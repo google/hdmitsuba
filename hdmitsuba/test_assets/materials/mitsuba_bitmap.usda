@@ -1,0 +1,95 @@
+#usda 1.0
+(
+    defaultPrim = "root"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "root"
+{
+    def Scope "_materials"
+    {
+        def Material "ground"
+        {
+            token outputs:surface.connect = </root/_materials/ground/Principled_BSDF.outputs:surface>
+            token outputs:mitsuba:surface.connect = </root/_materials/ground/myshader.outputs:surface>
+
+            def Shader "Principled_BSDF"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.5, 0.5, 0.5)
+                token outputs:surface
+            }
+
+            def Shader "myshader"
+            {
+                uniform token info:id = "mitsuba_principled"
+                color3f inputs:base_color.connect = </root/_materials/ground/myshader/base_color.outputs:rgb>
+                token outputs:surface
+
+                def Shader "base_color"
+                {
+                    uniform token info:id = "mitsuba_bitmap"
+                    asset inputs:filename = @./textures/albedo.png@
+                    float3 outputs:rgb
+                }
+            }
+        }
+    }
+
+    def Xform "Camera"
+    {
+        float3 xformOp:rotateXYZ = (38.4268, -0, 0)
+        float3 xformOp:scale = (1, 1, 1)
+        double3 xformOp:translate = (0, -2, 2.5)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+
+        def Camera "Camera"
+        {
+            float2 clippingRange = (0.1, 100)
+            float focalLength = 0.5
+            float horizontalAperture = 0.36
+            token projection = "perspective"
+            float verticalAperture = 0.28125
+        }
+    }
+
+    def Xform "Area"
+    {
+        float3 xformOp:rotateXYZ = (0, -0, 0)
+        float3 xformOp:scale = (1.6281606, 1.6281606, 1.6281606)
+        double3 xformOp:translate = (-0.06605362892150879, -0.19567212462425232, 1.7973778247833252)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+
+        def RectLight "Area"
+        {
+            float3[] extent = [(-0.5, -0.5, -0), (0.5, 0.5, 0)]
+            bool inputs:enableColorTemperature = 1
+            float inputs:intensity = 3.1830988
+            bool inputs:normalize = 1
+        }
+    }
+
+    def Xform "Plane"
+    {
+        def Mesh "Plane" (
+            active = true
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            uniform bool doubleSided = 1
+            float3[] extent = [(-1, -1, 0), (1, 1, 0)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 3, 2]
+            rel material:binding = </root/_materials/ground>
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+                interpolation = "faceVarying"
+            )
+            point3f[] points = [(-1, -1, 0), (1, -1, 0), (-1, 1, 0), (1, 1, 0)]
+            texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+                interpolation = "faceVarying"
+            )
+            uniform token subdivisionScheme = "none"
+        }
+    }
+}

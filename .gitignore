@@ -1,0 +1,14 @@
+build/
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
+.vscode/
+.vs/
+test_outputs/
+pyrefly.toml
+inst/
+.gemini/
+build_ci/
+scratch/
+run_tests.py

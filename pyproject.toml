@@ -1,0 +1,15 @@
+[tool.pytest.ini_options]
+norecursedirs = [
+    "third_party",
+    "build",
+    "inst",
+    "*.egg-info",
+    ".git",
+    ".pytest_cache",
+    "hdmitsuba/tests/fuzzing",
+]
+testpaths = [
+    "hdmitsuba/tests",
+    "usd_mitsuba/tests",
+    "render_engine",
+]

@@ -1,0 +1,22 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Types": {
+                    "HdMitsubaRendererPlugin": {
+                        "bases": [
+                            "HdRendererPlugin"
+                        ],
+                        "displayName": "Mitsuba",
+                        "priority": 99
+                    }
+                }
+            },
+            "LibraryPath": "@PLUG_INFO_LIBRARY_PATH@",
+            "Name": "hdMitsuba",
+            "ResourcePath": "resources",
+            "Root": ".",
+            "Type": "library"
+        }
+    ]
+}

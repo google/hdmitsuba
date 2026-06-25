@@ -1,0 +1,166 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Build and Test Template
+
+on:
+  workflow_call:
+    inputs:
+      os:
+        required: true
+        type: string
+      compiler_cc:
+        required: true
+        type: string
+      compiler_cxx:
+        required: true
+        type: string
+
+jobs:
+  build-and-test:
+    runs-on: ${{ inputs.os }}
+    defaults:
+      run:
+        shell: bash -el {0} # Needed for conda environment activation
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Setup Miniforge (Conda)
+      uses: conda-incubator/setup-miniconda@v3
+      with:
+        miniforge-version: latest
+        use-mamba: true
+        activate-environment: test-env
+        python-version: "3.12"
+
+    - name: Install System Dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y llvm-dev
+
+    - name: Install Conda Dependencies
+      run: |
+        if [ "${{ runner.os }}" = "macOS" ] || [ "${{ runner.os }}" = "Windows" ]; then
+          mamba install -y -c conda-forge openusd ninja llvm
+        else
+          mamba install -y -c conda-forge openusd ninja
+        fi
+
+    - name: Install Python Dependencies
+      run: |
+        pip install numpy pytest pyrefly
+
+    - name: Cache Mitsuba 3
+      id: cache-mitsuba
+      uses: actions/cache@v4
+      with:
+        path: |
+          mitsuba3
+        key: ${{ runner.os }}-mitsuba3-fc366545feebd379278f6ba4526a573dcbe6416a
+
+    - name: Clone and Build Mitsuba 3
+      if: steps.cache-mitsuba.outputs.cache-hit != 'true'
+      run: |
+        git clone https://github.com/mitsuba-renderer/mitsuba3.git
+        cd mitsuba3
+        git checkout fc366545feebd379278f6ba4526a573dcbe6416a
+        git submodule update --init --recursive
+        # Configure with minimal variants to speed up build
+        CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Release -DMI_ENABLE_CUDA=OFF -DMI_DEFAULT_VARIANTS=scalar_rgb,llvm_ad_rgb,metal_ad_rgb -DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+        if [ "${{ runner.os }}" = "Windows" ]; then
+          # Use default MSBuild generator on Windows (no CC/CXX overrides, no Ninja)
+          cmake -B build $CMAKE_FLAGS
+        else
+          # Use Ninja on Linux and macOS
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            CMAKE_FLAGS="$CMAKE_FLAGS -DMITSUBA_NATIVE_FLAGS=-march=haswell -DDRJIT_NATIVE_FLAGS=-march=haswell -DDRJIT_CORE_NATIVE_FLAGS=-march=haswell -DNANOTHREAD_NATIVE_FLAGS=-march=haswell"
+          fi
+          CC=${{ inputs.compiler_cc }} CXX=${{ inputs.compiler_cxx }} cmake -B build -G Ninja \
+            $CMAKE_FLAGS
+        fi
+        cmake --build build --config Release
+
+    - name: Configure hdmitsuba
+      run: |
+        CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DMITSUBA_DIR=$PWD/mitsuba3 -DMITSUBA_BUILD_DIR=$PWD/mitsuba3/build"
+        if [ "${{ runner.os }}" = "Windows" ]; then
+          # Use default MSBuild generator on Windows
+          cmake -B build $CMAKE_FLAGS
+        else
+          # Use Ninja on Linux/macOS
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            CMAKE_FLAGS="$CMAKE_FLAGS -DHDMITSUBA_NATIVE_FLAGS=-march=haswell"
+          fi
+          CC=${{ inputs.compiler_cc }} CXX=${{ inputs.compiler_cxx }} cmake -B build -G Ninja \
+            $CMAKE_FLAGS
+        fi
+
+    - name: Build hdmitsuba
+      run: |
+        cmake --build build --config Release
+
+    - name: Resolve LLVM Path for DrJit
+      run: |
+        if [ "${{ runner.os }}" = "macOS" ]; then
+          LLVM_PATH=$(find $CONDA_PREFIX/lib -name "libLLVM.dylib" | head -n 1)
+          if [ -z "$LLVM_PATH" ]; then
+            LLVM_PATH=$(find $CONDA_PREFIX/lib -name "libLLVM*.dylib" | head -n 1)
+          fi
+          echo "DRJIT_LIBLLVM_PATH=$LLVM_PATH" >> $GITHUB_ENV
+          echo "Resolved macOS LLVM: $LLVM_PATH"
+        elif [ "${{ runner.os }}" = "Windows" ]; then
+          LLVM_PATH=$(find $CONDA_PREFIX/Library/bin -iname "*llvm*.dll" | head -n 1)
+          echo "DRJIT_LIBLLVM_PATH=$LLVM_PATH" >> $GITHUB_ENV
+          echo "Resolved Windows LLVM: $LLVM_PATH"
+        else
+          # Linux: Try system (to match Mesa)
+          LLVM_PATH=$(find /usr/lib/x86_64-linux-gnu -name "libLLVM-*.so*" | head -n 1)
+          if [ -z "$LLVM_PATH" ]; then
+            LLVM_PATH=$(find /usr/lib -name "libLLVM*.so*" | head -n 1)
+          fi
+          if [ -n "$LLVM_PATH" ]; then
+            echo "DRJIT_LIBLLVM_PATH=$LLVM_PATH" >> $GITHUB_ENV
+            echo "Resolved Linux LLVM: $LLVM_PATH"
+          else
+            echo "System LLVM not found, letting DrJit resolve it"
+          fi
+        fi
+
+    - name: Run Python Tests
+      timeout-minutes: 10
+      run: |
+        source build/setpath.sh
+        export PYTHONFAULTHANDLER=1
+        python -c "import mitsuba; print('Mitsuba imported successfully')"
+        python -c "import drjit; print('Has LLVM backend:', drjit.has_backend(drjit.JitBackend.LLVM))"
+        pytest -s -vv -o faulthandler_timeout=120
+
+    - name: Run C++ Tests
+      run: |
+        ctest --test-dir build -C Release --output-on-failure
+
+    - name: Run Pyrefly Type Checker
+      run: |
+        pyrefly check
+
+    - name: Upload macOS Crash Reports
+      if: failure() && runner.os == 'macOS'
+      uses: actions/upload-artifact@v4
+      with:
+        name: macos-crash-reports
+        path: ~/Library/Logs/DiagnosticReports/

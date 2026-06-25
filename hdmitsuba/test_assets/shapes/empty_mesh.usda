@@ -1,0 +1,83 @@
+#usda 1.0
+(
+    defaultPrim = "root"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "root"
+{
+    def Xform "Camera"
+    {
+        float3 xformOp:rotateXYZ = (63.559296, 2.2983238e-7, 46.691944)
+        float3 xformOp:scale = (1, 1, 1)
+        double3 xformOp:translate = (4.8382463455200195, -4.495369911193848, 3.1569976806640625)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+
+        def Camera "Camera"
+        {
+            float2 clippingRange = (0.1, 100)
+            float focalLength = 0.5
+            float horizontalAperture = 0.36
+            token projection = "perspective"
+            float verticalAperture = 0.36
+        }
+    }
+
+    def Xform "Cube"
+    {
+        def Mesh "Cube" (
+            active = true
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            uniform bool doubleSided = 1
+            float3[] extent = []
+            int[] faceVertexCounts = []
+            int[] faceVertexIndices = []
+            rel material:binding = </root/_materials/Material>
+            normal3f[] normals = []
+            point3f[] points = []
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Scope "_materials"
+    {
+        def Material "Material"
+        {
+            token outputs:surface.connect = </root/_materials/Material/Principled_BSDF.outputs:surface>
+
+            def Shader "Principled_BSDF"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                float inputs:clearcoat = 0
+                float inputs:clearcoatRoughness = 0.03
+                color3f inputs:diffuseColor = (0.80002296, 0.05867831, 0.07401459)
+                float inputs:ior = 1.45
+                float inputs:metallic = 0
+                float inputs:opacity = 1
+                float inputs:roughness = 0.5
+                float inputs:specular = 0.5
+                token outputs:surface
+            }
+        }
+    }
+
+    def Xform "Light"
+    {
+        float3 xformOp:rotateXYZ = (37.26105, 3.1637092, 106.936325)
+        float3 xformOp:scale = (1, 0.99999994, 1)
+        double3 xformOp:translate = (4.076245307922363, 1.0054539442062378, 5.903861999511719)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+
+        def SphereLight "Light"
+        {
+            float3[] extent = [(-0.1, -0.1, -0.1), (0.1, 0.1, 0.1)]
+            bool inputs:enableColorTemperature = 1
+            float inputs:intensity = 318.30988
+            bool inputs:normalize = 1
+            float inputs:radius = 0.1
+        }
+    }
+}

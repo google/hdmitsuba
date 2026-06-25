@@ -1,0 +1,107 @@
+#usda 1.0
+(
+    defaultPrim = "root"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "root"
+{
+    def Xform "Camera"
+    {
+        float3 xformOp:rotateXYZ = (63.559296, 2.2983238e-7, 46.691944)
+        float3 xformOp:scale = (1, 1, 1)
+        double3 xformOp:translate = (4.3443217277526855, -4.01979398727417, 2.8224129676818848)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+
+        def Camera "Camera"
+        {
+            float2 clippingRange = (0.1, 100)
+            float focalLength = 0.5
+            float horizontalAperture = 0.36
+            token projection = "perspective"
+            float verticalAperture = 0.36
+        }
+    }
+
+    def Xform "Area"
+    {
+        float3 xformOp:rotateXYZ = (0.33011225, 25.082085, -11.532183)
+        float3 xformOp:scale = (3.9925542, 3.992554, 3.9925542)
+        double3 xformOp:translate = (2.980271816253662, -3.08508563041687, 2.4314658641815186)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+
+        def SphereLight "Area"
+        {
+            float3[] extent = [(-0, -0, -0), (0, 0, 0)]
+            bool inputs:enableColorTemperature = 1
+            float inputs:intensity = 100
+            bool inputs:normalize = 1
+            float inputs:radius = 0
+            bool treatAsPoint = 1
+        }
+    }
+
+    def Xform "Cube"
+    {
+        def Mesh "Cube" (
+            active = true
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            uniform bool doubleSided = 1
+            float3[] extent = [(-1, -1, -1), (1, 1, 1)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 4, 6, 2, 3, 2, 6, 7, 7, 6, 4, 5, 5, 1, 3, 7, 1, 0, 2, 3, 5, 4, 0, 1]
+            rel material:binding = </root/_materials/Material>
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, -1, 0), (0, -1, 0), (0, -1, 0), (0, -1, 0), (-1, 0, 0), (-1, 0, 0), (-1, 0, 0), (-1, 0, 0), (0, 0, -1), (0, 0, -1), (0, 0, -1), (0, 0, -1), (1, 0, 0), (1, 0, 0), (1, 0, 0), (1, 0, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0)] (
+                interpolation = "faceVarying"
+            )
+            point3f[] points = [(1, 1, 1), (1, 1, -1), (1, -1, 1), (1, -1, -1), (-1, 1, 1), (-1, 1, -1), (-1, -1, 1), (-1, -1, -1)]
+            texCoord2f[] primvars:st = [(0.625, 0.5), (0.875, 0.5), (0.875, 0.75), (0.625, 0.75), (0.375, 0.75), (0.625, 0.75), (0.625, 1), (0.375, 1), (0.375, 0), (0.625, 0), (0.625, 0.25), (0.375, 0.25), (0.125, 0.5), (0.375, 0.5), (0.375, 0.75), (0.125, 0.75), (0.375, 0.5), (0.625, 0.5), (0.625, 0.75), (0.375, 0.75), (0.375, 0.25), (0.625, 0.25), (0.625, 0.5), (0.375, 0.5)] (
+                interpolation = "faceVarying"
+            )
+            uniform token subdivisionScheme = "catmullClark"
+        }
+    }
+
+    def Scope "_materials"
+    {
+        def Material "Material"
+        {
+            token outputs:surface.connect = </root/_materials/Material/Principled_BSDF.outputs:surface>
+            token outputs:mitsuba:surface.connect = </root/_materials/Material/MitsubaBSDF.outputs:surface>
+
+            def Shader "Principled_BSDF"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                float inputs:clearcoat = 0
+                float inputs:clearcoatRoughness = 0.03
+                color3f inputs:diffuseColor = (0.1, 0.8, 0.8)
+                float inputs:ior = 1.45
+                float inputs:metallic = 0
+                float inputs:opacity = 1
+                float inputs:roughness = 0.5
+                float inputs:specular = 0.5
+                token outputs:surface
+            }
+            def Shader "MitsubaBSDF"
+            {
+                uniform token info:id = "mitsuba_diffuse"
+                float3 inputs:reflectance.connect = </root/_materials/Material/MitsubaBSDF/reflectance.outputs:rgb>
+                token outputs:surface
+
+                def Shader "reflectance"
+                {
+                    uniform token info:id = "mitsuba_checkerboard"
+                    color3f inputs:color0 = (0.9, 0.3, 0.3)
+                    color3f inputs:color1 = (0.2, 0.2, 1.0)
+                    matrix3d inputs:to_uv = ((8, 0, 0), (0, 8, 0), (0, 0, 1))
+                    float3 outputs:rgb
+                }
+
+            }
+        }
+    }
+}
+

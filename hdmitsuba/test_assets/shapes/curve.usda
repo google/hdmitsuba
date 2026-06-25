@@ -1,0 +1,89 @@
+#usda 1.0
+(
+    defaultPrim = "root"
+    doc = "Blender v4.5.3 LTS"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "root" (
+    customData = {
+        dictionary Blender = {
+            bool generated = 1
+        }
+    }
+)
+{
+    def Xform "mycurve"
+    {
+        def BasisCurves "curve" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            uniform token basis = "bezier"
+            int[] curveVertexCounts = [7, 10]
+            uniform bool doubleSided = 1
+            float3[] extent = [(-2, -1.7627827, -2.6877365), (2.1277044, 1.6240699, 1.9687281)]
+            rel material:binding = </root/_materials/Material_001>
+            point3f[] points = [(-1, 0, 0), (-0.5, 0.5, 0), (-0.40057373, 0.19831535, -0.07654056), (0.59942627, 0.19831535, -0.07654056), (1.5994263, 0.19831535, -0.07654056), (1.0291744, 0.14455485, 1.1094986), (0.21740222, 0.6240699, 0.77619517), (-0.05815816, -0.23449337, 0.9687281), (-0.23383069, 0.43086535, 0.80613524), (-0.9141159, -1.0941936, 0.6220726), (-0.6442778, -0.7023897, 0.09893075), (-0.37443984, -0.31058604, -0.42421088), (-0.0029197857, -0.045826614, -0.13303709), (-0.0936656, -0.036830395, -1.1288706), (-0.18441144, -0.027834175, -2.1247044), (0.74779814, -0.8246274, -1.6442125), (0.8668062, -0.24972019, -0.8346948)]
+            float[] primvars:tilt = [0, 0, 0, 0, 0, 0, 0] (
+                interpolation = "varying"
+            )
+            uniform token type = "cubic"
+            float[] widths = [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1] (
+                interpolation = "varying"
+            )
+            uniform token wrap = "nonperiodic"
+        }
+    }
+
+    def Scope "_materials"
+    {
+        def Material "Material_001"
+        {
+            token outputs:surface.connect = </root/_materials/Material_001/Principled_BSDF.outputs:surface>
+
+            def Shader "Principled_BSDF"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                float inputs:clearcoat = 0
+                float inputs:clearcoatRoughness = 0.03
+                color3f inputs:diffuseColor = (0.3, 0.8, 0.8)
+                float inputs:ior = 1.5
+                float inputs:metallic = 0
+                float inputs:opacity = 1
+                float inputs:roughness = 0.5
+                float inputs:specular = 0
+                token outputs:surface
+            }
+        }
+    }
+
+    def SphereLight "Point"
+    {
+        float3[] extent = [(-0, -0, -0), (0, 0, 0)]
+        bool inputs:enableColorTemperature = 1
+        float inputs:intensity = 31.830988
+        bool inputs:normalize = 1
+        float inputs:radius = 0
+        bool treatAsPoint = 1
+        float3 xformOp:rotateXYZ = (0, -0, 0)
+        float3 xformOp:scale = (1, 1, 1)
+        double3 xformOp:translate = (-1.7188133001327515, 2.323730707168579, 0.04948711022734642)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+    }
+
+    def Camera "Camera"
+    {
+        float2 clippingRange = (0.1, 100)
+        float focalLength = 0.5
+        float horizontalAperture = 0.36
+        token projection = "perspective"
+        float verticalAperture = 0.36
+        float3 xformOp:rotateXYZ = (86.72672, -0.000015431011, -176.13477)
+        float3 xformOp:scale = (1.0000002, 1.0000001, 1.0000001)
+        double3 xformOp:translate = (0.13143588602542877, 3.579655885696411, 0.14550842344760895)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+    }
+}
+

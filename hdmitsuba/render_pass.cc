@@ -1,0 +1,58 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "hdmitsuba/render_pass.h"
+
+#include <pxr/base/tf/diagnostic.h>
+#include <pxr/base/tf/token.h>
+#include <pxr/imaging/hd/aov.h>
+#include <pxr/imaging/hd/renderIndex.h>
+#include <pxr/imaging/hd/renderPass.h>
+#include <pxr/imaging/hd/renderPassState.h>
+#include <pxr/imaging/hd/rprimCollection.h>
+#include <pxr/pxr.h>
+
+#include "hdmitsuba/scene_manager.h"
+
+PXR_NAMESPACE_OPEN_SCOPE
+
+HdMitsubaRenderPass::HdMitsubaRenderPass(HdRenderIndex* index,
+                                         const HdRprimCollection& collection,
+                                         SceneManager* scene_manager)
+    : HdRenderPass(index, collection), scene_manager_(scene_manager) {
+  TF_VERIFY(scene_manager_ != nullptr);
+}
+
+void HdMitsubaRenderPass::_Execute(
+    const HdRenderPassStateSharedPtr& renderPassState,
+    const TfTokenVector& /*renderTags*/) {
+  if (!TF_VERIFY(renderPassState != nullptr)) {
+    return;
+  }
+  HdRenderPassAovBindingVector aov_bindings = renderPassState->GetAovBindings();
+  if (aov_bindings.empty()) {
+    return;
+  }
+  if (aov_bindings != aov_bindings_) {
+    scene_manager_->SetAovBindings(this, aov_bindings);
+    aov_bindings_ = aov_bindings;
+  }
+  scene_manager_->Render(this, renderPassState->GetCamera());
+}
+
+bool HdMitsubaRenderPass::IsConverged() const {
+  return scene_manager_->IsConverged(this);
+}
+
+PXR_NAMESPACE_CLOSE_SCOPE

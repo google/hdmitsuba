@@ -1,0 +1,164 @@
+#usda 1.0
+(
+    defaultPrim = "root"
+    doc = "Blender v5.0.1"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "root" (
+    customData = {
+        dictionary Blender = {
+            bool generated = 1
+        }
+    }
+)
+{
+    def Xform "Cube"
+    {
+        def Mesh "Cube" (
+            active = true
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            uniform bool doubleSided = 1
+            float3[] extent = [(-1, -1, -1), (1.2419715, 1, 1)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 4, 8, 2, 3, 2, 8, 7, 7, 6, 4, 5, 5, 1, 3, 7, 0, 2, 11, 9, 5, 4, 0, 1, 8, 4, 6, 7, 8, 6, 12, 10, 14, 16, 2, 3, 12, 11, 1, 0, 9, 10, 3, 1, 10, 12, 14, 13, 15, 16, 11, 12, 16, 15, 9, 11, 15, 13, 10, 9, 13, 14]
+            rel material:binding = </root/_materials/default>
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, -1, 0), (0, -1, 0), (0, -1, 0), (0, -1, 0), (-1, 0, 0), (-1, 0, 0), (-1, 0, 0), (-1, 0, 0), (0, 0, -1), (0, 0, -1), (0, 0, -1), (0, 0, -1), (1, 0, 0), (1, 0, 0), (1, 0, 0), (1, 0, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, -1, 0), (0, -1, 0), (0, -1, 0), (0, 0, -1), (0, 0, -1), (0, 0, -1), (0, 0, -1), (0.99999994, -2.0214185e-7, 0), (0.99999994, -2.0214185e-7, 0), (0.99999994, -2.0214185e-7, 0), (0.99999994, -2.0214185e-7, 0), (0.99999994, 2.0214185e-7, 0), (0.99999994, 2.0214185e-7, 0), (0.99999994, 2.0214185e-7, 0), (0.99999994, 2.0214185e-7, 0), (1, 0, 0), (1, 0, 0), (1, 0, 0), (1, 0, 0), (0.99999994, 0, 0), (0.99999994, 0, 0), (0.99999994, 0, 0), (0.99999994, 0, 0), (0, -1, 0), (0, -1, 0), (0, -1, 0), (0, -1, 0), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0)] (
+                interpolation = "faceVarying"
+            )
+            point3f[] points = [(1, 1, 1), (1, 1, -1), (1, -1, 1), (1, -1, -1), (-1, 1, 1), (-1, 1, -1), (-1, -1, 1), (-1, -1, -1), (0.08397007, -1, 1), (1, 0.64052254, 0.64052254), (1, 0.64052254, -0.64052254), (1, -0.64052254, 0.64052254), (1, -0.64052254, -0.64052254), (1.2419715, 0.64052254, 0.64052254), (1.2419715, 0.64052254, -0.64052254), (1.2419715, -0.64052254, 0.64052254), (1.2419715, -0.64052254, -0.64052254)]
+            texCoord2f[] primvars:st = [(0.625, 0.5), (0.875, 0.5), (0.73950374, 0.75), (0.625, 0.75), (0.375, 0.75), (0.625, 0.75), (0.625, 0.86450374), (0.375, 1), (0.375, 0), (0.625, 0), (0.625, 0.25), (0.375, 0.25), (0.125, 0.5), (0.375, 0.5), (0.375, 0.75), (0.125, 0.75), (0.625, 0.5), (0.625, 0.75), (0.625, 0.75), (0.625, 0.5), (0.375, 0.25), (0.625, 0.25), (0.625, 0.5), (0.375, 0.5), (0.73950374, 0.75), (0.875, 0.5), (0.875, 0.75), (0.375, 1), (0.625, 0.86450374), (0.625, 1), (0.375, 0.75), (0.375, 0.5), (0.375, 0.5), (0.375, 0.75), (0.625, 0.75), (0.375, 0.75), (0.375, 0.75), (0.625, 0.75), (0.375, 0.5), (0.625, 0.5), (0.625, 0.5), (0.375, 0.5), (0.375, 0.75), (0.375, 0.5), (0.375, 0.5), (0.375, 0.75), (0.375, 0.5), (0.625, 0.5), (0.625, 0.75), (0.375, 0.75), (0.625, 0.75), (0.375, 0.75), (0.375, 0.75), (0.625, 0.75), (0.625, 0.5), (0.625, 0.75), (0.625, 0.75), (0.625, 0.5), (0.375, 0.5), (0.625, 0.5), (0.625, 0.5), (0.375, 0.5)] (
+                interpolation = "faceVarying"
+            )
+            uniform token subdivisionScheme = "none"
+            uniform token subsetFamily:materialBind:familyType = "nonOverlapping"
+
+            def GeomSubset "default" (
+                prepend apiSchemas = ["MaterialBindingAPI"]
+            )
+            {
+                uniform token elementType = "face"
+                uniform token familyName = "materialBind"
+                int[] indices = [0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 13, 14, 15]
+                rel material:binding = </root/_materials/default>
+            }
+
+            def GeomSubset "red" (
+                prepend apiSchemas = ["MaterialBindingAPI"]
+            )
+            {
+                uniform token elementType = "face"
+                uniform token familyName = "materialBind"
+                int[] indices = [6, 7]
+                rel material:binding = </root/_materials/red>
+            }
+
+            def GeomSubset "blue" (
+                prepend apiSchemas = ["MaterialBindingAPI"]
+            )
+            {
+                uniform token elementType = "face"
+                uniform token familyName = "materialBind"
+                int[] indices = [12]
+                rel material:binding = </root/_materials/blue>
+            }
+        }
+    }
+
+    def Scope "_materials"
+    {
+        def Material "default"
+        {
+            token outputs:surface.connect = </root/_materials/default/Principled_BSDF.outputs:surface>
+
+            def Shader "Principled_BSDF"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                float inputs:clearcoat = 0
+                float inputs:clearcoatRoughness = 0.03
+                color3f inputs:diffuseColor = (0.1996822, 0.1996822, 0.1996822)
+                float inputs:ior = 1.5
+                float inputs:metallic = 0
+                float inputs:opacity = 1
+                float inputs:roughness = 0.5
+                float inputs:specular = 0.5
+                token outputs:surface
+            }
+        }
+
+        def Material "red"
+        {
+            token outputs:surface.connect = </root/_materials/red/Principled_BSDF.outputs:surface>
+
+            def Shader "Principled_BSDF"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                float inputs:clearcoat = 0
+                float inputs:clearcoatRoughness = 0.03
+                color3f inputs:diffuseColor = (0.8000157, 0.04861252, 0.036765765)
+                float inputs:ior = 1.5
+                float inputs:metallic = 0
+                float inputs:opacity = 1
+                float inputs:roughness = 0.5
+                float inputs:specular = 0.5
+                token outputs:surface
+            }
+        }
+
+        def Material "blue"
+        {
+            token outputs:surface.connect = </root/_materials/blue/Principled_BSDF.outputs:surface>
+
+            def Shader "Principled_BSDF"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                float inputs:clearcoat = 0
+                float inputs:clearcoatRoughness = 0.03
+                color3f inputs:diffuseColor = (0.03425875, 0.14304967, 0.8000157)
+                float inputs:ior = 1.5
+                float inputs:metallic = 0
+                float inputs:opacity = 1
+                float inputs:roughness = 0.5
+                float inputs:specular = 0.5
+                token outputs:surface
+            }
+        }
+    }
+
+    def Xform "Light"
+    {
+        float3 xformOp:rotateXYZ = (37.26105, 3.1637092, 106.936325)
+        float3 xformOp:scale = (1, 0.99999994, 1)
+        double3 xformOp:translate = (2.745413064956665, -3.564450263977051, 4.640903472900391)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+
+        def SphereLight "Light"
+        {
+            float3[] extent = [(-7.450581e-9, -7.450581e-9, -7.450581e-9), (7.450581e-9, 7.450581e-9, 7.450581e-9)]
+            float inputs:intensity = 100
+            bool inputs:normalize = 1
+            bool inputs:treatAsPoint = 1
+        }
+    }
+
+    def Xform "Camera"
+    {
+        float3 xformOp:rotateXYZ = (63.559296, 2.2983238e-7, 46.691944)
+        float3 xformOp:scale = (1, 1, 1)
+        double3 xformOp:translate = (3.502004623413086, -3.3319220542907715, 2.310969352722168)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+
+        def Camera "Camera"
+        {
+            float2 clippingRange = (0.1, 100)
+            float focalLength = 0.5
+            float horizontalAperture = 0.36
+            token projection = "perspective"
+            float verticalAperture = 0.36
+        }
+    }
+}
+
