@@ -639,20 +639,23 @@ PrimTranslator<Float, Spectrum>::BuildLightProperties(const LightSpec& spec) {
   if (spec.prim_type == HdPrimTypeTokens->domeLight) {
     if (!spec.texture_file_path.empty()) {
       try {
-        mitsuba::ref<mitsuba::Bitmap> bitmap = new mitsuba::Bitmap(spec.texture_file_path);
+        mitsuba::ref<mitsuba::Bitmap> bitmap =
+            new mitsuba::Bitmap(spec.texture_file_path);
         mitsuba::Properties props("envmap");
         props.set("to_world", to_world);
         props.set("scale", (color[0] + color[1] + color[2]) / 3.f);
-        // Mitsuba requires a minimum size of 2x3 for environment maps.
-        // Therefore, we resample to a minimum of 2x3 if the bitmap is smaller.
+        // If needed, resample to Mitsuba's minimum envmap size.
         if (bitmap->width() < 2 || bitmap->height() < 3) {
-          uint32_t target_w = std::max(2u, (uint32_t) bitmap->width());
-          uint32_t target_h = std::max(3u, (uint32_t) bitmap->height());
-          TF_DEBUG(HDMITSUBA_SYNC).Msg(
-              "Resampling environment map '%s' from %ux%u to %ux%u due to Mitsuba size limits\n",
-              spec.texture_file_path.c_str(), bitmap->width(), bitmap->height(), target_w, target_h);
-          // Convert to linear Float32 RGB before resampling, as resample requires a float component type.
-          bitmap = bitmap->convert(mitsuba::Bitmap::PixelFormat::RGB, mitsuba::struct_type_v<float>, false);
+          uint32_t target_w = std::max(2u, bitmap->width());
+          uint32_t target_h = std::max(3u, bitmap->height());
+          TF_DEBUG(HDMITSUBA_SYNC)
+              .Msg(
+                  "Resampling environment map '%s' from %ux%u to %ux%u due to "
+                  "Mitsuba size limits\n",
+                  spec.texture_file_path.c_str(), bitmap->width(),
+                  bitmap->height(), target_w, target_h);
+          bitmap = bitmap->convert(mitsuba::Bitmap::PixelFormat::RGB,
+                                   mitsuba::struct_type_v<float>, false);
           bitmap = bitmap->resample(ScalarVector2u(target_w, target_h));
         }
         props.set("bitmap", mitsuba::ref<mitsuba::Object>(bitmap));

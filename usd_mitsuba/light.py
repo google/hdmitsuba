@@ -51,7 +51,8 @@ def _convert_dome_light(
     bitmap = mi.Bitmap(filename)
     if bitmap.width() < 2 or bitmap.height() < 3:
       target_w, target_h = max(2, bitmap.width()), max(3, bitmap.height())
-      bitmap = bitmap.convert(mi.Bitmap.PixelFormat.RGB, mi.Struct.Type.Float32, False).resample([target_w, target_h])
+      bitmap = bitmap.convert(
+          mi.Bitmap.PixelFormat.RGB, mi.Struct.Type.Float32, False).resample([target_w, target_h])
     return {
         'type': 'envmap',
         'bitmap': bitmap,
