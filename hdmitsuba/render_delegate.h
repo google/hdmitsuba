@@ -30,9 +30,7 @@ PXR_NAMESPACE_OPEN_SCOPE
   ((variant, "mitsuba:variant")) \
   ((sample_count, "mitsuba:sample_count")) \
   ((integrator_type, "mitsuba:integrator:type")) \
-  ((progressive, "mitsuba:progressive")) \
   ((use_kernel_freezing, "mitsuba:use_kernel_freezing"))
-// clang-format on
 
 TF_DECLARE_PUBLIC_TOKENS(HdMitsubaRenderSettingsTokens,
                          HDMITSUBA_RENDER_SETTINGS_TOKENS);

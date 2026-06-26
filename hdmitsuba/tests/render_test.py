@@ -123,7 +123,7 @@ def test_progressive_vs_non_progressive_convergence():
       width=16,
       overrides={
           'mitsuba:sample_count': 16,
-          'mitsuba:progressive': False,
+          'enableInteractive': False,
       }
   )
   images_single = engine.render()
@@ -136,7 +136,7 @@ def test_progressive_vs_non_progressive_convergence():
       width=16,
       overrides={
           'mitsuba:sample_count': 16,
-          'mitsuba:progressive': True,
+          'enableInteractive': True,
       }
   )
   images_prog = engine_prog.render()
