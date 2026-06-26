@@ -34,8 +34,12 @@ class HdMitsubaRendererPlugin final : public HdRendererPlugin {
 
   void DeleteRenderDelegate(HdRenderDelegate* renderDelegate) override;
 
+#if HD_API_VERSION < 83
+  bool IsSupported(bool gpuEnabled = true) const override;
+#else
   bool IsSupported(const HdRendererCreateArgs& rendererCreateArgs,
                    std::string* reasonWhyNot = nullptr) const override;
+#endif
 
  private:
   // This class is not copyable.

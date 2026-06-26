@@ -14,6 +14,10 @@
 
 #include "hdmitsuba/renderer_plugin.h"
 
+#include <dlfcn.h>
+#include <cstdio>
+#include <cstdlib>
+
 #include <pxr/base/tf/registryManager.h>
 #include <pxr/base/tf/type.h>
 #include <pxr/imaging/hd/renderDelegate.h>
@@ -43,10 +47,16 @@ void HdMitsubaRendererPlugin::DeleteRenderDelegate(
   delete renderDelegate;
 }
 
+#if HD_API_VERSION < 83
+bool HdMitsubaRendererPlugin::IsSupported(bool /*gpuEnabled*/) const {
+  return true;
+}
+#else
 bool HdMitsubaRendererPlugin::IsSupported(
     const HdRendererCreateArgs& /*rendererCreateArgs*/,
     std::string* /*reasonWhyNot*/) const {
   return true;
 }
+#endif
 
 PXR_NAMESPACE_CLOSE_SCOPE
