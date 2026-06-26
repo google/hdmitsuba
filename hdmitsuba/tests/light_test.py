@@ -97,6 +97,7 @@ def test_dome_light_untextured():
         'directional',
         'disk',
         'envmap',
+        'envmap_1x1',
         'mesh',
         'mesh_light_api',
         'point',

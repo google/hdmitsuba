@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "hdmitsuba/prim_translator.h"
+#include "hdmitsuba/debug_codes.h"
 
 #include <cstddef>
 #include <map>
@@ -79,6 +80,7 @@ namespace dr = drjit;
 namespace {
 
 using ScalarVector3f = mitsuba::Vector<float, 3>;
+using ScalarVector2u = mitsuba::Vector<uint32_t, 2>;
 
 std::string ResolvePathFromValue(const VtValue& value) {
   if (value.IsHolding<SdfAssetPath>()) {
@@ -636,17 +638,36 @@ PrimTranslator<Float, Spectrum>::BuildLightProperties(const LightSpec& spec) {
 
   if (spec.prim_type == HdPrimTypeTokens->domeLight) {
     if (!spec.texture_file_path.empty()) {
-      mitsuba::Properties props("envmap");
-      props.set("filename", spec.texture_file_path);
-      props.set("to_world", to_world);
-      float scale = (color[0] + color[1] + color[2]) / 3.f;
-      props.set("scale", scale);
-      return props;
-    } else {
-      mitsuba::Properties props("constant");
-      props.set("radiance", color);
-      return props;
+      try {
+        mitsuba::ref<mitsuba::Bitmap> bitmap =
+            new mitsuba::Bitmap(spec.texture_file_path);
+        mitsuba::Properties props("envmap");
+        props.set("to_world", to_world);
+        props.set("scale", (color[0] + color[1] + color[2]) / 3.f);
+        // If needed, resample to Mitsuba's minimum envmap size.
+        if (bitmap->width() < 2 || bitmap->height() < 3) {
+          uint32_t target_w = std::max(2u, bitmap->width());
+          uint32_t target_h = std::max(3u, bitmap->height());
+          TF_DEBUG(HDMITSUBA_SYNC)
+              .Msg(
+                  "Resampling environment map '%s' from %ux%u to %ux%u due to "
+                  "Mitsuba size limits\n",
+                  spec.texture_file_path.c_str(), bitmap->width(),
+                  bitmap->height(), target_w, target_h);
+          bitmap = bitmap->convert(mitsuba::Bitmap::PixelFormat::RGB,
+                                   mitsuba::struct_type_v<float>, false);
+          bitmap = bitmap->resample(ScalarVector2u(target_w, target_h));
+        }
+        props.set("bitmap", mitsuba::ref<mitsuba::Object>(bitmap));
+        return props;
+      } catch (const std::exception& e) {
+        TF_WARN("Failed to load environment texture '%s': %s",
+                spec.texture_file_path.c_str(), e.what());
+      }
     }
+    mitsuba::Properties props("constant");
+    props.set("radiance", color);
+    return props;
   }
 
   if (spec.prim_type == HdPrimTypeTokens->distantLight) {
