@@ -71,6 +71,10 @@ target_link_libraries(hdMitsuba
     ${NANOTHREAD_LIBRARY}
 )
 
+if(MITSUBA_HAS_AD)
+  target_link_libraries(hdMitsuba PRIVATE ${DRJIT_EXTRA_LIBRARY})
+endif()
+
 # OpenSubdiv handling
 # Try to use standard CMake targets if they exist (usually defined by modern FindOpenSubdiv)
 if(TARGET OpenSubdiv::osdCPU)
@@ -144,6 +148,9 @@ if(HDMITSUBA_BUILD_TESTS)
       ${DRJIT_CORE_LIBRARY}
       ${NANOTHREAD_LIBRARY}
     )
+    if(MITSUBA_HAS_AD)
+      target_link_libraries(${Name} PRIVATE ${DRJIT_EXTRA_LIBRARY})
+    endif()
     add_test(NAME ${Name} COMMAND ${Name})
     set_tests_properties(${Name} PROPERTIES ENVIRONMENT "HDMITSUBA_VARIANT=scalar_rgb")
   endfunction()

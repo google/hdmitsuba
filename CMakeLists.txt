@@ -106,6 +106,14 @@ if(NOT DRJIT_CORE_LIBRARY)
   message(FATAL_ERROR "Could not find libdrjit-core in ${MITSUBA_BUILD_DIR}")
 endif()
 
+find_library(DRJIT_EXTRA_LIBRARY
+  NAMES drjit-extra
+  PATHS ${MITSUBA_BUILD_DIR}
+  PATH_SUFFIXES "" "dist" "ext/drjit" "ext/drjit/drjit-extra" "ext_build/drjit" "ext_build/drjit/drjit-extra"
+  NO_DEFAULT_PATH
+)
+
+
 find_library(NANOTHREAD_LIBRARY
   NAMES nanothread
   PATHS ${MITSUBA_BUILD_DIR}
@@ -161,6 +169,24 @@ else()
   endif()
   # Embree is typically enabled in mitsuba3
   add_compile_definitions(MI_ENABLE_EMBREE=1)
+endif()
+
+# Determine if Mitsuba has AD variants enabled
+set(MITSUBA_HAS_AD FALSE)
+if(PYTHON_RESULT EQUAL 0)
+  if(MITSUBA_VARIANTS_LIST MATCHES "ad_")
+    set(MITSUBA_HAS_AD TRUE)
+  endif()
+else()
+  # Fallback: assume AD is enabled to be safe
+  set(MITSUBA_HAS_AD TRUE)
+endif()
+
+if(MITSUBA_HAS_AD)
+  if(NOT DRJIT_EXTRA_LIBRARY)
+    message(FATAL_ERROR "Mitsuba has AD variants enabled (or fallback active), but libdrjit-extra could not be found in ${MITSUBA_BUILD_DIR}")
+  endif()
+  message(STATUS "hdmitsuba: Mitsuba has AD variants enabled, linking drjit-extra.")
 endif()
 
 
