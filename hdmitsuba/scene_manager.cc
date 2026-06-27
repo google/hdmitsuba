@@ -262,7 +262,7 @@ void PerformBatchedCopy(const TensorT& tensor,
       UInt32 final_idx = repeated_pixel_idx * tensor.shape()[2] +
                          dest.src_offset + channel_offsets;
       Float gathered;
-      if (dst_channels == kRgbaChanne4ls && dest.channels == 3) {
+      if (dst_channels == 4 && dest.channels == 3) {
         gathered =
             dr::select(channel_offsets < 3,
                        dr::gather<Float>(tensor.array(), final_idx), 1.0f);
@@ -922,7 +922,7 @@ class SceneModel final : public SceneManager {
       current_offset += req.channel_count;
     }
     PerformBatchedCopy<Float>(display_result, destinations_);
-  
+
     // 6. Set convergence status
     bool converged =
         !progressive_rendering_ ||
