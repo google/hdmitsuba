@@ -4,7 +4,7 @@
 [![macOS CI](https://github.com/google/hdmitsuba/actions/workflows/ci-macos.yml/badge.svg)](https://github.com/google/hdmitsuba/actions/workflows/ci-macos.yml)
 [![Windows CI](https://github.com/google/hdmitsuba/actions/workflows/ci-windows.yml/badge.svg)](https://github.com/google/hdmitsuba/actions/workflows/ci-windows.yml)
 
-`hdMitsuba` is a USD Hydra render delegate that enables [OpenUSD](https://github.com/PixarAnimationStudios/OpenUSD) to render scenes using [Mitsuba 3](https://github.com/mitsuba-renderer/mitsuba3). It allows integrating Mitsuba rendering into USD-compatible applications (e.g., usdview, Houdini, ...), or using it programmatically via Hydra. 
+`hdMitsuba` is a USD Hydra render delegate that enables [OpenUSD](https://github.com/PixarAnimationStudios/OpenUSD) to render scenes using [Mitsuba 3](https://github.com/mitsuba-renderer/mitsuba3). It allows integrating Mitsuba rendering into USD-compatible applications (e.g., usdview, Houdini, ...), or using it programmatically via Hydra.
 
 <p align="center">
   <img src="docs/usdview_example.gif" alt="Mitsuba in usdview" width="640" />
@@ -45,7 +45,7 @@ This repository provies the following components:
     *   **Linux**: Either GCC or Clang work. If you install OpenUSD using `conda`, you need to use GCC for ABI compatibility.
 2.  **Dependencies**:
     *   **OpenUSD**: For example [built locally](https://github.com/PixarAnimationStudios/OpenUSD/blob/dev/BUILDING.md) or installed via `conda`. Due to the size and complexity of this dependency, we currently do not include it as a git submodule.
-    *   **Mitsuba 3**: Locally built from source. Similarly to USD, it is not included as a submodule. For compatibility, it is recommended to use commit [`fc36654`](https://github.com/mitsuba-renderer/mitsuba3/commit/fc366545feebd379278f6ba4526a573dcbe6416a) (which is the version validated in our CI configuration). The `pip`-installed version of Mitsuba currently is not supported.
+    *   **Mitsuba 3**: Locally built from source. Similarly to USD, it is not included as a submodule. For compatibility, it is recommended to use commit [`3f00b723`](https://github.com/mitsuba-renderer/mitsuba3/commit/3f00b72372a24d0811a56186f137a817c9174f1f) (which is the version validated in our CI configuration). The `pip`-installed version of Mitsuba currently is not supported.
     *   **Additional dependencies**: Additional C++ dependencies are included as git submoduls. When cloning this repository, use `git clone --recursive` to initialize submodules. Otherwise, they can also be initialized using `git submodule update --init --recursive`.
     *   **Python dependencies**: `numpy`, `pytest`.
 
@@ -148,7 +148,7 @@ While `hdMitsuba` already supports many Mitsuba & USD features, it currently has
 *   **Performance**: There is room to further reduce overheads and improve performance. Note that `hdMitsuba` also inherits Mitsuba's performance characteristics (e.g., high JIT costs for scenes containing a very large number of materials).
 *   **Volume rendering**: Volume rendering is not yet supported.
 
-## Contributing 
+## Contributing
 We welcome community contributions and bug reports. To contribute code, please see the instructions in [CONTRIBUTING](CONTRIBUTING).
 
 ## Citation
