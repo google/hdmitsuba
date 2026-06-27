@@ -15,6 +15,19 @@
 cmake_minimum_required(VERSION 3.15)
 project(hdmitsuba VERSION 0.1.0 LANGUAGES CXX)
 
+# --- Mitsuba 3 Directory Config ---
+set(MITSUBA_DIR "" CACHE PATH "Path to Mitsuba 3 source directory")
+set(MITSUBA_BUILD_DIR "" CACHE PATH "Path to Mitsuba 3 build directory (defaults to MITSUBA_DIR/build)")
+set(EMBREE_LIB_DIR "" CACHE PATH "Path to Embree library directory (if needed at runtime)")
+
+if(NOT MITSUBA_DIR)
+  message(FATAL_ERROR "Please set MITSUBA_DIR to your Mitsuba 3 source directory.")
+endif()
+
+if(NOT MITSUBA_BUILD_DIR)
+  set(MITSUBA_BUILD_DIR "${MITSUBA_DIR}/build")
+endif()
+
 # --- Default Build Configurations ---
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build" FORCE)
@@ -39,7 +52,10 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   add_compile_options(-Wall -Wextra -Werror=unused-variable -Werror=unused-but-set-variable -Wno-deprecated)
 endif()
 
-include(third_party/cmake-defaults/CMakeLists.txt)
+if(NOT EXISTS "${MITSUBA_DIR}/ext/drjit/ext/drjit-core/ext/nanothread/ext/cmake-defaults/CMakeLists.txt")
+  message(FATAL_ERROR "cmake-defaults not found in Mitsuba's nanothread. Please ensure Mitsuba submodules are updated.")
+endif()
+include(${MITSUBA_DIR}/ext/drjit/ext/drjit-core/ext/nanothread/ext/cmake-defaults/CMakeLists.txt)
 set(CMAKE_CXX_VISIBILITY_PRESET default)
 
 # Enable AddressSanitizer for debugging (disabled by default)
@@ -72,18 +88,6 @@ find_package(pxr REQUIRED)
 find_package(OpenSubdiv REQUIRED)
 
 # 4. Mitsuba 3 & DrJit
-# The user must provide the path to their Mitsuba 3 source build.
-set(MITSUBA_DIR "" CACHE PATH "Path to Mitsuba 3 source directory")
-set(MITSUBA_BUILD_DIR "" CACHE PATH "Path to Mitsuba 3 build directory (defaults to MITSUBA_DIR/build)")
-set(EMBREE_LIB_DIR "" CACHE PATH "Path to Embree library directory (if needed at runtime)")
-
-if(NOT MITSUBA_DIR)
-  message(FATAL_ERROR "Please set MITSUBA_DIR to your Mitsuba 3 source directory.")
-endif()
-
-if(NOT MITSUBA_BUILD_DIR)
-  set(MITSUBA_BUILD_DIR "${MITSUBA_DIR}/build")
-endif()
 
 # Find Mitsuba 3 libraries in the build directory
 find_library(MITSUBA_LIBRARY
@@ -190,11 +194,11 @@ if(MITSUBA_HAS_AD)
 endif()
 
 
-# Add Nanobind submodule
-if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/nanobind/CMakeLists.txt")
-  message(FATAL_ERROR "Nanobind submodule is missing. Please run: git submodule update --init --recursive")
+# Add Nanobind (reusing the one from Mitsuba 3 to ensure ABI compatibility)
+if(NOT EXISTS "${MITSUBA_DIR}/ext/nanobind/CMakeLists.txt")
+  message(FATAL_ERROR "Nanobind not found in Mitsuba directory: ${MITSUBA_DIR}/ext/nanobind. Please ensure MITSUBA_DIR is correct.")
 endif()
-add_subdirectory(third_party/nanobind)
+add_subdirectory(${MITSUBA_DIR}/ext/nanobind ${CMAKE_CURRENT_BINARY_DIR}/nanobind)
 
 # 6. GoogleTest (for C++ unit tests)
 option(HDMITSUBA_BUILD_TESTS "Build C++ unit tests" ON)
