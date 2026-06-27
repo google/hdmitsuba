@@ -25,6 +25,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <absl/container/flat_hash_map.h>
@@ -172,23 +173,17 @@ struct JitScopeGuard {
   }
 };
 
-// Copies data from a Mitsuba Tensor to a Hydra Render Buffer.
+// Copies data from a Mitsuba Tensor to a Hydra Render Buffer (Scalar/CPU path).
 template <typename TensorT>
-void CopyToRenderBuffer(HdMitsubaRenderBuffer* render_buffer,
-                        const TensorT& tensor, int src_offset, int channels,
-                        bool is_int) {
-  using Float = typename TensorT::Array;
-  using UInt32 = dr::uint32_array_t<Float>;
-  using Int32 = dr::int32_array_t<Float>;
-  constexpr int kRgbChannels = 3;
-  constexpr int kRgbaChannels = 4;
+void ScalarCopyToRenderBuffer(HdMitsubaRenderBuffer* render_buffer,
+                              const TensorT& tensor, int src_offset, int channels,
+                              bool is_int) {
   if (!TF_VERIFY(render_buffer, "Render buffer is null.")) {
     return;
   }
   int dst_channels = HdGetComponentCount(render_buffer->GetFormat());
   if (!TF_VERIFY(
-          dst_channels == channels ||
-              (dst_channels == kRgbaChannels && channels == kRgbChannels),
+          dst_channels == channels || (dst_channels == 4 && channels == 3),
           "Destination and source channel counts do not match (%d vs %d)",
           dst_channels, channels)) {
     return;
@@ -198,73 +193,127 @@ void CopyToRenderBuffer(HdMitsubaRenderBuffer* render_buffer,
   size_t width = tensor.shape()[1];
   size_t src_channels = tensor.shape()[2];
   void* dst_ptr = render_buffer->Map();
-  if constexpr (dr::is_jit_v<Float>) {
-    size_t pixel_count = width * height;
-    UInt32 pixel_idx = dr::arange<UInt32>(pixel_count);
-    UInt32 x = pixel_idx % width;
-    UInt32 y = height - 1 - pixel_idx / width;  // Flips image vertically.
-    UInt32 repeated_pixel_idx = dr::repeat(y * width + x, dst_channels);
-    UInt32 channel_offsets =
-        dr::tile(dr::arange<UInt32>(dst_channels), pixel_count);
-    UInt32 final_idx =
-        repeated_pixel_idx * src_channels + src_offset + channel_offsets;
-    Float gathered_data;
-    // Fill alpha if needed.
-    if (dst_channels == kRgbaChannels && channels == kRgbChannels) {
-      gathered_data =
-          dr::select(channel_offsets < kRgbChannels,
-                     dr::gather<Float>(tensor.array(), final_idx), 1.0f);
-    } else {
-      gathered_data = dr::gather<Float>(tensor.array(), final_idx);
-    }
-    if (is_int) {
-      Int32 int_data = Int32(gathered_data);
-      dr::eval(int_data);
-      auto&& host_data = dr::migrate(int_data, JitBackend::None);
-      dr::sync_thread();
-      memcpy(dst_ptr, host_data.data(),
-             pixel_count * dst_channels * sizeof(int32_t));
-    } else {
-      dr::eval(gathered_data);
-      auto&& host_data = dr::migrate(gathered_data, JitBackend::None);
-      dr::sync_thread();
-      memcpy(dst_ptr, host_data.data(),
-             pixel_count * dst_channels * sizeof(float));
-    }
-  } else {
-    const float* src_data = tensor.array().data();
-    if (is_int) {
-      int32_t* dst_int = static_cast<int32_t*>(dst_ptr);
-      for (size_t y = 0; y < height; ++y) {
-        size_t src_y = height - 1 - y;  // Flip vertically.
-        for (size_t x = 0; x < width; ++x) {
-          size_t src_idx = (src_y * width + x) * src_channels + src_offset;
-          size_t dst_idx = (y * width + x) * dst_channels;
-          for (int c = 0; c < channels && c < dst_channels; ++c) {
-            dst_int[dst_idx + c] = static_cast<int32_t>(src_data[src_idx + c]);
-          }
+
+  const float* src_data = tensor.array().data();
+  if (is_int) {
+    int32_t* dst_int = static_cast<int32_t*>(dst_ptr);
+    for (size_t y = 0; y < height; ++y) {
+      size_t src_y = height - 1 - y;  // Flip vertically.
+      for (size_t x = 0; x < width; ++x) {
+        size_t src_idx = (src_y * width + x) * src_channels + src_offset;
+        size_t dst_idx = (y * width + x) * dst_channels;
+        for (int c = 0; c < channels && c < dst_channels; ++c) {
+          dst_int[dst_idx + c] = static_cast<int32_t>(src_data[src_idx + c]);
         }
       }
-    } else {
-      float* dst_float = static_cast<float*>(dst_ptr);
-      for (size_t y = 0; y < height; ++y) {
-        size_t src_y = height - 1 - y;  // Flip vertically.
-        for (size_t x = 0; x < width; ++x) {
-          size_t src_idx = (src_y * width + x) * src_channels + src_offset;
-          size_t dst_idx = (y * width + x) * dst_channels;
-          for (int c = 0; c < channels && c < dst_channels; ++c) {
-            dst_float[dst_idx + c] = src_data[src_idx + c];
-          }
-          // Fill alpha if needed.
-          if (dst_channels == kRgbaChannels && channels == kRgbChannels) {
-            dst_float[dst_idx + 3] = 1.0f;
-          }
+    }
+  } else {
+    float* dst_float = static_cast<float*>(dst_ptr);
+    for (size_t y = 0; y < height; ++y) {
+      size_t src_y = height - 1 - y;  // Flip vertically.
+      for (size_t x = 0; x < width; ++x) {
+        size_t src_idx = (src_y * width + x) * src_channels + src_offset;
+        size_t dst_idx = (y * width + x) * dst_channels;
+        for (int c = 0; c < channels && c < dst_channels; ++c) {
+          dst_float[dst_idx + c] = src_data[src_idx + c];
+        }
+        // Fill alpha if needed.
+        if (dst_channels == 4 && channels == 3) {
+          dst_float[dst_idx + 3] = 1.0f;
         }
       }
     }
   }
   render_buffer->SetConverged(true);
   render_buffer->Unmap();
+}
+
+struct CopyDestination {
+  HdMitsubaRenderBuffer* buffer;
+  int src_offset;
+  int channels;
+  bool is_int;
+};
+
+// Helper function to batch copy all output buffers / AOVs to hydra's render
+// buffers.
+template <typename Float, typename TensorT>
+void PerformBatchedCopy(const TensorT& tensor,
+                        const std::vector<CopyDestination>& destinations) {
+  if constexpr (dr::is_jit_v<Float>) {
+    using Int32 = dr::int32_array_t<Float>;
+    using MigratedFloat = std::decay_t<decltype(dr::migrate(
+        std::declval<Float>(), JitBackend::None))>;
+    using MigratedInt = std::decay_t<decltype(dr::migrate(std::declval<Int32>(),
+                                                          JitBackend::None))>;
+
+    std::vector<std::variant<Float, Int32>> gathered_vars;
+    gathered_vars.reserve(destinations.size());
+    for (const auto& dest : destinations) {
+      int dst_channels = HdGetComponentCount(dest.buffer->GetFormat());
+      using UInt32 = dr::uint32_array_t<Float>;
+      size_t height = tensor.shape()[0];
+      size_t width = tensor.shape()[1];
+      size_t pixel_count = width * height;
+
+      UInt32 pixel_idx = dr::arange<UInt32>(pixel_count);
+      UInt32 x = pixel_idx % width;
+      UInt32 y = height - 1 - pixel_idx / width;
+      UInt32 repeated_pixel_idx = dr::repeat(y * width + x, dst_channels);
+      UInt32 channel_offsets =
+          dr::tile(dr::arange<UInt32>(dst_channels), pixel_count);
+      UInt32 final_idx = repeated_pixel_idx * tensor.shape()[2] +
+                         dest.src_offset + channel_offsets;
+      Float gathered;
+      if (dst_channels == 4 && dest.channels == 3) {
+        gathered =
+            dr::select(channel_offsets < 3,
+                       dr::gather<Float>(tensor.array(), final_idx), 1.0f);
+      } else {
+        gathered = dr::gather<Float>(tensor.array(), final_idx);
+      }
+
+      if (dest.is_int) {
+        Int32 int_data = Int32(gathered);
+        dr::schedule(int_data);
+        gathered_vars.push_back(int_data);
+      } else {
+        dr::schedule(gathered);
+        gathered_vars.push_back(gathered);
+      }
+    }
+    dr::eval();
+
+    // Migrate result back to host memory.
+    std::vector<std::variant<MigratedFloat, MigratedInt>> migrated_vars;
+    migrated_vars.reserve(destinations.size());
+    for (size_t i = 0; i < destinations.size(); ++i) {
+      std::visit(
+          [&](auto& var) {
+            migrated_vars.push_back(dr::migrate(var, JitBackend::None));
+          },
+          gathered_vars[i]);
+    }
+    dr::sync_thread();
+
+    for (size_t i = 0; i < destinations.size(); ++i) {
+      const auto& dest = destinations[i];
+      void* dst_ptr = dest.buffer->Map();
+      int dst_channels = HdGetComponentCount(dest.buffer->GetFormat());
+      size_t size_bytes = tensor.shape()[0] * tensor.shape()[1] * dst_channels *
+                          (dest.is_int ? sizeof(int32_t) : sizeof(float));
+      std::visit(
+          [&](auto& host_arr) { memcpy(dst_ptr, host_arr.data(), size_bytes); },
+          migrated_vars[i]);
+      dest.buffer->SetConverged(true);
+      dest.buffer->Unmap();
+    }
+  } else {
+    for (const auto& dest : destinations) {
+      ScalarCopyToRenderBuffer(dest.buffer, tensor, dest.src_offset,
+                               dest.channels, dest.is_int);
+    }
+  }
 }
 
 template <typename Float, typename Spectrum>
@@ -854,13 +903,17 @@ class SceneModel final : public SceneManager {
 
     // 5. Copy the data to the output render buffers.
     size_t base_channels = sensor->film()->base_channels_count();
-    if (pass_state.color_buffer) {
-      CopyToRenderBuffer(pass_state.color_buffer, display_result, 0,
-                         base_channels, false);
-    }
     size_t total_channels = display_result.shape()[2];
+    destinations_.clear();
+    destinations_.reserve(1 + pass_state.aov_requests.size());
+
+    if (pass_state.color_buffer) {
+      destinations_.push_back({pass_state.color_buffer, 0, static_cast<int>(base_channels), false});
+    }
+
     size_t current_offset = base_channels;
     for (const auto& req : pass_state.aov_requests) {
+      if (!TF_VERIFY(req.buffer, "AOV buffer is null")) continue;
       if (!TF_VERIFY(current_offset + req.channel_count <= total_channels,
                      "AOV %s - out of bounds (offset %zu + %zu > %zu)",
                      req.mitsuba_name.c_str(), current_offset,
@@ -868,10 +921,10 @@ class SceneModel final : public SceneManager {
         return;
       }
       bool is_int = absl::StrContains(req.mitsuba_name, "_index");
-      CopyToRenderBuffer(req.buffer, display_result, current_offset,
-                         req.channel_count, is_int);
+      destinations_.push_back({req.buffer, static_cast<int>(current_offset), req.channel_count, is_int});
       current_offset += req.channel_count;
     }
+    PerformBatchedCopy<Float>(display_result, destinations_);
 
     // 6. Set convergence status
     bool converged =
@@ -1673,6 +1726,8 @@ class SceneModel final : public SceneManager {
     }
     return erased;
   }
+
+  std::vector<CopyDestination> destinations_;
 };
 
 template <typename Float, typename Spectrum>
