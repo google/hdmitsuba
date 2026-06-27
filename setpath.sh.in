@@ -10,7 +10,6 @@ export MITSUBA_BUILD_DIR_CONF="@MITSUBA_BUILD_DIR@"
 export PYTHONPATH="@CMAKE_CURRENT_SOURCE_DIR@:${HDMITSUBA_BUILD_DIR}:${HDMITSUBA_BUILD_DIR}/Release:${HDMITSUBA_BUILD_DIR}/hdmitsuba:${HDMITSUBA_BUILD_DIR}/hdmitsuba/Release:${MITSUBA_BUILD_DIR_CONF}/python:${MITSUBA_BUILD_DIR_CONF}/python/Release:${USD_DIR}/lib/python:${PYTHONPATH}"
 
 export LD_LIBRARY_PATH="${USD_DIR}/lib:${MITSUBA_BUILD_DIR_CONF}:${HDMITSUBA_BUILD_DIR}/hdmitsuba:${LD_LIBRARY_PATH}"
-export DYLD_LIBRARY_PATH="${USD_DIR}/lib:${MITSUBA_BUILD_DIR_CONF}:${HDMITSUBA_BUILD_DIR}/hdmitsuba:${DYLD_LIBRARY_PATH}"
 
 # On Windows, PATH is used to find DLLs at runtime (including Release subdirectories)
 if [ -n "$COMSPEC" ] || [ -n "$SYSTEMROOT" ]; then
@@ -20,7 +19,6 @@ fi
 # Add Embree path if configured
 if [ -n "@EMBREE_LIB_DIR@" ]; then
   export LD_LIBRARY_PATH="@EMBREE_LIB_DIR@:${LD_LIBRARY_PATH}"
-  export DYLD_LIBRARY_PATH="@EMBREE_LIB_DIR@:${DYLD_LIBRARY_PATH}"
 fi
 
 export DRJIT_NO_RTLD_DEEPBIND=1
