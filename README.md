@@ -2,7 +2,6 @@
 
 [![Linux CI](https://github.com/google/hdmitsuba/actions/workflows/ci-linux.yml/badge.svg)](https://github.com/google/hdmitsuba/actions/workflows/ci-linux.yml)
 [![macOS CI](https://github.com/google/hdmitsuba/actions/workflows/ci-macos.yml/badge.svg)](https://github.com/google/hdmitsuba/actions/workflows/ci-macos.yml)
-[![Windows CI](https://github.com/google/hdmitsuba/actions/workflows/ci-windows.yml/badge.svg)](https://github.com/google/hdmitsuba/actions/workflows/ci-windows.yml)
 
 `hdMitsuba` is a USD Hydra render delegate that enables [OpenUSD](https://github.com/PixarAnimationStudios/OpenUSD) to render scenes using [Mitsuba 3](https://github.com/mitsuba-renderer/mitsuba3). It allows integrating Mitsuba rendering into USD-compatible applications (e.g., usdview, Houdini, ...), or using it programmatically via Hydra.
 
@@ -147,6 +146,7 @@ While `hdMitsuba` already supports many Mitsuba & USD features, it currently has
 *   **Incremental Material Updates**: Materials are currently re-instantiated when modified. It would be useful to extend material support to also support efficient incremental updates.
 *   **Performance**: There is room to further reduce overheads and improve performance. Note that `hdMitsuba` also inherits Mitsuba's performance characteristics (e.g., high JIT costs for scenes containing a very large number of materials).
 *   **Volume rendering**: Volume rendering is not yet supported.
+*   **Windows support**: Mitsuba 3 is Windows compatible, but we have not tested hdMitsuba on Windows. The Windows CI setup is brittle and slow, and we therefore have temporarily disabled it.
 
 ## Contributing
 We welcome community contributions and bug reports. To contribute code, please see the instructions in [CONTRIBUTING](CONTRIBUTING).
