@@ -15,7 +15,11 @@
 cmake_minimum_required(VERSION 3.15)
 project(hdmitsuba VERSION 0.1.0 LANGUAGES CXX)
 
-# --- Mitsuba 3 Directory Config ---
+# Suppress FetchContent timestamp warning on CMake >= 3.24
+if(POLICY CMP0135)
+  cmake_policy(SET CMP0135 NEW)
+endif()
+
 set(MITSUBA_DIR "" CACHE PATH "Path to Mitsuba 3 source directory")
 set(MITSUBA_BUILD_DIR "" CACHE PATH "Path to Mitsuba 3 build directory (defaults to MITSUBA_DIR/build)")
 set(EMBREE_LIB_DIR "" CACHE PATH "Path to Embree library directory (if needed at runtime)")
@@ -28,7 +32,6 @@ if(NOT MITSUBA_BUILD_DIR)
   set(MITSUBA_BUILD_DIR "${MITSUBA_DIR}/build")
 endif()
 
-# --- Default Build Configurations ---
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build" FORCE)
 endif()
@@ -47,7 +50,6 @@ else()
   set(PLATFORM_ORIGIN "$ORIGIN")
 endif()
 
-# Compile options
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   add_compile_options(-Wall -Wextra -Werror=unused-variable -Werror=unused-but-set-variable -Wno-deprecated)
 endif()
@@ -58,38 +60,30 @@ endif()
 include(${MITSUBA_DIR}/ext/drjit/ext/drjit-core/ext/nanothread/ext/cmake-defaults/CMakeLists.txt)
 set(CMAKE_CXX_VISIBILITY_PRESET default)
 
-# Enable AddressSanitizer for debugging (disabled by default)
-option(HDMITSUBA_ENABLE_ASAN "Enable AddressSanitizer" OFF)
-if(HDMITSUBA_ENABLE_ASAN)
-  add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
-  add_link_options(-fsanitize=address)
-endif()
+# --- Set up dependencies ---
 
-# --- Dependencies Config ---
+# Ensure user-installed Python is preferred.
+set(Python_FIND_FRAMEWORK LAST)
+set(Python3_FIND_FRAMEWORK LAST)
+find_package(Python 3.9 COMPONENTS Interpreter Development.Module REQUIRED)
 
-# 1. Abseil (built from submodule as shared libraries to prevent dynamic symbol duplication)
+# Ensure USD uses the same Python.
+set(Python3_EXECUTABLE "${Python_EXECUTABLE}" CACHE FILEPATH "Path to Python 3 interpreter" FORCE)
+
 message(STATUS "hdmitsuba: Building Abseil from submodule as shared libraries...")
 if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/abseil-cpp/CMakeLists.txt")
   message(FATAL_ERROR "Abseil submodule is missing. Please run: git submodule update --init --recursive")
 endif()
 set(ABSL_PROPAGATE_CXX_STD ON CACHE INTERNAL "Use project C++ standard")
 set(ABSL_ENABLE_INSTALL ON CACHE INTERNAL "Enable install rule")
-
 set(BUILD_SHARED_LIBS ON)
 add_subdirectory(third_party/abseil-cpp)
 unset(BUILD_SHARED_LIBS)
 
-# 2. OpenUSD (PXR)
 find_package(OpenGL REQUIRED)
 find_package(pxr REQUIRED)
-# Note: User must set CMAKE_PREFIX_PATH to their USD build directory.
-
-# 3. OpenSubdiv
 find_package(OpenSubdiv REQUIRED)
 
-# 4. Mitsuba 3 & DrJit
-
-# Find Mitsuba 3 libraries in the build directory
 find_library(MITSUBA_LIBRARY
   NAMES mitsuba
   PATHS ${MITSUBA_BUILD_DIR}
@@ -117,7 +111,6 @@ find_library(DRJIT_EXTRA_LIBRARY
   NO_DEFAULT_PATH
 )
 
-
 find_library(NANOTHREAD_LIBRARY
   NAMES nanothread
   PATHS ${MITSUBA_BUILD_DIR}
@@ -127,9 +120,6 @@ find_library(NANOTHREAD_LIBRARY
 if(NOT NANOTHREAD_LIBRARY)
   message(FATAL_ERROR "Could not find libnanothread in ${MITSUBA_BUILD_DIR}")
 endif()
-
-# 5. Python & Nanobind
-find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 
 # Match mitsuba3 build configuration to ensure ABI compatibility by querying mitsuba via Python
 execute_process(
@@ -196,14 +186,12 @@ if(MITSUBA_HAS_AD)
   message(STATUS "hdmitsuba: Mitsuba has AD variants enabled, linking drjit-extra.")
 endif()
 
-
-# Add Nanobind (reusing the one from Mitsuba 3 to ensure ABI compatibility)
 if(NOT EXISTS "${MITSUBA_DIR}/ext/nanobind/CMakeLists.txt")
   message(FATAL_ERROR "Nanobind not found in Mitsuba directory: ${MITSUBA_DIR}/ext/nanobind. Please ensure MITSUBA_DIR is correct.")
 endif()
 add_subdirectory(${MITSUBA_DIR}/ext/nanobind ${CMAKE_CURRENT_BINARY_DIR}/nanobind)
 
-# 6. GoogleTest (for C++ unit tests)
+# Optional: GoogleTest (for C++ unit tests)
 option(HDMITSUBA_BUILD_TESTS "Build C++ unit tests" ON)
 if(HDMITSUBA_BUILD_TESTS)
   include(FetchContent)
@@ -216,8 +204,9 @@ if(HDMITSUBA_BUILD_TESTS)
   enable_testing()
 endif()
 
-# --- Include Directories ---
-# We define a common set of includes for our targets
+
+# --- HdMitsuba ---
+
 set(HDMITSUBA_COMMON_INCLUDES
   ${CMAKE_CURRENT_SOURCE_DIR} # For nanobind/usd.h, engine.h
   ${MITSUBA_DIR}/include
@@ -232,21 +221,14 @@ set(HDMITSUBA_COMMON_INCLUDES
   ${MITSUBA_DIR}/ext/embree/include
   ${MITSUBA_DIR}/ext/struct-jit/include
 )
-
-# --- Subdirectories ---
 add_subdirectory(hdmitsuba)
-
-# --- Main Engine Library & Python Extension (engine) ---
 add_subdirectory(render_engine)
 
-# Generate setpath.sh for easy environment setup
 configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/setpath.sh.in
   ${CMAKE_BINARY_DIR}/setpath.sh
   @ONLY
 )
-
-# Generate pyrefly.toml for local type checking
 configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/pyrefly.toml.in
   ${CMAKE_CURRENT_SOURCE_DIR}/pyrefly.toml
@@ -258,7 +240,6 @@ install(DIRECTORY usd_mitsuba
   DESTINATION lib/python
   PATTERN "*.py"
 )
-
 install(PROGRAMS render_engine/render_scene_cli.py
   DESTINATION bin
   RENAME render_scene_cli
