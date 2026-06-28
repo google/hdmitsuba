@@ -151,6 +151,9 @@ if(NOT PYTHON_RESULT EQUAL 0)
     MI_ENABLE_JIT=1
     MI_ENABLE_EMBREE=1
   )
+  if(APPLE)
+    add_compile_definitions(MI_ENABLE_METAL=1)
+  endif()
 else()
   set(HAS_JIT_VARIANT FALSE)
   if(MITSUBA_VARIANTS_LIST MATCHES "cuda_")
