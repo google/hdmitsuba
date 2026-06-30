@@ -83,8 +83,7 @@ void HdMitsubaCamera::Sync(HdSceneDelegate* sceneDelegate,
 
   CameraSpec spec;
   spec.id = GetId();
-  spec.transform =
-      UsdToMitsubaSensorTransform(sceneDelegate->GetTransform(GetId()));
+  spec.transform = UsdToMitsubaSensorTransform(GetTransform());
   spec.sensor_type = sensor_type;
   spec.fov = GetHorizontalFieldOfView();
   spec.horizontal_aperture_offset = GetHorizontalPrincipalPointOffset();
