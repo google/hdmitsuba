@@ -17,6 +17,7 @@
 #include <cmath>
 #include <utility>
 
+#include <drjit/math.h>
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/rotation.h>
 #include <pxr/base/gf/vec3d.h>
@@ -25,16 +26,19 @@
 #include <pxr/base/vt/value.h>
 #include <pxr/imaging/hd/changeTracker.h>
 #include <pxr/imaging/hd/light.h>
+#include <pxr/imaging/hd/lightSchema.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
+#include <pxr/imaging/hd/sceneIndex.h>
 #include <pxr/imaging/hd/types.h>
+#include <pxr/imaging/hd/visibilitySchema.h>
+#include <pxr/imaging/hd/xformSchema.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/assetPath.h>
 
 #include "hdmitsuba/render_param.h"
 #include "hdmitsuba/spec_types.h"
 #include "hdmitsuba/utils.h"
-#include <drjit/math.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -101,10 +105,26 @@ HdMitsubaLight::HdMitsubaLight(const SdfPath& id, const TfToken& typeId)
 
 void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
                           HdRenderParam* renderParam, HdDirtyBits* dirtyBits) {
+  static const HdDataSourceLocator transform_locator(
+      HdXformSchema::GetSchemaToken(), HdXformSchemaTokens->matrix);
+  static const HdDataSourceLocator visibility_locator(
+      HdVisibilitySchema::GetSchemaToken(),
+      HdVisibilitySchemaTokens->visibility);
+
   const SdfPath& id = GetId();
-  bool visible = sceneDelegate->GetVisible(id);
   SceneManager* scene =
       static_cast<HdMitsubaRenderParam*>(renderParam)->GetScene();
+
+  HdSceneIndexBaseRefPtr scene_index =
+      sceneDelegate->GetRenderIndex().GetTerminalSceneIndex();
+
+  if (!TF_VERIFY(scene_index)) {
+    return;
+  }
+  HdContainerDataSourceHandle data_source = scene_index->GetPrim(id).dataSource;
+
+  // 1. Visibility
+  const bool visible = GetParam<bool>(data_source, visibility_locator, true);
 
   if (!visible) {
     RemoveFromScene(scene);
@@ -112,43 +132,49 @@ void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
     return;
   }
 
-  // 1. Extract raw USD parameters
-  GfMatrix4d transform = sceneDelegate->GetTransform(id);
-  GfVec3f color = sceneDelegate->GetLightParamValue(id, HdLightTokens->color)
-                      .GetWithDefault<GfVec3f>(GfVec3f(1.0f, 1.0f, 1.0f));
+  // 2. Transform
+  const GfMatrix4d transform =
+      GetParam<GfMatrix4d>(data_source, transform_locator, GfMatrix4d(1.0));
+
+  // 3. Light Parameters
+  HdLightSchema light_schema = HdLightSchema::GetFromParent(data_source);
+  HdContainerDataSourceHandle light_container =
+      light_schema.IsDefined() ? light_schema.GetContainer() : nullptr;
+  if (!light_container) {
+    TF_WARN("Light %s has no light parameters. Removing from scene.",
+            id.GetText());
+    RemoveFromScene(scene);
+    *dirtyBits = HdChangeTracker::Clean;
+    return;
+  }
+
+  GfVec3f color =
+      GetParam<GfVec3f>(light_container, HdLightTokens->color, GfVec3f(1.0f));
   float intensity =
-      sceneDelegate->GetLightParamValue(id, HdLightTokens->intensity)
-          .GetWithDefault<float>(1.0f);
+      GetParam<float>(light_container, HdLightTokens->intensity, 1.0f);
   float exposure =
-      sceneDelegate->GetLightParamValue(id, HdLightTokens->exposure)
-          .GetWithDefault<float>(0.0f);
-  float radius = sceneDelegate->GetLightParamValue(id, HdLightTokens->radius)
-                     .GetWithDefault<float>(1.0f);
-  float width = sceneDelegate->GetLightParamValue(id, HdLightTokens->width)
-                    .GetWithDefault<float>(1.0f);
-  float height = sceneDelegate->GetLightParamValue(id, HdLightTokens->height)
-                     .GetWithDefault<float>(1.0f);
+      GetParam<float>(light_container, HdLightTokens->exposure, 0.0f);
+  float radius = GetParam<float>(light_container, HdLightTokens->radius, 1.0f);
+  float width = GetParam<float>(light_container, HdLightTokens->width, 1.0f);
+  float height = GetParam<float>(light_container, HdLightTokens->height, 1.0f);
   bool normalize =
-      sceneDelegate->GetLightParamValue(id, HdLightTokens->normalize)
-          .GetWithDefault<bool>(false);
+      GetParam<bool>(light_container, HdLightTokens->normalize, false);
+
+  static const TfToken treat_as_point_token("treatAsPoint");
   bool treat_as_point =
-      sceneDelegate->GetLightParamValue(id, TfToken("treatAsPoint"))
-          .GetWithDefault<bool>(radius == 0.0f);
+      GetParam<bool>(light_container, treat_as_point_token, radius == 0.0f);
+
   float shaping_cone_angle =
-      sceneDelegate->GetLightParamValue(id, HdLightTokens->shapingConeAngle)
-          .GetWithDefault<float>(0.0f);
-  float shaping_cone_softness =
-      sceneDelegate->GetLightParamValue(id, HdLightTokens->shapingConeSoftness)
-          .GetWithDefault<float>(1.0f);
+      GetParam<float>(light_container, HdLightTokens->shapingConeAngle, 0.0f);
+  float shaping_cone_softness = GetParam<float>(
+      light_container, HdLightTokens->shapingConeSoftness, 1.0f);
+
+  std::string texture_file_path =
+      GetParam<SdfAssetPath>(light_container, HdLightTokens->textureFile)
+          .GetResolvedPath();
+
   float shaping_cone_beam_width =
       shaping_cone_angle * (1.0f - shaping_cone_softness);
-
-  std::string texture_file_path;
-  VtValue texture_file =
-      sceneDelegate->GetLightParamValue(id, HdLightTokens->textureFile);
-  if (texture_file.IsHolding<SdfAssetPath>()) {
-    texture_file_path = texture_file.Get<SdfAssetPath>().GetResolvedPath();
-  }
 
   // 2. Calculate base emission (color * intensity * exp2(exposure))
   GfVec3f base_emission = color * intensity * std::exp2(exposure);
