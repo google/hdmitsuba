@@ -14,12 +14,55 @@
 
 #pragma once
 
-#include <mitsuba/core/transform.h>
+#include <string>
+
 #include <drjit/matrix.h>
+#include <mitsuba/core/transform.h>
 #include <pxr/base/gf/matrix4d.h>
+#include <pxr/base/tf/diagnostic.h>
+#include <pxr/base/tf/type.h>
+#include <pxr/base/vt/value.h>
+#include <pxr/imaging/hd/dataSource.h>
 #include <pxr/pxr.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
+
+template <typename T>
+T GetParam(const HdContainerDataSourceHandle& container, const TfToken& name,
+           const T& default_value = T()) {
+  if (!container) return default_value;
+  if (auto data_source = HdSampledDataSource::Cast(container->Get(name))) {
+    VtValue value = data_source->GetValue(0.0f);
+    if (value.IsHolding<T>()) {
+      return value.UncheckedGet<T>();
+    } else {
+      TF_WARN("GetParam type mismatch for '%s': expected %s, got %s (empty=%d)",
+              name.GetText(), TfType::Find<T>().GetTypeName().c_str(),
+              value.GetTypeName().c_str(), value.IsEmpty());
+    }
+  }
+  return default_value;
+}
+
+template <typename T>
+T GetParam(const HdContainerDataSourceHandle& container,
+           const HdDataSourceLocator& locator, const T& default_value = T()) {
+  if (!container) return default_value;
+  if (auto data_source = HdSampledDataSource::Cast(
+          HdContainerDataSource::Get(container, locator))) {
+    VtValue value = data_source->GetValue(0.0f);
+    if (value.IsHolding<T>()) {
+      return value.UncheckedGet<T>();
+    } else {
+      TF_WARN(
+          "GetParam type mismatch for locator '%s': expected %s, got %s "
+          "(empty=%d)",
+          locator.GetString().c_str(), TfType::Find<T>().GetTypeName().c_str(),
+          value.GetTypeName().c_str(), value.IsEmpty());
+    }
+  }
+  return default_value;
+}
 
 using ScalarAffineTransform4f =
     mitsuba::Transform<mitsuba::Point<float, 4>, true>;
