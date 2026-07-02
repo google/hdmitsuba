@@ -207,3 +207,117 @@ def test_aovs_duplicate_resolving():
   assert "primId" in results
   assert "instanceId" in results
   np.testing.assert_array_equal(results["primId"], results["instanceId"])
+
+
+def test_crop_rendering():
+  stage = Usd.Stage.Open(f"{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda")
+  render_settings = test_helpers.create_render_settings(
+      stage, resolution=(512, 512)
+  )
+  settings_prim = render_settings.GetPrim()
+
+  settings_prim.CreateAttribute(
+      "mitsuba:sample_count", Sdf.ValueTypeNames.Int
+  ).Set(4)
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:type", Sdf.ValueTypeNames.String
+  ).Set("path")
+
+  # Render full image first
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  image_full = engine.render()["color"]
+
+  # Configure crop rendering (center 128x128 region)
+  render_settings.CreateDataWindowNDCAttr().Set((0.375, 0.375, 0.625, 0.625))
+
+  # Re-render with crop
+  engine_crop = usd_render.RenderEngine(stage)
+  engine_crop.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  image_crop = engine_crop.render()["color"]
+
+  test_helpers.write_image(image_full, "test_crop_rendering_full.png")
+  test_helpers.write_image(image_crop, "test_crop_rendering_crop.png")
+
+  # Verify that the cropped image has the same content in the cropped region
+  # (192 to 320 in x and y coordinates)
+  crop_region_full = image_full[192:320, 192:320, :3]
+  crop_region_crop = image_crop[192:320, 192:320, :3]
+  test_helpers.robust_assert_close(
+      crop_region_crop, crop_region_full, atol=0.1
+  )
+
+  # Verify that everything else in image_crop is black (zeros)
+  mask = np.ones((512, 512, 3), dtype=bool)
+  mask[192:320, 192:320, :] = False
+
+  mismatched_coords = np.argwhere((image_crop[..., :3] != 0.0) & mask)
+  print(f"Number of mismatched pixels/channels: {len(mismatched_coords)}")
+  non_zero_coords = np.argwhere(image_crop[..., :3] != 0.0)
+  if len(non_zero_coords) > 0:
+    min_y, min_x, _ = non_zero_coords.min(axis=0)
+    max_y, max_x, _ = non_zero_coords.max(axis=0)
+    print(
+        f"Non-zero bounding box: y in [{min_y}, {max_y}], x in [{min_x},"
+        f" {max_x}]"
+    )
+  assert len(mismatched_coords) == 0
+
+
+def test_asymmetric_crop_rendering():
+  stage = Usd.Stage.Open(f"{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda")
+  render_settings = test_helpers.create_render_settings(
+      stage, resolution=(512, 512)
+  )
+  settings_prim = render_settings.GetPrim()
+
+  settings_prim.CreateAttribute(
+      "mitsuba:sample_count", Sdf.ValueTypeNames.Int
+  ).Set(4)
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:type", Sdf.ValueTypeNames.String
+  ).Set("path")
+
+  # Render full image first
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  image_full = engine.render()["color"]
+
+  # Configure asymmetric crop rendering (x: [0.25, 0.75], y: [0.1, 0.4] in Y-up NDC)
+  # y range 0.1 to 0.4 maps to rows [51, 204] in Y-up pixel coordinates.
+  render_settings.CreateDataWindowNDCAttr().Set((0.25, 0.1, 0.75, 0.4))
+
+  # Re-render with crop
+  engine_crop = usd_render.RenderEngine(stage)
+  engine_crop.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  image_crop = engine_crop.render()["color"]
+
+  test_helpers.write_image(
+      image_full, "test_asymmetric_crop_rendering_full.png"
+  )
+  test_helpers.write_image(
+      image_crop, "test_asymmetric_crop_rendering_crop.png"
+  )
+
+  # Verify content in cropped region (rows [307, 460], cols [128, 384] inclusive, so [307:461, 128:384])
+  crop_region_full = image_full[307:461, 128:384, :3]
+  crop_region_crop = image_crop[307:461, 128:384, :3]
+  test_helpers.robust_assert_close(
+      crop_region_crop, crop_region_full, atol=0.1
+  )
+
+  # Verify everything else is black
+  mask = np.ones((512, 512, 3), dtype=bool)
+  mask[307:461, 128:384, :] = False
+  mismatched_coords = np.argwhere((image_crop[..., :3] != 0.0) & mask)
+
+  non_zero_coords = np.argwhere(image_crop[..., :3] != 0.0)
+  if len(non_zero_coords) > 0:
+    min_y, min_x, _ = non_zero_coords.min(axis=0)
+    max_y, max_x, _ = non_zero_coords.max(axis=0)
+    print(
+        f"Asymmetric crop non-zero bounding box: y in [{min_y}, {max_y}], x"
+        f" in [{min_x}, {max_x}]"
+    )
+  assert len(mismatched_coords) == 0
+

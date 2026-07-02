@@ -177,7 +177,8 @@ struct JitScopeGuard {
 template <typename TensorT>
 void ScalarCopyToRenderBuffer(HdMitsubaRenderBuffer* render_buffer,
                               const TensorT& tensor, int src_offset, int channels,
-                              bool is_int) {
+                              bool is_int,
+                              const std::optional<GfRect2i>& crop_window = std::nullopt) {
   if (!TF_VERIFY(render_buffer, "Render buffer is null.")) {
     return;
   }
@@ -189,19 +190,33 @@ void ScalarCopyToRenderBuffer(HdMitsubaRenderBuffer* render_buffer,
     return;
   }
 
-  size_t height = tensor.shape()[0];
-  size_t width = tensor.shape()[1];
+  size_t dst_width = render_buffer->GetWidth();
+  size_t dst_height = render_buffer->GetHeight();
   size_t src_channels = tensor.shape()[2];
   void* dst_ptr = render_buffer->Map();
+
+  size_t crop_x = crop_window.has_value() ? crop_window->GetMinX() : 0;
+  size_t crop_y = crop_window.has_value() ? crop_window->GetMinY() : 0;
+  size_t crop_w = crop_window.has_value() ? crop_window->GetWidth() : dst_width;
+  size_t crop_h = crop_window.has_value() ? crop_window->GetHeight() : dst_height;
+
+  if (crop_w != tensor.shape()[1] || crop_h != tensor.shape()[0]) {
+    TF_RUNTIME_ERROR(
+        "Tensor dimensions do not match crop window: %lu x %lu vs %lu x %lu",
+        crop_w, crop_h, tensor.shape()[1], tensor.shape()[0]);
+    render_buffer->Unmap();
+    return;
+  }
 
   const float* src_data = tensor.array().data();
   if (is_int) {
     int32_t* dst_int = static_cast<int32_t*>(dst_ptr);
-    for (size_t y = 0; y < height; ++y) {
-      size_t src_y = height - 1 - y;  // Flip vertically.
-      for (size_t x = 0; x < width; ++x) {
-        size_t src_idx = (src_y * width + x) * src_channels + src_offset;
-        size_t dst_idx = (y * width + x) * dst_channels;
+    for (size_t y = 0; y < crop_h; ++y) {
+      size_t src_y = crop_h - 1 - y;  // Flip vertically.
+      size_t dst_y = (dst_height - crop_y - crop_h) + y; // Map to Y-up destination.
+      for (size_t x = 0; x < crop_w; ++x) {
+        size_t src_idx = (src_y * crop_w + x) * src_channels + src_offset;
+        size_t dst_idx = (dst_y * dst_width + (crop_x + x)) * dst_channels;
         for (int c = 0; c < channels && c < dst_channels; ++c) {
           dst_int[dst_idx + c] = static_cast<int32_t>(src_data[src_idx + c]);
         }
@@ -209,11 +224,12 @@ void ScalarCopyToRenderBuffer(HdMitsubaRenderBuffer* render_buffer,
     }
   } else {
     float* dst_float = static_cast<float*>(dst_ptr);
-    for (size_t y = 0; y < height; ++y) {
-      size_t src_y = height - 1 - y;  // Flip vertically.
-      for (size_t x = 0; x < width; ++x) {
-        size_t src_idx = (src_y * width + x) * src_channels + src_offset;
-        size_t dst_idx = (y * width + x) * dst_channels;
+    for (size_t y = 0; y < crop_h; ++y) {
+      size_t src_y = crop_h - 1 - y;  // Flip vertically.
+      size_t dst_y = (dst_height - crop_y - crop_h) + y; // Map to Y-up destination.
+      for (size_t x = 0; x < crop_w; ++x) {
+        size_t src_idx = (src_y * crop_w + x) * src_channels + src_offset;
+        size_t dst_idx = (dst_y * dst_width + (crop_x + x)) * dst_channels;
         for (int c = 0; c < channels && c < dst_channels; ++c) {
           dst_float[dst_idx + c] = src_data[src_idx + c];
         }
@@ -239,7 +255,8 @@ struct CopyDestination {
 // buffers.
 template <typename Float, typename TensorT>
 void PerformBatchedCopy(const TensorT& tensor,
-                        const std::vector<CopyDestination>& destinations) {
+                        const std::vector<CopyDestination>& destinations,
+                        const std::optional<GfRect2i>& crop_window = std::nullopt) {
   if constexpr (dr::is_jit_v<Float>) {
     using Int32 = dr::int32_array_t<Float>;
     using MigratedFloat = std::decay_t<decltype(dr::migrate(
@@ -300,10 +317,27 @@ void PerformBatchedCopy(const TensorT& tensor,
       const auto& dest = destinations[i];
       void* dst_ptr = dest.buffer->Map();
       int dst_channels = HdGetComponentCount(dest.buffer->GetFormat());
-      size_t size_bytes = tensor.shape()[0] * tensor.shape()[1] * dst_channels *
-                          (dest.is_int ? sizeof(int32_t) : sizeof(float));
+      size_t dst_width = dest.buffer->GetWidth();
+      size_t dst_height = dest.buffer->GetHeight();
+
+      size_t crop_x = crop_window.has_value() ? crop_window->GetMinX() : 0;
+      size_t crop_y = crop_window.has_value() ? crop_window->GetMinY() : 0;
+      size_t crop_w = crop_window.has_value() ? crop_window->GetWidth() : dst_width;
+      size_t crop_h = crop_window.has_value() ? crop_window->GetHeight() : dst_height;
+
+      size_t element_size = dest.is_int ? sizeof(int32_t) : sizeof(float);
+      size_t row_size_bytes = crop_w * dst_channels * element_size;
       std::visit(
-          [&](auto& host_arr) { memcpy(dst_ptr, host_arr.data(), size_bytes); },
+          [&](auto& host_arr) {
+            const char* src_ptr = reinterpret_cast<const char*>(host_arr.data());
+            char* dst_char = reinterpret_cast<char*>(dst_ptr);
+            for (size_t y = 0; y < crop_h; ++y) {
+              size_t dst_y = (dst_height - crop_y - crop_h) + y;
+              size_t dst_offset = (dst_y * dst_width + crop_x) * dst_channels * element_size;
+              size_t src_offset = (y * crop_w) * dst_channels * element_size;
+              memcpy(dst_char + dst_offset, src_ptr + src_offset, row_size_bytes);
+            }
+          },
           migrated_vars[i]);
       dest.buffer->SetConverged(true);
       dest.buffer->Unmap();
@@ -311,7 +345,7 @@ void PerformBatchedCopy(const TensorT& tensor,
   } else {
     for (const auto& dest : destinations) {
       ScalarCopyToRenderBuffer(dest.buffer, tensor, dest.src_offset,
-                               dest.channels, dest.is_int);
+                               dest.channels, dest.is_int, crop_window);
     }
   }
 }
@@ -756,7 +790,8 @@ class SceneModel final : public SceneManager {
   }
 
   void Render(const HdRenderPass* render_pass,
-              const HdCamera* camera) override {
+              const HdCamera* camera,
+              const std::optional<GfRect2i>& crop_window = std::nullopt) override {
     absl::MutexLock state_lock(state_mutex_);
     absl::MutexLock aov_lock(aov_states_mutex_);
     JitScopeGuard<Float> jit_guard;
@@ -807,11 +842,28 @@ class SceneModel final : public SceneManager {
 
     Film* film = sensor->film();
     auto film_size = film->size();
+    bool film_changed = false;
     // If necessary, resize film to match USD buffer size.
     if (film_size.x() != buffer_width || film_size.y() != buffer_height) {
       film->set_size(ScalarPoint2u(buffer_width, buffer_height));
-      sensor->parameters_changed();
+      film_changed = true;
       if (frozen_render_) frozen_render_->Clear(); // Invalidate cache on resize
+    }
+
+    ScalarPoint2u new_crop_offset(0, 0);
+    ScalarVector2u new_crop_size = film->size();
+    if (crop_window.has_value()) {
+      new_crop_offset = ScalarPoint2u(crop_window->GetMinX(), crop_window->GetMinY());
+      new_crop_size = ScalarVector2u(crop_window->GetWidth(), crop_window->GetHeight());
+    }
+
+    if (dr::any(film->crop_offset() != new_crop_offset) || dr::any(film->crop_size() != new_crop_size)) {
+      film->set_crop_window(new_crop_offset, new_crop_size);
+      film_changed = true;
+    }
+
+    if (film_changed) {
+      sensor->parameters_changed();
     }
 
     if (!integrator_) {
@@ -865,10 +917,12 @@ class SceneModel final : public SceneManager {
           if (frozen_render_) frozen_render_->Clear(); // Clear cache if freezing is disabled
         }
       }
-      if (static_cast<size_t>(buffer_width) != result.shape()[1] ||
-          static_cast<size_t>(buffer_height) != result.shape()[0]) {
-        TF_RUNTIME_ERROR("Buffer size mismatch: %u x %u vs %lu x %lu",
-                         buffer_width, buffer_height, result.shape()[1],
+      size_t expected_width = crop_window.has_value() ? crop_window->GetWidth() : buffer_width;
+      size_t expected_height = crop_window.has_value() ? crop_window->GetHeight() : buffer_height;
+      if (expected_width != result.shape()[1] ||
+          expected_height != result.shape()[0]) {
+        TF_RUNTIME_ERROR("Buffer size mismatch: %lu x %lu vs %lu x %lu",
+                         expected_width, expected_height, result.shape()[1],
                          result.shape()[0]);
         return;
       }
@@ -924,7 +978,7 @@ class SceneModel final : public SceneManager {
       destinations_.push_back({req.buffer, static_cast<int>(current_offset), req.channel_count, is_int});
       current_offset += req.channel_count;
     }
-    PerformBatchedCopy<Float>(display_result, destinations_);
+    PerformBatchedCopy<Float>(display_result, destinations_, crop_window);
 
     // 6. Set convergence status
     bool converged =

@@ -123,6 +123,7 @@ class RenderEngine {
   pxr::SdfPath camera_path_;
   int width_;
   pxr::HdRenderSettingsMap settings_map_;
+  pxr::GfRange2f data_window_ndc_;
 };
 
 }  // namespace hdmitsuba
