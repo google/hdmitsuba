@@ -54,7 +54,7 @@ MITSUBA_EXAMPLE_BSDFS = [
     },
     {
         'type': 'normalmap',
-        'normalmap': {'type': 'bitmap', 'filename': _NORMALMAP_PNG},
+        'normalmap': {'type': 'bitmap', 'filename': _NORMALMAP_PNG, 'raw': True},
         'nested_bsdf': {
             'type': 'roughplastic',
             'diffuse_reflectance': {
@@ -134,7 +134,7 @@ def test_mitsuba_to_usd_conversion(mitsuba_bsdf):
     },
     {
         'type': 'normalmap',
-        'normalmap': {'type': 'bitmap', 'filename': _NORMALMAP_PNG},
+        'normalmap': {'type': 'bitmap', 'filename': _NORMALMAP_PNG, 'raw': True},
         'nested_bsdf': {
             'type': 'principled',
             'base_color': {'type': 'bitmap', 'filename': _ALBEDO_PNG},
@@ -199,3 +199,16 @@ def test_usd_preview_surface_to_mitsuba_specular_eta_resolution():
   assert 'specular' in bsdf_dict
   assert bsdf_dict['specular'] == 0.5
   assert bsdf_dict['spec_trans'] == 0.0
+
+
+def test_displacement_texture_translation():
+  stage = Usd.Stage.CreateInMemory()
+  shader = UsdShade.Shader.Define(
+      stage, Sdf.Path('/Material/displacement_texture')
+  )
+  shader.CreateIdAttr('UsdUVTexture')
+  shader.CreateInput('file', Sdf.ValueTypeNames.Asset).Set(_ALBEDO_PNG)
+
+  result_dict = material.usd_mitsuba_material_to_dict(shader, 'displacement')
+  assert result_dict['raw']
+

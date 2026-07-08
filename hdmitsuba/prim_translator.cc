@@ -104,7 +104,9 @@ bool UseRawBitmap(const TfToken& source_color_space,
       absl::flat_hash_set<TfToken, TfToken::HashFunctor>>
       kNonColorInputs({
           TfToken("normal"),
+          TfToken("normalmap"),
           TfToken("bump"),
+          TfToken("bumpmap"),
           TfToken("roughness"),
           TfToken("metallic"),
           TfToken("displacement"),
@@ -202,12 +204,13 @@ std::optional<mitsuba::Properties> ExtractTextureProperties(
                           input_name == TfToken("normalmap")));
   if (nodeTypeId == TfToken("UsdUVTexture")) {
     auto source_color_space_it = parameters.find(TfToken("sourceColorSpace"));
+    TfToken source_color_space = TfToken("auto");
     if (source_color_space_it != parameters.end() &&
         source_color_space_it->second.IsHolding<TfToken>()) {
-      bool is_raw = UseRawBitmap(source_color_space_it->second.Get<TfToken>(),
-                                 input_name);
-      props.set("raw", is_raw);
+      source_color_space = source_color_space_it->second.Get<TfToken>();
     }
+    bool is_raw = UseRawBitmap(source_color_space, input_name);
+    props.set("raw", is_raw);
     auto wrap_s_it = parameters.find(TfToken("wrapS"));
     if (wrap_s_it != parameters.end() &&
         wrap_s_it->second.IsHolding<TfToken>()) {
