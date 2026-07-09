@@ -195,28 +195,31 @@ void ScalarCopyToRenderBuffer(HdMitsubaRenderBuffer* render_buffer,
   size_t src_channels = tensor.shape()[2];
   void* dst_ptr = render_buffer->Map();
 
-  size_t crop_x = crop_window.has_value() ? crop_window->GetMinX() : 0;
-  size_t crop_y = crop_window.has_value() ? crop_window->GetMinY() : 0;
-  size_t crop_w = crop_window.has_value() ? crop_window->GetWidth() : dst_width;
-  size_t crop_h = crop_window.has_value() ? crop_window->GetHeight() : dst_height;
+  size_t crop_x = 0;
+  size_t crop_y = 0;
+  size_t crop_w = dst_width;
+  size_t crop_h = dst_height;
+  if (crop_window.has_value()) {
+    crop_x = crop_window->GetMinX();
+    crop_y = crop_window->GetMinY();
+    crop_w = crop_window->GetWidth();
+    crop_h = crop_window->GetHeight();
+  }
 
   if (crop_w != tensor.shape()[1] || crop_h != tensor.shape()[0]) {
-    TF_RUNTIME_ERROR(
+    TF_FATAL_ERROR(
         "Tensor dimensions do not match crop window: %lu x %lu vs %lu x %lu",
         crop_w, crop_h, tensor.shape()[1], tensor.shape()[0]);
-    render_buffer->Unmap();
-    return;
   }
 
   const float* src_data = tensor.array().data();
   if (is_int) {
     int32_t* dst_int = static_cast<int32_t*>(dst_ptr);
-    for (size_t y = 0; y < crop_h; ++y) {
-      size_t src_y = crop_h - 1 - y;  // Flip vertically.
-      size_t dst_y = (dst_height - crop_y - crop_h) + y; // Map to Y-up destination.
-      for (size_t x = 0; x < crop_w; ++x) {
-        size_t src_idx = (src_y * crop_w + x) * src_channels + src_offset;
-        size_t dst_idx = (dst_y * dst_width + (crop_x + x)) * dst_channels;
+    for (size_t src_y = 0; src_y < crop_h; ++src_y) {
+      size_t dst_y = (dst_height - 1) - (crop_y + src_y);
+      for (size_t src_x = 0; src_x < crop_w; ++src_x) {
+        size_t src_idx = (src_y * crop_w + src_x) * src_channels + src_offset;
+        size_t dst_idx = (dst_y * dst_width + (crop_x + src_x)) * dst_channels;
         for (int c = 0; c < channels && c < dst_channels; ++c) {
           dst_int[dst_idx + c] = static_cast<int32_t>(src_data[src_idx + c]);
         }
@@ -224,12 +227,11 @@ void ScalarCopyToRenderBuffer(HdMitsubaRenderBuffer* render_buffer,
     }
   } else {
     float* dst_float = static_cast<float*>(dst_ptr);
-    for (size_t y = 0; y < crop_h; ++y) {
-      size_t src_y = crop_h - 1 - y;  // Flip vertically.
-      size_t dst_y = (dst_height - crop_y - crop_h) + y; // Map to Y-up destination.
-      for (size_t x = 0; x < crop_w; ++x) {
-        size_t src_idx = (src_y * crop_w + x) * src_channels + src_offset;
-        size_t dst_idx = (dst_y * dst_width + (crop_x + x)) * dst_channels;
+    for (size_t src_y = 0; src_y < crop_h; ++src_y) {
+      size_t dst_y = (dst_height - 1) - (crop_y + src_y);
+      for (size_t src_x = 0; src_x < crop_w; ++src_x) {
+        size_t src_idx = (src_y * crop_w + src_x) * src_channels + src_offset;
+        size_t dst_idx = (dst_y * dst_width + (crop_x + src_x)) * dst_channels;
         for (int c = 0; c < channels && c < dst_channels; ++c) {
           dst_float[dst_idx + c] = src_data[src_idx + c];
         }
@@ -269,34 +271,65 @@ void PerformBatchedCopy(const TensorT& tensor,
     for (const auto& dest : destinations) {
       int dst_channels = HdGetComponentCount(dest.buffer->GetFormat());
       using UInt32 = dr::uint32_array_t<Float>;
-      size_t height = tensor.shape()[0];
-      size_t width = tensor.shape()[1];
-      size_t pixel_count = width * height;
+      size_t dst_width = dest.buffer->GetWidth();
+      size_t dst_height = dest.buffer->GetHeight();
+      size_t dst_pixel_count = dst_width * dst_height;
 
-      UInt32 pixel_idx = dr::arange<UInt32>(pixel_count);
-      UInt32 x = pixel_idx % width;
-      UInt32 y = height - 1 - pixel_idx / width;
-      UInt32 repeated_pixel_idx = dr::repeat(y * width + x, dst_channels);
-      UInt32 channel_offsets =
-          dr::tile(dr::arange<UInt32>(dst_channels), pixel_count);
-      UInt32 final_idx = repeated_pixel_idx * tensor.shape()[2] +
-                         dest.src_offset + channel_offsets;
-      Float gathered;
-      if (dst_channels == 4 && dest.channels == 3) {
-        gathered =
-            dr::select(channel_offsets < 3,
-                       dr::gather<Float>(tensor.array(), final_idx), 1.0f);
-      } else {
-        gathered = dr::gather<Float>(tensor.array(), final_idx);
+      size_t crop_x = 0;
+      size_t crop_y = 0;
+      size_t crop_w = dst_width;
+      size_t crop_h = dst_height;
+      if (crop_window.has_value()) {
+        crop_x = crop_window->GetMinX();
+        crop_y = crop_window->GetMinY();
+        crop_w = crop_window->GetWidth();
+        crop_h = crop_window->GetHeight();
       }
 
+      UInt32 dst_pixel_idx = dr::arange<UInt32>(dst_pixel_count);
+      UInt32 dst_x = dst_pixel_idx % dst_width;
+      UInt32 dst_row = dst_pixel_idx / dst_width;
+      UInt32 r_topdown = dst_height - 1 - dst_row;
+
+      auto in_crop = (dst_x >= crop_x) && (dst_x < crop_x + crop_w) &&
+                     (r_topdown >= crop_y) && (r_topdown < crop_y + crop_h);
+
+      UInt32 src_x = dst_x - crop_x;
+      UInt32 src_y_down = r_topdown - crop_y;
+      UInt32 src_pixel_idx =
+          dr::select(in_crop, src_y_down * crop_w + src_x, 0);
+
+      UInt32 repeated_pixel_idx =
+          dr::repeat(src_pixel_idx, dst_channels);
+      UInt32 channel_offsets =
+          dr::tile(dr::arange<UInt32>(dst_channels), dst_pixel_count);
+      UInt32 final_idx = repeated_pixel_idx * tensor.shape()[2] +
+                         dest.src_offset + channel_offsets;
+
+      auto in_crop_channel = dr::repeat(in_crop, dst_channels);
+
       if (dest.is_int) {
-        Int32 int_data = Int32(gathered);
-        dr::schedule(int_data);
-        gathered_vars.push_back(int_data);
+        Int32 gathered_int = dr::select(
+            in_crop_channel,
+            Int32(dr::gather<Float>(tensor.array(), final_idx)),
+            0);
+        dr::schedule(gathered_int);
+        gathered_vars.push_back(gathered_int);
       } else {
-        dr::schedule(gathered);
-        gathered_vars.push_back(gathered);
+        Float gathered_float;
+        if (dst_channels == 4 && dest.channels == 3) {
+          gathered_float = dr::select(
+              in_crop_channel,
+              dr::select(channel_offsets < 3,
+                         dr::gather<Float>(tensor.array(), final_idx), 1.0f),
+              0.0f);
+        } else {
+          gathered_float = dr::select(
+              in_crop_channel,
+              dr::gather<Float>(tensor.array(), final_idx), 0.0f);
+        }
+        dr::schedule(gathered_float);
+        gathered_vars.push_back(gathered_float);
       }
     }
     dr::eval();
@@ -319,24 +352,12 @@ void PerformBatchedCopy(const TensorT& tensor,
       int dst_channels = HdGetComponentCount(dest.buffer->GetFormat());
       size_t dst_width = dest.buffer->GetWidth();
       size_t dst_height = dest.buffer->GetHeight();
-
-      size_t crop_x = crop_window.has_value() ? crop_window->GetMinX() : 0;
-      size_t crop_y = crop_window.has_value() ? crop_window->GetMinY() : 0;
-      size_t crop_w = crop_window.has_value() ? crop_window->GetWidth() : dst_width;
-      size_t crop_h = crop_window.has_value() ? crop_window->GetHeight() : dst_height;
-
       size_t element_size = dest.is_int ? sizeof(int32_t) : sizeof(float);
-      size_t row_size_bytes = crop_w * dst_channels * element_size;
+      size_t size_bytes = dst_width * dst_height * dst_channels * element_size;
+
       std::visit(
           [&](auto& host_arr) {
-            const char* src_ptr = reinterpret_cast<const char*>(host_arr.data());
-            char* dst_char = reinterpret_cast<char*>(dst_ptr);
-            for (size_t y = 0; y < crop_h; ++y) {
-              size_t dst_y = (dst_height - crop_y - crop_h) + y;
-              size_t dst_offset = (dst_y * dst_width + crop_x) * dst_channels * element_size;
-              size_t src_offset = (y * crop_w) * dst_channels * element_size;
-              memcpy(dst_char + dst_offset, src_ptr + src_offset, row_size_bytes);
-            }
+            memcpy(dst_ptr, host_arr.data(), size_bytes);
           },
           migrated_vars[i]);
       dest.buffer->SetConverged(true);
@@ -847,7 +868,6 @@ class SceneModel final : public SceneManager {
     if (film_size.x() != buffer_width || film_size.y() != buffer_height) {
       film->set_size(ScalarPoint2u(buffer_width, buffer_height));
       film_changed = true;
-      if (frozen_render_) frozen_render_->Clear(); // Invalidate cache on resize
     }
 
     ScalarPoint2u new_crop_offset(0, 0);
@@ -864,6 +884,7 @@ class SceneModel final : public SceneManager {
 
     if (film_changed) {
       sensor->parameters_changed();
+      if (frozen_render_) frozen_render_->Clear();
     }
 
     if (!integrator_) {
