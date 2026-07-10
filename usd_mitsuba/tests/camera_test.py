@@ -147,3 +147,31 @@ def test_convert_to_mitsuba_with_time(
       np.array(expected_transform).T,
       atol=1e-4,
   )
+
+
+def test_convert_to_mitsuba_with_crop():
+  stage, _ = _create_camera_stage()
+  camera_prim = UsdGeom.Camera(stage.GetPrimAtPath("/World/MyCamera"))
+
+  # Set crop window on render settings
+  render_settings = UsdRender.Settings(stage.GetPrimAtPath("/Render/Settings"))
+  # dataWindowNDC: (0.25, 0.1, 0.75, 0.4)
+  # resolution is (200, 100)
+  render_settings.CreateDataWindowNDCAttr().Set((0.25, 0.1, 0.75, 0.4))
+
+  mitsuba_camera = camera.usd_to_mitsuba(camera_prim)
+
+  # Expected crop values:
+  # width = 200, height = 100
+  # xmin=0.25, ymin=0.1, xmax=0.75, ymax=0.4
+  # crop_offset_x = round(0.25 * 200) = 50
+  # crop_offset_y = round((1.0 - 0.4) * 100) = 60
+  # crop_width = round(0.75 * 200) - 50 = 150 - 50 = 100
+  # crop_height = round((1.0 - 0.1) * 100) - 60 = 90 - 60 = 30
+
+  film = mitsuba_camera["film"]
+  assert film["crop_offset_x"] == 50
+  assert film["crop_offset_y"] == 60
+  assert film["crop_width"] == 100
+  assert film["crop_height"] == 30
+

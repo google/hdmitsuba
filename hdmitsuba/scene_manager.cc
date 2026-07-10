@@ -884,7 +884,7 @@ class SceneModel final : public SceneManager {
 
     if (film_changed) {
       sensor->parameters_changed();
-      if (frozen_render_) frozen_render_->Clear();
+      if (frozen_render_) frozen_render_->Clear(); // Invalidate cache on resize
     }
 
     if (!integrator_) {

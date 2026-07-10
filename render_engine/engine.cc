@@ -201,20 +201,19 @@ bool AovInfosChanged(const std::vector<RenderEngine::AovInfo>& old_aovs,
 
 CameraUtilFraming ComputeFraming(const GfRange2f& ndc,
                                  const GfVec2i& resolution) {
-  CameraUtilFraming framing;
-  if (!ndc.IsEmpty()) {
-    GfRange2f displayWindow(GfVec2f(0.0f, 0.0f),
-                            GfVec2f(resolution[0], resolution[1]));
-    int minX = std::round(ndc.GetMin()[0] * resolution[0]);
-    int minY = std::round((1.0f - ndc.GetMax()[1]) * resolution[1]);
-    int maxX = std::round(ndc.GetMax()[0] * resolution[0]) - 1;
-    int maxY = std::round((1.0f - ndc.GetMin()[1]) * resolution[1]) - 1;
-    maxX = std::max(minX, std::min(maxX, resolution[0] - 1));
-    maxY = std::max(minY, std::min(maxY, resolution[1] - 1));
-    framing = CameraUtilFraming(
-        displayWindow, GfRect2i(GfVec2i(minX, minY), GfVec2i(maxX, maxY)));
+  if (ndc.IsEmpty()) {
+    return {};
   }
-  return framing;
+  GfRange2f display_window(GfVec2f(0.0f, 0.0f),
+                           GfVec2f(resolution[0], resolution[1]));
+  int min_x = std::round(ndc.GetMin()[0] * resolution[0]);
+  int min_y = std::round((1.0f - ndc.GetMax()[1]) * resolution[1]);
+  int max_x = std::round(ndc.GetMax()[0] * resolution[0]) - 1;
+  int max_y = std::round((1.0f - ndc.GetMin()[1]) * resolution[1]) - 1;
+  max_x = std::max(min_x, std::min(max_x, resolution[0] - 1));
+  max_y = std::max(min_y, std::min(max_y, resolution[1] - 1));
+  return CameraUtilFraming(
+      display_window, GfRect2i(GfVec2i(min_x, min_y), GfVec2i(max_x, max_y)));
 }
 
 }  // namespace

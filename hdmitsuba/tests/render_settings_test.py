@@ -219,17 +219,12 @@ def test_crop_rendering():
   settings_prim.CreateAttribute(
       "mitsuba:sample_count", Sdf.ValueTypeNames.Int
   ).Set(4)
-  settings_prim.CreateAttribute(
-      "mitsuba:integrator:type", Sdf.ValueTypeNames.String
-  ).Set("path")
 
   # Render full image first
   engine = usd_render.RenderEngine(stage)
   engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
   image_full = engine.render()["color"]
 
-  # Configure asymmetric crop rendering (x: [0.25, 0.75], y: [0.1, 0.4] in Y-up NDC)
-  # y range 0.1 to 0.4 maps to rows [51, 204] in Y-up pixel coordinates.
   render_settings.CreateDataWindowNDCAttr().Set((0.25, 0.1, 0.75, 0.4))
 
   # Re-render with crop
@@ -244,22 +239,12 @@ def test_crop_rendering():
   crop_region_full = image_full[307:461, 128:384, :3]
   crop_region_crop = image_crop[307:461, 128:384, :3]
   test_helpers.robust_assert_close(
-      crop_region_crop, crop_region_full, atol=0.1
+      crop_region_crop, crop_region_full, atol=0.02
   )
 
   # Verify everything else is black
-  mask = np.ones((512, 512, 3), dtype=bool)
-  mask[307:461, 128:384, :] = False
-  mismatched_coords = np.argwhere((image_crop[..., :3] != 0.0) & mask)
-
-  non_zero_coords = np.argwhere(image_crop[..., :3] != 0.0)
-  if len(non_zero_coords) > 0:
-    min_y, min_x, _ = non_zero_coords.min(axis=0)
-    max_y, max_x, _ = non_zero_coords.max(axis=0)
-    print(
-        f"Asymmetric crop non-zero bounding box: y in [{min_y}, {max_y}], x"
-        f" in [{min_x}, {max_x}]"
-    )
-  assert len(mismatched_coords) == 0
+  mask = np.ones((512, 512), dtype=bool)
+  mask[307:461, 128:384] = False
+  np.testing.assert_array_equal(image_crop[..., :3][mask], 0.0)
 
 
