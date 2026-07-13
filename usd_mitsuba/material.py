@@ -53,7 +53,7 @@ MI_TO_USD_PRINCIPLED_RENAMING = {
 # Standard non-color shader inputs defined in the UsdPreviewSurface
 # specification. Ref:
 # third_party/usd/v23/pxr/usdImaging/plugin/usdShaders/shaders/shaderDefs.usda
-_USD_NON_COLOR_INPUTS = frozenset({
+_USD_PREVIEW_SURFACE_NON_COLOR_INPUTS = frozenset({
     'normal',
     'bump',
     'roughness',
@@ -65,6 +65,16 @@ _USD_NON_COLOR_INPUTS = frozenset({
     'ior',
     'opacity',
 })
+
+# Mitsuba-specific non-color shader inputs for custom shaders.
+_MITSUBA_NON_COLOR_INPUTS = frozenset({
+    'normalmap',
+    'bumpmap',
+})
+
+_NON_COLOR_INPUTS = (
+    _USD_PREVIEW_SURFACE_NON_COLOR_INPUTS | _MITSUBA_NON_COLOR_INPUTS
+)
 
 _SUPPORTED_IMAGE_EXTENSIONS = frozenset({
     '.exr',
@@ -131,13 +141,15 @@ def _convert_uv_texture(
       texture = {'type': 'bitmap', 'filename': filename}
 
       # Handle color space if we have a bitmap.
-      if source_color_space := shader.GetInput('sourceColorSpace').Get():
-        is_non_color = input_name in _USD_NON_COLOR_INPUTS
-        if source_color_space == 'auto':
-          if is_non_color:
-            texture['raw'] = True
-        else:
-          texture['raw'] = (source_color_space == 'raw') and is_non_color
+      source_color_space = shader.GetInput('sourceColorSpace').Get()
+      if source_color_space is None:
+        source_color_space = 'auto'
+      is_non_color = input_name in _NON_COLOR_INPUTS
+      if source_color_space == 'auto':
+        if is_non_color:
+          texture['raw'] = True
+      else:
+        texture['raw'] = (source_color_space == 'raw') and is_non_color
       return texture
     else:
       Tf.Warn(
@@ -157,7 +169,10 @@ def _convert_uv_texture(
   return {'type': 'rgb', 'value': (1.0, 0.0, 1.0)}
 
 
-def usd_mitsuba_material_to_dict(shader: UsdShade.Shader) -> dict[str, Any]:
+def usd_mitsuba_material_to_dict(
+    shader: UsdShade.Shader,
+    input_name: str | None = None,
+) -> dict[str, Any]:
   """Converts a USD shader to a Mitsuba BSDF dictionary."""
 
   def _traverse(
@@ -200,7 +215,7 @@ def usd_mitsuba_material_to_dict(shader: UsdShade.Shader) -> dict[str, Any]:
 
     return result
 
-  return _traverse(shader)
+  return _traverse(shader, input_name)
 
 
 def usd_preview_surface_to_mitsuba(
@@ -331,7 +346,7 @@ def convert_material(
         bsdf = mi.load_dict(bsdf_dict)
 
     if shader := find_shader(_get_displacement_output(material)):
-      bsdf_dict = usd_mitsuba_material_to_dict(shader)
+      bsdf_dict = usd_mitsuba_material_to_dict(shader, 'displacement')
       displacement = mi.load_dict(bsdf_dict)
       if not isinstance(displacement, mi.Texture):
         raise ValueError(
