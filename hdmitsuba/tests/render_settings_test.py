@@ -207,3 +207,44 @@ def test_aovs_duplicate_resolving():
   assert "primId" in results
   assert "instanceId" in results
   np.testing.assert_array_equal(results["primId"], results["instanceId"])
+
+
+def test_crop_rendering():
+  stage = Usd.Stage.Open(f"{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda")
+  render_settings = test_helpers.create_render_settings(
+      stage, resolution=(512, 512)
+  )
+  settings_prim = render_settings.GetPrim()
+
+  settings_prim.CreateAttribute(
+      "mitsuba:sample_count", Sdf.ValueTypeNames.Int
+  ).Set(4)
+
+  # Render full image first
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  image_full = engine.render()["color"]
+
+  render_settings.CreateDataWindowNDCAttr().Set((0.25, 0.1, 0.75, 0.4))
+
+  # Re-render with crop
+  engine_crop = usd_render.RenderEngine(stage)
+  engine_crop.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  image_crop = engine_crop.render()["color"]
+
+  test_helpers.write_image(image_full, "test_crop_rendering_full.png")
+  test_helpers.write_image(image_crop, "test_crop_rendering_crop.png")
+
+  # Verify content in cropped region (rows [307, 460], cols [128, 384] inclusive, so [307:461, 128:384])
+  crop_region_full = image_full[307:461, 128:384, :3]
+  crop_region_crop = image_crop[307:461, 128:384, :3]
+  test_helpers.robust_assert_close(
+      crop_region_crop, crop_region_full, atol=0.02
+  )
+
+  # Verify everything else is black
+  mask = np.ones((512, 512), dtype=bool)
+  mask[307:461, 128:384] = False
+  np.testing.assert_array_equal(image_crop[..., :3][mask], 0.0)
+
+

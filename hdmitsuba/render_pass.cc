@@ -19,6 +19,8 @@
 #include <pxr/imaging/hd/aov.h>
 #include <pxr/imaging/hd/renderIndex.h>
 #include <pxr/imaging/hd/renderPass.h>
+#include <optional>
+#include <pxr/imaging/cameraUtil/framing.h>
 #include <pxr/imaging/hd/renderPassState.h>
 #include <pxr/imaging/hd/rprimCollection.h>
 #include <pxr/pxr.h>
@@ -48,7 +50,11 @@ void HdMitsubaRenderPass::_Execute(
     scene_manager_->SetAovBindings(this, aov_bindings);
     aov_bindings_ = aov_bindings;
   }
-  scene_manager_->Render(this, renderPassState->GetCamera());
+  std::optional<GfRect2i> crop_window;
+  if (renderPassState->GetFraming().IsValid()) {
+    crop_window = renderPassState->GetFraming().dataWindow;
+  }
+  scene_manager_->Render(this, renderPassState->GetCamera(), crop_window);
 }
 
 bool HdMitsubaRenderPass::IsConverged() const {

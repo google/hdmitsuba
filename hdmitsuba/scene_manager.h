@@ -24,6 +24,8 @@
 #include <pxr/base/vt/dictionary.h>
 #include <pxr/base/vt/types.h>
 #include <pxr/imaging/hd/aov.h>
+#include <optional>
+#include <pxr/base/gf/rect2i.h>
 #include <pxr/imaging/hd/camera.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
@@ -61,8 +63,10 @@ class SceneManager {
       const HdRenderPass* render_pass,
       const HdRenderPassAovBindingVector& aov_bindings) = 0;
 
-  virtual void Render(const HdRenderPass* render_pass,
-                      const HdCamera* camera) = 0;
+  virtual void Render(
+      const HdRenderPass* render_pass,
+      const HdCamera* camera,
+      const std::optional<GfRect2i>& crop_window = std::nullopt) = 0;
 
   virtual bool IsConverged(const HdRenderPass* render_pass) const = 0;
 

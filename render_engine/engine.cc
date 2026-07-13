@@ -37,6 +37,7 @@
 #include <pxr/base/tf/token.h>
 #include <pxr/base/vt/dictionary.h>
 #include <pxr/base/vt/value.h>
+#include <pxr/imaging/cameraUtil/framing.h>
 #include <pxr/imaging/hd/aov.h>
 #include <pxr/imaging/hd/engine.h>
 #include <pxr/imaging/hd/pluginRenderDelegateUniqueHandle.h>
@@ -198,9 +199,28 @@ bool AovInfosChanged(const std::vector<RenderEngine::AovInfo>& old_aovs,
   return false;
 }
 
+CameraUtilFraming ComputeFraming(const GfRange2f& ndc,
+                                 const GfVec2i& resolution) {
+  if (ndc.IsEmpty()) {
+    return {};
+  }
+  GfRange2f display_window(GfVec2f(0.0f, 0.0f),
+                           GfVec2f(resolution[0], resolution[1]));
+  int min_x = std::round(ndc.GetMin()[0] * resolution[0]);
+  int min_y = std::round((1.0f - ndc.GetMax()[1]) * resolution[1]);
+  int max_x = std::round(ndc.GetMax()[0] * resolution[0]) - 1;
+  int max_y = std::round((1.0f - ndc.GetMin()[1]) * resolution[1]) - 1;
+  max_x = std::max(min_x, std::min(max_x, resolution[0] - 1));
+  max_y = std::max(min_y, std::min(max_y, resolution[1] - 1));
+  return CameraUtilFraming(
+      display_window, GfRect2i(GfVec2i(min_x, min_y), GfVec2i(max_x, max_y)));
+}
+
 }  // namespace
 
-RenderEngine::RenderEngine(UsdStagePtr stage) : stage_(stage) {
+RenderEngine::RenderEngine(UsdStagePtr stage)
+    : stage_(stage),
+      data_window_ndc_(GfVec2f(0.0f, 0.0f), GfVec2f(1.0f, 1.0f)) {
   engine_ = std::make_unique<HdEngine>();
 }
 
@@ -305,6 +325,16 @@ void RenderEngine::Configure(
   for (const auto& [key, value] : overrides) {
     settings_map[key] = value;
   }
+
+  GfRange2f new_data_window_ndc(GfVec2f(0.0f, 0.0f), GfVec2f(1.0f, 1.0f));
+  TfToken ndc_token("dataWindowNDC");
+  auto ndc_it = settings_map.find(ndc_token);
+  if (ndc_it != settings_map.end() && ndc_it->second.IsHolding<GfVec4f>()) {
+    GfVec4f ndc = ndc_it->second.Get<GfVec4f>();
+    new_data_window_ndc =
+        GfRange2f(GfVec2f(ndc[0], ndc[1]), GfVec2f(ndc[2], ndc[3]));
+  }
+  bool ndc_changed = (new_data_window_ndc != data_window_ndc_);
 
   // Unconditionally disable progressive refinement in the batch render engine
   settings_map[pxr::HdRenderSettingsTokens->enableInteractive] =
@@ -440,6 +470,7 @@ void RenderEngine::Configure(
       HdxRenderTaskParams params{};
       params.aovBindings = CreateAovBindings();
       params.viewport = GfVec4d(0, 0, resolution_[0], resolution_[1]);
+      params.framing = ComputeFraming(new_data_window_ndc, resolution_);
       params_delegate_->SetParameter(render_task_id_, HdTokens->params, params);
       params_delegate_->SetParameter(render_task_id_, HdTokens->collection,
                                      collection);
@@ -449,7 +480,16 @@ void RenderEngine::Configure(
       tasks_.push_back(render_index_->GetTask(render_task_id_));
     }
     SetCamera(camera_path_);
+  } else if (ndc_changed) {
+    auto params = params_delegate_->GetParameter<HdxRenderTaskParams>(
+        render_task_id_, HdTokens->params);
+    params.framing = ComputeFraming(new_data_window_ndc, resolution_);
+    params_delegate_->SetParameter(render_task_id_, HdTokens->params, params);
+    render_index_->GetChangeTracker().MarkTaskDirty(
+        render_task_id_, HdChangeTracker::DirtyParams);
   }
+
+  data_window_ndc_ = new_data_window_ndc;
 }
 
 void RenderEngine::SetCamera(const SdfPath& camera) {

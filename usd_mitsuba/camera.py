@@ -116,6 +116,36 @@ def usd_to_mitsuba(
       sensor_dict['near_clip'] = clipping_range[0]
       sensor_dict['far_clip'] = clipping_range[1]
 
+  film_dict = sensor_dict['film']
+  assert isinstance(film_dict, dict)
+
+  # Apply crop window if present in render settings
+  if render_settings:
+    ndc_attr = render_settings.GetDataWindowNDCAttr()
+    if ndc_attr.HasAuthoredValue():
+      ndc = ndc_attr.Get(time)
+      ndc = tuple(ndc)
+      if ndc != (0.0, 0.0, 1.0, 1.0):
+        width, height = image_size
+        xmin, ymin, xmax, ymax = ndc
+
+        # Calculate pixel-space crop
+        crop_offset_x = int(round(xmin * width))
+        crop_offset_y = int(round((1.0 - ymax) * height))
+        crop_width = int(round(xmax * width)) - crop_offset_x
+        crop_height = int(round((1.0 - ymin) * height)) - crop_offset_y
+
+        # Ensure values are within bounds
+        crop_offset_x = max(0, min(crop_offset_x, width - 1))
+        crop_offset_y = max(0, min(crop_offset_y, height - 1))
+        crop_width = max(1, min(crop_width, width - crop_offset_x))
+        crop_height = max(1, min(crop_height, height - crop_offset_y))
+
+        film_dict['crop_width'] = crop_width
+        film_dict['crop_height'] = crop_height
+        film_dict['crop_offset_x'] = crop_offset_x
+        film_dict['crop_offset_y'] = crop_offset_y
+
   # TODO: Modify this to also support specifying 'mitsuba:sampler:sample_count'.
   sample_count = 1
   if render_settings:
@@ -129,7 +159,5 @@ def usd_to_mitsuba(
   }
 
   if reconstruction_filter is not None:
-    film_dict = sensor_dict.setdefault('film', {})
-    assert isinstance(film_dict, dict)
     film_dict['reconstruction_filter'] = reconstruction_filter
   return sensor_dict
