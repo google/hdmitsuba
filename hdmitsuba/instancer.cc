@@ -25,28 +25,18 @@
 #include <pxr/base/vt/array.h>
 #include <pxr/imaging/hd/changeTracker.h>
 #include <pxr/imaging/hd/instancer.h>
+#include <pxr/imaging/hd/instancerTopologySchema.h>
+#include <pxr/imaging/hd/primvarsSchema.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
+#include <pxr/imaging/hd/sceneIndex.h>
 #include <pxr/imaging/hd/tokens.h>
+#include <pxr/imaging/hd/xformSchema.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
 
+#include "hdmitsuba/utils.h"
+
 PXR_NAMESPACE_OPEN_SCOPE
-
-namespace {
-
-template <typename T>
-T GetPrimvarArray(HdSceneDelegate* delegate, const SdfPath& id,
-                  const TfToken& token) {
-  if (delegate) {
-    VtValue value = delegate->Get(id, token);
-    if (value.IsHolding<T>()) {
-      return value.UncheckedGet<T>();
-    }
-  }
-  return T();
-}
-
-}  // namespace
 
 HdMitsubaInstancer::HdMitsubaInstancer(HdSceneDelegate* delegate,
                                        const SdfPath& id)
@@ -66,6 +56,20 @@ void HdMitsubaInstancer::Sync(HdSceneDelegate* scene_delegate,
 
 VtMatrix4dArray HdMitsubaInstancer::ComputeInstanceTransforms(
     const SdfPath& prototype_id) {
+  static const HdDataSourceLocator transforms_locator(
+      HdInstancerTokens->instanceTransforms,
+      HdPrimvarSchemaTokens->primvarValue);
+  static const HdDataSourceLocator translations_locator(
+      HdInstancerTokens->instanceTranslations,
+      HdPrimvarSchemaTokens->primvarValue);
+  static const HdDataSourceLocator scales_locator(
+      HdInstancerTokens->instanceScales, HdPrimvarSchemaTokens->primvarValue);
+  static const HdDataSourceLocator rotations_locator(
+      HdInstancerTokens->instanceRotations,
+      HdPrimvarSchemaTokens->primvarValue);
+  static const HdDataSourceLocator transform_locator(
+      HdXformSchema::GetSchemaToken(), HdXformSchemaTokens->matrix);
+
   {
     absl::MutexLock lock(cache_mutex_);
     auto it = cached_transforms_.find(prototype_id);
@@ -74,10 +78,20 @@ VtMatrix4dArray HdMitsubaInstancer::ComputeInstanceTransforms(
     }
   }
 
-  HdSceneDelegate* delegate = GetDelegate();
   const SdfPath& instancer_id = GetId();
-  const VtIntArray instance_indices =
-      delegate->GetInstanceIndices(instancer_id, prototype_id);
+  HdRenderIndex& render_index = GetDelegate()->GetRenderIndex();
+  HdSceneIndexBaseRefPtr scene_index = render_index.GetTerminalSceneIndex();
+  if (!TF_VERIFY(scene_index)) {
+    return {};
+  }
+  HdSceneIndexPrim prim = scene_index->GetPrim(instancer_id);
+  HdInstancerTopologySchema topology_schema =
+      HdInstancerTopologySchema::GetFromParent(prim.dataSource);
+  VtIntArray instance_indices;
+  if (topology_schema.IsDefined()) {
+    instance_indices =
+        topology_schema.ComputeInstanceIndicesForProto(prototype_id);
+  }
 
   VtMatrix4dArray transforms;
   if (instance_indices.empty()) {
@@ -87,27 +101,45 @@ VtMatrix4dArray HdMitsubaInstancer::ComputeInstanceTransforms(
   }
 
   // Fetch various primvars outside of the loop over instances.
-  auto instancer_transforms = GetPrimvarArray<VtMatrix4dArray>(
-      delegate, instancer_id, HdInstancerTokens->instanceTransforms);
-  auto instancer_translations = GetPrimvarArray<VtVec3fArray>(
-      delegate, instancer_id, HdInstancerTokens->instanceTranslations);
-  auto instancer_scales = GetPrimvarArray<VtVec3fArray>(
-      delegate, instancer_id, HdInstancerTokens->instanceScales);
+  VtMatrix4dArray instancer_transforms;
+  VtVec3fArray instancer_translations;
+  VtVec3fArray instancer_scales;
   VtVec4fArray instancer_rotations;
   VtQuathArray instancer_rotations_q;
   VtQuatfArray instancer_rotations_qf;
-  VtValue rotations_val =
-      delegate->Get(instancer_id, HdInstancerTokens->instanceRotations);
-  if (rotations_val.IsHolding<VtVec4fArray>()) {
-    instancer_rotations = rotations_val.UncheckedGet<VtVec4fArray>();
-  } else if (rotations_val.IsHolding<VtQuathArray>()) {
-    instancer_rotations_q = rotations_val.UncheckedGet<VtQuathArray>();
-  } else if (rotations_val.IsHolding<VtQuatfArray>()) {
-    instancer_rotations_qf = rotations_val.UncheckedGet<VtQuatfArray>();
+
+  HdPrimvarsSchema primvars_schema =
+      HdPrimvarsSchema::GetFromParent(prim.dataSource);
+  if (primvars_schema.IsDefined()) {
+    HdContainerDataSourceHandle primvars_container =
+        primvars_schema.GetContainer();
+
+    instancer_transforms =
+        GetParam(primvars_container, transforms_locator, instancer_transforms);
+    instancer_translations = GetParam(primvars_container, translations_locator,
+                                      instancer_translations);
+    instancer_scales =
+        GetParam(primvars_container, scales_locator, instancer_scales);
+
+    // Rotations can have different types, try them one by one.
+    if (auto data_source = HdSampledDataSource::Cast(HdContainerDataSource::Get(
+            primvars_container, rotations_locator))) {
+      VtValue value = data_source->GetValue(0.0f);
+      if (value.IsHolding<VtVec4fArray>()) {
+        instancer_rotations = value.UncheckedGet<VtVec4fArray>();
+      } else if (value.IsHolding<VtQuathArray>()) {
+        instancer_rotations_q = value.UncheckedGet<VtQuathArray>();
+      } else if (value.IsHolding<VtQuatfArray>()) {
+        instancer_rotations_qf = value.UncheckedGet<VtQuatfArray>();
+      } else if (!value.IsEmpty()) {
+        TF_WARN("Unexpected type for instanceRotations: %s",
+                value.GetTypeName().c_str());
+      }
+    }
   }
 
-  const GfMatrix4d instancer_transform =
-      delegate->GetInstancerTransform(instancer_id);
+  GfMatrix4d instancer_transform =
+      GetParam<GfMatrix4d>(prim.dataSource, transform_locator, GfMatrix4d(1.0));
 
   const bool has_scales = !instancer_scales.empty();
   const bool has_rotations = !instancer_rotations.empty();
@@ -166,7 +198,7 @@ VtMatrix4dArray HdMitsubaInstancer::ComputeInstanceTransforms(
   const SdfPath parent_instancer_id = GetParentId();
   if (!parent_instancer_id.IsEmpty()) {
     if (HdMitsubaInstancer* parent_instancer = static_cast<HdMitsubaInstancer*>(
-            delegate->GetRenderIndex().GetInstancer(parent_instancer_id))) {
+            render_index.GetInstancer(parent_instancer_id))) {
       const VtMatrix4dArray parent_transforms =
           parent_instancer->ComputeInstanceTransforms(GetId());
       if (!parent_transforms.empty()) {
