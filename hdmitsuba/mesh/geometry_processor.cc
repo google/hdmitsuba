@@ -487,8 +487,11 @@ std::vector<SubMeshOutput> GeometryProcessor::SplitAndCompactMeshes(
       primvars[token] = {compactor.get_compacted_value(), compactor.descriptor};
     }
 
-    std::string mat_name = absl::StrReplaceAll(material_ids[i].GetAsString(),
-                                               {{"/", "_"}, {":", "_"}});
+    std::string mat_name =
+        material_ids[i].IsEmpty()
+            ? "mat_" + std::to_string(i)
+            : absl::StrReplaceAll(material_ids[i].GetAsString(),
+                                  {{"/", "_"}, {":", "_"}});
     SubMeshOutput out;
     out.id = id.AppendChild(TfToken(mat_name));
     out.material_id = material_ids[i];
