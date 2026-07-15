@@ -1011,18 +1011,6 @@ class SceneModel final : public SceneManager {
     for (auto& req : pass_state.aov_requests) {
       req.buffer->SetConverged(converged);
     }
-
-    // Notify change to update viewport, even if more samples will be rendered.
-    HdChangeTracker& change_tracker =
-        render_pass->GetRenderIndex()->GetChangeTracker();
-    if (pass_state.color_buffer) {
-      change_tracker.MarkBprimDirty(pass_state.color_buffer->GetId(),
-                                    HdRenderBuffer::DirtyDescription);
-    }
-    for (const auto& req : pass_state.aov_requests) {
-      change_tracker.MarkBprimDirty(req.buffer->GetId(),
-                                    HdRenderBuffer::DirtyDescription);
-    }
   }
 
   bool IsConverged(const HdRenderPass* /*render_pass*/) const override {
