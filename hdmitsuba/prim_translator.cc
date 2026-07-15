@@ -789,6 +789,7 @@ PrimTranslator<Float, Spectrum>::BuildSensor(const CameraSpec& spec,
   props.set("near_clip", spec.near_clip);
   props.set("far_clip", spec.far_clip);
 
+  std::string filter_type = is_interactive ? "box" : spec.pixel_filter_type;
   if (!filter_type.empty()) {
     mitsuba::Properties film_props("hdrfilm");
     film_props.set(
@@ -796,7 +797,7 @@ PrimTranslator<Float, Spectrum>::BuildSensor(const CameraSpec& spec,
         static_cast<mitsuba::Object*>(
             mitsuba::PluginManager::instance()
                 ->create_object<mitsuba::ReconstructionFilter<Float, Spectrum>>(
-                    mitsuba::Properties(is_interactive ? "box" : spec.pixel_filter_type))
+                    mitsuba::Properties(filter_type))
                 .get()));
     props.set(
         "film",
