@@ -1056,6 +1056,11 @@ class SceneModel final : public SceneManager {
         bool progressive = it->second.Get<bool>();
         if (progressive != progressive_rendering_) {
           progressive_rendering_ = progressive;
+          // A change in render mode requires rebuilding the sensors, since
+          // this affects the used pixel filter type.
+          for (auto& [_, camera_spec] : camera_specs_) {
+            camera_spec.needs_rebuild = true;
+          }
           reset_progressive_ = true;
         }
       }
@@ -1239,7 +1244,7 @@ class SceneModel final : public SceneManager {
         camera_specs_,
         [&](CameraSpec* spec, mitsuba::ref<Sensor>& res) {
           if (spec->needs_rebuild) {
-            res = PrimTranslator::BuildSensor(*spec);
+            res = PrimTranslator::BuildSensor(*spec, progressive_rendering_);
           } else if (spec->dirty_bits != 0) {
             if (spec->sensor_type != "irradiancemeter") {
               auto it = sensors_.find(spec->id.GetAsString());

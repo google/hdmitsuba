@@ -773,7 +773,8 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateLightInPlace(
 }
 
 MI_VARIANT mitsuba::ref<mitsuba::Sensor<Float, Spectrum>>
-PrimTranslator<Float, Spectrum>::BuildSensor(const CameraSpec& spec) {
+PrimTranslator<Float, Spectrum>::BuildSensor(const CameraSpec& spec,
+                                             bool is_interactive) {
   mitsuba::Properties props;
   if (spec.sensor_type == "irradiancemeter") {
     props = mitsuba::Properties("irradiancemeter");
@@ -788,14 +789,15 @@ PrimTranslator<Float, Spectrum>::BuildSensor(const CameraSpec& spec) {
   props.set("near_clip", spec.near_clip);
   props.set("far_clip", spec.far_clip);
 
-  if (!spec.pixel_filter_type.empty()) {
+  std::string filter_type = is_interactive ? "box" : spec.pixel_filter_type;
+  if (!filter_type.empty()) {
     mitsuba::Properties film_props("hdrfilm");
     film_props.set(
         "pixel_filter",
         static_cast<mitsuba::Object*>(
             mitsuba::PluginManager::instance()
                 ->create_object<mitsuba::ReconstructionFilter<Float, Spectrum>>(
-                    mitsuba::Properties(spec.pixel_filter_type))
+                    mitsuba::Properties(filter_type))
                 .get()));
     props.set(
         "film",

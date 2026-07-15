@@ -86,7 +86,7 @@ class PrimTranslator {
                                  const LightSpec& spec);
 
   static mitsuba::ref<mitsuba::Sensor<Float, Spectrum>> BuildSensor(
-      const CameraSpec& spec);
+      const CameraSpec& spec, bool is_interactive = false);
 
   static void UpdateSensorInPlace(mitsuba::Object* sensor_obj,
                                   const CameraSpec& spec);
