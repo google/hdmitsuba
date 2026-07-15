@@ -315,7 +315,8 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
   auto points_it = primvars.find(HdTokens->points);
   if (points_it == primvars.end() || points_it->second.value.IsEmpty() ||
       points_it->second.value.Get<VtVec3fArray>().empty()) {
-    TF_WARN("Mesh %s has no points. Removing from scene.", id.GetText());
+    TF_DEBUG(HDMITSUBA_LIFECYCLE)
+        .Msg("Mesh %s has no points. Removing from scene.\n", id.GetText());
     RemoveFromScene(scene);
     return;
   }

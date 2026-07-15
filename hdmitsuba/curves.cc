@@ -13,8 +13,7 @@
 // limitations under the License.
 
 #include "hdmitsuba/curves.h"
-
-#include <utility>
+#include "hdmitsuba/debug_codes.h"
 
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/tf/diagnostic.h>
@@ -168,8 +167,9 @@ void HdMitsubaCurves::Sync(HdSceneDelegate* sceneDelegate,
       GetParam<VtIntArray>(data_source, vertex_counts_locator);
 
   if (points_.empty() || widths_.empty()) {
-    TF_WARN("Curves %s has no points or widths. Removing from scene.",
-            id.GetText());
+    TF_DEBUG(HDMITSUBA_LIFECYCLE)
+        .Msg("Curves %s has no points or widths. Removing from scene.\n",
+             id.GetText());
     RemoveFromScene(scene_manager);
     *dirtyBits = HdChangeTracker::Clean;
     return;
