@@ -143,7 +143,7 @@ JITInputs<Float, Spectrum> GatherAllJitInputs(
   return { indices, owned_class_vars };
 }
 
-// State maanger for JIT recording state.
+// State manager for JIT recording state.
 template <typename Float, typename Spectrum>
 class FrozenRender {
  public:
@@ -167,12 +167,18 @@ class FrozenRender {
     owned_class_vars_.clear();
     output_indices_.clear();
     output_shape_.clear();
+    recorded_input_count_ = 0;
     render_count_ = 0;             // Reset the recording warm-up count!
     TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("Clear(): done\n");
   }
 
   bool CanReplay(const JITInputs<Float, Spectrum>& new_inputs) {
     if (!recording_) return false;
+    if (new_inputs.flat_indices.size() != recorded_input_count_) {
+      TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("CanReplay failed: flat_indices size mismatch (expected %zu, got %zu)\n",
+                                         recorded_input_count_, new_inputs.flat_indices.size());
+      return false;
+    }
     return jit_freeze_dry_run(recording_, new_inputs.flat_indices.data()) != 0;
   }
 
@@ -180,7 +186,9 @@ class FrozenRender {
                       const std::function<TensorXf()>& render_fn) {
     if constexpr (dr::is_jit_v<Float>) {
       Clear();
+      TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("Record: flat_indices size = %zu\n", inputs.flat_indices.size());
       owned_class_vars_ = inputs.owned_class_vars; // Transfer ownership!
+      recorded_input_count_ = inputs.flat_indices.size();
       // Force evaluation of all input JIT variables before recording.
       for (uint32_t idx : inputs.flat_indices) {
         jit_var_schedule(idx);
@@ -207,6 +215,7 @@ class FrozenRender {
         jit_var_schedule(idx);
       }
       jit_eval();
+      TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("Replay: flat_indices size = %zu\n", inputs.flat_indices.size());
       std::vector<uint32_t> new_outputs(output_indices_.size(), 0);
       jit_freeze_replay(recording_, inputs.flat_indices.data(), new_outputs.data());
       // Decrement reference counts of the temporary class variables created for this replay!
@@ -267,6 +276,7 @@ class FrozenRender {
   std::vector<uint32_t> owned_class_vars_;
   std::vector<uint32_t> output_indices_;
   dr::vector<size_t> output_shape_;
+  size_t recorded_input_count_ = 0;
   int render_count_ = 0;
 };
 
