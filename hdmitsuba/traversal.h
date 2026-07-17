@@ -34,9 +34,11 @@ PXR_NAMESPACE_OPEN_SCOPE
 class TraversalCallback : public mitsuba::TraversalCallback {
  public:
   explicit TraversalCallback(std::string_view prefix = "",
-                             mitsuba::Object* parent = nullptr);
+                             mitsuba::Object* parent = nullptr,
+                             bool recurse_objects = true);
   TraversalCallback(std::string_view prefix, mitsuba::Object* parent,
-                    const absl::flat_hash_set<void*>& parent_hierarchy);
+                    const absl::flat_hash_set<void*>& parent_hierarchy,
+                    bool recurse_objects = true);
 
   template <typename T>
   T* get(std::string_view name) {
@@ -74,6 +76,7 @@ class TraversalCallback : public mitsuba::TraversalCallback {
  private:
   absl::flat_hash_set<void*> hierarchy_;
   std::string prefix_;
+  bool recurse_objects_;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

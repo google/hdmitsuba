@@ -897,7 +897,7 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateMeshInPlace(
   size_t face_count = face_indices.size() / 3;
   if (vertex_count == 0 || face_count == 0) return;
 
-  TraversalCallback cb;
+  TraversalCallback cb("", nullptr, /*recurse_objects=*/false);
   mesh->traverse(&cb);
 
   std::vector<std::string> keys = {"vertex_positions", "faces"};
@@ -953,7 +953,7 @@ PrimTranslator<Float, Spectrum>::BuildCurves(const CurveSpec& spec,
     shape->set_bsdf(dynamic_cast<mitsuba::BSDF<Float, Spectrum>*>(bsdf));
   }
 
-  TraversalCallback cb;
+  TraversalCallback cb("", nullptr, /*recurse_objects=*/false);
   shape->traverse(&cb);
 
   using FloatStorage = typename mitsuba::Mesh<Float, Spectrum>::FloatStorage;
