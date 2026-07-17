@@ -28,8 +28,9 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 using mitsuba::Object;
 
-TraversalCallback::TraversalCallback(std::string_view prefix, Object* parent)
-    : prefix_(prefix) {
+TraversalCallback::TraversalCallback(std::string_view prefix, Object* parent,
+                                      bool recurse_objects)
+    : prefix_(prefix), recurse_objects_(recurse_objects) {
   if (parent != nullptr) {
     hierarchy_.insert(parent);
   }
@@ -37,8 +38,11 @@ TraversalCallback::TraversalCallback(std::string_view prefix, Object* parent)
 
 TraversalCallback::TraversalCallback(
     std::string_view prefix, Object* parent,
-    const absl::flat_hash_set<void*>& parent_hierarchy)
-    : hierarchy_(parent_hierarchy), prefix_(prefix) {
+    const absl::flat_hash_set<void*>& parent_hierarchy,
+    bool recurse_objects)
+    : hierarchy_(parent_hierarchy),
+      prefix_(prefix),
+      recurse_objects_(recurse_objects) {
   if (parent != nullptr) {
     hierarchy_.insert(parent);
   }
@@ -53,10 +57,12 @@ void TraversalCallback::put_value(std::string_view name, void* value,
 /// Actual implementation for Object references [To be provided by subclass]
 void TraversalCallback::put_object(std::string_view name, Object* value,
                                    uint32_t /*flags*/) {
-  if (value == nullptr || hierarchy_.find(value) != hierarchy_.end()) {
-    return;  // prevent infinite recursion
+  if (!recurse_objects_ || value == nullptr ||
+      hierarchy_.find(value) != hierarchy_.end()) {
+    return;
   }
-  TraversalCallback cb(absl::StrCat(prefix_, name, "."), value, hierarchy_);
+  TraversalCallback cb(absl::StrCat(prefix_, name, "."), value, hierarchy_,
+                       recurse_objects_);
   value->traverse(&cb);
   for (auto& [name, value] : cb.data) {
     data.insert({std::move(name), std::move(value)});
