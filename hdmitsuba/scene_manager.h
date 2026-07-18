@@ -68,7 +68,7 @@ class SceneManager {
       const HdCamera* camera,
       const std::optional<GfRect2i>& crop_window = std::nullopt) = 0;
 
-  virtual bool IsConverged(const HdRenderPass* render_pass) const = 0;
+  virtual bool IsConverged() const = 0;
 
   virtual void CommitResources() = 0;
 

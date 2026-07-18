@@ -119,10 +119,11 @@ void HdMitsubaRenderDelegate::Initialize() {
                              VtValue(default_freezing)};
   _PopulateDefaultSettings(setting_descriptors_);
 
-  std::string variant = GetRenderSetting(HdMitsubaRenderSettingsTokens->variant)
-                            .Get<std::string>();
-  scene_impl_ =
-      std::unique_ptr<SceneManager>(SceneManager::CreateSceneManager(variant));
+  current_variant_ =
+      GetRenderSetting(HdMitsubaRenderSettingsTokens->variant)
+          .GetWithDefault<std::string>(HdMitsubaConfig::GetInstance().variant);
+  scene_impl_ = std::unique_ptr<SceneManager>(
+      SceneManager::CreateSceneManager(current_variant_));
   render_param_ = std::make_unique<HdMitsubaRenderParam>(scene_impl_.get());
 }
 
@@ -178,8 +179,8 @@ void HdMitsubaRenderDelegate::DestroyBprim(HdBprim* bPrim) { delete bPrim; }
 
 HdRenderPassSharedPtr HdMitsubaRenderDelegate::CreateRenderPass(
     HdRenderIndex* index, const HdRprimCollection& collection) {
-  return std::make_shared<HdMitsubaRenderPass>(index, collection,
-                                               scene_impl_.get());
+  render_index_ = index;
+  return std::make_shared<HdMitsubaRenderPass>(index, collection);
 }
 
 HdInstancer* HdMitsubaRenderDelegate::CreateInstancer(HdSceneDelegate* delegate,
@@ -213,7 +214,41 @@ HdBprim* HdMitsubaRenderDelegate::CreateFallbackBprim(const TfToken& typeId) {
   return nullptr;
 }
 
-void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* /*tracker*/) {
+void HdMitsubaRenderDelegate::MarkAllPrimsDirty(HdChangeTracker* tracker) {
+  tracker->MarkAllRprimsDirty(HdChangeTracker::AllDirty);
+  if (render_index_) {
+    for (const TfToken& sprim_type : GetSupportedSprimTypes()) {
+      for (const SdfPath& id : render_index_->GetSprimSubtree(
+               sprim_type, SdfPath::AbsoluteRootPath())) {
+        tracker->MarkSprimDirty(id, HdChangeTracker::AllDirty);
+      }
+    }
+    for (const TfToken& bprim_type : GetSupportedBprimTypes()) {
+      for (const SdfPath& id : render_index_->GetBprimSubtree(
+               bprim_type, SdfPath::AbsoluteRootPath())) {
+        tracker->MarkBprimDirty(id, HdChangeTracker::AllDirty);
+      }
+    }
+  }
+}
+
+void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* tracker) {
+  std::string target_variant =
+      GetRenderSetting(HdMitsubaRenderSettingsTokens->variant)
+          .GetWithDefault<std::string>(HdMitsubaConfig::GetInstance().variant);
+  if (!target_variant.empty() && current_variant_ != target_variant) {
+    TF_DEBUG(HDMITSUBA_LIFECYCLE)
+        .Msg(
+            "Mitsuba variant changed from '%s' to '%s'. Recreating "
+            "SceneManager.\n",
+            current_variant_.c_str(), target_variant.c_str());
+    scene_impl_ = std::unique_ptr<SceneManager>(
+        SceneManager::CreateSceneManager(target_variant));
+    render_param_->SetScene(scene_impl_.get());
+    current_variant_ = target_variant;
+    MarkAllPrimsDirty(tracker);
+  }
+
   VtDictionary namespaced_settings;
   namespaced_settings[HdMitsubaRenderSettingsTokens->variant.GetString()] =
       GetRenderSetting(HdMitsubaRenderSettingsTokens->variant);
@@ -224,7 +259,8 @@ void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* /*tracker*/) {
       GetRenderSetting(HdMitsubaRenderSettingsTokens->integrator_type);
   namespaced_settings["enableInteractive"] =
       GetRenderSetting(HdRenderSettingsTokens->enableInteractive);
-  namespaced_settings[HdMitsubaRenderSettingsTokens->use_kernel_freezing.GetString()] =
+  namespaced_settings[HdMitsubaRenderSettingsTokens->use_kernel_freezing
+                          .GetString()] =
       GetRenderSetting(HdMitsubaRenderSettingsTokens->use_kernel_freezing);
 
   scene_impl_->UpdateNamespacedSettings(namespaced_settings);

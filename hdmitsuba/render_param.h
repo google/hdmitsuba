@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include <atomic>
+
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/pxr.h>
 
@@ -28,10 +30,11 @@ class HdMitsubaRenderParam final : public HdRenderParam {
  public:
   explicit HdMitsubaRenderParam(SceneManager* scene) : scene_(scene) {}
 
-  SceneManager* GetScene() const { return scene_; }
+  SceneManager* GetScene() const { return scene_.load(); }
+  void SetScene(SceneManager* scene) { scene_.store(scene); }
 
  private:
-  SceneManager* scene_;
+  std::atomic<SceneManager*> scene_;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

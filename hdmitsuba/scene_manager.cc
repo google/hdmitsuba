@@ -1013,7 +1013,7 @@ class SceneModel final : public SceneManager {
     }
   }
 
-  bool IsConverged(const HdRenderPass* /*render_pass*/) const override {
+  bool IsConverged() const override {
     if (!progressive_rendering_) {
       return true;
     }

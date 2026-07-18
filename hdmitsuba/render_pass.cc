@@ -25,16 +25,14 @@
 #include <pxr/imaging/hd/rprimCollection.h>
 #include <pxr/pxr.h>
 
+#include "hdmitsuba/render_param.h"
 #include "hdmitsuba/scene_manager.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
 HdMitsubaRenderPass::HdMitsubaRenderPass(HdRenderIndex* index,
-                                         const HdRprimCollection& collection,
-                                         SceneManager* scene_manager)
-    : HdRenderPass(index, collection), scene_manager_(scene_manager) {
-  TF_VERIFY(scene_manager_ != nullptr);
-}
+                                         const HdRprimCollection& collection)
+    : HdRenderPass(index, collection) {}
 
 void HdMitsubaRenderPass::_Execute(
     const HdRenderPassStateSharedPtr& renderPassState,
@@ -46,19 +44,27 @@ void HdMitsubaRenderPass::_Execute(
   if (aov_bindings.empty()) {
     return;
   }
-  if (aov_bindings != aov_bindings_) {
-    scene_manager_->SetAovBindings(this, aov_bindings);
+
+  HdMitsubaRenderParam* render_param = static_cast<HdMitsubaRenderParam*>(
+      GetRenderIndex()->GetRenderDelegate()->GetRenderParam());
+  SceneManager* scene_manager = render_param->GetScene();
+  if (aov_bindings != aov_bindings_ || scene_manager != last_scene_manager_) {
+    scene_manager->SetAovBindings(this, aov_bindings);
     aov_bindings_ = aov_bindings;
+    last_scene_manager_ = scene_manager;
   }
   std::optional<GfRect2i> crop_window;
   if (renderPassState->GetFraming().IsValid()) {
     crop_window = renderPassState->GetFraming().dataWindow;
   }
-  scene_manager_->Render(this, renderPassState->GetCamera(), crop_window);
+  scene_manager->Render(this, renderPassState->GetCamera(), crop_window);
 }
 
 bool HdMitsubaRenderPass::IsConverged() const {
-  return scene_manager_->IsConverged(this);
+  return static_cast<HdMitsubaRenderParam*>(
+             GetRenderIndex()->GetRenderDelegate()->GetRenderParam())
+      ->GetScene()
+      ->IsConverged();
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE
