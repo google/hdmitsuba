@@ -25,8 +25,8 @@ class SceneManager;
 
 class HdMitsubaRenderPass final : public HdRenderPass {
  public:
-  HdMitsubaRenderPass(HdRenderIndex* index, const HdRprimCollection& collection,
-                      SceneManager* scene_manager);
+  HdMitsubaRenderPass(HdRenderIndex* index,
+                      const HdRprimCollection& collection);
   ~HdMitsubaRenderPass() override = default;
 
   bool IsConverged() const override;
@@ -36,7 +36,7 @@ class HdMitsubaRenderPass final : public HdRenderPass {
                 const TfTokenVector& renderTags) override;
 
  private:
-  SceneManager* scene_manager_;
+  SceneManager* last_scene_manager_ = nullptr;
   HdRenderPassAovBindingVector aov_bindings_;
 };
 

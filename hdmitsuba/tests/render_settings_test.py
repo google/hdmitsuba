@@ -248,3 +248,23 @@ def test_crop_rendering():
   np.testing.assert_array_equal(image_crop[..., :3][mask], 0.0)
 
 
+def test_variant_change_dynamic():
+  stage = Usd.Stage.Open(f"{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda")
+  render_settings = test_helpers.create_render_settings(stage)
+  settings_prim = render_settings.GetPrim()
+
+  settings_prim.CreateAttribute(
+      "mitsuba:variant", Sdf.ValueTypeNames.String
+  ).Set("scalar_rgb")
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  results_scalar = engine.render()
+
+  # Change the variant setting dynamically on the same stage and render engine
+  settings_prim.GetAttribute("mitsuba:variant").Set("llvm_ad_rgb")
+  results_llvm = engine.render()
+
+  test_helpers.robust_assert_close(
+      results_scalar["color"], results_llvm["color"], atol=0.05
+  )

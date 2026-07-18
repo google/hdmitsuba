@@ -639,9 +639,7 @@ class SceneModel final : public SceneManager {
     TF_DEBUG(HDMITSUBA_SYNC).Msg("SyncCamera: %s\n", spec.id.GetText());
     absl::MutexLock lock(state_mutex_);
     auto prev_it = camera_specs_.find(spec.id);
-    if (!TF_VERIFY(prev_it != camera_specs_.end() || spec.needs_rebuild,
-                   "New camera spec %s must have needs_rebuild set.",
-                   spec.id.GetText())) {
+    if (prev_it == camera_specs_.end()) {
       spec.needs_rebuild = true;
     }
     if (prev_it != camera_specs_.end() && !spec.needs_rebuild) {
@@ -660,9 +658,7 @@ class SceneModel final : public SceneManager {
                                        : spec.material_ids[0].GetText());
     absl::MutexLock lock(state_mutex_);
     auto prev_it = mesh_specs_.find(spec.id);
-    if (!TF_VERIFY(prev_it != mesh_specs_.end() || spec.needs_rebuild,
-                   "New mesh spec %s must have needs_rebuild set.",
-                   spec.id.GetText())) {
+    if (prev_it == mesh_specs_.end()) {
       spec.needs_rebuild = true;
     }
     if (prev_it != mesh_specs_.end() && !spec.needs_rebuild) {
@@ -683,9 +679,7 @@ class SceneModel final : public SceneManager {
     TF_DEBUG(HDMITSUBA_SYNC).Msg("SyncLight: %s\n", spec.id.GetText());
     absl::MutexLock lock(state_mutex_);
     auto prev_it = light_specs_.find(spec.id);
-    if (!TF_VERIFY(prev_it != light_specs_.end() || spec.needs_rebuild,
-                   "New light spec %s must have needs_rebuild set.",
-                   spec.id.GetText())) {
+    if (prev_it == light_specs_.end()) {
       spec.needs_rebuild = true;
     }
     if (prev_it != light_specs_.end() && !spec.needs_rebuild) {
@@ -1013,7 +1007,7 @@ class SceneModel final : public SceneManager {
     }
   }
 
-  bool IsConverged(const HdRenderPass* /*render_pass*/) const override {
+  bool IsConverged() const override {
     if (!progressive_rendering_) {
       return true;
     }
