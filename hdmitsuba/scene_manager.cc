@@ -1502,6 +1502,14 @@ class SceneModel final : public SceneManager {
         drjit::blocked_range<size_t>(0, work_items.size()),
         [&](drjit::blocked_range<size_t> r) {
           JitScopeGuard<Float> jit_guard;
+
+          // Make sure any prior pending JIT compilations are flushed here.
+          // Otherwise, we may accumulate too much pending JIT state and
+          // exhaust stack memory during LLVM JIT compilation.
+          if constexpr (dr::is_jit_v<Float>) {
+            dr::eval();
+            dr::sync_thread();
+          }
           for (size_t i = r.begin(); i != r.end(); ++i) {
             if (work_items[i].spec->instance_transforms.empty()) {
               CommitNonInstancedMeshWork(&work_items[i], results[i]);
