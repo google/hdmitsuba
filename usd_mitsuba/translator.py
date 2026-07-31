@@ -128,12 +128,12 @@ def _convert_curves(
   if widths is not None:
     widths = np.array(widths)
     if widths.ndim == 0 or widths.size == 1:
-      radius = np.full((curve_points.shape[0], 1), widths.item())
+      radius = np.full((curve_points.shape[0], 1), widths.item() * 0.5)
     elif widths.size == curve_points.shape[0]:
-      radius = widths.reshape(-1, 1)
+      radius = widths.reshape(-1, 1) * 0.5
     else:
       # Fallback to mean for other interpolations (e.g., uniform per curve)
-      radius = np.full((curve_points.shape[0], 1), np.mean(widths))
+      radius = np.full((curve_points.shape[0], 1), np.mean(widths) * 0.5)
   else:
     radius = np.full((curve_points.shape[0], 1), 0.01)
   curve_points = np.hstack([curve_points, radius])

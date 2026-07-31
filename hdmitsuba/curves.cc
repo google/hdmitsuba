@@ -189,13 +189,13 @@ void HdMitsubaCurves::Sync(HdSceneDelegate* sceneDelegate,
   // Pack control points [x, y, z, r] (lazy-evaluating widths based on layout)
   if (widths_.size() == points_.size()) {
     spec.control_points =
-        PackControlPoints(points_, [&](size_t i) { return widths_[i]; });
+        PackControlPoints(points_, [&](size_t i) { return widths_[i] * 0.5f; });
   } else if (widths_.size() == 1) {
-    float r = widths_[0];
+    float r = widths_[0] * 0.5f;
     spec.control_points =
         PackControlPoints(points_, [&](size_t /*i*/) { return r; });
   } else {
-    float uniform_radius = CalculateMeanWidth(widths_);
+    float uniform_radius = CalculateMeanWidth(widths_) * 0.5f;
     spec.control_points = PackControlPoints(
         points_, [&](size_t /*i*/) { return uniform_radius; });
   }
