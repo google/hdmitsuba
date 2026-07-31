@@ -121,7 +121,7 @@ def _convert_curves(
     time: Usd.TimeCode = Usd.TimeCode.Default(),
 ) -> mi.Object:
   """Handles a curves prim and returns the Mitsuba curve object."""
-  curve_prim = UsdGeom.BasisCurves(prim)
+  curve_prim = UsdGeom.Curves(prim)
   curve_points = np.array(curve_prim.GetPointsAttr().Get(time))
   bsdf, _, _ = material.convert_material(prim)
   widths = curve_prim.GetWidthsAttr().Get(time)
@@ -143,6 +143,14 @@ def _convert_curves(
 
   # TODO: Correctly parse this from the USD prim.
   curve_type = 'linearcurve'
+  if (
+      hasattr(curve_prim, 'GetTypeAttr')
+      and curve_prim.GetTypeAttr().Get(time) == 'cubic'
+      and curve_prim.GetBasisAttr().Get(time) == 'bspline'
+  ):
+    curve_type = 'bsplinecurve'
+  elif prim.IsA(UsdGeom.NurbsCurves):
+    curve_type = 'bsplinecurve'
   curve_obj = _create_empty_mitsuba_curve(curve_type, bsdf)
   degree = 3 if curve_type == 'bsplinecurve' else 1
   params = mi.traverse(curve_obj)
@@ -272,6 +280,6 @@ def convert_to_mitsuba(
         UsdLux.BoundableLightBase
     ):
       mi_scene_dict[mi_id] = light.convert_light(prim, time)
-    elif prim.IsA(UsdGeom.BasisCurves):
+    elif prim.IsA(UsdGeom.Curves):
       mi_scene_dict[mi_id] = _convert_curves(prim, time)
   return mi_scene_dict
