@@ -500,14 +500,18 @@ HdMitsubaMesh::PrimvarMap HdMitsubaMesh::SyncPrimvars(
                               face_count, corner_count)) {
         primvars_[HdTokens->normals] = {std::move(value), desc};
       } else {
-        TF_WARN(
-            "Ignored invalid normals for %s (size mismatch). "
-            "Interpolation: %d, Actual size: %zu, Expected (Vertex: %zu, Face: "
-            "%zu, Corner: %zu)",
-            id.GetText(), (int)desc.interpolation,
+        size_t actual_size =
             value.IsHolding<VtVec3fArray>() ? value.Get<VtVec3fArray>().size()
-                                            : 0,
-            vertex_count, face_count, corner_count);
+                                            : 0;
+        // Only warn if the user explicitly authored a non-empty array with incorrect length (>1)
+        if (actual_size > 1) {
+          TF_WARN(
+              "Ignored invalid normals for %s (size mismatch). "
+              "Interpolation: %d, Actual size: %zu, Expected (Vertex: %zu, Face: "
+              "%zu, Corner: %zu)",
+              id.GetText(), (int)desc.interpolation, actual_size,
+              vertex_count, face_count, corner_count);
+        }
       }
     }
   }
