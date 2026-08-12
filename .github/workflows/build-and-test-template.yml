@@ -35,12 +35,12 @@ jobs:
         shell: bash -el {0} # Needed for conda environment activation
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       with:
         submodules: recursive
 
     - name: Setup Miniforge (Conda)
-      uses: conda-incubator/setup-miniconda@v3
+      uses: conda-incubator/setup-miniconda@d2e6a045a86077fb6cad6f5adf368e9076ddaa8d # v3.1.0
       with:
         miniforge-version: latest
         use-mamba: true
@@ -55,7 +55,7 @@ jobs:
 
     - name: Install Conda Dependencies
       run: |
-        if [ "${{ runner.os }}" = "macOS" ] || [ "${{ runner.os }}" = "Windows" ]; then
+        if [ "$RUNNER_OS" = "macOS" ] || [ "$RUNNER_OS" = "Windows" ]; then
           mamba install -y -c conda-forge openusd ninja llvm
         else
           mamba install -y -c conda-forge openusd ninja
@@ -67,7 +67,7 @@ jobs:
 
     - name: Cache Mitsuba 3
       id: cache-mitsuba
-      uses: actions/cache@v4
+      uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
       with:
         path: |
           mitsuba3
@@ -75,6 +75,9 @@ jobs:
 
     - name: Clone and Build Mitsuba 3
       if: steps.cache-mitsuba.outputs.cache-hit != 'true'
+      env:
+        COMPILER_CC: ${{ inputs.compiler_cc }}
+        COMPILER_CXX: ${{ inputs.compiler_cxx }}
       run: |
         git clone https://github.com/mitsuba-renderer/mitsuba3.git
         cd mitsuba3
@@ -82,31 +85,34 @@ jobs:
         git submodule update --init --recursive
         # Configure with minimal variants to speed up build
         CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Release -DMI_ENABLE_CUDA=OFF -DMI_DEFAULT_VARIANTS=scalar_rgb,llvm_ad_rgb,metal_ad_rgb -DCMAKE_POLICY_VERSION_MINIMUM=3.5"
-        if [ "${{ runner.os }}" = "Windows" ]; then
+        if [ "$RUNNER_OS" = "Windows" ]; then
           # Use default MSBuild generator on Windows (no CC/CXX overrides, no Ninja)
           cmake -B build $CMAKE_FLAGS
         else
           # Use Ninja on Linux and macOS
-          if [ "${{ runner.os }}" = "Linux" ]; then
+          if [ "$RUNNER_OS" = "Linux" ]; then
             CMAKE_FLAGS="$CMAKE_FLAGS -DMITSUBA_NATIVE_FLAGS=-march=haswell -DDRJIT_NATIVE_FLAGS=-march=haswell -DDRJIT_CORE_NATIVE_FLAGS=-march=haswell -DNANOTHREAD_NATIVE_FLAGS=-march=haswell"
           fi
-          CC=${{ inputs.compiler_cc }} CXX=${{ inputs.compiler_cxx }} cmake -B build -G Ninja \
+          CC="$COMPILER_CC" CXX="$COMPILER_CXX" cmake -B build -G Ninja \
             $CMAKE_FLAGS
         fi
         cmake --build build --config Release
 
     - name: Configure hdmitsuba
+      env:
+        COMPILER_CC: ${{ inputs.compiler_cc }}
+        COMPILER_CXX: ${{ inputs.compiler_cxx }}
       run: |
         CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DMITSUBA_DIR=$PWD/mitsuba3 -DMITSUBA_BUILD_DIR=$PWD/mitsuba3/build"
-        if [ "${{ runner.os }}" = "Windows" ]; then
+        if [ "$RUNNER_OS" = "Windows" ]; then
           # Use default MSBuild generator on Windows
           cmake -B build $CMAKE_FLAGS
         else
           # Use Ninja on Linux/macOS
-          if [ "${{ runner.os }}" = "Linux" ]; then
+          if [ "$RUNNER_OS" = "Linux" ]; then
             CMAKE_FLAGS="$CMAKE_FLAGS -DHDMITSUBA_NATIVE_FLAGS=-march=haswell"
           fi
-          CC=${{ inputs.compiler_cc }} CXX=${{ inputs.compiler_cxx }} cmake -B build -G Ninja \
+          CC="$COMPILER_CC" CXX="$COMPILER_CXX" cmake -B build -G Ninja \
             $CMAKE_FLAGS
         fi
 
@@ -116,14 +122,14 @@ jobs:
 
     - name: Resolve LLVM Path for DrJit
       run: |
-        if [ "${{ runner.os }}" = "macOS" ]; then
+        if [ "$RUNNER_OS" = "macOS" ]; then
           LLVM_PATH=$(find $CONDA_PREFIX/lib -name "libLLVM.dylib" | head -n 1)
           if [ -z "$LLVM_PATH" ]; then
             LLVM_PATH=$(find $CONDA_PREFIX/lib -name "libLLVM*.dylib" | head -n 1)
           fi
           echo "DRJIT_LIBLLVM_PATH=$LLVM_PATH" >> $GITHUB_ENV
           echo "Resolved macOS LLVM: $LLVM_PATH"
-        elif [ "${{ runner.os }}" = "Windows" ]; then
+        elif [ "$RUNNER_OS" = "Windows" ]; then
           LLVM_PATH=$(find $CONDA_PREFIX/Library/bin -iname "*llvm*.dll" | head -n 1)
           echo "DRJIT_LIBLLVM_PATH=$LLVM_PATH" >> $GITHUB_ENV
           echo "Resolved Windows LLVM: $LLVM_PATH"
@@ -160,7 +166,7 @@ jobs:
 
     - name: Upload macOS Crash Reports
       if: failure() && runner.os == 'macOS'
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
       with:
         name: macos-crash-reports
         path: ~/Library/Logs/DiagnosticReports/
