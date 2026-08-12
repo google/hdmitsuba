@@ -76,6 +76,7 @@
 
 #include "hdmitsuba/debug_codes.h"
 #include "hdmitsuba/mesh.h"
+#include "hdmitsuba/mesh/corner_mesh.h"
 #include "hdmitsuba/mesh/geometry_processor.h"
 #include "hdmitsuba/prim_translator.h"
 #include "hdmitsuba/render_buffer.h"
@@ -104,6 +105,9 @@ namespace dr = drjit;
 namespace {
 
 constexpr size_t kDefaultSampleCount = 128;
+
+// The texture-coordinate primvar Mitsuba consumes as the mesh's UV set.
+const TfToken kStToken("st");
 
 void DiscoverTextures(
     const HdMaterialNetwork2& network,
@@ -402,7 +406,7 @@ void ApplyDisplacement(
   VtVec3fArray normals;
   VtIntArray target_vertex_indices;
   absl::flat_hash_set<int> target_vertex_indices_set;
-  auto uv_it = primvars.find(TfToken("st"));
+  auto uv_it = primvars.find(kStToken);
   auto normal_it = primvars.find(HdTokens->normals);
   auto points_it = primvars.find(HdTokens->points);
   if (uv_it == primvars.end() || normal_it == primvars.end() ||
@@ -489,25 +493,32 @@ void ApplyDisplacement(
 }
 
 template <typename Float, typename Spectrum>
-std::vector<SubMeshOutput> RunGeometryPipeline(
+CornerMeshSpec RunGeometryPipeline(
     const MeshSpec& spec,
     const std::vector<const mitsuba::Texture<Float, Spectrum>*>&
         displacement_textures) {
   TRACE_FUNCTION();
   PrimvarMap final_primvars = spec.primvars;
-  if (final_primvars.find(HdTokens->normals) == final_primvars.end()) {
-    bool has_displacement = false;
-    for (const auto* tex : displacement_textures) {
-      if (tex != nullptr) {
-        has_displacement = true;
-        break;
-      }
-    }
-    if (has_displacement || spec.is_subdivided) {
-      GeometryProcessor::ComputeNormals(
-          final_primvars, spec.face_vertex_indices, spec.face_vertex_counts);
+
+  bool has_displacement = false;
+  for (const auto* tex : displacement_textures) {
+    if (tex != nullptr) {
+      has_displacement = true;
+      break;
     }
   }
+  const bool had_authored_normals =
+      final_primvars.find(HdTokens->normals) != final_primvars.end();
+  const bool multi_material = spec.material_ids.size() > 1;
+
+  const NormalPolicy policy = DecideNormals(had_authored_normals,
+                                            spec.is_subdivided,
+                                            has_displacement, multi_material);
+  if (policy.compute_by_hand) {
+    GeometryProcessor::ComputeNormals(
+        final_primvars, spec.face_vertex_indices, spec.face_vertex_counts);
+  }
+
   bool displaced = false;
   for (size_t i = 0; i < spec.material_ids.size(); ++i) {
     if (displacement_textures[i]) {
@@ -542,19 +553,18 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
   }
   GeometryProcessor::TransformPrimvars(final_primvars, spec.transform);
   if (displaced) {
-    GeometryProcessor::ComputeNormals(final_primvars, spec.face_vertex_indices,
-                                      spec.face_vertex_counts);
+    RefreshNormalsAfterDisplacement(final_primvars, spec.face_vertex_counts,
+                                    spec.face_vertex_indices, multi_material);
   }
+  GeometryProcessor::NormalizeNormals(final_primvars);
 
-  // Expand primvar data, triangulate and split into submeshes.
-  auto [face_indices, expanded_primvars] = GeometryProcessor::ExpandPrimData(
-      spec.face_vertex_indices, spec.face_vertex_counts, final_primvars);
-  auto [triangles, primitive_params] =
-      GeometryProcessor::TriangulateWithFaceMapping(spec.face_vertex_counts,
-                                                    face_indices);
-  return GeometryProcessor::SplitAndCompactMeshes(
-      spec.id, triangles, primitive_params, expanded_primvars,
-      spec.material_ids, spec.face_material_indices);
+  // The primvars Mitsuba consumes directly. Everything else is either folded
+  // into the material or, for now, dropped.
+  const TfToken attribute_names[] = {HdTokens->normals, kStToken};
+  return CornerMeshBuilder::Build(spec.id, spec.face_vertex_counts,
+                                  spec.face_vertex_indices, final_primvars,
+                                  spec.material_ids, spec.face_material_indices,
+                                  policy.smooth_normals, attribute_names);
 }
 
 }  // namespace
@@ -1301,37 +1311,66 @@ class SceneModel final : public SceneManager {
     return pair;
   }
 
+  // How `from_corners()` welded a sub-mesh is only knowable once it is built,
+  // and the update path re-derives its spec from scratch each commit. Carrying
+  // the map across lets a deforming mesh restate its normals without a rebuild.
+  // Valid for as long as the topology is unchanged, which is exactly when the
+  // in-place path runs.
+  // Both run from the parallel commit, so they need the lock.
+  void StoreNormalRecord(const SubMeshSpec& sub) {
+    absl::MutexLock lock(normal_records_mutex_);
+    if (sub.normal_record.empty()) {
+      normal_records_.erase(sub.id.GetAsString());
+    } else {
+      normal_records_[sub.id.GetAsString()] = sub.normal_record;
+    }
+  }
+
+  void RestoreNormalRecord(SubMeshSpec& sub) {
+    absl::MutexLock lock(normal_records_mutex_);
+    auto it = normal_records_.find(sub.id.GetAsString());
+    if (it == normal_records_.end()) return;
+    // Only reuse the cached weld if it still addresses this spec: a stale entry
+    // would index out of bounds when gathering the normals.
+    const size_t record_count = sub.RecordCount();
+    for (int record : it->second) {
+      if (record < 0 || static_cast<size_t>(record) >= record_count) return;
+    }
+    sub.normal_record = it->second;
+  }
+
   void CommitNonInstancedMeshWork(MeshCommitWork* work, CommittedMesh& res) {
     const auto& spec = *(work->spec);
     if (spec.needs_rebuild) {
       // Run geometry pipeline to get sub-meshes
-      auto sub_meshes = RunGeometryPipeline(spec, work->displacement_textures);
-      res.meshes.reserve(sub_meshes.size());
-      for (const auto& sub_mesh : sub_meshes) {
+      auto mesh_spec = RunGeometryPipeline(spec, work->displacement_textures);
+      res.meshes.reserve(mesh_spec.sub_meshes.size());
+      for (auto& sub_mesh : mesh_spec.sub_meshes) {
         auto env = ResolveEmitterAndSensor(
             spec.emitter_spec, sub_mesh.material_id, spec.attached_sensor_id);
-        ref<BSDF> bsdf = ResolveBsdf(sub_mesh.material_id, sub_mesh.primvars);
-        auto mesh = PrimTranslator::BuildMesh(sub_mesh.id, sub_mesh.triangles,
-                                              sub_mesh.primvars, bsdf.get(),
+        ref<BSDF> bsdf = ResolveBsdf(sub_mesh.material_id, mesh_spec.primvars);
+        auto mesh = PrimTranslator::BuildMesh(mesh_spec, sub_mesh, bsdf.get(),
                                               env.emitter_ptr, env.sensor_ptr);
         if (mesh) {
           res.meshes.push_back(mesh);
+          StoreNormalRecord(sub_mesh);
         }
       }
     } else {
       // Update in place.
-      auto sub_meshes = RunGeometryPipeline(spec, work->displacement_textures);
-      for (const auto& sub_mesh : sub_meshes) {
+      auto mesh_spec = RunGeometryPipeline(spec, work->displacement_textures);
+      for (auto& sub_mesh : mesh_spec.sub_meshes) {
         std::string sub_mesh_id_str = sub_mesh.id.GetAsString();
         auto it = shapes_.find(sub_mesh_id_str);
         if (!TF_VERIFY(it != shapes_.end(), "Sub-mesh not found: %s",
                        sub_mesh_id_str.c_str())) {
           continue;
         }
-        ref<BSDF> bsdf = ResolveBsdf(sub_mesh.material_id, sub_mesh.primvars);
+        ref<BSDF> bsdf = ResolveBsdf(sub_mesh.material_id, mesh_spec.primvars);
         if (spec.dirty_bits != 0) {
-          PrimTranslator::UpdateMeshInPlace(
-              it->second.get(), sub_mesh.triangles, sub_mesh.primvars);
+          RestoreNormalRecord(sub_mesh);
+          PrimTranslator::UpdateMeshInPlace(it->second.get(), mesh_spec,
+                                            sub_mesh);
           // Update emissive mesh radiance in-place
           if (it->second->is_emitter() && spec.emitter_spec.has_value()) {
             auto* emitter = it->second->emitter();
@@ -1364,13 +1403,13 @@ class SceneModel final : public SceneManager {
       }
 
       // Run geometry pipeline
-      auto sub_meshes = RunGeometryPipeline(spec, work->displacement_textures);
-      if (sub_meshes.empty()) return;
+      auto mesh_spec = RunGeometryPipeline(spec, work->displacement_textures);
+      if (mesh_spec.sub_meshes.empty()) return;
 
       // 1. Build prototype meshes
       std::vector<mitsuba::ref<Shape>> prototype_shapes;
-      prototype_shapes.reserve(sub_meshes.size());
-      for (const auto& sub_mesh : sub_meshes) {
+      prototype_shapes.reserve(mesh_spec.sub_meshes.size());
+      for (auto& sub_mesh : mesh_spec.sub_meshes) {
         auto env = ResolveEmitterAndSensor(std::nullopt, sub_mesh.material_id,
                                            spec.attached_sensor_id);
         if (env.emitter_ptr != nullptr && !warned_emitter) {
@@ -1380,14 +1419,14 @@ class SceneModel final : public SceneManager {
               spec.id.GetText());
           warned_emitter = true;
         }
-        ref<BSDF> bsdf = ResolveBsdf(sub_mesh.material_id, sub_mesh.primvars);
+        ref<BSDF> bsdf = ResolveBsdf(sub_mesh.material_id, mesh_spec.primvars);
 
-        auto mesh = PrimTranslator::BuildMesh(sub_mesh.id, sub_mesh.triangles,
-                                              sub_mesh.primvars, bsdf.get(),
+        auto mesh = PrimTranslator::BuildMesh(mesh_spec, sub_mesh, bsdf.get(),
                                               nullptr, env.sensor_ptr);
         if (mesh) {
           prototype_shapes.push_back(mesh);
           res.meshes.push_back(mesh);
+          StoreNormalRecord(sub_mesh);
         }
       }
       if (prototype_shapes.empty()) return;
@@ -1415,16 +1454,17 @@ class SceneModel final : public SceneManager {
       }
     } else {
       // Update in place
-      auto sub_meshes = RunGeometryPipeline(spec, work->displacement_textures);
-      for (const auto& sub_mesh : sub_meshes) {
+      auto mesh_spec = RunGeometryPipeline(spec, work->displacement_textures);
+      for (auto& sub_mesh : mesh_spec.sub_meshes) {
         std::string sub_mesh_id_str = sub_mesh.id.GetAsString();
         auto it = shapes_.find(absl::StrCat(kProtoPrefix, sub_mesh_id_str));
         if (TF_VERIFY(it != shapes_.end())) {
-          ref<BSDF> bsdf = ResolveBsdf(sub_mesh.material_id, sub_mesh.primvars);
+          ref<BSDF> bsdf = ResolveBsdf(sub_mesh.material_id, mesh_spec.primvars);
 
           if (spec.dirty_bits != 0) {
-            PrimTranslator::UpdateMeshInPlace(
-                it->second.get(), sub_mesh.triangles, sub_mesh.primvars);
+            RestoreNormalRecord(sub_mesh);
+            PrimTranslator::UpdateMeshInPlace(it->second.get(), mesh_spec,
+                                              sub_mesh);
           }
           it->second->set_bsdf(bsdf.get());
         }
@@ -1710,6 +1750,9 @@ class SceneModel final : public SceneManager {
   absl::flat_hash_map<std::string, ref<Sensor>> sensors_;
   absl::flat_hash_map<std::string, mitsuba::ref<Object>> surface_sensors_;
   absl::flat_hash_map<std::string, ref<Shape>> shapes_;
+  // Sub-mesh id -> normal group representatives, see StoreNormalRecord().
+  absl::flat_hash_map<std::string, VtIntArray> normal_records_;
+  absl::Mutex normal_records_mutex_;
   absl::flat_hash_map<std::string, ref<Emitter>> emitters_;
   absl::flat_hash_map<std::string, ref<BSDF>> bsdfs_;
   absl::flat_hash_map<std::string, ref<Texture>> displacement_textures_;

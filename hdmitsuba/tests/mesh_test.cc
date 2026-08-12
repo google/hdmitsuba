@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "hdmitsuba/mesh.h"
+#include "hdmitsuba/mesh/corner_mesh.h"
 
 #include <cstddef>
 
@@ -24,6 +25,7 @@
 #include <mitsuba/render/fwd.h>
 #include <mitsuba/render/mesh.h>
 #include <mitsuba/render/scene.h>
+#include <pxr/base/gf/vec2f.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/tf/token.h>
 #include <pxr/base/vt/types.h>
@@ -57,6 +59,7 @@ using pxr::HdMitsubaMesh;
 using pxr::HdPrimvarDescriptor;
 using pxr::HdPrimvarRoleTokens;
 using pxr::HdTokens;
+using pxr::GfVec2f;
 using pxr::TfToken;
 using pxr::VtIntArray;
 using pxr::VtValue;
@@ -129,6 +132,88 @@ TEST(HdMitsubaMeshTest, ComputeNormalsMatchesMitsuba) {
   ASSERT_EQ(hdmitsuba_normals.size(), mitsuba_computed_normals.size());
   EXPECT_THAT(hdmitsuba_normals,
               Pointwise(Vec3fNear(1e-3), mitsuba_computed_normals));
+}
+
+TEST(HdMitsubaMeshTest, CornerMeshBuilderMatchesMitsubaRowOrder) {
+  // The in-place update path gathers positions straight into Mitsuba's row
+  // order using SubMeshSpec::used_vertices, and never re-welds. That is only
+  // sound because from_corners() allocates one position row per referenced
+  // source vertex in ascending order, and fans polygons exactly the way the
+  // builder predicts. Pin both here.
+
+  // Two quads sharing the edge (1, 2), with a UV seam along it so that the
+  // shared vertices split (V > P) and the mapping is non-trivial.
+  VtVec3fArray points = {GfVec3f(0, 0, 0), GfVec3f(1, 0, 0), GfVec3f(1, 1, 0),
+                         GfVec3f(0, 1, 0), GfVec3f(2, 0, 0), GfVec3f(2, 1, 0)};
+  VtIntArray counts = {4, 4};
+  VtIntArray indices = {0, 1, 2, 3, 1, 4, 5, 2};
+  pxr::VtVec2fArray st = {GfVec2f(0, 0), GfVec2f(1, 0), GfVec2f(1, 1),
+                          GfVec2f(0, 1), GfVec2f(0, 0), GfVec2f(1, 0),
+                          GfVec2f(1, 1), GfVec2f(0, 1)};
+
+  HdMitsubaMesh::PrimvarMap primvars;
+  HdPrimvarDescriptor points_desc;
+  points_desc.interpolation = pxr::HdInterpolationVertex;
+  points_desc.role = HdPrimvarRoleTokens->point;
+  primvars[HdTokens->points] = {VtValue(points), points_desc};
+  HdPrimvarDescriptor st_desc;
+  st_desc.interpolation = pxr::HdInterpolationFaceVarying;
+  primvars[TfToken("st")] = {VtValue(st), st_desc};
+
+  const TfToken attribute_names[] = {TfToken("st")};
+  CornerMeshSpec spec = CornerMeshBuilder::Build(
+      SdfPath("/mesh"), counts, indices, primvars, {}, {},
+      /*smooth_normals=*/true, attribute_names);
+  ASSERT_EQ(spec.sub_meshes.size(), 1);
+  const SubMeshSpec& sub = spec.sub_meshes[0];
+  ASSERT_EQ(sub.attributes.size(), 1);
+
+  auto as_uint32 = [](const VtIntArray& a) {
+    return reinterpret_cast<const uint32_t*>(a.cdata());
+  };
+
+  mitsuba::CornerMesh desc;
+  desc.vertex_count = spec.positions.size();
+  desc.positions = spec.positions.cdata()->data();
+  desc.corner_count = sub.RecordCount();
+  desc.corner_vertex = as_uint32(sub.corner_vertex);
+  desc.face_count = sub.FaceCount();
+  desc.face_offsets = as_uint32(sub.face_offsets);
+  desc.texcoords = {"texcoords", 2,
+                    sub.attributes[0].values.Get<pxr::VtVec2fArray>()
+                        .cdata()
+                        ->data(),
+                    st.size(), as_uint32(sub.attributes[0].indices)};
+
+  mitsuba::ref<Mesh> mesh = new Mesh("contract", /*face_normals=*/false);
+  mesh->from_corners(desc);
+
+  // The UV seam must split vertices without duplicating positions.
+  EXPECT_GT(mesh->vertex_count(), mesh->position_count());
+  ASSERT_EQ(mesh->position_count(), sub.used_vertices.size());
+
+  // Position row i holds source vertex used_vertices[i].
+  const auto& positions = mesh->positions().array();
+  for (size_t i = 0; i < sub.used_vertices.size(); ++i) {
+    const GfVec3f& expected = points[sub.used_vertices[i]];
+    for (size_t k = 0; k < 3; ++k) {
+      EXPECT_FLOAT_EQ(positions[3 * i + k], expected[k])
+          << "position row " << i << " component " << k;
+    }
+  }
+
+  // Each triangle corner resolves to the same source vertex the builder
+  // recorded, i.e. the fan order agrees.
+  const auto& faces = mesh->faces().array();
+  const auto& position_index = mesh->position_index();
+  ASSERT_EQ(faces.size(), sub.tri_corner_record.size());
+  for (size_t i = 0; i < faces.size(); ++i) {
+    const uint32_t vertex = faces[i];
+    const uint32_t row =
+        position_index.size() ? position_index[vertex] : vertex;
+    EXPECT_EQ(sub.used_vertices[row], sub.corner_vertex[sub.tri_corner_record[i]])
+        << "triangle corner " << i;
+  }
 }
 
 TEST(HdMitsubaMeshTest, SubdivisionLevelAttribute) {

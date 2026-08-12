@@ -47,6 +47,7 @@
 #include <pxr/usd/usdSkel/skinningQuery.h>
 #include <pxr/usd/usdSkel/utils.h>
 
+#include "hdmitsuba/mesh/corner_mesh.h"
 #include "hdmitsuba/mesh/geometry_processor.h"
 #include "hdmitsuba/mesh/subdivision.h"
 #include "nanobind/usd.h"
@@ -199,6 +200,13 @@ MeshExtractionData ExtractMeshData(UsdStagePtr stage, const SdfPath& path,
     desc.name = primvar.GetPrimvarName();
     desc.interpolation =
         UsdInterpolationToHdInterpolation(primvar.GetInterpolation());
+    // Hydra sets this itself; matching it here is what lets TransformPrimvars
+    // own the UV v-flip for both pipelines instead of the offline translator
+    // flipping separately after the fact.
+    if (primvar.GetTypeName() == pxr::SdfValueTypeNames->TexCoord2fArray ||
+        desc.name == TfToken("st")) {
+      desc.role = HdPrimvarRoleTokens->textureCoordinate;
+    }
     VtValue value;
     if (primvar.ComputeFlattened(&value, time) && !value.IsEmpty()) {
       data.primvars[desc.name] = {std::move(value), desc};
@@ -266,10 +274,28 @@ NB_MODULE(geometry_ext, m) {
   nb::class_<PrimvarState>(m, "PrimvarState")
       .def_rw("value", &PrimvarState::value);
 
-  nb::class_<SubMeshOutput>(m, "SubMeshOutput")
-      .def_ro("material_id", &SubMeshOutput::material_id)
-      .def_ro("triangles", &SubMeshOutput::triangles)
-      .def_rw("primvars", &SubMeshOutput::primvars);
+  nb::class_<CornerAttributeSpec>(m, "CornerAttributeSpec")
+      .def_ro("name", &CornerAttributeSpec::name)
+      .def_ro("values", &CornerAttributeSpec::values)
+      .def_ro("dim", &CornerAttributeSpec::dim)
+      .def_ro("indices", &CornerAttributeSpec::indices);
+
+  nb::class_<SubMeshSpec>(m, "SubMeshSpec")
+      .def_ro("id", &SubMeshSpec::id)
+      .def_ro("material_id", &SubMeshSpec::material_id)
+      .def_ro("corner_vertex", &SubMeshSpec::corner_vertex)
+      .def_ro("face_offsets", &SubMeshSpec::face_offsets)
+      .def_ro("attributes", &SubMeshSpec::attributes);
+
+  nb::class_<CornerMeshSpec>(m, "CornerMeshSpec")
+      .def_ro("positions", &CornerMeshSpec::positions)
+      .def_ro("smooth_normals", &CornerMeshSpec::smooth_normals)
+      .def_rw("primvars", &CornerMeshSpec::primvars)
+      .def_ro("sub_meshes", &CornerMeshSpec::sub_meshes);
+
+  nb::class_<NormalPolicy>(m, "NormalPolicy")
+      .def_ro("smooth_normals", &NormalPolicy::smooth_normals)
+      .def_ro("compute_by_hand", &NormalPolicy::compute_by_hand);
 
   nb::class_<HdMeshTopology>(m, "HdMeshTopology")
       .def(nb::init<const TfToken&, const TfToken&, const VtIntArray&,
@@ -278,7 +304,13 @@ NB_MODULE(geometry_ext, m) {
   nb::class_<MeshExtractionData>(m, "MeshExtractionData")
       .def_ro("scheme", &MeshExtractionData::scheme)
       .def_ro("orientation", &MeshExtractionData::orientation)
-      .def_ro("material_ids", &MeshExtractionData::material_ids);
+      .def_ro("material_ids", &MeshExtractionData::material_ids)
+      .def_ro("face_vertex_counts", &MeshExtractionData::face_vertex_counts)
+      .def_ro("face_vertex_indices", &MeshExtractionData::face_vertex_indices)
+      .def_ro("face_material_indices",
+              &MeshExtractionData::face_material_indices)
+      .def_rw("primvars", &MeshExtractionData::primvars)
+      .def("id", [](const MeshExtractionData& d) { return d.id; });
 
   m.def("extract_and_process_meshes", [](UsdStagePtr stage, const SdfPath& path,
                                          UsdTimeCode time, int refine_level,
@@ -340,16 +372,15 @@ NB_MODULE(geometry_ext, m) {
                                         subdiv.GetRefinedFaceVertexIndices());
       refined_to_coarse_map = subdiv.GetRefinedToCoarseMap();
     }
-    bool needs_normals = has_displacement || (is_subdivided && had_normals);
-    if (primvars.find(HdTokens->normals) == primvars.end() && needs_normals) {
+    // Same rule as the Hydra path, from the same helper, so the two cannot
+    // drift apart again.
+    const bool multi_material = mesh_data.material_ids.size() > 1;
+    const NormalPolicy policy = DecideNormals(
+        primvars.find(HdTokens->normals) != primvars.end(), is_subdivided,
+        has_displacement, multi_material);
+    if (policy.compute_by_hand) {
       GeometryProcessor::ComputeNormals(primvars, refined_topology);
     }
-
-    auto [face_indices, expanded] =
-        GeometryProcessor::ExpandPrimData(refined_topology, primvars);
-    auto [triangles, prim_params] =
-        GeometryProcessor::TriangulateWithFaceMapping(
-            refined_topology.GetFaceVertexCounts(), face_indices);
 
     VtIntArray mapped_material_indices;
     if (is_subdivided) {
@@ -362,12 +393,40 @@ NB_MODULE(geometry_ext, m) {
       mapped_material_indices = mesh_data.face_material_indices;
     }
 
-    auto sub_meshes = GeometryProcessor::SplitAndCompactMeshes(
-        mesh_data.id, triangles, prim_params, expanded, mesh_data.material_ids,
-        mapped_material_indices);
-
-    return std::make_pair(mesh_data, sub_meshes);
+    // Hand back the refined, still-unwelded state. Displacement and the world
+    // transform run on it in Python -- on the whole mesh, matching the Hydra
+    // ordering -- and `build_corner_mesh` then finishes the job.
+    mesh_data.primvars = std::move(primvars);
+    mesh_data.face_vertex_counts = refined_topology.GetFaceVertexCounts();
+    mesh_data.face_vertex_indices = refined_topology.GetFaceVertexIndices();
+    mesh_data.face_material_indices = std::move(mapped_material_indices);
+    return std::make_pair(mesh_data, policy);
   });
+
+  m.def("refresh_normals_after_displacement",
+        [](PrimvarMap& primvars, const VtIntArray& face_vertex_counts,
+           const VtIntArray& face_vertex_indices, bool multi_material) {
+          RefreshNormalsAfterDisplacement(primvars, face_vertex_counts,
+                                          face_vertex_indices, multi_material);
+          return primvars;
+        });
+
+  m.def("normalize_normals", [](PrimvarMap& primvars) {
+    GeometryProcessor::NormalizeNormals(primvars);
+    return primvars;
+  });
+
+  m.def("build_corner_mesh",
+        [](const SdfPath& id, const VtIntArray& face_vertex_counts,
+           const VtIntArray& face_vertex_indices, const PrimvarMap& primvars,
+           const std::vector<SdfPath>& material_ids,
+           const VtIntArray& face_material_indices, bool smooth_normals) {
+          const TfToken attribute_names[] = {HdTokens->normals, TfToken("st")};
+          return CornerMeshBuilder::Build(
+              id, face_vertex_counts, face_vertex_indices, primvars,
+              material_ids, face_material_indices, smooth_normals,
+              attribute_names);
+        });
 
   m.def("compute_normals",
         [](PrimvarMap& primvars, const HdMeshTopology& topology) {

@@ -29,6 +29,7 @@
 #include <pxr/imaging/hd/material.h>
 #include <pxr/pxr.h>
 
+#include "hdmitsuba/mesh/corner_mesh.h"
 #include "hdmitsuba/spec_types.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -91,14 +92,16 @@ class PrimTranslator {
   static void UpdateSensorInPlace(mitsuba::Object* sensor_obj,
                                   const CameraSpec& spec);
 
+  // Builds one Mitsuba mesh from a material subset. `sub` is non-const because
+  // the welding `from_corners()` performs is only knowable afterwards, and
+  // in-place updates need it (see SubMeshSpec::normal_record).
   static mitsuba::ref<mitsuba::Shape<Float, Spectrum>> BuildMesh(
-      const SdfPath& id, const VtIntArray& face_indices,
-      const PrimvarMap& primvars, mitsuba::Object* bsdf,
+      const CornerMeshSpec& mesh_spec, SubMeshSpec& sub, mitsuba::Object* bsdf,
       mitsuba::Object* emitter_ptr, mitsuba::Object* sensor_ptr);
 
   static void UpdateMeshInPlace(mitsuba::Object* mesh_obj,
-                                const VtIntArray& face_indices,
-                                const PrimvarMap& primvars);
+                                const CornerMeshSpec& mesh_spec,
+                                const SubMeshSpec& sub);
 
   static mitsuba::ref<mitsuba::Shape<Float, Spectrum>> BuildCurves(
       const CurveSpec& spec, mitsuba::Object* bsdf);

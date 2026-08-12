@@ -23,6 +23,7 @@ import mitsuba as mi
 import numpy as np
 
 from pxr import Gf
+from pxr import Sdf
 from pxr import Tf
 from pxr import Usd
 from pxr import UsdLux
@@ -34,59 +35,77 @@ from usd_mitsuba import material
 from usd_mitsuba import util
 
 
+def _sub_mesh_for_material(spec: Any, material_id: Any) -> Any:
+  """Returns the sub-mesh bound to `material_id`, or None."""
+  for sub in spec.sub_meshes:
+    if sub.material_id == material_id:
+      return sub
+  return None
+
+
 def _apply_displacement(
-    sub: Any, displacement: mi.Texture, mesh_data: Any
+    primvars: Any, sub: Any, displacement: mi.Texture
 ) -> None:
-  """Applies a displacement texture to a sub-mesh object."""
-  uv_state = sub.primvars['st']
-  uv = np.array(uv_state.value)
+  """Displaces the source points reached by one material's faces.
+
+  Mirrors the Hydra delegate: the whole, un-welded point array is displaced, and
+  a point shared by several corners is displaced once, using the first corner
+  that reaches it. `sub` supplies the addressing -- its per-record `indices`
+  already encode the primvar's interpolation mode, so nothing here needs to know
+  what that mode was.
+  """
+  attrs = {a.name: a for a in sub.attributes}
+  if 'st' not in attrs or 'normals' not in attrs:
+    return
+
+  corner_vertex = np.asarray(sub.corner_vertex)
+  # First corner wins, matching the delegate's "displace each vertex once".
+  target, first = np.unique(corner_vertex, return_index=True)
+
+  uv_values = np.asarray(attrs['st'].values, dtype=np.float32)
+  uv = uv_values[np.asarray(attrs['st'].indices)[first]]
+  normals = np.asarray(attrs['normals'].values, dtype=np.float32)[
+      np.asarray(attrs['normals'].indices)[first]
+  ]
+
   si = dr.zeros(mi.SurfaceInteraction3f)
   si.uv = mi.Point2f(uv[:, 0], 1.0 - uv[:, 1])
   offset = np.array(displacement.eval_1(si))[..., None] - 0.5
-  points = np.array(sub.primvars['points'].value)
-  points += offset * np.array(sub.primvars['normals'].value)
-  sub.primvars['points'].value = Vt.Vec3fArray.FromNumpy(
-      points.astype(np.float32)
-  )
-  sub_topology = geom_lib.HdMeshTopology(
-      mesh_data.scheme,
-      mesh_data.orientation,
-      Vt.IntArray([3] * (len(sub.triangles) // 3)),
-      sub.triangles,
-  )
-  sub.primvars = geom_lib.compute_normals(sub.primvars, sub_topology)
+
+  points = np.array(primvars['points'].value)
+  points[target] += offset * normals
+  primvars['points'].value = Vt.Vec3fArray.FromNumpy(points.astype(np.float32))
 
 
-# TODO: Add support for vertex colors and other primvars.
-def _to_mitsuba_mesh(sub: Any, properties: mi.Properties) -> mi.Mesh:
-  """Creates a Mitsuba mesh from a sub-mesh object and properties."""
+def _to_mitsuba_mesh(
+    spec: Any, sub: Any, properties: mi.Properties
+) -> mi.Mesh:
+  """Creates a Mitsuba mesh from one sub-mesh of a corner-mesh spec."""
+  properties['face_normals'] = not spec.smooth_normals
 
-  vertices = np.array(sub.primvars['points'].value)
-  faces = np.array(sub.triangles).reshape(-1, 3)
-  has_vertex_normals = 'normals' in sub.primvars
-  # Without authored normals the mesh is flat shaded. Requesting face normals
-  # keeps Mitsuba from deriving smooth shading normals of its own.
-  properties['face_normals'] = not has_vertex_normals
-  texture_coordinates = (
-      np.array(sub.primvars['st'].value) if 'st' in sub.primvars else None
-  )
+  attrs = {}
+  for attr in sub.attributes:
+    values = np.asarray(attr.values, dtype=np.float32)
+    # The Python binding exposes only the shared `corner_index`, not
+    # per-attribute indices, so each attribute is gathered to one row per
+    # record.
+    attrs[attr.name] = np.ascontiguousarray(
+        values[np.asarray(attr.indices)]
+    )
 
-  normals = mi.TensorXf()
-  if has_vertex_normals:
-      normals = mi.TensorXf(np.array(sub.primvars['normals'].value, dtype=np.float32))
-  texcoords = mi.TensorXf()
-  if texture_coordinates is not None:
-      texture_coordinates[:, 1] = 1 - texture_coordinates[:, 1]
-      texcoords = mi.TensorXf(texture_coordinates.astype(np.float32))
-
-  # The mesh fields are immutable after construction, so they all have to be
-  # supplied up front.
   mi_mesh = mi.Mesh(properties)
-  mi_mesh.from_fields(
-      faces=mi.TensorXu(faces.astype(np.uint32)),
-      positions=mi.TensorXf(vertices.astype(np.float32)),
-      normals=normals,
-      texcoords=texcoords,
+  mi_mesh.from_corners(
+      positions=np.ascontiguousarray(
+          np.asarray(spec.positions, dtype=np.float32)
+      ),
+      # np.array (not asarray): Vt arrays expose a read-only buffer, and the
+      # index parameters of from_corners are declared non-const, so nanobind
+      # rejects anything unwritable. The float parameters are const and would
+      # accept a view.
+      corner_vertex=np.array(sub.corner_vertex, dtype=np.int32),
+      face_offsets=np.array(sub.face_offsets, dtype=np.int32),
+      normals=attrs.get('normals'),
+      texcoords=attrs.get('st'),
   )
   return mi_mesh
 
@@ -136,7 +155,7 @@ def convert_mesh(
     if (level := level_attr.Get()) is not None:
       subdivision_level = level
 
-  mesh_data, sub_meshes = geom_lib.extract_and_process_meshes(
+  mesh_data, policy = geom_lib.extract_and_process_meshes(
       stage, path, time, subdivision_level, has_displacement
   )
   if custom_transform is not None:
@@ -144,17 +163,70 @@ def convert_mesh(
   else:
     world_transform = mesh_prim.ComputeLocalToWorldTransform(time)
 
-  converted_meshes = {}
-  for sub in sub_meshes:
-    if 'points' not in sub.primvars or len(sub.primvars['points'].value) == 0:
-      Tf.Warn(f"Mesh {prim.GetPath()} has no points. Skipping translation.")
-      continue
+  primvars = mesh_data.primvars
+  if 'points' not in primvars or len(primvars['points'].value) == 0:
+    Tf.Warn(f"Mesh {prim.GetPath()} has no points. Skipping translation.")
+    return {}
+
+  material_ids = list(mesh_data.material_ids)
+  if not material_ids:
+    material_ids = [Sdf.Path.emptyPath]
+
+  # Resolve each bound material once, up front: displacement has to be applied
+  # before the mesh is welded, and the sub-mesh split is what scopes it.
+  resolved = {}
+  for material_id in material_ids:
     subprim = (
-        stage.GetPrimAtPath(sub.material_id)
-        if not sub.material_id.isEmpty
+        stage.GetPrimAtPath(material_id)
+        if not material_id.isEmpty
         else prim
     )
-    bsdf, material_emitter, displacement = material.convert_material(subprim)
+    resolved[material_id] = (subprim, material.convert_material(subprim))
+
+  # Build once for addressing only, so displacement can find each material's
+  # points and their UVs/normals, then rebuild below from the displaced state.
+  displaced = False
+  if has_displacement:
+    addressing = geom_lib.build_corner_mesh(
+        mesh_data.id(),
+        mesh_data.face_vertex_counts,
+        mesh_data.face_vertex_indices,
+        primvars,
+        material_ids,
+        mesh_data.face_material_indices,
+        policy.smooth_normals,
+    )
+    for material_id, (_, (_, _, displacement)) in resolved.items():
+      if displacement is None:
+        continue
+      sub = _sub_mesh_for_material(addressing, material_id)
+      if sub is not None:
+        _apply_displacement(primvars, sub, displacement)
+        displaced = True
+
+  primvars = geom_lib.transform_primvars(primvars, world_transform)
+  if displaced:
+    primvars = geom_lib.refresh_normals_after_displacement(
+        primvars,
+        mesh_data.face_vertex_counts,
+        mesh_data.face_vertex_indices,
+        len(material_ids) > 1,
+    )
+  primvars = geom_lib.normalize_normals(primvars)
+
+  spec = geom_lib.build_corner_mesh(
+      mesh_data.id(),
+      mesh_data.face_vertex_counts,
+      mesh_data.face_vertex_indices,
+      primvars,
+      material_ids,
+      mesh_data.face_material_indices,
+      policy.smooth_normals,
+  )
+
+  converted_meshes = {}
+  for sub in spec.sub_meshes:
+    subprim, (bsdf, material_emitter, _) = resolved[sub.material_id]
     mesh_light_emitter = _get_mesh_light_emitter(prim, time)
     props = mi.Properties()
     if bsdf is not None:
@@ -175,10 +247,7 @@ def convert_mesh(
             camera.usd_to_mitsuba(UsdGeom.Camera(cam_prim), time=time)
         )
 
-    if displacement is not None:
-      _apply_displacement(sub, displacement, mesh_data)
-
-    sub.primvars = geom_lib.transform_primvars(sub.primvars, world_transform)
-    converted_meshes[util.get_mitsuba_id(
-        subprim)] = _to_mitsuba_mesh(sub, props)
+    converted_meshes[util.get_mitsuba_id(subprim)] = _to_mitsuba_mesh(
+        spec, sub, props
+    )
   return converted_meshes

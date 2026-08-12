@@ -24,6 +24,7 @@ add_library(hdMitsuba SHARED
   light.cc
   instancer.cc
   mesh.cc
+  mesh/corner_mesh.cc
   mesh/geometry_processor.cc
   mesh/subdivision.cc
   sdr_discovery.cc
@@ -157,6 +158,7 @@ if(HDMITSUBA_BUILD_TESTS)
 
   add_hdmitsuba_test(camera_test tests/camera_test.cc)
   add_hdmitsuba_test(mesh_test tests/mesh_test.cc)
+  add_hdmitsuba_test(corner_mesh_test mesh/tests/corner_mesh_test.cc)
   add_hdmitsuba_test(geometry_processor_test mesh/tests/geometry_processor_test.cc)
   add_hdmitsuba_test(subdivision_test mesh/tests/subdivision_test.cc)
 endif()

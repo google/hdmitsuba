@@ -41,13 +41,6 @@ struct PrimvarState {
 using PrimvarMap =
     std::unordered_map<TfToken, PrimvarState, TfToken::HashFunctor>;
 
-struct SubMeshOutput {
-  SdfPath id;
-  SdfPath material_id;
-  VtIntArray triangles;
-  PrimvarMap primvars;
-};
-
 class GeometryProcessor {
  public:
   GeometryProcessor() = delete;
@@ -59,7 +52,9 @@ class GeometryProcessor {
                       const VtIntArray& vertex_indices)>;
 
   // Returns an interpolation function for the given primvar data and
-  // interpolation method.
+  // interpolation method. `data` is captured by value: VtArray is a refcounted
+  // copy-on-write handle, so this is cheap, and the returned std::function
+  // routinely outlives the caller's array.
   template <typename T>
   static Interpolator<T> GetInterpolator(const VtArray<T>& data,
                                          HdInterpolation interpolation) {
@@ -68,31 +63,25 @@ class GeometryProcessor {
     }
     switch (interpolation) {
       case HdInterpolationConstant:
-        return [&data](int, int, int, const VtIntArray&) { return data[0]; };
+        return [data](int, int, int, const VtIntArray&) { return data[0]; };
       case HdInterpolationUniform:
-        return [&data](int global_face, int, int, const VtIntArray&) {
+        return [data](int global_face, int, int, const VtIntArray&) {
           return data[global_face];
         };
       case HdInterpolationVertex:
       case HdInterpolationVarying:
-        return [&data](int, int local_corner, int,
-                       const VtIntArray& vertex_indices) {
+        return [data](int, int local_corner, int,
+                      const VtIntArray& vertex_indices) {
           return data[vertex_indices[local_corner]];
         };
       case HdInterpolationFaceVarying:
-        return [&data](int, int, int global_corner, const VtIntArray&) {
+        return [data](int, int, int global_corner, const VtIntArray&) {
           return data[global_corner];
         };
       default:
         return [](int, int, int, const VtIntArray&) { return T(0.f); };
     }
   }
-
-  // Triangulates a mesh topology and returns the triangle indices and primitive
-  // parameters mapping each triangle to its parent polygon index.
-  static std::pair<VtIntArray, VtIntArray> TriangulateWithFaceMapping(
-      const VtIntArray& face_vertex_counts,
-      const VtIntArray& face_vertex_indices);
 
   // Computes smooth vertex normals for a mesh topology.
   static void ComputeNormals(PrimvarMap& primvars,
@@ -107,23 +96,13 @@ class GeometryProcessor {
   static void TransformPrimvars(PrimvarMap& primvars,
                                 const GfMatrix4d& transform);
 
-  // Expands indexed and uniform primvars into per-vertex arrays, removing
-  // duplicate vertices using a compression key if configured.
-  static std::pair<VtIntArray, PrimvarMap> ExpandPrimData(
-      const HdMeshTopology& topology, const PrimvarMap& primvars);
-
-  // Expands indexed and uniform primvars using raw topology arrays.
-  static std::pair<VtIntArray, PrimvarMap> ExpandPrimData(
-      const VtIntArray& face_vertex_indices,
-      const VtIntArray& face_vertex_counts, const PrimvarMap& primvars);
-
-  // Splits a triangulated mesh into multiple sub-meshes by material index and
-  // compacts unused vertices from the primvar buffers.
-  static std::vector<SubMeshOutput> SplitAndCompactMeshes(
-      const SdfPath& id, const VtIntArray& triangles,
-      const VtIntArray& primitive_params, const PrimvarMap& final_primvars,
-      absl::Span<const SdfPath> material_ids,
-      const VtIntArray& face_material_indices);
+  // Scales the "normals" primvar to unit length in place.
+  //
+  // Mitsuba welds face corners by comparing the raw float payload and only
+  // normalizes afterwards, so two corners of one vertex that agree in direction
+  // but differ in magnitude would be split apart for no reason. USD frequently
+  // carries unnormalized normals, so this has to run before handing them over.
+  static void NormalizeNormals(PrimvarMap& primvars);
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

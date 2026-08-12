@@ -851,124 +851,192 @@ typename Mesh::TensorXf32 LoadFloatTensor(const void* data, size_t rows) {
                                    {rows, Cols});
 }
 
-// Wrap host-side data as a row-major ``(rows, 3)`` tensor of vertex indices.
-template <typename Mesh>
-typename Mesh::TensorXu32 LoadFaceTensor(const void* data, size_t rows) {
-  using IndexBuffer = typename Mesh::IndexBuffer;
-  return typename Mesh::TensorXu32(dr::load<IndexBuffer>(data, rows * 3),
-                                   {rows, size_t(3)});
+// The texture-coordinate primvar Mitsuba consumes as the mesh's UV set.
+const TfToken kStToken("st");
+
+// VtIntArray is int32 and all our indices are non-negative, so Mitsuba can read
+// them as uint32 in place.
+const uint32_t* AsUInt32(const VtIntArray& a) {
+  return a.empty() ? nullptr : reinterpret_cast<const uint32_t*>(a.cdata());
+}
+
+const CornerAttributeSpec* FindAttribute(const SubMeshSpec& sub,
+                                         const TfToken& name) {
+  for (const CornerAttributeSpec& attr : sub.attributes) {
+    if (attr.name == name) return &attr;
+  }
+  return nullptr;
+}
+
+// Copies a Mitsuba index buffer to the host so we can walk it once, at build
+// time, to learn how the corners were welded.
+template <typename Float, typename Buffer>
+std::vector<uint32_t> ToHostIndices(const Buffer& buffer) {
+  const size_t n = buffer.size();
+  std::vector<uint32_t> out(n);
+  if (n == 0) return out;
+  if constexpr (dr::is_jit_v<Float>) {
+    dr::eval(buffer);
+    auto&& host = dr::migrate(buffer, JitBackend::None);
+    dr::sync_thread();
+    std::memcpy(out.data(), host.data(), n * sizeof(uint32_t));
+  } else {
+    std::memcpy(out.data(), buffer.data(), n * sizeof(uint32_t));
+  }
+  return out;
 }
 
 }  // namespace
 
 MI_VARIANT mitsuba::ref<mitsuba::Shape<Float, Spectrum>>
-PrimTranslator<Float, Spectrum>::BuildMesh(const SdfPath& id,
-                                           const VtIntArray& face_indices,
-                                           const PrimvarMap& primvars,
+PrimTranslator<Float, Spectrum>::BuildMesh(const CornerMeshSpec& mesh_spec,
+                                           SubMeshSpec& sub,
                                            mitsuba::Object* bsdf,
                                            mitsuba::Object* emitter_ptr,
                                            mitsuba::Object* sensor_ptr) {
   using Mesh = mitsuba::Mesh<Float, Spectrum>;
-  using TensorXf32 = typename Mesh::TensorXf32;
 
-  const std::string id_str = id.GetAsString();
-  auto points_it = primvars.find(HdTokens->points);
-  if (points_it == primvars.end()) {
-    TF_RUNTIME_ERROR("Mesh %s has no points.", id_str.c_str());
+  if (mesh_spec.positions.empty() || sub.RecordCount() == 0 ||
+      sub.TriangleCount() == 0) {
     return nullptr;
   }
 
-  const auto& points_array = points_it->second.value.Get<VtVec3fArray>();
-  size_t vertex_count = points_array.size();
-  if (vertex_count == 0) return nullptr;
-
-  size_t face_count = face_indices.size() / 3;
-  if (face_count == 0) return nullptr;
-
-  auto normals_it = primvars.find(HdTokens->normals);
-  const bool has_normals = normals_it != primvars.end();
+  const std::string id_str = sub.id.GetAsString();
   mitsuba::Properties props;
   props.set_id(id_str);
-  // Without authored normals the mesh is flat shaded. Requesting face normals
-  // keeps Mitsuba from deriving smooth shading normals of its own: normal
-  // computation is handled explicitly by the hydra delegate.
-  props.set("face_normals", !has_normals);
+  props.set("face_normals", !mesh_spec.smooth_normals);
   if (emitter_ptr != nullptr) {
     props.set("emitter", emitter_ptr);
   }
   if (sensor_ptr != nullptr) {
     props.set("sensor", sensor_ptr);
   }
+
   mitsuba::ref<Mesh> mesh = new Mesh(props);
   mesh->set_id(id_str);
+  // The BSDF has to be attached first: from_corners() decides whether to pack
+  // MikkTSpace tangents from the material's BSDFFlags::NeedsTangents.
   if (bsdf != nullptr) {
     mesh->set_bsdf(dynamic_cast<mitsuba::BSDF<Float, Spectrum>*>(bsdf));
   }
-  TensorXf32 normals;
-  if (has_normals) {
-    const auto& normals_array = normals_it->second.value.Get<VtVec3fArray>();
-    normals =
-        LoadFloatTensor<Mesh, 3>(normals_array.data(), normals_array.size());
+
+  // Nothing below copies: Mitsuba welds the corners itself, reading straight out
+  // of the shared USD arrays.
+  mitsuba::CornerMesh desc;
+  desc.vertex_count = mesh_spec.positions.size();
+  desc.positions = mesh_spec.positions.cdata()->data();
+  desc.corner_count = sub.RecordCount();
+  desc.corner_vertex = AsUInt32(sub.corner_vertex);
+  desc.face_count = sub.FaceCount();
+  desc.face_offsets = AsUInt32(sub.face_offsets);
+
+  std::vector<mitsuba::CornerAttribute> custom_attrs;
+  for (const CornerAttributeSpec& attr : sub.attributes) {
+    mitsuba::CornerAttribute out;
+    out.dim = attr.dim;
+    out.value_count = attr.dim == 3
+                          ? attr.values.Get<VtVec3fArray>().size()
+                          : attr.values.Get<VtVec2fArray>().size();
+    out.data = attr.dim == 3
+                   ? attr.values.Get<VtVec3fArray>().cdata()->data()
+                   : attr.values.Get<VtVec2fArray>().cdata()->data();
+    out.indices = AsUInt32(attr.indices);
+
+    if (attr.name == HdTokens->normals) {
+      out.name = "normals";
+      desc.normals = out;
+    } else if (attr.name == kStToken) {
+      out.name = "texcoords";
+      desc.texcoords = out;
+    }
   }
-  TensorXf32 texcoords;
-  auto texcoords_it = primvars.find(TfToken("st"));
-  if (texcoords_it != primvars.end()) {
-    const auto& texcoords_array =
-        texcoords_it->second.value.Get<VtVec2fArray>();
-    texcoords = LoadFloatTensor<Mesh, 2>(texcoords_array.data(),
-                                         texcoords_array.size());
+  if (!custom_attrs.empty()) {
+    desc.attrs = custom_attrs.data();
+    desc.attr_count = custom_attrs.size();
   }
-  mesh->from_fields(LoadFaceTensor<Mesh>(face_indices.data(), face_count),
-                    LoadFloatTensor<Mesh, 3>(points_array.data(), vertex_count),
-                    normals, texcoords);
+
+  mesh->from_corners(desc);
+
+  // Learn how the corners collapsed, so later frames can restate the authored
+  // normals without re-welding. Only worth it when we actually supply normals;
+  // generated ones are Mitsuba's business.
+  if (mesh->has_normals() && desc.normals.data != nullptr) {
+    const std::vector<uint32_t> faces =
+        ToHostIndices<Float>(mesh->faces().array());
+    const std::vector<uint32_t> normal_index =
+        ToHostIndices<Float>(mesh->normal_index());
+    const std::vector<uint32_t> position_index =
+        ToHostIndices<Float>(mesh->position_index());
+
+    // An empty index map is the identity, except that an empty normal map falls
+    // back to the position grouping when the two counts agree.
+    const size_t normal_count = mesh->normal_count();
+    auto normal_group = [&](uint32_t v) -> uint32_t {
+      if (!normal_index.empty()) return normal_index[v];
+      if (!position_index.empty() && normal_count == mesh->position_count()) {
+        return position_index[v];
+      }
+      return v;
+    };
+
+    sub.normal_record.assign(normal_count, 0);
+    const size_t n = std::min(faces.size(), sub.tri_corner_record.size());
+    for (size_t i = 0; i < n; ++i) {
+      const uint32_t group = normal_group(faces[i]);
+      if (group < normal_count) {
+        sub.normal_record[group] = sub.tri_corner_record[i];
+      }
+    }
+  }
+
   return mitsuba::ref<mitsuba::Shape<Float, Spectrum>>(mesh.get());
 }
 
 MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateMeshInPlace(
-    mitsuba::Object* mesh_obj, const VtIntArray& face_indices,
-    const PrimvarMap& primvars) {
+    mitsuba::Object* mesh_obj, const CornerMeshSpec& mesh_spec,
+    const SubMeshSpec& sub) {
   using Mesh = mitsuba::Mesh<Float, Spectrum>;
   using TensorXf32 = typename Mesh::TensorXf32;
-  using TensorXu32 = typename Mesh::TensorXu32;
-  auto* mesh = dynamic_cast<Mesh*>(mesh_obj);
-  if (!mesh) return;
 
-  auto points_it = primvars.find(HdTokens->points);
-  if (points_it == primvars.end()) return;
-  const auto& points_array = points_it->second.value.Get<VtVec3fArray>();
-  size_t vertex_count = points_array.size();
-  size_t face_count = face_indices.size() / 3;
-  if (vertex_count == 0 || face_count == 0) return;
+  auto* mesh = dynamic_cast<Mesh*>(mesh_obj);
+  if (!mesh || mesh_spec.positions.empty()) return;
 
   TraversalCallback cb("", nullptr, /*recurse_objects=*/false);
   mesh->traverse(&cb);
 
-  std::vector<std::string> keys = {"positions", "faces"};
-  cb.set<TensorXf32>(
-      "positions", LoadFloatTensor<Mesh, 3>(points_array.data(), vertex_count));
-  cb.set<TensorXu32>("faces",
-                     LoadFaceTensor<Mesh>(face_indices.data(), face_count));
-
-  auto normals_it = primvars.find(HdTokens->normals);
-  if (normals_it != primvars.end() && mesh->has_normals()) {
-    const auto& normals_array = normals_it->second.value.Get<VtVec3fArray>();
-    cb.set<TensorXf32>("normals", LoadFloatTensor<Mesh, 3>(
-                                      normals_array.data(),
-                                      normals_array.size()));
+  // The weld captured at build time still holds: positions never take part in
+  // it, so a deforming mesh only has to restate the rows Mitsuba keeps.
+  const VtIntArray& used = sub.used_vertices;
+  std::vector<float> rows(used.size() * 3);
+  for (size_t i = 0; i < used.size(); ++i) {
+    const GfVec3f& p = mesh_spec.positions[used[i]];
+    rows[3 * i + 0] = p[0];
+    rows[3 * i + 1] = p[1];
+    rows[3 * i + 2] = p[2];
   }
-  // Always add "normals" to the keys: This prevents Mitsuba from recomputing
-  // the normals. We handle normal recomputation explicitly in the hydra
-  // delegate.
-  keys.push_back("normals");
+  std::vector<std::string> keys = {"positions"};
+  cb.set<TensorXf32>("positions",
+                     LoadFloatTensor<Mesh, 3>(rows.data(), used.size()));
 
-  auto texcoords_it = primvars.find(TfToken("st"));
-  if (texcoords_it != primvars.end() && mesh->has_texcoords()) {
-    const auto& texcoords_array =
-        texcoords_it->second.value.Get<VtVec2fArray>();
-    cb.set<TensorXf32>("texcoords",
-                       LoadFloatTensor<Mesh, 2>(texcoords_array.data(),
-                                                texcoords_array.size()));
-    keys.push_back("texcoords");
+  // Authored normals follow the same grouping only when they are constant over
+  // each source vertex; otherwise Mitsuba's normal rows do not line up with
+  // `used_vertices` and we leave them to be regenerated.
+  if (mesh->has_normals() && !sub.normal_record.empty()) {
+    const CornerAttributeSpec* normals = FindAttribute(sub, HdTokens->normals);
+    if (normals != nullptr) {
+      const auto& values = normals->values.template Get<VtVec3fArray>();
+      std::vector<float> nrows(sub.normal_record.size() * 3);
+      for (size_t g = 0; g < sub.normal_record.size(); ++g) {
+        const GfVec3f& n = values[normals->indices[sub.normal_record[g]]];
+        nrows[3 * g + 0] = n[0];
+        nrows[3 * g + 1] = n[1];
+        nrows[3 * g + 2] = n[2];
+      }
+      cb.set<TensorXf32>(
+          "normals",
+          LoadFloatTensor<Mesh, 3>(nrows.data(), sub.normal_record.size()));
+      keys.push_back("normals");
+    }
   }
 
   mesh->parameters_changed(keys);
