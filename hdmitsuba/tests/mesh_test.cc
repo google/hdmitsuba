@@ -105,18 +105,20 @@ TEST(HdMitsubaMeshTest, ComputeNormalsMatchesMitsuba) {
 
   // Compute the normals using Mitsuba too.
   size_t vertex_count = points.size();
-  mitsuba::Properties props;
-  mitsuba::ref<Mesh> mitsuba_mesh =
-      new Mesh("test_mesh", vertex_count, face_count, props, true, false);
-
-  mitsuba_mesh->vertex_positions_buffer() =
-      dr::load<typename Mesh::FloatStorage>(points.data(), vertex_count * 3);
-  mitsuba_mesh->faces_buffer() = dr::load<mitsuba::DynamicBuffer<UInt32>>(
-      face_vertex_indices.data(), face_vertex_indices.size());
-  mitsuba_mesh->parameters_changed();
+  // Leaving the shading normals unspecified makes Mitsuba derive them from
+  // the positions and the face winding order.
+  mitsuba::ref<Mesh> mitsuba_mesh = new Mesh(
+      "test_mesh",
+      typename Mesh::TensorXu32(
+          dr::load<typename Mesh::IndexBuffer>(face_vertex_indices.data(),
+                                               face_vertex_indices.size()),
+          {face_count, size_t(3)}),
+      typename Mesh::TensorXf32(
+          dr::load<typename Mesh::FloatBuffer>(points.data(), vertex_count * 3),
+          {vertex_count, size_t(3)}));
 
   VtVec3fArray mitsuba_computed_normals;
-  const auto& mitsuba_normals_data = mitsuba_mesh->vertex_normals_buffer();
+  const auto& mitsuba_normals_data = mitsuba_mesh->normals().array();
   for (size_t i = 0; i < mitsuba_normals_data.size() / 3; ++i) {
     mitsuba_computed_normals.push_back(
         GfVec3f(mitsuba_normals_data[3 * i], mitsuba_normals_data[3 * i + 1],

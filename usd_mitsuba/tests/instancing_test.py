@@ -143,11 +143,11 @@ def test_translate_native_instancing():
   assert isinstance(mesh2, mi.Mesh)
 
   params1 = mi.traverse(mesh1)
-  positions1 = np.array(params1['vertex_positions']).reshape(-1, 3)
+  positions1 = np.array(params1['positions']).reshape(-1, 3)
   centroid1 = np.mean(positions1, axis=0)
 
   params2 = mi.traverse(mesh2)
-  positions2 = np.array(params2['vertex_positions']).reshape(-1, 3)
+  positions2 = np.array(params2['positions']).reshape(-1, 3)
   centroid2 = np.mean(positions2, axis=0)
 
   np.testing.assert_allclose(centroid1, [0.0, 0.5, 0.0], atol=1e-6)

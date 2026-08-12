@@ -841,6 +841,26 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateSensorInPlace(
   sensor->parameters_changed();
 }
 
+namespace {
+
+// Wrap host-side data as a row-major ``(rows, Cols)`` tensor of floats.
+template <typename Mesh, size_t Cols>
+typename Mesh::TensorXf32 LoadFloatTensor(const void* data, size_t rows) {
+  using FloatBuffer = typename Mesh::FloatBuffer;
+  return typename Mesh::TensorXf32(dr::load<FloatBuffer>(data, rows * Cols),
+                                   {rows, Cols});
+}
+
+// Wrap host-side data as a row-major ``(rows, 3)`` tensor of vertex indices.
+template <typename Mesh>
+typename Mesh::TensorXu32 LoadFaceTensor(const void* data, size_t rows) {
+  using IndexBuffer = typename Mesh::IndexBuffer;
+  return typename Mesh::TensorXu32(dr::load<IndexBuffer>(data, rows * 3),
+                                   {rows, size_t(3)});
+}
+
+}  // namespace
+
 MI_VARIANT mitsuba::ref<mitsuba::Shape<Float, Spectrum>>
 PrimTranslator<Float, Spectrum>::BuildMesh(const SdfPath& id,
                                            const VtIntArray& face_indices,
@@ -848,6 +868,9 @@ PrimTranslator<Float, Spectrum>::BuildMesh(const SdfPath& id,
                                            mitsuba::Object* bsdf,
                                            mitsuba::Object* emitter_ptr,
                                            mitsuba::Object* sensor_ptr) {
+  using Mesh = mitsuba::Mesh<Float, Spectrum>;
+  using TensorXf32 = typename Mesh::TensorXf32;
+
   const std::string id_str = id.GetAsString();
   auto points_it = primvars.find(HdTokens->points);
   if (points_it == primvars.end()) {
@@ -862,32 +885,52 @@ PrimTranslator<Float, Spectrum>::BuildMesh(const SdfPath& id,
   size_t face_count = face_indices.size() / 3;
   if (face_count == 0) return nullptr;
 
+  auto normals_it = primvars.find(HdTokens->normals);
+  const bool has_normals = normals_it != primvars.end();
   mitsuba::Properties props;
+  props.set_id(id_str);
+  // Without authored normals the mesh is flat shaded. Requesting face normals
+  // keeps Mitsuba from deriving smooth shading normals of its own: normal
+  // computation is handled explicitly by the hydra delegate.
+  props.set("face_normals", !has_normals);
   if (emitter_ptr != nullptr) {
     props.set("emitter", emitter_ptr);
   }
   if (sensor_ptr != nullptr) {
     props.set("sensor", sensor_ptr);
   }
-
-  auto* mesh = new mitsuba::Mesh<Float, Spectrum>(
-      id_str, vertex_count, face_count, props,
-      primvars.find(HdTokens->normals) != primvars.end(), false);
+  mitsuba::ref<Mesh> mesh = new Mesh(props);
   mesh->set_id(id_str);
   if (bsdf != nullptr) {
     mesh->set_bsdf(dynamic_cast<mitsuba::BSDF<Float, Spectrum>*>(bsdf));
   }
-  UpdateMeshInPlace(mesh, face_indices, primvars);
-  mesh->initialize();
-  return mitsuba::ref<mitsuba::Shape<Float, Spectrum>>(mesh);
+  TensorXf32 normals;
+  if (has_normals) {
+    const auto& normals_array = normals_it->second.value.Get<VtVec3fArray>();
+    normals =
+        LoadFloatTensor<Mesh, 3>(normals_array.data(), normals_array.size());
+  }
+  TensorXf32 texcoords;
+  auto texcoords_it = primvars.find(TfToken("st"));
+  if (texcoords_it != primvars.end()) {
+    const auto& texcoords_array =
+        texcoords_it->second.value.Get<VtVec2fArray>();
+    texcoords = LoadFloatTensor<Mesh, 2>(texcoords_array.data(),
+                                         texcoords_array.size());
+  }
+  mesh->from_fields(LoadFaceTensor<Mesh>(face_indices.data(), face_count),
+                    LoadFloatTensor<Mesh, 3>(points_array.data(), vertex_count),
+                    normals, texcoords);
+  return mitsuba::ref<mitsuba::Shape<Float, Spectrum>>(mesh.get());
 }
 
 MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateMeshInPlace(
     mitsuba::Object* mesh_obj, const VtIntArray& face_indices,
     const PrimvarMap& primvars) {
-  using FloatStorage = typename mitsuba::Mesh<Float, Spectrum>::FloatStorage;
-  using IntStorage = mitsuba::DynamicBuffer<dr::uint32_array_t<Float>>;
-  auto* mesh = dynamic_cast<mitsuba::Mesh<Float, Spectrum>*>(mesh_obj);
+  using Mesh = mitsuba::Mesh<Float, Spectrum>;
+  using TensorXf32 = typename Mesh::TensorXf32;
+  using TensorXu32 = typename Mesh::TensorXu32;
+  auto* mesh = dynamic_cast<Mesh*>(mesh_obj);
   if (!mesh) return;
 
   auto points_it = primvars.find(HdTokens->points);
@@ -900,33 +943,32 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateMeshInPlace(
   TraversalCallback cb("", nullptr, /*recurse_objects=*/false);
   mesh->traverse(&cb);
 
-  std::vector<std::string> keys = {"vertex_positions", "faces"};
-  cb.set<FloatStorage>(
-      "vertex_positions",
-      dr::load<FloatStorage>(points_array.data(), vertex_count * 3));
-  cb.set<IntStorage>("faces",
-                     dr::load<IntStorage>(face_indices.data(), face_count * 3));
+  std::vector<std::string> keys = {"positions", "faces"};
+  cb.set<TensorXf32>(
+      "positions", LoadFloatTensor<Mesh, 3>(points_array.data(), vertex_count));
+  cb.set<TensorXu32>("faces",
+                     LoadFaceTensor<Mesh>(face_indices.data(), face_count));
 
   auto normals_it = primvars.find(HdTokens->normals);
-  if (normals_it != primvars.end()) {
+  if (normals_it != primvars.end() && mesh->has_normals()) {
     const auto& normals_array = normals_it->second.value.Get<VtVec3fArray>();
-    cb.set<FloatStorage>(
-        "vertex_normals",
-        dr::load<FloatStorage>(normals_array.data(), normals_array.size() * 3));
+    cb.set<TensorXf32>("normals", LoadFloatTensor<Mesh, 3>(
+                                      normals_array.data(),
+                                      normals_array.size()));
   }
-  // Always add "vertex_normals" to the keys: This prevents Mitsuba from
-  // recomputing the normals. We handle normal recomputation explicitly in the
-  // hydra delegate.
-  keys.push_back("vertex_normals");
+  // Always add "normals" to the keys: This prevents Mitsuba from recomputing
+  // the normals. We handle normal recomputation explicitly in the hydra
+  // delegate.
+  keys.push_back("normals");
 
   auto texcoords_it = primvars.find(TfToken("st"));
-  if (texcoords_it != primvars.end()) {
+  if (texcoords_it != primvars.end() && mesh->has_texcoords()) {
     const auto& texcoords_array =
         texcoords_it->second.value.Get<VtVec2fArray>();
-    cb.set<FloatStorage>("vertex_texcoords",
-                         dr::load<FloatStorage>(texcoords_array.data(),
-                                                texcoords_array.size() * 2));
-    keys.push_back("vertex_texcoords");
+    cb.set<TensorXf32>("texcoords",
+                       LoadFloatTensor<Mesh, 2>(texcoords_array.data(),
+                                                texcoords_array.size()));
+    keys.push_back("texcoords");
   }
 
   mesh->parameters_changed(keys);
@@ -956,7 +998,7 @@ PrimTranslator<Float, Spectrum>::BuildCurves(const CurveSpec& spec,
   TraversalCallback cb("", nullptr, /*recurse_objects=*/false);
   shape->traverse(&cb);
 
-  using FloatStorage = typename mitsuba::Mesh<Float, Spectrum>::FloatStorage;
+  using FloatStorage = mitsuba::DynamicBuffer<dr::float32_array_t<Float>>;
   using IntStorage = mitsuba::DynamicBuffer<dr::uint32_array_t<Float>>;
   using ScalarSize = typename mitsuba::Shape<Float, Spectrum>::ScalarSize;
 

@@ -64,30 +64,30 @@ def _to_mitsuba_mesh(sub: Any, properties: mi.Properties) -> mi.Mesh:
   vertices = np.array(sub.primvars['points'].value)
   faces = np.array(sub.triangles).reshape(-1, 3)
   has_vertex_normals = 'normals' in sub.primvars
+  # Without authored normals the mesh is flat shaded. Requesting face normals
+  # keeps Mitsuba from deriving smooth shading normals of its own.
   properties['face_normals'] = not has_vertex_normals
   texture_coordinates = (
       np.array(sub.primvars['st'].value) if 'st' in sub.primvars else None
   )
-  mi_mesh = mi.Mesh(
-      name='',
-      vertex_count=vertices.shape[0],
-      face_count=faces.shape[0],
-      props=properties,
-      has_vertex_normals=has_vertex_normals,
-      has_vertex_texcoords=texture_coordinates is not None,
-  )
 
-  params = mi.traverse(mi_mesh)
-  params['faces'] = np.ravel(faces)
-  params['vertex_positions'] = np.ravel(vertices)
-  if texture_coordinates is not None:
-    texture_coordinates[:, 1] = 1 - texture_coordinates[:, 1]
-    params['vertex_texcoords'] = np.ravel(texture_coordinates)
+  normals = mi.TensorXf()
   if has_vertex_normals:
-    params['vertex_normals'] = np.ravel(
-        np.array(sub.primvars['normals'].value))
+      normals = mi.TensorXf(np.array(sub.primvars['normals'].value, dtype=np.float32))
+  texcoords = mi.TensorXf()
+  if texture_coordinates is not None:
+      texture_coordinates[:, 1] = 1 - texture_coordinates[:, 1]
+      texcoords = mi.TensorXf(texture_coordinates.astype(np.float32))
 
-  params.update()
+  # The mesh fields are immutable after construction, so they all have to be
+  # supplied up front.
+  mi_mesh = mi.Mesh(properties)
+  mi_mesh.from_fields(
+      faces=mi.TensorXu(faces.astype(np.uint32)),
+      positions=mi.TensorXf(vertices.astype(np.float32)),
+      normals=normals,
+      texcoords=texcoords,
+  )
   return mi_mesh
 
 

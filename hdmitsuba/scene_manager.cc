@@ -453,7 +453,7 @@ void ApplyDisplacement(
   }
 
   // 2) Query displacement and scatter add on vertices at target index.
-  using FloatStorage = typename mitsuba::Mesh<Float, Spectrum>::FloatStorage;
+  using FloatStorage = mitsuba::DynamicBuffer<dr::float32_array_t<Float>>;
   if constexpr (!dr::is_dynamic_v<Float>) {
     for (size_t i = 0; i < target_vertex_indices.size(); ++i) {
       int vertex_index = target_vertex_indices[i];
