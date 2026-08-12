@@ -119,23 +119,33 @@ def _create_empty_mitsuba_curve(curve_type: str, bsdf: Any) -> mi.Object:
 def _convert_curves(
     prim: Usd.Prim,
     time: Usd.TimeCode = Usd.TimeCode.Default(),
-) -> mi.Object:
+) -> mi.Object | None:
   """Handles a curves prim and returns the Mitsuba curve object."""
   curve_prim = UsdGeom.Curves(prim)
-  curve_points = np.array(curve_prim.GetPointsAttr().Get(time))
-  bsdf, _, _ = material.convert_material(prim)
   widths = curve_prim.GetWidthsAttr().Get(time)
-  if widths is not None:
-    widths = np.array(widths)
-    if widths.ndim == 0 or widths.size == 1:
-      radius = np.full((curve_points.shape[0], 1), widths.item() * 0.5)
-    elif widths.size == curve_points.shape[0]:
-      radius = widths.reshape(-1, 1) * 0.5
-    else:
-      # Fallback to mean for other interpolations (e.g., uniform per curve)
-      radius = np.full((curve_points.shape[0], 1), np.mean(widths) * 0.5)
+  if widths is None or len(widths) == 0:
+    return None
+
+  curve_points = np.array(
+      curve_prim.GetPointsAttr().Get(time), dtype=np.float32
+  )
+  world_mat = np.array(
+      curve_prim.ComputeLocalToWorldTransform(time), dtype=np.float32
+  )
+  ones = np.ones((curve_points.shape[0], 1), dtype=np.float32)
+  pts_homog = np.hstack([curve_points, ones])
+  pts_world_homog = pts_homog @ world_mat
+  curve_points = pts_world_homog[:, :3] / pts_world_homog[:, 3:4]
+  bsdf, _, _ = material.convert_material(prim)
+
+  widths = np.array(widths)
+  if widths.ndim == 0 or widths.size == 1:
+    radius = np.full((curve_points.shape[0], 1), widths.item() * 0.5)
+  elif widths.size == curve_points.shape[0]:
+    radius = widths.reshape(-1, 1) * 0.5
   else:
-    radius = np.full((curve_points.shape[0], 1), 0.01)
+    # Fallback to mean for other interpolations (e.g., uniform per curve)
+    radius = np.full((curve_points.shape[0], 1), np.mean(widths) * 0.5)
   curve_points = np.hstack([curve_points, radius])
 
   curve_point_counts = np.array(
@@ -281,5 +291,6 @@ def convert_to_mitsuba(
     ):
       mi_scene_dict[mi_id] = light.convert_light(prim, time)
     elif prim.IsA(UsdGeom.Curves):
-      mi_scene_dict[mi_id] = _convert_curves(prim, time)
+      if (curve_obj := _convert_curves(prim, time)) is not None:
+        mi_scene_dict[mi_id] = curve_obj
   return mi_scene_dict

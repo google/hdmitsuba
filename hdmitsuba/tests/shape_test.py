@@ -88,6 +88,27 @@ def test_modify_shape_transform():
   np.testing.assert_allclose(image_modified, image_modified_2, atol=0.05)
 
 
+def test_curve_transform():
+  stage = Usd.Stage.Open(f'{test_helpers.TEST_ASSETS_PATH}/shapes/curve.usda')
+  test_helpers.create_render_settings(stage, resolution=(256, 256))
+  engine_orig = usd_render.RenderEngine(stage)
+  engine_orig.configure(hydra_delegate_id='HdMitsubaRendererPlugin')
+  image_original = engine_orig.render()['color']
+
+  curve_xform = UsdGeom.Xformable.Get(stage, '/root/mycurve')
+  curve_xform.AddTranslateOp(opSuffix='new_translation').Set((0.1, -0.1, 0.0))
+  curve_xform.AddRotateXYZOp(opSuffix='new_rotation').Set((0.0, 0.0, -15.0))
+  curve_xform.AddScaleOp(opSuffix='new_scale').Set((1.1, 0.9, 1.0))
+  image_hd_modified, _ = test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      output_prefix='test_curve_transform',
+      atol=0.05,
+  )
+  assert not np.allclose(
+      image_hd_modified[..., :3], image_original[..., :3], atol=0.01
+  )
+
+
 def test_modify_points():
   stage = Usd.Stage.Open(f'{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda')
   test_helpers.create_render_settings(stage, resolution=(256, 256))
@@ -200,17 +221,20 @@ def test_modify_curve_width():
 
 def test_modify_curve_transform_only():
   stage = Usd.Stage.Open(f'{test_helpers.TEST_ASSETS_PATH}/shapes/curve.usda')
-  test_helpers.create_render_settings(stage, resolution=(64, 64))
+  test_helpers.create_render_settings(stage, resolution=(256, 256))
   engine = usd_render.RenderEngine(stage)
   engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin')
-  _ = engine.render()['color']
+  image_original = engine.render()['color']
 
   curve_xform = UsdGeom.Xformable.Get(stage, '/root/mycurve')
   curve_xform.AddRotateZOp().Set(45.0)
 
-  test_helpers.assert_hydra_equal_to_offline(
+  image_modified, _ = test_helpers.assert_hydra_equal_to_offline(
       stage,
       output_prefix='test_modify_curve_transform_only',
-      atol=0.1,
+      atol=0.05,
       engine=engine,
+  )
+  assert not np.allclose(
+      image_modified[..., :3], image_original[..., :3], atol=0.01
   )

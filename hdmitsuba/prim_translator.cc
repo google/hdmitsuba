@@ -979,7 +979,6 @@ PrimTranslator<Float, Spectrum>::BuildCurves(const CurveSpec& spec,
                                              mitsuba::Object* bsdf) {
   const std::string id_str = spec.id.GetAsString();
   mitsuba::Properties props(spec.plugin_name);
-  props.set("to_world", spec.transform);
   if (auto plugin =
           PlugRegistry::GetInstance().GetPluginWithName("hdMitsuba")) {
     props.set("filename", plugin->GetResourcePath() + "/curve.txt");
@@ -1002,10 +1001,21 @@ PrimTranslator<Float, Spectrum>::BuildCurves(const CurveSpec& spec,
   using IntStorage = mitsuba::DynamicBuffer<dr::uint32_array_t<Float>>;
   using ScalarSize = typename mitsuba::Shape<Float, Spectrum>::ScalarSize;
 
-  cb.set<ScalarSize>("control_point_count", spec.control_points.size() / 4);
+  using Point3f = mitsuba::Point<float, 3>;
+  std::vector<float> world_control_points = spec.control_points;
+  for (size_t i = 0; i < world_control_points.size(); i += 4) {
+    Point3f p(world_control_points[i], world_control_points[i + 1],
+              world_control_points[i + 2]);
+    p = spec.transform * p;
+    world_control_points[i + 0] = p[0];
+    world_control_points[i + 1] = p[1];
+    world_control_points[i + 2] = p[2];
+  }
+
+  cb.set<ScalarSize>("control_point_count", world_control_points.size() / 4);
   cb.set<FloatStorage>("control_points",
-                       dr::load<FloatStorage>(spec.control_points.data(),
-                                              spec.control_points.size()));
+                       dr::load<FloatStorage>(world_control_points.data(),
+                                              world_control_points.size()));
   cb.set<IntStorage>("segment_indices",
                      dr::load<IntStorage>(spec.segment_indices.data(),
                                           spec.segment_indices.size()));
