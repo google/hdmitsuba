@@ -119,12 +119,14 @@ def _create_empty_mitsuba_curve(curve_type: str, bsdf: Any) -> mi.Object:
 def _convert_curves(
     prim: Usd.Prim,
     time: Usd.TimeCode = Usd.TimeCode.Default(),
-) -> mi.Object | None:
+) -> mi.Object:
   """Handles a curves prim and returns the Mitsuba curve object."""
   curve_prim = UsdGeom.Curves(prim)
   widths = curve_prim.GetWidthsAttr().Get(time)
   if widths is None or len(widths) == 0:
-    return None
+    raise ValueError(
+        f"Curves prim '{prim.GetPath()}' is missing widths attribute."
+    )
 
   curve_points = np.array(
       curve_prim.GetPointsAttr().Get(time), dtype=np.float32
@@ -291,6 +293,5 @@ def convert_to_mitsuba(
     ):
       mi_scene_dict[mi_id] = light.convert_light(prim, time)
     elif prim.IsA(UsdGeom.Curves):
-      if (curve_obj := _convert_curves(prim, time)) is not None:
-        mi_scene_dict[mi_id] = curve_obj
+      mi_scene_dict[mi_id] = _convert_curves(prim, time)
   return mi_scene_dict
