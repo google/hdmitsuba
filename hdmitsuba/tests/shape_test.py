@@ -104,8 +104,9 @@ def test_curve_transform():
       output_prefix='test_curve_transform',
       atol=0.05,
   )
-  assert not np.allclose(
-      image_hd_modified[..., :3], image_original[..., :3], atol=0.01
+  assert (
+      np.max(np.abs(image_hd_modified[..., :3] - image_original[..., :3]))
+      > 0.2
   )
 
 
@@ -235,6 +236,6 @@ def test_modify_curve_transform_only():
       atol=0.05,
       engine=engine,
   )
-  assert not np.allclose(
-      image_modified[..., :3], image_original[..., :3], atol=0.01
+  assert (
+      np.max(np.abs(image_modified[..., :3] - image_original[..., :3])) > 0.2
   )
