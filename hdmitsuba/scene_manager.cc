@@ -74,6 +74,11 @@
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
 
+#ifdef PXR_PYTHON_SUPPORT_ENABLED
+#include <pxr/base/tf/pyInvoke.h>
+#include <pxr/base/tf/pyUtils.h>
+#endif
+
 #include "hdmitsuba/debug_codes.h"
 #include "hdmitsuba/mesh.h"
 #include "hdmitsuba/mesh/geometry_processor.h"
@@ -104,6 +109,24 @@ namespace dr = drjit;
 namespace {
 
 constexpr size_t kDefaultSampleCount = 128;
+
+// Sync the Python-side Mitsuba variant so Python-defined plugins
+// (e.g. volprim_rf_basic) get registered for the delegate's variant.
+void SyncMitsubaPythonVariant(const std::string& variant) {
+#ifdef PXR_PYTHON_SUPPORT_ENABLED
+  if (!TfPyIsInitialized()) {
+    return;
+  }
+  if (!TfPyInvoke("mitsuba", "set_variant", variant)) {
+    TF_WARN(
+        "Failed to set Mitsuba Python variant '%s'; Python-defined plugins "
+        "(e.g. volprim_rf_basic) will be unavailable.",
+        variant.c_str());
+  }
+#else
+  return;
+#endif
+}
 
 void DiscoverTextures(
     const HdMaterialNetwork2& network,
@@ -1806,6 +1829,7 @@ SceneManager* CreateSceneManagerImpl() {
 }
 
 SceneManager* SceneManager::CreateSceneManager(const std::string& variant) {
+  SyncMitsubaPythonVariant(variant);
   return MI_INVOKE_VARIANT(variant, CreateSceneManagerImpl);
 }
 
