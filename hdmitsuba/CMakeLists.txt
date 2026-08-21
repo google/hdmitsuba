@@ -52,6 +52,7 @@ target_link_libraries(hdMitsuba
     absl::inlined_vector
     absl::strings
     absl::time
+    ar
     arch
     gf
     hd

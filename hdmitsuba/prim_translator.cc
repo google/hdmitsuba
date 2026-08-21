@@ -33,6 +33,7 @@
 #include <mitsuba/core/config.h>
 #include <mitsuba/core/filesystem.h>
 #include <mitsuba/core/fwd.h>
+#include <mitsuba/core/mstream.h>
 #include <mitsuba/core/object.h>
 #include <mitsuba/core/plugin.h>
 #include <mitsuba/core/properties.h>
@@ -66,6 +67,9 @@
 #include <pxr/imaging/hd/material.h>
 #include <pxr/imaging/hd/tokens.h>
 #include <pxr/pxr.h>
+#include <pxr/usd/ar/asset.h>
+#include <pxr/usd/ar/resolvedPath.h>
+#include <pxr/usd/ar/resolver.h>
 #include <pxr/usd/sdf/assetPath.h>
 #include <pxr/usd/sdf/path.h>
 
@@ -81,6 +85,21 @@ namespace {
 
 using ScalarVector3f = mitsuba::Vector<float, 3>;
 using ScalarVector2u = mitsuba::Vector<uint32_t, 2>;
+
+// Loads a bitmap through USD's asset resolver so textures embedded in .usdz
+// packages (or served by custom resolvers) can be read from memory. Falls back
+// to reading directly from the filesystem.
+mitsuba::ref<mitsuba::Bitmap> LoadBitmap(const std::string& path) {
+  if (std::shared_ptr<ArAsset> asset =
+          ArGetResolver().OpenAsset(ArResolvedPath(path))) {
+    if (std::shared_ptr<const char> buffer = asset->GetBuffer()) {
+      mitsuba::MemoryStream stream(const_cast<char*>(buffer.get()),
+                                   asset->GetSize());
+      return new mitsuba::Bitmap(&stream);
+    }
+  }
+  return new mitsuba::Bitmap(path);
+}
 
 std::string ResolvePathFromValue(const VtValue& value) {
   if (value.IsHolding<SdfAssetPath>()) {
@@ -491,7 +510,7 @@ PrimTranslator<Float, Spectrum>::LoadTexture(const mitsuba::Properties& props) {
     local_props.remove_property("is_normal");
   }
   try {
-    mitsuba::ref<mitsuba::Bitmap> bmp = new mitsuba::Bitmap(path);
+    mitsuba::ref<mitsuba::Bitmap> bmp = LoadBitmap(path);
     if (is_normal) {
       if (bmp->channel_count() < 3) {
         TF_WARN(
@@ -643,7 +662,7 @@ PrimTranslator<Float, Spectrum>::BuildLightProperties(const LightSpec& spec) {
     if (!spec.texture_file_path.empty()) {
       try {
         mitsuba::ref<mitsuba::Bitmap> bitmap =
-            new mitsuba::Bitmap(spec.texture_file_path);
+            LoadBitmap(spec.texture_file_path);
         mitsuba::Properties props("envmap");
         props.set("to_world", to_world);
         props.set("scale", (color[0] + color[1] + color[2]) / 3.f);
