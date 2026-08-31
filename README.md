@@ -44,7 +44,7 @@ This repository provies the following components:
     *   **Linux**: Either GCC or Clang work. If you install OpenUSD using `conda`, you need to use GCC for ABI compatibility.
 2.  **Dependencies**:
     *   **OpenUSD**: For example [built locally](https://github.com/PixarAnimationStudios/OpenUSD/blob/dev/BUILDING.md) or installed via `conda`. Due to the size and complexity of this dependency, we currently do not include it as a git submodule.
-    *   **Mitsuba 3**: Locally built from source. Similarly to USD, it is not included as a submodule. For compatibility, it is recommended to use commit [`5eefc440`](https://github.com/mitsuba-renderer/mitsuba3/commit/5eefc440f0a9d4f94e94a2794667397610cbfeda) (which is the version validated in our CI configuration). The `pip`-installed version of Mitsuba currently is not supported.
+    *   **Mitsuba 3**: Locally built from source. Similarly to USD, it is not included as a submodule. For compatibility, it is recommended to use commit [`d8c765ef`](https://github.com/mitsuba-renderer/mitsuba3/commit/d8c765efb3861e4fb42e39a70c8e52aac0686962) (which is the version validated in our CI configuration). The `pip`-installed version of Mitsuba currently is not supported.
     *   **Additional dependencies**: Additional C++ dependencies are included as git submoduls. When cloning this repository, use `git clone --recursive` to initialize submodules. Otherwise, they can also be initialized using `git submodule update --init --recursive`.
     *   **Python dependencies**: `numpy`, `pytest`.
 

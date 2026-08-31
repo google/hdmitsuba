@@ -63,16 +63,16 @@ JITInputs<Float, Spectrum> GatherAllJitInputs(
   absl::flat_hash_set<void*> visited_ptrs;
 
   auto collect_cb = [](void* payload, uint64_t index_combined, const char*,
-                       const char*) {
+                       const char*, const char*) -> uint64_t {
     auto* vec = static_cast<std::vector<uint32_t>*>(payload);
     uint32_t index = (uint32_t)index_combined;
     if (index != 0) {
       vec->push_back(index);
     }
+    return index_combined;
   };
 
-  bool old_traversal = ::jit_flag(::JitFlag::EnableObjectTraversal);
-  ::jit_set_flag(::JitFlag::EnableObjectTraversal, true);
+  dr::TraverseVisitor visitor{dr::TraverseRole::Freeze, collect_cb, nullptr};
 
   if constexpr (dr::is_jit_v<Float>) {
     ::JitBackend backend = dr::backend_v<Float>;
@@ -87,15 +87,15 @@ JITInputs<Float, Spectrum> GatherAllJitInputs(
 
     if (scene) {
       collect_class_var(scene);
-      dr::traverse_1_fn_ro(*scene, &indices, collect_cb);
+      dr::traverse_fn(*scene, &indices, visitor);
     }
     if (sensor) {
       collect_class_var(sensor);
-      dr::traverse_1_fn_ro(*sensor, &indices, collect_cb);
+      dr::traverse_fn(*sensor, &indices, visitor);
     }
     if (integrator) {
       collect_class_var(integrator);
-      dr::traverse_1_fn_ro(*integrator, &indices, collect_cb);
+      dr::traverse_fn(*integrator, &indices, visitor);
     }
 
     const char* variant_name = mitsuba::detail::variant<Float, Spectrum>::name;
@@ -124,11 +124,10 @@ JITInputs<Float, Spectrum> GatherAllJitInputs(
         if (!ptr) continue;
         collect_class_var(ptr);
         auto* obj = static_cast<mitsuba::Object*>(ptr);
-        dr::traverse_1_fn_ro(*obj, &indices, collect_cb);
+        dr::traverse_fn(*obj, &indices, visitor);
       }
     }
   }
-  ::jit_set_flag(::JitFlag::EnableObjectTraversal, old_traversal);
 
   // Deduplicate collected indices using an order-preserving set
   std::vector<uint32_t> unique_indices;

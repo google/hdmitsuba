@@ -71,7 +71,7 @@ jobs:
       with:
         path: |
           mitsuba3
-        key: ${{ runner.os }}-mitsuba3-5eefc440f0a9d4f94e94a2794667397610cbfeda
+        key: ${{ runner.os }}-mitsuba3-d8c765efb3861e4fb42e39a70c8e52aac0686962
 
     - name: Clone and Build Mitsuba 3
       if: steps.cache-mitsuba.outputs.cache-hit != 'true'
@@ -81,7 +81,7 @@ jobs:
       run: |
         git clone https://github.com/mitsuba-renderer/mitsuba3.git
         cd mitsuba3
-        git checkout 5eefc440f0a9d4f94e94a2794667397610cbfeda
+        git checkout d8c765efb3861e4fb42e39a70c8e52aac0686962
         git submodule update --init --recursive
         # Configure with minimal variants to speed up build
         CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Release -DMI_ENABLE_CUDA=OFF -DMI_DEFAULT_VARIANTS=scalar_rgb,llvm_ad_rgb,metal_ad_rgb -DCMAKE_POLICY_VERSION_MINIMUM=3.5"

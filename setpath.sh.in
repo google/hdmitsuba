@@ -7,7 +7,7 @@ export MITSUBA_DIR="@MITSUBA_DIR@"
 export MITSUBA_BUILD_DIR_CONF="@MITSUBA_BUILD_DIR@"
 
 # Update PYTHONPATH (including Release subdirectories for Windows multi-config builds)
-export PYTHONPATH="@CMAKE_CURRENT_SOURCE_DIR@:${HDMITSUBA_BUILD_DIR}:${HDMITSUBA_BUILD_DIR}/Release:${HDMITSUBA_BUILD_DIR}/hdmitsuba:${HDMITSUBA_BUILD_DIR}/hdmitsuba/Release:${MITSUBA_BUILD_DIR_CONF}/python:${MITSUBA_BUILD_DIR_CONF}/python/Release:${USD_DIR}/lib/python:${PYTHONPATH}"
+export PYTHONPATH="@CMAKE_CURRENT_SOURCE_DIR@:${HDMITSUBA_BUILD_DIR}:${HDMITSUBA_BUILD_DIR}/Release:${HDMITSUBA_BUILD_DIR}/hdmitsuba:${HDMITSUBA_BUILD_DIR}/hdmitsuba/Release:${MITSUBA_BUILD_DIR_CONF}/python:${MITSUBA_BUILD_DIR_CONF}/python/Release:${USD_DIR}/lib/python:${USD_DIR}/lib/python@Python3_VERSION_MAJOR@.@Python3_VERSION_MINOR@/site-packages:${PYTHONPATH}"
 
 export LD_LIBRARY_PATH="${USD_DIR}/lib:${MITSUBA_BUILD_DIR_CONF}:${HDMITSUBA_BUILD_DIR}/hdmitsuba:${LD_LIBRARY_PATH}"
 
