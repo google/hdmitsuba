@@ -63,7 +63,7 @@ jobs:
 
     - name: Install Python Dependencies
       run: |
-        pip install numpy pytest pyrefly
+        pip install numpy pytest pyrefly nanobind_backend
 
     - name: Cache Mitsuba 3
       id: cache-mitsuba
