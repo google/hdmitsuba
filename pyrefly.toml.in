@@ -28,6 +28,7 @@ replace-imports-with-any = [
     "pxr.UsdShade",
     "pxr.UsdRender",
     "pxr.UsdLux",
+    "pxr.UsdVol",
     "pxr.Gf",
     "pxr.Sdf",
     "pxr.Vt",

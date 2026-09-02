@@ -52,6 +52,7 @@
 #include "hdmitsuba/render_pass.h"
 #include "hdmitsuba/render_settings.h"
 #include "hdmitsuba/scene_manager.h"
+#include "hdmitsuba/particle_field.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -62,6 +63,7 @@ const TfTokenVector& HdMitsubaRenderDelegate::GetSupportedRprimTypes() const {
   static const TfTokenVector* kSupportedRprimTypes = new TfTokenVector{
       HdPrimTypeTokens->mesh,
       HdPrimTypeTokens->basisCurves,
+      HdPrimTypeTokens->particleField,
   };
   return *kSupportedRprimTypes;
 }
@@ -135,6 +137,8 @@ HdRprim* HdMitsubaRenderDelegate::CreateRprim(const TfToken& typeId,
     return new HdMitsubaMesh(rprimId);
   } else if (typeId == HdPrimTypeTokens->basisCurves) {
     return new HdMitsubaCurves(rprimId);
+  } else if (typeId == HdPrimTypeTokens->particleField) {
+    return new HdMitsubaParticleField(rprimId);
   }
   return nullptr;
 }

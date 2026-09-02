@@ -1,0 +1,54 @@
+#usda 1.0
+def Xform "World"
+{
+    def ParticleField3DGaussianSplat "gaussian_splats"
+    {
+        float3[] positions = [
+            (0, 2.5, 0), (1.25, 2.165, 0.000833), (2.165, 1.25, 0.001667),
+            (2.5, 0, 0.0025), (2.165, -1.25, 0.003333), (1.25, -2.165, 0.004167),
+            (0, -2.5, 0.005), (-1.25, -2.165, 0.005833), (-2.165, -1.25, 0.006667),
+            (-2.5, 0, 0.0075), (-2.165, 1.25, 0.008333), (-1.25, 2.165, 0.009167)
+        ]
+        float3[] scales = [
+            (0.05, 0.15, 0.05), (0.0667, 0.2, 0.0667), (0.0833, 0.25, 0.0833),
+            (0.1, 0.3, 0.1), (0.1167, 0.35, 0.1167), (0.1333, 0.4, 0.1333),
+            (0.15, 0.45, 0.15), (0.1667, 0.5, 0.1667), (0.1833, 0.55, 0.1833),
+            (0.2, 0.6, 0.2), (0.2167, 0.65, 0.2167), (0.2333, 0.7, 0.2333)
+        ]
+        quatf[] orientations = [
+            (1, 0, 0, 0), (0.9659, 0, 0, -0.2588), (0.866, 0, 0, -0.5),
+            (0.7071, 0, 0, -0.7071), (0.5, 0, 0, -0.866), (0.2588, 0, 0, -0.9659),
+            (0, 0, 0, -1), (-0.2588, 0, 0, -0.9659), (-0.5, 0, 0, -0.866),
+            (-0.7071, 0, 0, -0.7071), (-0.866, 0, 0, -0.5), (-0.9659, 0, 0, -0.2588)
+        ]
+        float[] opacities = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+        int radiance:sphericalHarmonicsDegree = 0
+        float3[] radiance:sphericalHarmonicsCoefficients = [
+            (0, 1, 0), (0.2588, 0.9167, 0.0833), (0.5, 0.8333, 0.1667),
+            (0.7071, 0.75, 0.25), (0.866, 0.6667, 0.3333), (0.9659, 0.5833, 0.4167),
+            (1, 0.5, 0.5), (0.9659, 0.4167, 0.5833), (0.866, 0.3333, 0.6667),
+            (0.7071, 0.25, 0.75), (0.5, 0.1667, 0.8333), (0.2588, 0.0833, 0.9167)
+        ]
+    }
+    def Camera "camera"
+    {
+        float2 clippingRange = (0.1, 100)
+        float focalLength = 30
+        float horizontalAperture = 36
+        token projection = "perspective"
+        matrix4d xformOp:transform = ((-1, 0, 0, 0), (0, 1, 0, 0), (0, 0, -1, 0), (0, 0, -5, 1))
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+}
+
+def Scope "Render"
+{
+    # Gaussian splats need the volumetric radiance-field integrator; the
+    # default 'path' integrator does not intersect ellipsoid primitives and
+    # renders black. Authoring it here lets the generic render test pick this
+    # scene up without a special case.
+    def RenderSettings "PrimarySettings"
+    {
+        custom string mitsuba:integrator:type = "volprim_rf_basic"
+    }
+}

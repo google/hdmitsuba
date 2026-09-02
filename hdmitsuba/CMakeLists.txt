@@ -34,6 +34,7 @@ add_library(hdMitsuba SHARED
   render_settings.cc
   renderer_plugin.cc
   scene_manager.cc
+  particle_field.cc
   traversal.cc
   prim_translator.cc
 )
@@ -61,6 +62,7 @@ target_link_libraries(hdMitsuba
     sdf
     tf
     usdGeom
+    usdVol
     vt
   PRIVATE
     absl::log

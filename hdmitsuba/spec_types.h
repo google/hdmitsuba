@@ -18,6 +18,7 @@
 #include <string>
 
 #include <pxr/base/gf/matrix4d.h>
+#include <pxr/base/gf/quatf.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/tf/token.h>
 #include <pxr/base/vt/types.h>
@@ -79,6 +80,27 @@ struct CurveSpec : public BaseSpec {
   std::vector<float> control_points;  // Flat packed [x, y, z, r] control points
   std::vector<uint32_t> segment_indices;  // Precomputed segment indices
   std::optional<SdfPath> attached_sensor_id = std::nullopt;
+};
+
+struct ParticleFieldSpec : public BaseSpec {
+  GfMatrix4d transform;
+  VtVec3fArray points;
+  VtVec3fArray scales;
+  VtQuatfArray orientations;
+  VtFloatArray opacities;
+  VtVec3fArray sh_coeffs;
+  int sh_degree = 0;
+  // Which half of the plugin's parameters changed since the last sync. Only
+  // consulted when `needs_rebuild` is false, i.e. when the particle count and
+  // SH layout are unchanged and the shape can be updated in place.
+  bool geometry_dirty = true;
+  bool attributes_dirty = true;
+
+  void MarkClean() {
+    BaseSpec::MarkClean();
+    geometry_dirty = false;
+    attributes_dirty = false;
+  }
 };
 
 struct CameraSpec : public BaseSpec {

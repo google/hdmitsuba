@@ -26,8 +26,10 @@ from pxr import Usd
 from pxr import UsdGeom
 from pxr import UsdLux
 from pxr import UsdRender
+from pxr import UsdVol
 
 from usd_mitsuba import camera
+from usd_mitsuba import gaussian_splatting
 from usd_mitsuba import instancing
 from usd_mitsuba import light
 from usd_mitsuba import material
@@ -294,4 +296,6 @@ def convert_to_mitsuba(
       mi_scene_dict[mi_id] = light.convert_light(prim, time)
     elif prim.IsA(UsdGeom.Curves):
       mi_scene_dict[mi_id] = _convert_curves(prim, time)
+    elif prim.IsA(UsdVol.ParticleField3DGaussianSplat):
+      mi_scene_dict.update(gaussian_splatting.convert_gaussian_splats(prim, time))
   return mi_scene_dict

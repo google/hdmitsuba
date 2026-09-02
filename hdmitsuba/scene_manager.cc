@@ -698,6 +698,23 @@ class SceneModel final : public SceneManager {
     reset_progressive_ = true;
   }
 
+  void SyncParticleField(ParticleFieldSpec spec) override {
+    TF_DEBUG(HDMITSUBA_SYNC).Msg("SyncParticleField: %s\n", spec.id.GetText());
+    absl::MutexLock lock(state_mutex_);
+    auto it = particle_field_specs_.find(spec.id);
+    if (it == particle_field_specs_.end()) {
+      spec.needs_rebuild = true;
+    } else {
+      // Fold in anything the previous spec still had pending, so a second sync
+      // arriving before the next commit cannot drop an update.
+      spec.needs_rebuild |= it->second.needs_rebuild;
+      spec.geometry_dirty |= it->second.geometry_dirty;
+      spec.attributes_dirty |= it->second.attributes_dirty;
+    }
+    particle_field_specs_[spec.id] = std::move(spec);
+    reset_progressive_ = true;
+  }
+
   void SyncLight(LightSpec spec) override {
     TF_DEBUG(HDMITSUBA_SYNC).Msg("SyncLight: %s\n", spec.id.GetText());
     absl::MutexLock lock(state_mutex_);
@@ -726,6 +743,7 @@ class SceneModel final : public SceneManager {
     absl::MutexLock lock(state_mutex_);
     mesh_specs_.erase(id);
     curve_specs_.erase(id);
+    particle_field_specs_.erase(id);
     bool erased = false;
     if (shapes_.erase(id_str) > 0) {
       erased = true;
@@ -1170,7 +1188,12 @@ class SceneModel final : public SceneManager {
           needs_bsdf_update = true;
         }
       }
-      if (spec.needs_rebuild || spec.dirty_bits != 0 || needs_bsdf_update) {
+      bool has_in_place_update = false;
+      if constexpr (std::is_same_v<SpecType, ParticleFieldSpec>) {
+        has_in_place_update = spec.geometry_dirty || spec.attributes_dirty;
+      }
+      if (spec.needs_rebuild || spec.dirty_bits != 0 || needs_bsdf_update ||
+          has_in_place_update) {
         pending_specs.push_back(&spec);
       }
     }
@@ -1601,6 +1624,45 @@ class SceneModel final : public SceneManager {
         });
   }
 
+  bool CommitParticleFields() {
+    if (!particle_field_specs_.empty() &&
+        integrator_type_ != "volprim_rf_basic") {
+      TF_WARN(
+          "Scene contains Gaussian splats (%zu), which require the "
+          "'volprim_rf_basic' integrator for radiance field evaluation. "
+          "Current integrator: '%s'.",
+          particle_field_specs_.size(), integrator_type_.c_str());
+    }
+    return ParallelCommit<decltype(particle_field_specs_), mitsuba::ref<Shape>>(
+        particle_field_specs_,
+        [&](ParticleFieldSpec* spec, mitsuba::ref<Shape>& res) {
+          if (spec->needs_rebuild) {
+            res = PrimTranslator::BuildParticleField(*spec);
+            return;
+          }
+          // Particle count and SH layout are unchanged, so the existing shape
+          // can absorb the new values without being rebuilt (and without
+          // forcing a scene rebuild - ParallelCommit only merges rebuilds).
+          auto it = shapes_.find(spec->id.GetAsString());
+          if (!TF_VERIFY(it != shapes_.end(), "Particle field not found: %s",
+                         spec->id.GetText())) {
+            return;
+          }
+          TF_DEBUG(HDMITSUBA_SYNC)
+              .Msg("UpdateParticleFieldInPlace: %s (geometry: %d, "
+                   "attributes: %d)\n",
+                   spec->id.GetText(), spec->geometry_dirty,
+                   spec->attributes_dirty);
+          PrimTranslator::UpdateParticleFieldInPlace(it->second.get(), *spec);
+        },
+        [&](ParticleFieldSpec* spec, mitsuba::ref<Shape>& res) {
+          if (res) {
+            shapes_[spec->id.GetAsString()] = res;
+          }
+          return true;
+        });
+  }
+
   bool CommitLights() {
     return ParallelCommit<decltype(light_specs_),
                           typename PrimTranslator::TranslatedLight>(
@@ -1651,6 +1713,7 @@ class SceneModel final : public SceneManager {
     rebuild_scene |= CommitCameras();
     rebuild_scene |= CommitMeshes();
     rebuild_scene |= CommitCurves();
+    rebuild_scene |= CommitParticleFields();
     rebuild_scene |= CommitLights();
 
     if (rebuild_scene) {
@@ -1726,6 +1789,8 @@ class SceneModel final : public SceneManager {
   absl::flat_hash_map<SdfPath, MaterialSpec, SdfPath::Hash> material_specs_;
   absl::flat_hash_map<SdfPath, MeshSpec, SdfPath::Hash> mesh_specs_;
   absl::flat_hash_map<SdfPath, CurveSpec, SdfPath::Hash> curve_specs_;
+  absl::flat_hash_map<SdfPath, ParticleFieldSpec, SdfPath::Hash>
+      particle_field_specs_;
   absl::flat_hash_map<SdfPath, LightSpec, SdfPath::Hash> light_specs_;
   absl::flat_hash_map<SdfPath, CameraSpec, SdfPath::Hash> camera_specs_;
   absl::flat_hash_map<SdfPath, uint32_t, SdfPath::Hash> material_dirty_flags_;

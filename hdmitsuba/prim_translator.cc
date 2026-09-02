@@ -15,6 +15,7 @@
 #include "hdmitsuba/prim_translator.h"
 #include "hdmitsuba/debug_codes.h"
 
+#include <cmath>
 #include <cstddef>
 #include <map>
 #include <string>
@@ -28,6 +29,7 @@
 #include <absl/strings/str_join.h>
 #include <absl/strings/strip.h>
 #include <drjit/matrix.h>
+#include <drjit/tensor.h>
 #include <drjit/transform.h>
 #include <mitsuba/core/bitmap.h>
 #include <mitsuba/core/config.h>
@@ -54,6 +56,8 @@
 #include <pxr/base/gf/matrix3f.h>
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/matrix4f.h>
+#include <pxr/base/gf/quatf.h>
+#include <pxr/base/gf/rotation.h>
 #include <pxr/base/gf/vec3d.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/gf/vec4f.h>
@@ -1040,6 +1044,195 @@ PrimTranslator<Float, Spectrum>::BuildCurves(const CurveSpec& spec,
                                           spec.segment_indices.size()));
   shape->parameters_changed();
   return shape;
+}
+
+namespace {
+
+// The 'ellipsoids' plugin keeps each particle as one interleaved record of
+// centre (3), scale (3) and quaternion (4) floats, and its "data" property
+// accepts exactly that layout. Handing it pre-interleaved data skips the
+// gather/scatter pass it would otherwise run to assemble the same buffer from
+// separate "centers", "scales" and "quaternions" tensors.
+constexpr size_t kEllipsoidStride = 10;
+
+bool ParticleFieldSizesValid(const ParticleFieldSpec& spec,
+                             const std::string& id_str) {
+  const size_t count = spec.points.size();
+  if (spec.scales.size() == count && spec.orientations.size() == count &&
+      spec.opacities.size() == count) {
+    return true;
+  }
+  TF_WARN(
+      "Particle field %s has mismatched primvar sizes (positions: %zu, "
+      "scales: %zu, orientations: %zu, opacities: %zu), skipping.",
+      id_str.c_str(), count, spec.scales.size(), spec.orientations.size(),
+      spec.opacities.size());
+  return false;
+}
+
+// Splits the prim transform into the uniform scale and rigid rotation that can
+// be folded into per-particle scales and orientations. Centres are transformed
+// by the full matrix, so only the scale/rotation part needs decomposing.
+void DecomposeParticleFieldTransform(const GfMatrix4d& transform,
+                                     const std::string& id_str,
+                                     GfQuatf* rotation, float* scale_factor) {
+  GfMatrix4d r_mat, u_mat, p_mat;
+  GfVec3d scale_vec, trans_vec;
+  *rotation = GfQuatf(1.0f);
+  *scale_factor = 1.0f;
+
+  if (!transform.Factor(&r_mat, &scale_vec, &u_mat, &trans_vec, &p_mat)) {
+    TF_WARN(
+        "Singular transform matrix for particle field %s, ignoring transform "
+        "scale/rotation",
+        id_str.c_str());
+    return;
+  }
+
+  *rotation = GfQuatf(u_mat.ExtractRotation().GetQuat());
+  *scale_factor = scale_vec[0];
+  const double scale_eps = 1e-3 * std::abs(scale_vec[0]);
+  if (std::abs(scale_vec[1] - scale_vec[0]) > scale_eps ||
+      std::abs(scale_vec[2] - scale_vec[0]) > scale_eps) {
+    TF_WARN(
+        "Non-uniform transform scale (%f, %f, %f) on particle field %s is not "
+        "supported; applying x-axis scale uniformly.",
+        scale_vec[0], scale_vec[1], scale_vec[2], id_str.c_str());
+  }
+}
+
+// Bakes the prim transform into the interleaved per-particle records. The
+// plugin rejects "to_world" and "scale_factor" unless it is loading a PLY
+// file, so the transform has to be applied on this side.
+template <typename Storage>
+Storage PackParticleField(const ParticleFieldSpec& spec,
+                          const std::string& id_str) {
+  GfQuatf rotation;
+  float scale_factor = 1.0f;
+  DecomposeParticleFieldTransform(spec.transform, id_str, &rotation,
+                                  &scale_factor);
+
+  const size_t count = spec.points.size();
+  std::vector<float> packed(count * kEllipsoidStride);
+  for (size_t i = 0; i < count; ++i) {
+    float* record = packed.data() + i * kEllipsoidStride;
+
+    const GfVec3f center(spec.transform.Transform(spec.points[i]));
+    record[0] = center[0];
+    record[1] = center[1];
+    record[2] = center[2];
+
+    record[3] = spec.scales[i][0] * scale_factor;
+    record[4] = spec.scales[i][1] * scale_factor;
+    record[5] = spec.scales[i][2] * scale_factor;
+
+    // USD does not guarantee unit-length orientations, and the plugin only
+    // normalizes on its PLY path - a non-unit quaternion here would shear the
+    // ellipsoid rather than just rotate it.
+    const GfQuatf quat = (rotation * spec.orientations[i]).GetNormalized();
+    const GfVec3f& imaginary = quat.GetImaginary();
+    record[6] = imaginary[0];
+    record[7] = imaginary[1];
+    record[8] = imaginary[2];
+    record[9] = quat.GetReal();
+  }
+  return dr::load<Storage>(packed.data(), packed.size());
+}
+
+// SH coefficients in the plugin's flat (count, num_coeffs * 3) layout. GfVec3f
+// is three packed floats, so the prim's array is already that layout and loads
+// as-is. Without coefficients, or with a size that disagrees with the declared
+// degree, fall back to a uniform white DC term.
+template <typename Storage>
+Storage LoadShCoefficients(const ParticleFieldSpec& spec) {
+  const size_t count = spec.points.size();
+  if (!spec.sh_coeffs.empty()) {
+    const size_t num_coeffs = (spec.sh_degree + 1) * (spec.sh_degree + 1);
+    if (spec.sh_coeffs.size() == count * num_coeffs) {
+      return dr::load<Storage>(spec.sh_coeffs.cdata(),
+                               count * num_coeffs * 3);
+    }
+    TF_WARN(
+        "SH coefficients size mismatch: %zu vs expected %zu. Defaulting to "
+        "uniform white DC color.",
+        spec.sh_coeffs.size(), count * num_coeffs);
+  }
+  return dr::full<Storage>(1.0f, count * 3);
+}
+
+}  // namespace
+
+MI_VARIANT mitsuba::ref<mitsuba::Shape<Float, Spectrum>>
+PrimTranslator<Float, Spectrum>::BuildParticleField(
+    const ParticleFieldSpec& spec) {
+  const std::string id_str = spec.id.GetAsString();
+  const size_t count = spec.points.size();
+  if (count == 0 || !ParticleFieldSizesValid(spec, id_str)) {
+    return nullptr;
+  }
+
+  using FloatStorage = mitsuba::DynamicBuffer<dr::float32_array_t<Float>>;
+  using TensorXf32 = dr::Tensor<FloatStorage>;
+
+  mitsuba::Properties props("ellipsoidsmesh");
+  props.set("data", mitsuba::Any(TensorXf32(
+                        PackParticleField<FloatStorage>(spec, id_str),
+                        {count, kEllipsoidStride})));
+  props.set("opacities",
+            mitsuba::Any(TensorXf32(
+                dr::load<FloatStorage>(spec.opacities.cdata(), count),
+                {count, 1})));
+
+  FloatStorage sh_coeffs = LoadShCoefficients<FloatStorage>(spec);
+  const size_t sh_width = dr::width(sh_coeffs) / count;
+  props.set("sh_coeffs", mitsuba::Any(TensorXf32(std::move(sh_coeffs),
+                                                 {count, sh_width})));
+
+  mitsuba::ref<mitsuba::Shape<Float, Spectrum>> shape =
+      mitsuba::PluginManager::instance()
+          ->template create_object<mitsuba::Shape<Float, Spectrum>>(props);
+  shape->set_id(id_str);
+
+  return shape;
+}
+
+// Pushes new particle data into an existing shape instead of re-creating it.
+// The plugin only re-derives its proxy mesh when "data" changes, so opacity or
+// SH edits stay cheap.
+MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateParticleFieldInPlace(
+    mitsuba::Object* shape_obj, const ParticleFieldSpec& spec) {
+  using FloatStorage = mitsuba::DynamicBuffer<dr::float32_array_t<Float>>;
+
+  auto* shape = dynamic_cast<mitsuba::Shape<Float, Spectrum>*>(shape_obj);
+  const std::string id_str = spec.id.GetAsString();
+  if (!TF_VERIFY(shape != nullptr, "Not a shape: %s", id_str.c_str())) {
+    return;
+  }
+  if (spec.points.empty() || !ParticleFieldSizesValid(spec, id_str)) {
+    return;
+  }
+
+  TraversalCallback cb;
+  shape->traverse(&cb);
+
+  std::vector<std::string> changed;
+  if (spec.geometry_dirty) {
+    cb.set<FloatStorage>("data", PackParticleField<FloatStorage>(spec, id_str));
+    changed.emplace_back("data");
+  }
+  if (spec.attributes_dirty) {
+    cb.set<FloatStorage>("opacities",
+                         dr::load<FloatStorage>(spec.opacities.cdata(),
+                                                spec.opacities.size()));
+    changed.emplace_back("opacities");
+    cb.set<FloatStorage>("sh_coeffs", LoadShCoefficients<FloatStorage>(spec));
+    changed.emplace_back("sh_coeffs");
+  }
+
+  if (changed.empty()) {
+    return;
+  }
+  shape->parameters_changed(changed);
 }
 
 using mitsuba::Color;

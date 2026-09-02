@@ -48,6 +48,7 @@ class SceneManager {
   // Prim creation and update methods
   virtual void SyncMesh(MeshSpec spec) = 0;
   virtual void SyncCurves(CurveSpec spec) = 0;
+  virtual void SyncParticleField(ParticleFieldSpec spec) = 0;
   virtual void SyncCamera(CameraSpec spec) = 0;
   virtual void SyncLight(LightSpec spec) = 0;
   virtual void SyncMaterial(MaterialSpec spec) = 0;

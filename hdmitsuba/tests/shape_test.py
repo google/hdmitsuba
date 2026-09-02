@@ -33,24 +33,25 @@ def _set_mitsuba_variant():
 
 
 @pytest.mark.parametrize(
-    'scene_name, time',
+    'scene_name, time, expect_non_black',
     [
-        ('subdiv_cube', Usd.TimeCode.Default()),
-        ('subdiv_plane', Usd.TimeCode.Default()),
-        ('subdiv_two_quads', Usd.TimeCode.Default()),
-        ('displacement_preview_surface', Usd.TimeCode.Default()),
-        ('curve', Usd.TimeCode.Default()),
-        ('geom_subsets', Usd.TimeCode.Default()),
-        ('empty_mesh', Usd.TimeCode.Default()),
-        ('skinned_mesh', Usd.TimeCode(20)),
+        ('subdiv_cube', Usd.TimeCode.Default(), True),
+        ('subdiv_plane', Usd.TimeCode.Default(), True),
+        ('subdiv_two_quads', Usd.TimeCode.Default(), True),
+        ('displacement_preview_surface', Usd.TimeCode.Default(), True),
+        ('curve', Usd.TimeCode.Default(), True),
+        ('geom_subsets', Usd.TimeCode.Default(), True),
+        ('empty_mesh', Usd.TimeCode.Default(), False),
+        ('skinned_mesh', Usd.TimeCode(20), True),
+        ('gaussian_splats', Usd.TimeCode.Default(), True),
     ],
 )
-def test_render(scene_name: str, time: Usd.TimeCode):
+def test_render(scene_name: str, time: Usd.TimeCode, expect_non_black: bool):
   stage = Usd.Stage.Open(
       f'{test_helpers.TEST_ASSETS_PATH}/shapes/{scene_name}.usda'
   )
   test_helpers.create_render_settings(stage, resolution=(512, 512))
-  test_helpers.assert_hydra_equal_to_offline(
+  image_hd, image_usd = test_helpers.assert_hydra_equal_to_offline(
       stage,
       output_prefix=f'test_render_{scene_name}',
       atol=0.05,
@@ -58,6 +59,14 @@ def test_render(scene_name: str, time: Usd.TimeCode):
       refine_level_fallback=4,
       time=time,
   )
+
+  # Comparing the two paths against each other passes trivially when both go
+  # black, which is exactly what happens if a scene silently stops rendering
+  # (e.g. splats losing their radiance-field integrator). Assert the images
+  # carry signal for every scene that is supposed to produce some.
+  if expect_non_black:
+    assert np.max(image_hd[..., :3]) > 0.05
+    assert np.max(image_usd) > 0.05
 
 
 def test_modify_shape_transform():

@@ -103,6 +103,12 @@ class PrimTranslator {
   static mitsuba::ref<mitsuba::Shape<Float, Spectrum>> BuildCurves(
       const CurveSpec& spec, mitsuba::Object* bsdf);
 
+  static mitsuba::ref<mitsuba::Shape<Float, Spectrum>> BuildParticleField(
+      const ParticleFieldSpec& spec);
+
+  static void UpdateParticleFieldInPlace(mitsuba::Object* shape_obj,
+                                         const ParticleFieldSpec& spec);
+
  private:
   static mitsuba::Properties BuildLightProperties(const LightSpec& spec);
 
