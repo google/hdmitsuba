@@ -50,7 +50,13 @@ TraversalCallback::TraversalCallback(
 void TraversalCallback::put_value(std::string_view name, void* value,
                                   uint32_t /*flags*/,
                                   const std::type_info& type) {
-  data.insert({absl::StrCat(prefix_, name), {value, type}});
+  std::string full_name;
+  if (name.empty() && !prefix_.empty() && prefix_.back() == '.') {
+    full_name = prefix_.substr(0, prefix_.size() - 1);
+  } else {
+    full_name = absl::StrCat(prefix_, name);
+  }
+  data.insert({std::move(full_name), {value, type}});
 }
 
 /// Actual implementation for Object references [To be provided by subclass]
@@ -60,11 +66,16 @@ void TraversalCallback::put_object(std::string_view name, Object* value,
       hierarchy_.find(value) != hierarchy_.end()) {
     return;
   }
-  TraversalCallback cb(absl::StrCat(prefix_, name, "."), value, hierarchy_,
-                       recurse_objects_);
+  objects.push_back(value);
+  std::string new_prefix =
+      name.empty() ? prefix_ : absl::StrCat(prefix_, name, ".");
+  TraversalCallback cb(new_prefix, value, hierarchy_, recurse_objects_);
   value->traverse(&cb);
   for (auto& [name, value] : cb.data) {
     data.insert({std::move(name), std::move(value)});
+  }
+  for (auto* obj : cb.objects) {
+    objects.push_back(obj);
   }
 }
 

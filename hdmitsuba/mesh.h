@@ -84,6 +84,7 @@ class HdMitsubaMesh final : public HdMesh {
 
   size_t instance_count_ = 0;
   bool in_scene_ = false;
+  bool was_animated_ = false;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

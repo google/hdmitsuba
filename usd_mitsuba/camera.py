@@ -21,6 +21,7 @@ from typing import Any
 import drjit as dr
 import mitsuba as mi
 import numpy as np
+from pxr import Gf
 from pxr import Usd
 from pxr import UsdGeom
 
@@ -66,7 +67,51 @@ def usd_to_mitsuba(
     A dictionary representing the Mitsuba sensor.
   """
 
-  world_transform = _get_camera_transform(camera, time)
+  shutter_open_attr = camera.GetShutterOpenAttr()
+  shutter_close_attr = camera.GetShutterCloseAttr()
+  shutter_open = (
+      shutter_open_attr.Get(time)
+      if shutter_open_attr.HasAuthoredValue()
+      else 0.0
+  )
+  shutter_close = (
+      shutter_close_attr.Get(time)
+      if shutter_close_attr.HasAuthoredValue()
+      else 0.0
+  )
+
+  if shutter_close > shutter_open:
+    xformable = UsdGeom.Xformable(camera.GetPrim())
+    cur_t = time.GetValue() if time.IsNumeric() else 0.0
+    t_start = cur_t + shutter_open
+    t_end = cur_t + shutter_close
+    raw_samples = xformable.GetTimeSamplesInInterval(
+        Gf.Interval(t_start, t_end)
+    )
+    sample_times = sorted(
+        set([t_start, t_end] + [t for t in raw_samples if t_start <= t <= t_end])
+    )
+    keyframes = [
+        (float(st - cur_t), _get_camera_transform(camera, Usd.TimeCode(st)))
+        for st in sample_times
+    ]
+    if len(keyframes) > 2:
+      start_k, end_k = keyframes[0][0], keyframes[-1][0]
+      step = (end_k - start_k) / (len(keyframes) - 1)
+      if any(
+          abs(t - (start_k + i * step))
+          > 1e-4 * max(abs(start_k), abs(end_k), 1.0)
+          for i, (t, _) in enumerate(keyframes)
+      ):
+        keyframes = [keyframes[0], keyframes[-1]]
+
+    has_motion = any(kf[1] != keyframes[0][1] for kf in keyframes[1:])
+    if has_motion:
+      world_transform = mi.AnimatedTransform4f(keyframes)
+    else:
+      world_transform = keyframes[0][1]
+  else:
+    world_transform = _get_camera_transform(camera, time)
   aperture_x = camera.GetHorizontalApertureAttr().Get(time)
   aperture_y = camera.GetVerticalApertureAttr().Get(time)
   render_settings = get_render_settings(camera.GetPrim().GetStage())
@@ -115,6 +160,10 @@ def usd_to_mitsuba(
     if clipping_range:
       sensor_dict['near_clip'] = clipping_range[0]
       sensor_dict['far_clip'] = clipping_range[1]
+
+  if shutter_close > shutter_open:
+    sensor_dict['shutter_open'] = float(shutter_open)
+    sensor_dict['shutter_close'] = float(shutter_close)
 
   film_dict = sensor_dict['film']
   assert isinstance(film_dict, dict)

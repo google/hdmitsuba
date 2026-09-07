@@ -116,7 +116,8 @@ def convert_mesh(
     subdivision_level: int,
     time: Usd.TimeCode,
     custom_transform: Gf.Matrix4d | None = None,
-) -> dict[str, mi.Mesh]:
+    shutter_interval: tuple[float, float] | None = None,
+) -> dict[str, Any]:
   """Converts a mesh prim and returns a dictionary of Mitsuba meshes.
 
   Args:
@@ -124,9 +125,10 @@ def convert_mesh(
     subdivision_level: The subdivision level.
     time: The time code.
     custom_transform: Optional transform to use instead of local-to-world.
+    shutter_interval: Optional (shutter_open, shutter_close) for motion blur.
 
   Returns:
-    A dictionary mapping Mitsuba scene object IDs to mi.Mesh objects.
+    A dictionary mapping Mitsuba scene object IDs to mi.Mesh/instance objects.
   """
   stage = prim.GetStage()
   path = prim.GetPath()
@@ -139,12 +141,61 @@ def convert_mesh(
   mesh_data, sub_meshes = geom_lib.extract_and_process_meshes(
       stage, path, time, subdivision_level, has_displacement
   )
-  if custom_transform is not None:
+
+  # Check for rigid motion blur over the shutter interval.
+  has_motion = False
+  keyframes = []
+  if custom_transform is None and shutter_interval is not None:
+    shutter_open, shutter_close = shutter_interval
+    if shutter_close > shutter_open:
+      cur_t = time.GetValue() if time.IsNumeric() else 0.0
+      t_start = cur_t + shutter_open
+      t_end = cur_t + shutter_close
+      time_samples = {t_start, t_end}
+      curr = prim
+      while curr and not curr.IsPseudoRoot():
+        if curr.IsA(UsdGeom.Xformable):
+          raw_samples = UsdGeom.Xformable(curr).GetTimeSamplesInInterval(
+              Gf.Interval(t_start, t_end)
+          )
+          for t in raw_samples:
+            if t_start <= t <= t_end:
+              time_samples.add(t)
+        curr = curr.GetParent()
+
+      sample_times = sorted(time_samples)
+      sample_transforms = [
+          mesh_prim.ComputeLocalToWorldTransform(Usd.TimeCode(st))
+          for st in sample_times
+      ]
+      if any(mat != sample_transforms[0] for mat in sample_transforms[1:]):
+        has_motion = True
+        keyframes = [
+            (
+                float(st - cur_t),
+                mi.ScalarTransform4f(np.array(mat, dtype=np.float32).T),
+            )
+            for st, mat in zip(sample_times, sample_transforms)
+        ]
+        if len(keyframes) > 2:
+          start_k, end_k = keyframes[0][0], keyframes[-1][0]
+          step = (end_k - start_k) / (len(keyframes) - 1)
+          if any(
+              abs(t - (start_k + i * step))
+              > 1e-4 * max(abs(start_k), abs(end_k), 1.0)
+              for i, (t, _) in enumerate(keyframes)
+          ):
+            keyframes = [keyframes[0], keyframes[-1]]
+
+  if has_motion:
+    world_transform = Gf.Matrix4d(1.0)
+  elif custom_transform is not None:
     world_transform = custom_transform
   else:
     world_transform = mesh_prim.ComputeLocalToWorldTransform(time)
 
   converted_meshes = {}
+  proto_meshes = []
   for sub in sub_meshes:
     if 'points' not in sub.primvars or len(sub.primvars['points'].value) == 0:
       Tf.Warn(f"Mesh {prim.GetPath()} has no points. Skipping translation.")
@@ -160,11 +211,19 @@ def convert_mesh(
     if bsdf is not None:
       props['bsdf'] = bsdf
 
-    # MeshLightAPI takes precedence over material-driven emission.
-    if mesh_light_emitter is not None:
-      props['emitter'] = mesh_light_emitter
-    elif material_emitter is not None:
-      props['emitter'] = material_emitter
+    if has_motion:
+      if mesh_light_emitter is not None or material_emitter is not None:
+        Tf.Warn(
+            f"Mesh {prim.GetPath()} is animated/instanced but has an emitter"
+            " attached. Mitsuba does not support emitters on instances."
+            " Ignoring emitter."
+        )
+    else:
+      # MeshLightAPI takes precedence over material-driven emission.
+      if mesh_light_emitter is not None:
+        props['emitter'] = mesh_light_emitter
+      elif material_emitter is not None:
+        props['emitter'] = material_emitter
 
     if (sensor_attr := prim.GetAttribute('mitsuba:sensor')) and (
         sensor_path := sensor_attr.Get()
@@ -178,7 +237,30 @@ def convert_mesh(
     if displacement is not None:
       _apply_displacement(sub, displacement, mesh_data)
 
-    sub.primvars = geom_lib.transform_primvars(sub.primvars, world_transform)
-    converted_meshes[util.get_mitsuba_id(
-        subprim)] = _to_mitsuba_mesh(sub, props)
+    if not has_motion:
+      sub.primvars = geom_lib.transform_primvars(sub.primvars, world_transform)
+      converted_meshes[util.get_mitsuba_id(
+          subprim)] = _to_mitsuba_mesh(sub, props)
+    else:
+      proto_meshes.append(_to_mitsuba_mesh(sub, props))
+
+  if has_motion:
+    if not proto_meshes:
+      return {}
+    prim_id = util.get_mitsuba_id(prim)
+    group_id = f"proto_group_{prim_id}"
+    group_dict = {'type': 'shapegroup'}
+    for i, m in enumerate(proto_meshes):
+      group_dict[f'shape_{i}'] = m
+
+    anim_to_world = mi.AnimatedTransform4f(keyframes)
+    return {
+        group_id: group_dict,
+        prim_id: {
+            'type': 'instance',
+            'shapegroup': {'type': 'ref', 'id': group_id},
+            'to_world': anim_to_world,
+        },
+    }
+
   return converted_meshes

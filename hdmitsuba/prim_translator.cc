@@ -31,6 +31,7 @@
 #include <drjit/matrix.h>
 #include <drjit/tensor.h>
 #include <drjit/transform.h>
+#include <mitsuba/core/animated_transform.h>
 #include <mitsuba/core/bitmap.h>
 #include <mitsuba/core/config.h>
 #include <mitsuba/core/filesystem.h>
@@ -803,7 +804,18 @@ PrimTranslator<Float, Spectrum>::BuildSensor(const CameraSpec& spec,
     props = mitsuba::Properties("irradiancemeter");
   } else {
     props = mitsuba::Properties("perspective");
-    props.set("to_world", spec.transform);
+    if (spec.transform_samples.size() > 1) {
+      using AnimatedTransform4f = mitsuba::AnimatedTransform<Float, Spectrum>;
+      mitsuba::ref<AnimatedTransform4f> anim_to_world =
+          new AnimatedTransform4f(spec.transform_samples);
+      props.set("to_world", mitsuba::ref<mitsuba::Object>(anim_to_world.get()));
+    } else {
+      props.set("to_world", spec.transform);
+    }
+    if (spec.shutter_close > spec.shutter_open) {
+      props.set("shutter_open", spec.shutter_open);
+      props.set("shutter_close", spec.shutter_close);
+    }
     props.set("fov", spec.fov);
     props.set("fov_axis", "x");
     props.set("principal_point_offset_x", spec.horizontal_aperture_offset);

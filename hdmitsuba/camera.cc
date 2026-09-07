@@ -81,9 +81,39 @@ void HdMitsubaCamera::Sync(HdSceneDelegate* sceneDelegate,
             .GetWithDefault<std::string>("");
   }
 
+  float shutter_open = static_cast<float>(GetShutterOpen());
+  float shutter_close = static_cast<float>(GetShutterClose());
+
+  HdTimeSampleArray<GfMatrix4d, 4> sample_array;
+  sceneDelegate->SampleTransform(GetId(), &sample_array);
+
+  std::vector<std::pair<float, ScalarAffineTransform4f>> transform_samples;
+  if (sample_array.count > 1) {
+    bool has_motion = false;
+    for (size_t i = 1; i < sample_array.count; ++i) {
+      if (sample_array.values[i] != sample_array.values[0]) {
+        has_motion = true;
+        break;
+      }
+    }
+    if (has_motion) {
+      transform_samples.reserve(sample_array.count);
+      for (size_t i = 0; i < sample_array.count; ++i) {
+        transform_samples.emplace_back(
+            sample_array.times[i],
+            UsdToMitsubaSensorTransform(sample_array.values[i]));
+      }
+    }
+  }
+
+  bool is_animated = (transform_samples.size() > 1);
+
   CameraSpec spec;
   spec.id = GetId();
   spec.transform = UsdToMitsubaSensorTransform(GetTransform());
+  spec.shutter_open = shutter_open;
+  spec.shutter_close = shutter_close;
+  spec.transform_samples = std::move(transform_samples);
   spec.sensor_type = sensor_type;
   spec.fov = GetHorizontalFieldOfView();
   spec.horizontal_aperture_offset = GetHorizontalPrincipalPointOffset();
@@ -95,10 +125,13 @@ void HdMitsubaCamera::Sync(HdSceneDelegate* sceneDelegate,
 
   spec.needs_rebuild = !is_instantiated_;
   spec.needs_rebuild |= sensor_type != sensor_type_;
+  spec.needs_rebuild |= is_animated;
+  spec.needs_rebuild |= (is_animated != was_animated_);
   spec.needs_rebuild |= (sensor_type != "perspective" &&
                          (dirty_bits_copy & HdCamera::DirtyParams));
   is_instantiated_ = true;
   sensor_type_ = sensor_type;
+  was_animated_ = is_animated;
 
   static_cast<HdMitsubaRenderParam*>(renderParam)
       ->GetScene()

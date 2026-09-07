@@ -38,7 +38,7 @@
 #include <drjit-core/jit.h>
 #include <drjit/array_router.h>
 #include <drjit/array_traits.h>
-#include <drjit/array_traverse.h>
+#include <mitsuba/core/animated_transform.h>
 #include <mitsuba/core/bitmap.h>
 #include <mitsuba/core/config.h>
 #include <mitsuba/core/fresolver.h>
@@ -402,6 +402,7 @@ void SetTransform(
   instance->traverse(&cb);
   using Transform4f = mitsuba::Transform<mitsuba::Point<Float, 4>, true>;
   cb.set<Transform4f>("to_world", transform);
+  cb.update();
   instance->parameters_changed({"to_world"});
 }
 
@@ -563,7 +564,9 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
       }
     }
   }
-  GeometryProcessor::TransformPrimvars(final_primvars, spec.transform);
+  if (spec.transform_samples.size() <= 1) {
+    GeometryProcessor::TransformPrimvars(final_primvars, spec.transform);
+  }
   if (displaced) {
     GeometryProcessor::ComputeNormals(final_primvars, spec.face_vertex_indices,
                                       spec.face_vertex_counts);
@@ -1448,16 +1451,54 @@ class SceneModel final : public SceneManager {
           mitsuba::PluginManager::instance()->create_object<Shape>(group_props);
 
       // 3. Create Instances
-      res.instances.reserve(spec.instance_transforms.size());
-      for (size_t i = 0; i < spec.instance_transforms.size(); ++i) {
+      if (spec.transform_samples.size() > 1) {
+        using AnimatedTransform4f = mitsuba::AnimatedTransform<Float, Spectrum>;
+        std::vector<std::pair<float, ScalarAffineTransform4f>> kfs;
+        kfs.reserve(spec.transform_samples.size());
+        for (const auto& [time, mat] : spec.transform_samples) {
+          kfs.emplace_back(time, UsdToMitsubaTransform(mat));
+        }
+        if (kfs.size() > 2) {
+          float start_k = kfs.front().first;
+          float end_k = kfs.back().first;
+          float step = (end_k - start_k) / (kfs.size() - 1);
+          float tol =
+              1e-5f * std::max({end_k - start_k, std::abs(start_k),
+                                std::abs(end_k), 1.0f});
+          bool is_uniform = true;
+          for (size_t i = 0; i < kfs.size(); ++i) {
+            if (std::abs(kfs[i].first - (start_k + i * step)) > tol) {
+              is_uniform = false;
+              break;
+            }
+          }
+          if (!is_uniform) {
+            kfs = {kfs.front(), kfs.back()};
+          }
+        }
+        mitsuba::ref<AnimatedTransform4f> anim_to_world =
+            new AnimatedTransform4f(kfs);
+
         mitsuba::Properties inst_props("instance");
         inst_props.set("shapegroup", res.shapegroup.get());
         inst_props.set("to_world",
-                       UsdToMitsubaTransform(spec.instance_transforms[i]));
+                       mitsuba::ref<mitsuba::Object>(anim_to_world.get()));
         mitsuba::ref<Shape> inst =
             mitsuba::PluginManager::instance()->create_object<Shape>(
                 inst_props);
         res.instances.push_back(inst);
+      } else {
+        res.instances.reserve(spec.instance_transforms.size());
+        for (size_t i = 0; i < spec.instance_transforms.size(); ++i) {
+          mitsuba::Properties inst_props("instance");
+          inst_props.set("shapegroup", res.shapegroup.get());
+          inst_props.set("to_world",
+                         UsdToMitsubaTransform(spec.instance_transforms[i]));
+          mitsuba::ref<Shape> inst =
+              mitsuba::PluginManager::instance()->create_object<Shape>(
+                  inst_props);
+          res.instances.push_back(inst);
+        }
       }
     } else {
       // Update in place
@@ -1513,7 +1554,7 @@ class SceneModel final : public SceneManager {
     // Dynamically determine if the scene contains any instanced meshes
     bool has_instancing = false;
     for (const auto& [id, spec] : mesh_specs_) {
-      if (!spec.instance_transforms.empty()) {
+      if (!spec.instance_transforms.empty() || spec.transform_samples.size() > 1) {
         has_instancing = true;
         break;
       }
@@ -1557,11 +1598,16 @@ class SceneModel final : public SceneManager {
             dr::sync_thread();
           }
           for (size_t i = r.begin(); i != r.end(); ++i) {
-            if (work_items[i].spec->instance_transforms.empty()) {
+            if (work_items[i].spec->instance_transforms.empty() &&
+                work_items[i].spec->transform_samples.size() <= 1) {
               CommitNonInstancedMeshWork(&work_items[i], results[i]);
             } else {
               CommitInstancedMeshWork(&work_items[i], results[i]);
             }
+          }
+          if constexpr (dr::is_jit_v<Float>) {
+            dr::eval();
+            dr::sync_thread();
           }
           if constexpr (dr::is_metal_v<Float>) {
             jit_flush_thread();
@@ -1586,7 +1632,7 @@ class SceneModel final : public SceneManager {
             ++it;
           }
         }
-        if (!spec->instance_transforms.empty()) {
+        if (!spec->instance_transforms.empty() || spec->transform_samples.size() > 1) {
           rebuild |= MergeInstancedMesh(results[i], id_str);
         } else {
           rebuild |= MergeNonInstancedMesh(results[i], id_str);

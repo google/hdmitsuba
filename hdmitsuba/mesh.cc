@@ -339,18 +339,46 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
     }
   }
 
+  HdTimeSampleArray<GfMatrix4d, 4> xform_samples;
+  sceneDelegate->SampleTransform(id, &xform_samples);
+
+  std::vector<std::pair<float, GfMatrix4d>> transform_samples;
+  if (xform_samples.count > 1) {
+    bool has_motion = false;
+    for (size_t i = 1; i < xform_samples.count; ++i) {
+      if (xform_samples.values[i] != xform_samples.values[0]) {
+        has_motion = true;
+        break;
+      }
+    }
+    if (has_motion) {
+      transform_samples.reserve(xform_samples.count);
+      for (size_t i = 0; i < xform_samples.count; ++i) {
+        transform_samples.emplace_back(xform_samples.times[i],
+                                       xform_samples.values[i]);
+      }
+    }
+  }
+
+  bool is_animated = (transform_samples.size() > 1);
   bool instance_count_changed = instance_transforms.size() != instance_count_;
   instance_count_ = instance_transforms.size();
 
   bool topology_dirty =
       dirtyBits && (*dirtyBits & HdChangeTracker::DirtyTopology);
-  bool needs_rebuild = topology_dirty || instance_count_changed;
+  bool transform_dirty =
+      dirtyBits && (*dirtyBits & HdChangeTracker::DirtyTransform);
+  bool needs_rebuild = topology_dirty || instance_count_changed ||
+                       (is_animated != was_animated_) ||
+                       (is_animated && transform_dirty);
+  was_animated_ = is_animated;
 
   MeshSpec spec;
   spec.id = id;
   spec.material_ids = material_ids_;
   spec.primvars = primvars;
   spec.transform = sceneDelegate->GetTransform(id);
+  spec.transform_samples = std::move(transform_samples);
   spec.attached_sensor_id = attached_sensor_id;
   spec.emitter_spec = emitter_spec;
   spec.instance_transforms = instance_transforms;

@@ -66,6 +66,7 @@ struct MeshSpec : public BaseSpec {
   VtIntArray face_vertex_indices;
   PrimvarMap primvars;
   GfMatrix4d transform;
+  std::vector<std::pair<float, GfMatrix4d>> transform_samples;
   std::optional<SdfPath> attached_sensor_id = std::nullopt;
   std::optional<LightSpec> emitter_spec = std::nullopt;
   VtMatrix4dArray instance_transforms;
@@ -106,6 +107,9 @@ struct ParticleFieldSpec : public BaseSpec {
 struct CameraSpec : public BaseSpec {
   std::string sensor_type = "perspective";
   ScalarAffineTransform4f transform;
+  float shutter_open = 0.0f;
+  float shutter_close = 0.0f;
+  std::vector<std::pair<float, ScalarAffineTransform4f>> transform_samples;
   float fov = 90.0f;
   float horizontal_aperture_offset = 0.0f;
   float vertical_aperture_offset = 0.0f;

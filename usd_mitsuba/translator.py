@@ -230,6 +230,38 @@ def _convert_render_settings(
   return integrator_dict
 
 
+def _get_active_camera_shutter(
+    stage: Usd.Stage,
+    render_settings: UsdRender.Settings | None = None,
+    time: Usd.TimeCode = Usd.TimeCode.Default(),
+) -> tuple[float, float]:
+  """Extracts shutter_open and shutter_close from the active camera."""
+  cam_prim = None
+  if render_settings:
+    targets = render_settings.GetCameraRel().GetTargets()
+    if targets:
+      cam_prim = stage.GetPrimAtPath(targets[0])
+  if not cam_prim or not cam_prim.IsA(UsdGeom.Camera):
+    for prim in stage.Traverse():
+      if prim.IsA(UsdGeom.Camera):
+        cam_prim = prim
+        break
+  if not cam_prim:
+    return (0.0, 0.0)
+  cam = UsdGeom.Camera(cam_prim)
+  shutter_open = (
+      cam.GetShutterOpenAttr().Get(time)
+      if cam.GetShutterOpenAttr().HasAuthoredValue()
+      else 0.0
+  )
+  shutter_close = (
+      cam.GetShutterCloseAttr().Get(time)
+      if cam.GetShutterCloseAttr().HasAuthoredValue()
+      else 0.0
+  )
+  return (float(shutter_open), float(shutter_close))
+
+
 def convert_to_mitsuba(
     stage: Usd.Stage,
     subdivision_level: int = 1,
@@ -253,6 +285,7 @@ def convert_to_mitsuba(
     A Mitsuba scene dictionary.
   """
   render_settings = render_settings_lib.get_render_settings(stage)
+  shutter_interval = _get_active_camera_shutter(stage, render_settings, time)
   mi_scene_dict: dict[str, Any] = {'type': 'scene'}
   mi_scene_dict['integrator'] = _convert_render_settings(
       stage,
@@ -282,7 +315,11 @@ def convert_to_mitsuba(
       instancing.convert_point_instancer(
           prim, subdivision_level, time, mi_scene_dict)
     elif prim.IsA(UsdGeom.Mesh):
-      mi_scene_dict.update(mesh.convert_mesh(prim, subdivision_level, time))
+      mi_scene_dict.update(
+          mesh.convert_mesh(
+              prim, subdivision_level, time, shutter_interval=shutter_interval
+          )
+      )
     elif prim.IsA(UsdGeom.Cube):
       mi_scene_dict[mi_id] = _convert_cube(prim, time)
     elif prim.IsA(UsdGeom.Plane):

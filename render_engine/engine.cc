@@ -500,6 +500,8 @@ void RenderEngine::SetCamera(const SdfPath& camera) {
         absl::StrCat("Camera not found: ", camera.GetText()));
   }
 
+  scene_delegate_->SetCameraForSampling(camera);
+
   auto params = params_delegate_->GetParameter<HdxRenderTaskParams>(
       render_task_id_, HdTokens->params);
   params.camera = camera;
@@ -550,6 +552,9 @@ absl::flat_hash_map<pxr::TfToken, RenderEngine::OutputBuffer,
 RenderEngine::Render(UsdTimeCode time_code) {
   UpdateAovsAndBuffers();
   scene_delegate_->SetTime(time_code);
+  if (!camera_path_.IsEmpty()) {
+    scene_delegate_->SetCameraForSampling(camera_path_);
+  }
   do {
     TF_PY_ALLOW_THREADS_IN_SCOPE();
     engine_->Execute(&scene_delegate_->GetRenderIndex(), &tasks_);

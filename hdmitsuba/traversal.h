@@ -64,8 +64,15 @@ class TraversalCallback : public mitsuba::TraversalCallback {
     }
   }
 
+  void update() {
+    for (auto* obj : objects) {
+      obj->parameters_changed();
+    }
+  }
+
   absl::flat_hash_map<std::string, std::pair<void*, const std::type_info&>>
       data;
+  std::vector<mitsuba::Object*> objects;
 
  protected:
   void put_value(std::string_view name, void* value, uint32_t flags,
