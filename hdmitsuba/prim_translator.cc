@@ -782,6 +782,8 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateLightInPlace(
                                   AffineTransform4f(to_world.matrix));
         float scale = (color[0] + color[1] + color[2]) / 3.f;
         cb.set<Float>("scale", scale);
+        emitter->parameters_changed({"scale", "to_world"});
+        return;
       } else {
         cb.set<Color3f>("radiance.value",
                         Color3f(color[0], color[1], color[2]));

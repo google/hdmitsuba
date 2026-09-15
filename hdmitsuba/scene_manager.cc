@@ -1542,13 +1542,6 @@ class SceneModel final : public SceneManager {
         [&](drjit::blocked_range<size_t> r) {
           JitScopeGuard<Float> jit_guard;
 
-          // Make sure any prior pending JIT compilations are flushed here.
-          // Otherwise, we may accumulate too much pending JIT state and
-          // exhaust stack memory during LLVM JIT compilation.
-          if constexpr (dr::is_jit_v<Float>) {
-            dr::eval();
-            dr::sync_thread();
-          }
           for (size_t i = r.begin(); i != r.end(); ++i) {
             if (work_items[i].spec->instance_transforms.empty()) {
               CommitNonInstancedMeshWork(&work_items[i], results[i]);
@@ -1556,8 +1549,11 @@ class SceneModel final : public SceneManager {
               CommitInstancedMeshWork(&work_items[i], results[i]);
             }
           }
-          if constexpr (dr::is_metal_v<Float>) {
-            jit_flush_thread();
+          // Make sure any pending JIT compilations and scatter side-effects
+          // (e.g. from Mesh::from_fields) are flushed before exiting the worker scope.
+          if constexpr (dr::is_jit_v<Float>) {
+            dr::eval();
+            dr::sync_thread();
           }
         });
 
@@ -1826,6 +1822,9 @@ class SceneModel final : public SceneManager {
                             JitScopeGuard<Float> jit_guard;
                             loaded_textures[i] =
                                 PrimTranslator::LoadTexture(texture_list[i]);
+                          }
+                          if constexpr (dr::is_metal_v<Float>) {
+                            jit_flush_thread();
                           }
                         });
     for (size_t i = 0; i < texture_list.size(); ++i) {
