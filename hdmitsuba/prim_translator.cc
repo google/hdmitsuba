@@ -97,9 +97,9 @@ mitsuba::ref<mitsuba::Bitmap> LoadBitmap(const std::string& path) {
   if (std::shared_ptr<ArAsset> asset =
           ArGetResolver().OpenAsset(ArResolvedPath(path))) {
     if (std::shared_ptr<const char> buffer = asset->GetBuffer()) {
-      mitsuba::MemoryStream stream(const_cast<char*>(buffer.get()),
-                                   asset->GetSize());
-      return new mitsuba::Bitmap(&stream);
+      mitsuba::ref<mitsuba::MemoryStream> stream = new mitsuba::MemoryStream(
+          const_cast<char*>(buffer.get()), asset->GetSize());
+      return new mitsuba::Bitmap(stream.get());
     }
   }
   return new mitsuba::Bitmap(path);
