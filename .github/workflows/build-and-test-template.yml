@@ -91,7 +91,7 @@ jobs:
         else
           # Use Ninja on Linux and macOS
           if [ "$RUNNER_OS" = "Linux" ]; then
-            CMAKE_FLAGS="$CMAKE_FLAGS -DMITSUBA_NATIVE_FLAGS=-march=haswell -DDRJIT_NATIVE_FLAGS=-march=haswell -DDRJIT_CORE_NATIVE_FLAGS=-march=haswell -DNANOTHREAD_NATIVE_FLAGS=-march=haswell"
+            CMAKE_FLAGS="$CMAKE_FLAGS -DMI_NATIVE_FLAGS=-march=haswell"
           fi
           CC="$COMPILER_CC" CXX="$COMPILER_CXX" cmake -B build -G Ninja \
             $CMAKE_FLAGS
