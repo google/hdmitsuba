@@ -1160,6 +1160,20 @@ Storage LoadShCoefficients(const ParticleFieldSpec& spec) {
   return dr::full<Storage>(1.0f, count * 3);
 }
 
+// Minimum opacity threshold when adaptive extent clamping is active.
+// In Mitsuba's EllipsoidsData::compute_extents(), extents are scaled by
+// sqrt(2 * log(opacity / 0.01)). Values <= 0.01 produce 0 or NaN extents, which
+// create degenerate or NaN triangles in the BVH. Clamping >= 0.0101 ensures a
+// positive minimum extent (~0.141 sigma) while shrinking low-opacity shells.
+constexpr float kMinAdaptiveClampingOpacity = 0.0101f;
+
+template <typename Storage>
+Storage LoadOpacities(const ParticleFieldSpec& spec) {
+  const size_t count = spec.opacities.size();
+  Storage loaded = dr::load<Storage>(spec.opacities.cdata(), count);
+  return dr::maximum(std::move(loaded), kMinAdaptiveClampingOpacity);
+}
+
 }  // namespace
 
 MI_VARIANT mitsuba::ref<mitsuba::Shape<Float, Spectrum>>
@@ -1175,13 +1189,13 @@ PrimTranslator<Float, Spectrum>::BuildParticleField(
   using TensorXf32 = dr::Tensor<FloatStorage>;
 
   mitsuba::Properties props("ellipsoidsmesh");
+  props.set("extent_adaptive_clamping", true);
   props.set("data", mitsuba::Any(TensorXf32(
                         PackParticleField<FloatStorage>(spec, id_str),
                         {count, kEllipsoidStride})));
   props.set("opacities",
-            mitsuba::Any(TensorXf32(
-                dr::load<FloatStorage>(spec.opacities.cdata(), count),
-                {count, 1})));
+            mitsuba::Any(TensorXf32(LoadOpacities<FloatStorage>(spec),
+                                    {count, 1})));
 
   FloatStorage sh_coeffs = LoadShCoefficients<FloatStorage>(spec);
   const size_t sh_width = dr::width(sh_coeffs) / count;
@@ -1197,8 +1211,8 @@ PrimTranslator<Float, Spectrum>::BuildParticleField(
 }
 
 // Pushes new particle data into an existing shape instead of re-creating it.
-// The plugin only re-derives its proxy mesh when "data" changes, so opacity or
-// SH edits stay cheap.
+// Pure SH edits stay cheap without rebuilding the proxy mesh, while opacity
+// edits trigger a proxy mesh recomputation when adaptive clamping is active.
 MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateParticleFieldInPlace(
     mitsuba::Object* shape_obj, const ParticleFieldSpec& spec) {
   using FloatStorage = mitsuba::DynamicBuffer<dr::float32_array_t<Float>>;
@@ -1220,11 +1234,17 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateParticleFieldInPlace(
     cb.set<FloatStorage>("data", PackParticleField<FloatStorage>(spec, id_str));
     changed.emplace_back("data");
   }
-  if (spec.attributes_dirty) {
-    cb.set<FloatStorage>("opacities",
-                         dr::load<FloatStorage>(spec.opacities.cdata(),
-                                                spec.opacities.size()));
+  if (spec.opacities_dirty) {
+    cb.set<FloatStorage>("opacities", LoadOpacities<FloatStorage>(spec));
     changed.emplace_back("opacities");
+    // Mitsuba's EllipsoidsMesh only calls recompute_mesh() when "data" is in
+    // `changed`. When adaptive extent clamping is active, proxy shell extents
+    // depend on opacities, so include "data" to trigger mesh recomputation.
+    if (!spec.geometry_dirty) {
+      changed.emplace_back("data");
+    }
+  }
+  if (spec.sh_dirty) {
     cb.set<FloatStorage>("sh_coeffs", LoadShCoefficients<FloatStorage>(spec));
     changed.emplace_back("sh_coeffs");
   }

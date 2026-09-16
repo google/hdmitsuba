@@ -119,15 +119,16 @@ def convert_gaussian_splats(
   # Per-splat scales only carry the uniform part of the prim transform.
   scales = mi.TensorXf(np.asarray(scales, dtype=np.float32)) * scale_factor
 
+  opacities_np = np.maximum(np.asarray(opacities, dtype=np.float32), 0.0101)
+
   # Shape dict for Mitsuba ellipsoidsmesh primitive
   mi_splats = {
       'type': 'ellipsoidsmesh',
+      'extent_adaptive_clamping': True,
       'centers': mi.TensorXf(dr.ravel(centers), shape=(num_splats, 3)),
       'scales': scales,
       'quaternions': mi.TensorXf(dr.ravel(world_quats), shape=(num_splats, 4)),
-      'opacities': mi.TensorXf(
-          np.asarray(opacities, dtype=np.float32).reshape((num_splats, 1))
-      ),
+      'opacities': mi.TensorXf(opacities_np.reshape((num_splats, 1))),
   }
 
   # SH coeffs (optional, uniform white degree-0 fallback if missing or invalid)

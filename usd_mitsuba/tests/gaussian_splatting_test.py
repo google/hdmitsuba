@@ -58,6 +58,7 @@ def test_convert_gaussian_splats():
   assert splat_id in res
   splats_dict = res[splat_id]
   assert splats_dict['type'] == 'ellipsoidsmesh'
+  assert splats_dict['extent_adaptive_clamping'] is True
   assert np.allclose(np.array(splats_dict['centers']), [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
   assert np.allclose(np.array(splats_dict['scales']), [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
   assert np.allclose(np.array(splats_dict['opacities']), [[0.8], [0.9]])
@@ -66,3 +67,39 @@ def test_convert_gaussian_splats():
   # Test full stage conversion
   scene_dict = translator.convert_to_mitsuba(stage)
   assert splat_id in scene_dict
+
+
+def test_convert_gaussian_splats_adaptive_clamping_and_opacity_floor():
+  stage = Usd.Stage.CreateInMemory()
+  prim = stage.DefinePrim('/World/Splat', 'ParticleField3DGaussianSplat')
+  usd_splat = UsdVol.ParticleField3DGaussianSplat(prim)
+
+  positions = Vt.Vec3fArray([
+      Gf.Vec3f(0.0, 0.0, 0.0),
+      Gf.Vec3f(1.0, 0.0, 0.0),
+      Gf.Vec3f(2.0, 0.0, 0.0),
+      Gf.Vec3f(3.0, 0.0, 0.0),
+  ])
+  scales = Vt.Vec3fArray([Gf.Vec3f(0.1, 0.1, 0.1)] * 4)
+  orientations = Vt.QuatfArray([Gf.Quatf(1.0, 0, 0, 0)] * 4)
+  opacities = Vt.FloatArray([0.0, 0.005, 0.01, 0.8])
+
+  usd_splat.GetPositionsAttr().Set(positions)
+  usd_splat.GetScalesAttr().Set(scales)
+  usd_splat.GetOrientationsAttr().Set(orientations)
+  usd_splat.GetOpacitiesAttr().Set(opacities)
+
+  splat_id = util.get_mitsuba_id(prim)
+  res = gaussian_splatting.convert_gaussian_splats(prim, Usd.TimeCode.Default())
+  splats_dict = res[splat_id]
+  assert splats_dict['extent_adaptive_clamping'] is True
+  assert np.allclose(
+      np.array(splats_dict['opacities']),
+      [[0.0101], [0.0101], [0.0101], [0.8]],
+  )
+
+  # Verify loading into Mitsuba produces no NaNs in mesh vertices
+  shape = mi.load_dict(splats_dict)
+  params = mi.traverse(shape)
+  assert not np.any(np.isnan(np.array(params['data'])))
+

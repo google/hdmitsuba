@@ -90,3 +90,17 @@ def test_gaussian_splats_dynamic_transform_primvar_mutation():
       image_hd_modified[..., :3], image_usd_modified, atol=0.05
   )
   assert np.mean(np.abs(image_hd_modified[..., :3] - image_hd_initial[..., :3])) > 0.01
+
+  # Modification 5: Pure opacity-only mutation with near-zero/sub-threshold
+  # values (exercising in-place opacity clamping and proxy mesh recomputation
+  # when geometry_dirty is False).
+  mixed_opacities = np.linspace(0.0, 0.9, len(sh_coeffs), dtype=np.float32)
+  splats_prim.GetOpacitiesAttr().Set(Vt.FloatArray.FromNumpy(mixed_opacities))
+
+  image_hd_opacity_only = engine.render()['color']
+  scene_opacity_only = mi.load_dict(usd_mitsuba.convert_to_mitsuba(stage))
+  image_usd_opacity_only = np.array(mi.render(scene_opacity_only, spp=128))
+
+  test_helpers.robust_assert_close(
+      image_hd_opacity_only[..., :3], image_usd_opacity_only, atol=0.05
+  )

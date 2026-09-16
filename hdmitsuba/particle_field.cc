@@ -93,10 +93,12 @@ void HdMitsubaParticleField::Sync(HdSceneDelegate* sceneDelegate,
   // for being invisible still has valid cached primvars.
   const bool refetch_all = points_.empty();
 
-  // "geometry" is what the plugin packs into its "data" parameter; the rest
-  // are plain attributes it can swap without re-deriving its proxy mesh.
+  // "geometry" is what the plugin packs into its "data" parameter; SH coeffs
+  // can be swapped without re-deriving the proxy mesh, while opacities trigger
+  // proxy mesh recomputation when adaptive extent clamping is active.
   bool geometry_dirty = false;
-  bool attributes_dirty = false;
+  bool opacities_dirty = false;
+  bool sh_dirty = false;
 
   if (HdChangeTracker::IsTransformDirty(*dirtyBits, id)) {
     if (auto xform_schema = HdXformSchema::GetFromParent(prim_source)) {
@@ -136,9 +138,9 @@ void HdMitsubaParticleField::Sync(HdSceneDelegate* sceneDelegate,
     fetch_primvar(UsdVolTokens->positions, points_, geometry_dirty);
     fetch_primvar(UsdVolTokens->scales, scales_, geometry_dirty);
     fetch_primvar(UsdVolTokens->orientations, orientations_, geometry_dirty);
-    fetch_primvar(UsdVolTokens->opacities, opacities_, attributes_dirty);
+    fetch_primvar(UsdVolTokens->opacities, opacities_, opacities_dirty);
     fetch_primvar(UsdVolTokens->radianceSphericalHarmonicsCoefficients,
-                  sh_coeffs_, attributes_dirty);
+                  sh_coeffs_, sh_dirty);
 
     if (refetch_all ||
         HdChangeTracker::IsPrimvarDirty(
@@ -149,14 +151,14 @@ void HdMitsubaParticleField::Sync(HdSceneDelegate* sceneDelegate,
           const int degree = pv.GetPrimvarValue()->GetValue(0.0f).Get<int>();
           if (refetch_all || degree != sh_degree_) {
             sh_degree_ = degree;
-            attributes_dirty = true;
+            sh_dirty = true;
           }
         }
       }
     }
   }
 
-  if (in_scene_ && !geometry_dirty && !attributes_dirty) {
+  if (in_scene_ && !geometry_dirty && !opacities_dirty && !sh_dirty) {
     *dirtyBits = HdChangeTracker::Clean;
     return;
   }
@@ -183,7 +185,8 @@ void HdMitsubaParticleField::Sync(HdSceneDelegate* sceneDelegate,
   spec.sh_degree = sh_degree_;
   spec.needs_rebuild = needs_rebuild;
   spec.geometry_dirty = geometry_dirty;
-  spec.attributes_dirty = attributes_dirty;
+  spec.opacities_dirty = opacities_dirty;
+  spec.sh_dirty = sh_dirty;
   sceneManager->SyncParticleField(std::move(spec));
   in_scene_ = true;
 

@@ -702,7 +702,8 @@ class SceneModel final : public SceneManager {
       // arriving before the next commit cannot drop an update.
       spec.needs_rebuild |= it->second.needs_rebuild;
       spec.geometry_dirty |= it->second.geometry_dirty;
-      spec.attributes_dirty |= it->second.attributes_dirty;
+      spec.opacities_dirty |= it->second.opacities_dirty;
+      spec.sh_dirty |= it->second.sh_dirty;
     }
     particle_field_specs_[spec.id] = std::move(spec);
     reset_progressive_ = true;
@@ -1183,7 +1184,7 @@ class SceneModel final : public SceneManager {
       }
       bool has_in_place_update = false;
       if constexpr (std::is_same_v<SpecType, ParticleFieldSpec>) {
-        has_in_place_update = spec.geometry_dirty || spec.attributes_dirty;
+        has_in_place_update = spec.geometry_dirty || spec.attributes_dirty();
       }
       if (spec.needs_rebuild || spec.dirty_bits != 0 || needs_bsdf_update ||
           has_in_place_update) {
@@ -1645,7 +1646,7 @@ class SceneModel final : public SceneManager {
               .Msg("UpdateParticleFieldInPlace: %s (geometry: %d, "
                    "attributes: %d)\n",
                    spec->id.GetText(), spec->geometry_dirty,
-                   spec->attributes_dirty);
+                   spec->attributes_dirty());
           PrimTranslator::UpdateParticleFieldInPlace(it->second.get(), *spec);
         },
         [&](ParticleFieldSpec* spec, mitsuba::ref<Shape>& res) {

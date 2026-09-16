@@ -90,16 +90,21 @@ struct ParticleFieldSpec : public BaseSpec {
   VtFloatArray opacities;
   VtVec3fArray sh_coeffs;
   int sh_degree = 0;
-  // Which half of the plugin's parameters changed since the last sync. Only
-  // consulted when `needs_rebuild` is false, i.e. when the particle count and
-  // SH layout are unchanged and the shape can be updated in place.
+  // Which parts of the plugin's parameters changed since the last sync. Only
+  // consulted when `needs_rebuild` is false, i.e. when the particle count, SH
+  // layout, and adaptive clamping setting are unchanged and the shape can be
+  // updated in place.
   bool geometry_dirty = true;
-  bool attributes_dirty = true;
+  bool opacities_dirty = true;
+  bool sh_dirty = true;
+
+  bool attributes_dirty() const { return opacities_dirty || sh_dirty; }
 
   void MarkClean() {
     BaseSpec::MarkClean();
     geometry_dirty = false;
-    attributes_dirty = false;
+    opacities_dirty = false;
+    sh_dirty = false;
   }
 };
 
