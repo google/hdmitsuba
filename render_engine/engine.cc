@@ -56,11 +56,12 @@
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
 #include <pxr/usd/usd/common.h>
+#include <pxr/usd/usd/primRange.h>
 #include <pxr/usd/usd/timeCode.h>
 #include <pxr/usd/usdGeom/camera.h>
 #include <pxr/usd/usdRender/settings.h>
 #include <pxr/usd/usdRender/spec.h>
-#include <pxr/usdImaging/usdImaging/delegate.h>
+#include <pxr/usdImaging/usdImaging/sceneIndices.h>
 
 #include "absl/strings/str_cat.h"
 
@@ -415,16 +416,21 @@ void RenderEngine::Configure(
     width_ = resolved_width;
 
     if (rebuild_delegate) {
-      hydra_delegate_id_ = hydra_delegate_id;
+      // NOTE: hydra_delegate_id_ is deliberately *not* committed here. If
+      // construction below throws, a retry with the same id must still take
+      // the rebuild path rather than reusing half-torn-down state.
 
       // Clean up any previous state in reverse order.
+      tasks_.clear();
       params_delegate_ = nullptr;
-      scene_delegate_ = nullptr;
+      render_index_.reset();
+      display_style_scene_index_ = nullptr;
+      stage_scene_index_ = nullptr;
       render_delegate_ = nullptr;
       aov_ids_.clear();
       render_buffer_ids_.clear();
 
-      // Create render delegate, scene delegate, and params delegate.
+      // Create render delegate, scene index chain, and params delegate.
       renderer_plugin_ =
           HdRendererPluginRegistry::GetInstance().GetRendererPlugin(
               hydra_delegate_id);
@@ -439,19 +445,30 @@ void RenderEngine::Configure(
       if (!render_index_) {
         throw std::runtime_error("Failed to create render index.");
       }
-      scene_delegate_ = std::make_unique<UsdImagingDelegate>(
-          render_index_.get(), SdfPath::AbsoluteRootPath());
-      scene_delegate_->Populate(stage_->GetPseudoRoot());
+      UsdImagingCreateSceneIndicesInfo create_info;
+      create_info.stage = stage_;
+      const UsdImagingSceneIndices scene_indices =
+          UsdImagingCreateSceneIndices(create_info);
+      stage_scene_index_ = scene_indices.stageSceneIndex;
+      display_style_scene_index_ =
+          HdsiLegacyDisplayStyleOverrideSceneIndex::New(
+              scene_indices.finalSceneIndex);
+      render_index_->InsertSceneIndex(display_style_scene_index_,
+                                      SdfPath::AbsoluteRootPath());
       params_delegate_ = std::make_unique<EngineSceneDelegate>(
           render_index_.get(), SdfPath{"/task_controller"});
+      // Commit the resolved state only once everything above succeeded.
+      hydra_delegate_id_ = hydra_delegate_id;
       settings_map_ = settings_map;
     }
   }
 
-  if (refine_level_fallback.has_value() &&
-      refine_level_fallback.value() !=
-          scene_delegate_->GetRefineLevelFallback()) {
-    scene_delegate_->SetRefineLevelFallback(refine_level_fallback.value());
+  // Applied unconditionally: an unset `refine_level_fallback` resets the
+  // fallback to the schema default rather than preserving the previously
+  // configured value, so that Configure() fully describes the engine state.
+  // (No-op inside the scene index when the value is unchanged.)
+  if (TF_VERIFY(display_style_scene_index_)) {
+    display_style_scene_index_->SetRefineLevelFallback(refine_level_fallback);
   }
 
   if (cache_invalid) {
@@ -549,10 +566,15 @@ absl::flat_hash_map<pxr::TfToken, RenderEngine::OutputBuffer,
                     TfToken::HashFunctor>
 RenderEngine::Render(UsdTimeCode time_code) {
   UpdateAovsAndBuffers();
-  scene_delegate_->SetTime(time_code);
+  // Pending stage edits must be absorbed *before* setting the time, so that
+  // SetTime operates on an up-to-date prim set. This matches the ordering in
+  // UsdImagingGLEngine::_PreSetTime; reversing it applies the time against
+  // prims that have not yet seen pending resyncs/removals.
+  stage_scene_index_->ApplyPendingUpdates();
+  stage_scene_index_->SetTime(time_code);
   do {
     TF_PY_ALLOW_THREADS_IN_SCOPE();
-    engine_->Execute(&scene_delegate_->GetRenderIndex(), &tasks_);
+    engine_->Execute(render_index_.get(), &tasks_);
   } while (!IsConverged(tasks_));
 
   for (size_t i = 0; i < render_buffer_ids_.size(); i++) {

@@ -116,6 +116,53 @@ HdMaterialNetwork2 ConvertMaterialNetwork(
   return network;
 }
 
+// Selects the material network to use for this renderer.
+//
+// Under scene index population the material data source carries one network per
+// render context and choosing between them is the renderer's job:
+// HdMaterialSchema::GetMaterialNetwork(context) performs no fallback.
+//
+// NOTE: this deliberately *merges* the universal network with the renderer
+// specific ones rather than taking the first matching context, which is what
+// hdPrman/hdStorm do. Renderer-specific networks here are commonly *partial*
+// overrides: e.g. test_assets/shapes/displacement_preview_surface.usda authors
+// a universal `outputs:surface` + `outputs:displacement` and overrides only
+// `outputs:mitsuba:displacement`. First-match-wins would silently drop that
+// material's surface terminal. Merging per terminal keeps the universal network
+// as the base and lets higher-priority contexts override individual terminals.
+// Covered by shape_test.py::test_render[displacement_preview_surface-*].
+HdMaterialNetwork2 ExtractMaterialNetwork(
+    const HdMaterialSchema& material_schema,
+    const TfTokenVector& render_contexts) {
+  HdMaterialNetwork2 result;
+  auto merge_network = [&result](const HdMaterialNetworkSchema& schema) {
+    if (!schema.IsDefined()) {
+      return;
+    }
+    HdMaterialNetwork2 net = ConvertMaterialNetwork(schema);
+    if (result.nodes.empty() && result.terminals.empty()) {
+      result = std::move(net);
+      return;
+    }
+    for (auto& [path, node] : net.nodes) {
+      result.nodes[path] = std::move(node);
+    }
+    for (auto& [name, conn] : net.terminals) {
+      result.terminals[name] = std::move(conn);
+    }
+  };
+
+  // Universal network first, then contexts in reverse priority order, so that
+  // the highest-priority context is merged last and wins per terminal.
+  merge_network(material_schema.GetMaterialNetwork());
+  for (auto it = render_contexts.rbegin(); it != render_contexts.rend(); ++it) {
+    if (!it->IsEmpty()) {
+      merge_network(material_schema.GetMaterialNetwork(*it));
+    }
+  }
+  return result;
+}
+
 }  // namespace
 
 HdMitsubaMaterial::HdMitsubaMaterial(const SdfPath& id) : HdMaterial(id) {}
@@ -139,19 +186,19 @@ void HdMitsubaMaterial::Sync(HdSceneDelegate* scene_delegate,
   }
   HdMaterialSchema materialSchema =
       HdMaterialSchema::GetFromParent(scene_index->GetPrim(id).dataSource);
-  if (!materialSchema.IsDefined()) {
-    return;
-  }
-  HdMaterialNetworkSchema networkSchema = materialSchema.GetMaterialNetwork();
-  if (!networkSchema.IsDefined()) {
-    return;
+  HdMaterialNetwork2 network2;
+  if (materialSchema.IsDefined()) {
+    network2 = ExtractMaterialNetwork(materialSchema,
+                                      scene_delegate->GetRenderIndex()
+                                          .GetRenderDelegate()
+                                          ->GetMaterialRenderContexts());
   }
 
   SceneManager* scene_manager =
       static_cast<HdMitsubaRenderParam*>(render_param)->GetScene();
   MaterialSpec spec;
   spec.id = id;
-  spec.network2 = ConvertMaterialNetwork(networkSchema);
+  spec.network2 = std::move(network2);
   spec.needs_rebuild = true;
   scene_manager->SyncMaterial(std::move(spec));
   *dirty_bits = HdChangeTracker::Clean;

@@ -57,11 +57,15 @@ target_link_libraries(hdMitsuba
     arch
     gf
     hd
+    hdsi
     hdx
     pxOsd
     sdf
     tf
     usdGeom
+    usdImaging
+    usdLux
+    usdShade
     usdVol
     vt
   PRIVATE

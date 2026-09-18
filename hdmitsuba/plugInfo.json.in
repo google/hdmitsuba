@@ -9,6 +9,25 @@
                         ],
                         "displayName": "Mitsuba",
                         "priority": 99
+                    },
+                    "HdMitsuba_ImplicitSurfaceSceneIndexPlugin": {
+                        "bases": [
+                            "HdSceneIndexPlugin"
+                        ],
+                        "loadWithRenderer": "Mitsuba",
+                        # `priority` and `displayName` are required by
+                        # HfPluginRegistry: without them the type is skipped as
+                        # "information incomplete" and this plugin silently
+                        # never loads.
+                        "priority": 0,
+                        "displayName": "Scene Index to turn implicit surfaces into prims suitable for HdMitsuba"
+                    },
+                    "HdMitsuba_APISchemaAdapter": {
+                        "bases": [
+                            "UsdImagingAPISchemaAdapter"
+                        ],
+                        "displayName": "Supplies mitsuba:sensor and fills UsdImaging invalidation gaps for HdMitsuba",
+                        "apiSchemaName": ""
                     }
                 }
             },

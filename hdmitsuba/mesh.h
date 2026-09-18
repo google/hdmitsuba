@@ -33,7 +33,9 @@
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-#define HDMITSUBA_MESH_TOKENS ((subdivision_level, "mitsuba:subdivision_level"))
+#define HDMITSUBA_MESH_TOKENS                   \
+  ((subdivision_level, "mitsuba:subdivision_level"))( \
+      (sensor, "mitsuba:sensor"))
 
 TF_DECLARE_PUBLIC_TOKENS(HdMitsubaMeshTokens, HDMITSUBA_MESH_TOKENS);
 
@@ -72,8 +74,8 @@ class HdMitsubaMesh final : public HdMesh {
   PrimvarMap primvars_;
 
   void SyncTopology(HdSceneDelegate* sceneDelegate);
-  PrimvarMap SyncPrimvars(HdSceneDelegate* sceneDelegate,
-                          HdDirtyBits* dirtyBits);
+  // Refreshes `primvars_` in place; callers read the member directly.
+  void SyncPrimvars(HdSceneDelegate* sceneDelegate, HdDirtyBits* dirtyBits);
   void UpdateScene(HdSceneDelegate* sceneDelegate, HdRenderParam* renderParam,
                    const PrimvarMap& final_primvars, HdDirtyBits* dirtyBits);
 

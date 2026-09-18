@@ -173,3 +173,121 @@ def test_invalid_camera_throws():
     pytest.skip("No renderers registered")
   with pytest.raises(RuntimeError, match="No camera found"):
     engine.configure(hydra_delegate_id=renderers[0])
+
+
+_CUBE_POINTS = [
+    (-1, -1, -1),
+    (1, -1, -1),
+    (1, 1, -1),
+    (-1, 1, -1),
+    (-1, -1, 1),
+    (1, -1, 1),
+    (1, 1, 1),
+    (-1, 1, 1),
+]
+_CUBE_FACE_VERTEX_INDICES = [
+    0, 3, 2, 1,
+    4, 5, 6, 7,
+    0, 1, 5, 4,
+    2, 3, 7, 6,
+    0, 4, 7, 3,
+    1, 2, 6, 5,
+]
+
+
+def _create_subdiv_cube_stage() -> Usd.Stage:
+  """A stage whose only geometry is a catmullClark cube."""
+  stage = _create_stage()
+  stage.RemovePrim('/mesh')
+  cube = UsdGeom.Mesh.Define(stage, '/cube')
+  cube.GetSubdivisionSchemeAttr().Set(UsdGeom.Tokens.catmullClark)
+  cube.GetPointsAttr().Set(_CUBE_POINTS)
+  cube.GetFaceVertexCountsAttr().Set([4] * 6)
+  cube.GetFaceVertexIndicesAttr().Set(_CUBE_FACE_VERTEX_INDICES)
+  return stage
+
+
+def _render_at_refine_level(stage: Usd.Stage, refine_level: int | None):
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      width=64,
+      refine_level_fallback=refine_level,
+  )
+  return engine.render()['color']
+
+
+def test_refine_level_fallback_reconfigure():
+  """Reconfiguring the refine level must match configuring it from scratch.
+
+  Asserting against a freshly configured engine (rather than merely 'the image
+  changed') is what catches primvars going stale against a re-refined topology
+  after a display style change.
+  """
+  _skip_missing_delegate('HdMitsubaRendererPlugin')
+
+  # Ground truth: separate engines, each configured once.
+  img_coarse_fresh = _render_at_refine_level(_create_subdiv_cube_stage(), 0)
+  img_refined_fresh = _render_at_refine_level(_create_subdiv_cube_stage(), 2)
+  # Sanity check that refinement is observable at all, otherwise the
+  # equivalence assertions below would be vacuous.
+  assert (
+      np.mean(np.abs(img_refined_fresh[..., :3] - img_coarse_fresh[..., :3]))
+      > 0.005
+  )
+
+  engine = usd_render.RenderEngine(_create_subdiv_cube_stage())
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      width=64,
+      refine_level_fallback=0,
+  )
+  np.testing.assert_allclose(engine.render()['color'], img_coarse_fresh,
+                             atol=1e-4)
+
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      width=64,
+      refine_level_fallback=2,
+  )
+  np.testing.assert_allclose(engine.render()['color'], img_refined_fresh,
+                             atol=1e-4)
+
+  # An unset refine_level_fallback resets to the schema default rather than
+  # preserving the previously configured value: configure() fully describes
+  # the engine state.
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      width=64,
+      refine_level_fallback=None,
+  )
+  np.testing.assert_allclose(engine.render()['color'], img_coarse_fresh,
+                             atol=1e-4)
+
+
+def test_implicit_surface_scene_index_plugin():
+  """An implicit surface renders, i.e. the renderer's scene index plugin ran.
+
+  hdMitsuba only supports mesh rprims, so a UsdGeom.Sphere is only visible if
+  HdMitsuba_ImplicitSurfaceSceneIndexPlugin was discovered via plugInfo and
+  appended to the render index chain for this renderer. This is the end-to-end
+  check that renderer-registered scene index plugins are picked up.
+  """
+  _skip_missing_delegate('HdMitsubaRendererPlugin')
+
+  empty_stage = _create_stage()
+  empty_stage.RemovePrim('/mesh')
+  engine = usd_render.RenderEngine(empty_stage)
+  engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin', width=64)
+  img_empty = engine.render()['color']
+
+  sphere_stage = _create_stage()
+  sphere_stage.RemovePrim('/mesh')
+  UsdGeom.Sphere.Define(sphere_stage, '/sphere').GetRadiusAttr().Set(1.5)
+  engine = usd_render.RenderEngine(sphere_stage)
+  engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin', width=64)
+  img_sphere = engine.render()['color']
+
+  assert np.mean(np.abs(img_sphere[..., :3] - img_empty[..., :3])) > 0.01
+
+

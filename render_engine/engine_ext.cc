@@ -172,7 +172,11 @@ NB_MODULE(usd_render, m) {
           nb::arg("width") = nb::none(), nb::arg("camera_path") = nb::none(),
           nb::arg("refine_level_fallback") = nb::none(),
           nb::arg("overrides") = nb::none(),
-          "Configures the Hydra rendering pipeline.")
+          "Configures the Hydra rendering pipeline.\n\n"
+          "Each call fully describes the engine state: leaving "
+          "`refine_level_fallback` unset resets the refinement fallback to the "
+          "schema default rather than preserving a value set by a previous "
+          "call.")
       .def(
           "render",
           [](hdmitsuba::RenderEngine& engine,
