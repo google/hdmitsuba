@@ -835,6 +835,7 @@ class SceneModel final : public SceneManager {
     }
     pass_state.aov_integrator_keys = absl::StrJoin(aov_strings, ",");
     pass_state.aov_integrator = nullptr;
+    reset_progressive_ = true;
     absl::MutexLock lock(aov_states_mutex_);
     pass_aov_states_[render_pass] = std::move(pass_state);
   }
@@ -914,6 +915,7 @@ class SceneModel final : public SceneManager {
     if (film_changed) {
       sensor->parameters_changed();
       if (frozen_render_) frozen_render_->Clear(); // Invalidate cache on resize
+      reset_progressive_ = true;
     }
 
     if (!integrator_) {
