@@ -169,17 +169,12 @@ void HdMitsubaMaterial::Sync(HdSceneDelegate* scene_delegate,
   }
   HdMaterialSchema materialSchema =
       HdMaterialSchema::GetFromParent(scene_index->GetPrim(id).dataSource);
-  if (!materialSchema.IsDefined()) {
-    *dirty_bits = HdChangeTracker::Clean;
-    return;
-  }
-  HdMaterialNetwork2 network2 =
-      ExtractMaterialNetwork(materialSchema, scene_delegate->GetRenderIndex()
-                                                 .GetRenderDelegate()
-                                                 ->GetMaterialRenderContexts());
-  if (network2.nodes.empty() && network2.terminals.empty()) {
-    *dirty_bits = HdChangeTracker::Clean;
-    return;
+  HdMaterialNetwork2 network2;
+  if (materialSchema.IsDefined()) {
+    network2 = ExtractMaterialNetwork(materialSchema,
+                                      scene_delegate->GetRenderIndex()
+                                          .GetRenderDelegate()
+                                          ->GetMaterialRenderContexts());
   }
 
   SceneManager* scene_manager =
