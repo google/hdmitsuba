@@ -33,7 +33,9 @@
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-#define HDMITSUBA_MESH_TOKENS ((subdivision_level, "mitsuba:subdivision_level"))
+#define HDMITSUBA_MESH_TOKENS                   \
+  ((subdivision_level, "mitsuba:subdivision_level"))( \
+      (sensor, "mitsuba:sensor"))
 
 TF_DECLARE_PUBLIC_TOKENS(HdMitsubaMeshTokens, HDMITSUBA_MESH_TOKENS);
 

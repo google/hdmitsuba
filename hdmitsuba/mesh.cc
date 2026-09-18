@@ -42,6 +42,7 @@
 #include <pxr/imaging/hd/meshTopology.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
+#include <pxr/imaging/hd/sceneIndex.h>
 #include <pxr/imaging/hd/tokens.h>
 #include <pxr/imaging/hd/types.h>
 #include <pxr/imaging/pxOsd/tokens.h>
@@ -91,7 +92,19 @@ bool ValidatePrimvarSize(const VtValue& value, HdInterpolation interpolation,
 
 std::optional<SdfPath> GetAttachedSensorId(HdSceneDelegate* sceneDelegate,
                                            const SdfPath& id) {
-  VtValue attached_sensor = sceneDelegate->Get(id, TfToken("mitsuba:sensor"));
+  VtValue attached_sensor = sceneDelegate->Get(id, HdMitsubaMeshTokens->sensor);
+  if (attached_sensor.IsEmpty()) {
+    if (HdSceneIndexBaseRefPtr scene_index =
+            sceneDelegate->GetRenderIndex().GetTerminalSceneIndex()) {
+      if (HdContainerDataSourceHandle ds =
+              scene_index->GetPrim(id).dataSource) {
+        if (auto sample_ds = HdSampledDataSource::Cast(
+                ds->Get(HdMitsubaMeshTokens->sensor))) {
+          attached_sensor = sample_ds->GetValue(0.0f);
+        }
+      }
+    }
+  }
   if (attached_sensor.IsHolding<SdfPath>()) {
     return attached_sensor.Get<SdfPath>();
   } else if (attached_sensor.IsHolding<std::string>()) {
@@ -185,14 +198,21 @@ void HdMitsubaMesh::Sync(HdSceneDelegate* sceneDelegate,
        HdChangeTracker::DirtyNormals | HdChangeTracker::DirtyTransform);
   bool instancer_dirty = *dirtyBits & (HdChangeTracker::DirtyInstancer |
                                        HdChangeTracker::DirtyInstanceIndex);
+  bool light_dirty = *dirtyBits & HdChangeTracker::DirtyParams;
 
   if (topology_dirty) {
     SyncTopology(sceneDelegate);
+    *dirtyBits |= HdChangeTracker::DirtyTopology |
+                  HdChangeTracker::DirtyPoints | HdChangeTracker::DirtyNormals |
+                  HdChangeTracker::DirtyPrimvar;
   }
 
-  if (topology_dirty || primvars_dirty || instancer_dirty) {
-    UpdateScene(sceneDelegate, renderParam,
-                SyncPrimvars(sceneDelegate, dirtyBits), dirtyBits);
+  if (topology_dirty || primvars_dirty) {
+    SyncPrimvars(sceneDelegate, dirtyBits);
+  }
+
+  if (topology_dirty || primvars_dirty || instancer_dirty || light_dirty) {
+    UpdateScene(sceneDelegate, renderParam, primvars_, dirtyBits);
   }
 
   *dirtyBits = HdChangeTracker::Clean;

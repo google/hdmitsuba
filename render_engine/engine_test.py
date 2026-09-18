@@ -173,3 +173,73 @@ def test_invalid_camera_throws():
     pytest.skip("No renderers registered")
   with pytest.raises(RuntimeError, match="No camera found"):
     engine.configure(hydra_delegate_id=renderers[0])
+
+
+def test_refine_level_fallback_reconfigure():
+  stage = _create_stage()
+  stage.RemovePrim('/mesh')
+  cube = UsdGeom.Mesh.Define(stage, '/cube')
+  cube.GetSubdivisionSchemeAttr().Set(UsdGeom.Tokens.catmullClark)
+  cube.GetPointsAttr().Set([
+      (-1, -1, -1),
+      (1, -1, -1),
+      (1, 1, -1),
+      (-1, 1, -1),
+      (-1, -1, 1),
+      (1, -1, 1),
+      (1, 1, 1),
+      (-1, 1, 1),
+  ])
+  cube.GetFaceVertexCountsAttr().Set([4, 4, 4, 4, 4, 4])
+  cube.GetFaceVertexIndicesAttr().Set([
+      0,
+      3,
+      2,
+      1,
+      4,
+      5,
+      6,
+      7,
+      0,
+      1,
+      5,
+      4,
+      2,
+      3,
+      7,
+      6,
+      0,
+      4,
+      7,
+      3,
+      1,
+      2,
+      6,
+      5,
+  ])
+
+  engine = usd_render.RenderEngine(stage)
+  _skip_missing_delegate('HdMitsubaRendererPlugin')
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      width=64,
+      refine_level_fallback=0,
+  )
+  img_coarse = engine.render()['color']
+
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      width=64,
+      refine_level_fallback=2,
+  )
+  img_refined = engine.render()['color']
+  assert np.mean(np.abs(img_refined[..., :3] - img_coarse[..., :3])) > 0.005
+
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      width=64,
+      refine_level_fallback=None,
+  )
+  img_reset = engine.render()['color']
+  np.testing.assert_allclose(img_reset, img_coarse, atol=0.02)
+

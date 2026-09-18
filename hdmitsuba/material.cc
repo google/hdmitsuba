@@ -116,6 +116,36 @@ HdMaterialNetwork2 ConvertMaterialNetwork(
   return network;
 }
 
+HdMaterialNetwork2 ExtractMaterialNetwork(
+    const HdMaterialSchema& material_schema,
+    const TfTokenVector& render_contexts) {
+  HdMaterialNetwork2 result;
+  auto merge_network = [&result](const HdMaterialNetworkSchema& schema) {
+    if (!schema.IsDefined()) {
+      return;
+    }
+    HdMaterialNetwork2 net = ConvertMaterialNetwork(schema);
+    if (result.nodes.empty() && result.terminals.empty()) {
+      result = std::move(net);
+      return;
+    }
+    for (auto& [path, node] : net.nodes) {
+      result.nodes[path] = std::move(node);
+    }
+    for (auto& [name, conn] : net.terminals) {
+      result.terminals[name] = std::move(conn);
+    }
+  };
+
+  merge_network(material_schema.GetMaterialNetwork());
+  for (auto it = render_contexts.rbegin(); it != render_contexts.rend(); ++it) {
+    if (!it->IsEmpty()) {
+      merge_network(material_schema.GetMaterialNetwork(*it));
+    }
+  }
+  return result;
+}
+
 }  // namespace
 
 HdMitsubaMaterial::HdMitsubaMaterial(const SdfPath& id) : HdMaterial(id) {}
@@ -140,10 +170,15 @@ void HdMitsubaMaterial::Sync(HdSceneDelegate* scene_delegate,
   HdMaterialSchema materialSchema =
       HdMaterialSchema::GetFromParent(scene_index->GetPrim(id).dataSource);
   if (!materialSchema.IsDefined()) {
+    *dirty_bits = HdChangeTracker::Clean;
     return;
   }
-  HdMaterialNetworkSchema networkSchema = materialSchema.GetMaterialNetwork();
-  if (!networkSchema.IsDefined()) {
+  HdMaterialNetwork2 network2 =
+      ExtractMaterialNetwork(materialSchema, scene_delegate->GetRenderIndex()
+                                                 .GetRenderDelegate()
+                                                 ->GetMaterialRenderContexts());
+  if (network2.nodes.empty() && network2.terminals.empty()) {
+    *dirty_bits = HdChangeTracker::Clean;
     return;
   }
 
@@ -151,7 +186,7 @@ void HdMitsubaMaterial::Sync(HdSceneDelegate* scene_delegate,
       static_cast<HdMitsubaRenderParam*>(render_param)->GetScene();
   MaterialSpec spec;
   spec.id = id;
-  spec.network2 = ConvertMaterialNetwork(networkSchema);
+  spec.network2 = std::move(network2);
   spec.needs_rebuild = true;
   scene_manager->SyncMaterial(std::move(spec));
   *dirty_bits = HdChangeTracker::Clean;

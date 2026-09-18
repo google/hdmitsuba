@@ -107,13 +107,12 @@ class RenderEngine {
   ReadRenderSettings(const std::optional<pxr::SdfPath>& path) const;
 
   pxr::UsdStageRefPtr stage_;
-  pxr::HdRendererPlugin* renderer_plugin_ = nullptr;
-  pxr::HdPluginRenderDelegateUniqueHandle render_delegate_ = nullptr;
-  std::unique_ptr<pxr::HdRenderIndex> render_index_;
   pxr::UsdImagingStageSceneIndexRefPtr stage_scene_index_;
   pxr::HdsiLegacyDisplayStyleOverrideSceneIndexRefPtr
       display_style_scene_index_;
-  std::optional<int> refine_level_fallback_;
+  pxr::HdRendererPlugin* renderer_plugin_ = nullptr;
+  pxr::HdPluginRenderDelegateUniqueHandle render_delegate_ = nullptr;
+  std::unique_ptr<pxr::HdRenderIndex> render_index_;
   std::unique_ptr<EngineSceneDelegate> params_delegate_;
   std::unique_ptr<pxr::HdEngine> engine_;
   pxr::GfVec2i resolution_;

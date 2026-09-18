@@ -419,7 +419,9 @@ void RenderEngine::Configure(
       hydra_delegate_id_ = hydra_delegate_id;
 
       // Clean up any previous state in reverse order.
+      tasks_.clear();
       params_delegate_ = nullptr;
+      render_index_.reset();
       display_style_scene_index_ = nullptr;
       stage_scene_index_ = nullptr;
       render_delegate_ = nullptr;
@@ -454,16 +456,10 @@ void RenderEngine::Configure(
       params_delegate_ = std::make_unique<EngineSceneDelegate>(
           render_index_.get(), SdfPath{"/task_controller"});
       settings_map_ = settings_map;
-      refine_level_fallback_ = std::nullopt;
     }
   }
 
-  if (refine_level_fallback.has_value() &&
-      refine_level_fallback != refine_level_fallback_) {
-    display_style_scene_index_->SetRefineLevelFallback(
-        refine_level_fallback.value());
-    refine_level_fallback_ = refine_level_fallback;
-  }
+  display_style_scene_index_->SetRefineLevelFallback(refine_level_fallback);
 
   if (cache_invalid) {
     // This update is necessary to correctly update render buffer resolutions.
