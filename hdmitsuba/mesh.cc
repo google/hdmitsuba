@@ -92,6 +92,13 @@ bool ValidatePrimvarSize(const VtValue& value, HdInterpolation interpolation,
 
 std::optional<SdfPath> GetAttachedSensorId(HdSceneDelegate* sceneDelegate,
                                            const SdfPath& id) {
+  // Two lookup paths, because both population styles are still in use:
+  //  1. Legacy UsdImagingDelegate (the C++ unit test fixture) resolves custom
+  //     attributes through HdSceneDelegate::Get().
+  //  2. Under stage scene index population the attribute is supplied by
+  //     HdMitsuba_APISchemaAdapter as a top-level prim data source, which
+  //     Get() does not surface, so read it off the terminal scene index.
+  // Path 1 can be dropped once the C++ tests are migrated to scene indices.
   VtValue attached_sensor = sceneDelegate->Get(id, HdMitsubaMeshTokens->sensor);
   if (attached_sensor.IsEmpty()) {
     if (HdSceneIndexBaseRefPtr scene_index =
@@ -198,20 +205,20 @@ void HdMitsubaMesh::Sync(HdSceneDelegate* sceneDelegate,
        HdChangeTracker::DirtyNormals | HdChangeTracker::DirtyTransform);
   bool instancer_dirty = *dirtyBits & (HdChangeTracker::DirtyInstancer |
                                        HdChangeTracker::DirtyInstanceIndex);
-  bool light_dirty = *dirtyBits & HdChangeTracker::DirtyParams;
+  // DirtyParams reaches a mesh rprim via the custom dirty bits translator
+  // registered for the mesh prim type: it is how changes to the attached
+  // sensor and to mesh-light parameters are signalled.
+  bool params_dirty = *dirtyBits & HdChangeTracker::DirtyParams;
 
   if (topology_dirty) {
     SyncTopology(sceneDelegate);
-    *dirtyBits |= HdChangeTracker::DirtyTopology |
-                  HdChangeTracker::DirtyPoints | HdChangeTracker::DirtyNormals |
-                  HdChangeTracker::DirtyPrimvar;
   }
 
   if (topology_dirty || primvars_dirty) {
     SyncPrimvars(sceneDelegate, dirtyBits);
   }
 
-  if (topology_dirty || primvars_dirty || instancer_dirty || light_dirty) {
+  if (topology_dirty || primvars_dirty || instancer_dirty || params_dirty) {
     UpdateScene(sceneDelegate, renderParam, primvars_, dirtyBits);
   }
 
@@ -420,8 +427,8 @@ HdMitsubaMesh::GetAllPrimvarDescriptors(HdSceneDelegate* sceneDelegate) {
   return primvar_descriptors;
 }
 
-HdMitsubaMesh::PrimvarMap HdMitsubaMesh::SyncPrimvars(
-    HdSceneDelegate* sceneDelegate, HdDirtyBits* dirtyBits) {
+void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
+                                 HdDirtyBits* dirtyBits) {
   TRACE_FUNCTION();
   TF_DEBUG(HDMITSUBA_SYNC)
       .Msg("SyncPrimvars for %s dirtyBits: %d subdivided: %d\n",
@@ -547,7 +554,6 @@ HdMitsubaMesh::PrimvarMap HdMitsubaMesh::SyncPrimvars(
       sync_primvar(token, descriptor);
     }
   }
-  return primvars_;
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

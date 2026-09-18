@@ -15,7 +15,6 @@
 #include "hdmitsuba/render_delegate.h"
 
 #include <memory>
-#include <mutex>
 #include <string>
 
 #include <pxr/base/gf/vec2f.h>
@@ -28,10 +27,8 @@
 #include <pxr/base/vt/value.h>
 #include <pxr/imaging/hd/aov.h>
 #include <pxr/imaging/hd/bprim.h>
-#include <pxr/imaging/hd/dirtyBitsTranslator.h>
 #include <pxr/imaging/hd/extComputation.h>
 #include <pxr/imaging/hd/instancer.h>
-#include <pxr/imaging/hd/lightSchema.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/resourceRegistry.h>
 #include <pxr/imaging/hd/rprim.h>
@@ -50,12 +47,12 @@
 #include "hdmitsuba/light.h"
 #include "hdmitsuba/material.h"
 #include "hdmitsuba/mesh.h"
-#include "hdmitsuba/particle_field.h"
 #include "hdmitsuba/render_buffer.h"
 #include "hdmitsuba/render_param.h"
 #include "hdmitsuba/render_pass.h"
 #include "hdmitsuba/render_settings.h"
 #include "hdmitsuba/scene_manager.h"
+#include "hdmitsuba/particle_field.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -130,21 +127,6 @@ void HdMitsubaRenderDelegate::Initialize() {
   scene_impl_ = std::unique_ptr<SceneManager>(
       SceneManager::CreateSceneManager(current_variant_));
   render_param_ = std::make_unique<HdMitsubaRenderParam>(scene_impl_.get());
-
-  static std::once_flag register_translators_flag;
-  std::call_once(register_translators_flag, []() {
-    HdDirtyBitsTranslator::RegisterTranslatorsForCustomRprimType(
-        HdPrimTypeTokens->mesh,
-        [](const HdDataSourceLocatorSet& set, HdDirtyBits* bits) {
-          static const HdDataSourceLocator kSensorLocator(
-              HdMitsubaMeshTokens->sensor);
-          if (set.Intersects(HdLightSchema::GetDefaultLocator()) ||
-              set.Intersects(kSensorLocator)) {
-            *bits |= HdChangeTracker::DirtyParams;
-          }
-        },
-        [](const HdDirtyBits /*bits*/, HdDataSourceLocatorSet* /*set*/) {});
-  });
 }
 
 HdRprim* HdMitsubaRenderDelegate::CreateRprim(const TfToken& typeId,

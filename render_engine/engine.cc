@@ -416,7 +416,9 @@ void RenderEngine::Configure(
     width_ = resolved_width;
 
     if (rebuild_delegate) {
-      hydra_delegate_id_ = hydra_delegate_id;
+      // NOTE: hydra_delegate_id_ is deliberately *not* committed here. If
+      // construction below throws, a retry with the same id must still take
+      // the rebuild path rather than reusing half-torn-down state.
 
       // Clean up any previous state in reverse order.
       tasks_.clear();
@@ -455,11 +457,19 @@ void RenderEngine::Configure(
                                       SdfPath::AbsoluteRootPath());
       params_delegate_ = std::make_unique<EngineSceneDelegate>(
           render_index_.get(), SdfPath{"/task_controller"});
+      // Commit the resolved state only once everything above succeeded.
+      hydra_delegate_id_ = hydra_delegate_id;
       settings_map_ = settings_map;
     }
   }
 
-  display_style_scene_index_->SetRefineLevelFallback(refine_level_fallback);
+  // Applied unconditionally: an unset `refine_level_fallback` resets the
+  // fallback to the schema default rather than preserving the previously
+  // configured value, so that Configure() fully describes the engine state.
+  // (No-op inside the scene index when the value is unchanged.)
+  if (TF_VERIFY(display_style_scene_index_)) {
+    display_style_scene_index_->SetRefineLevelFallback(refine_level_fallback);
+  }
 
   if (cache_invalid) {
     // This update is necessary to correctly update render buffer resolutions.
@@ -556,8 +566,12 @@ absl::flat_hash_map<pxr::TfToken, RenderEngine::OutputBuffer,
                     TfToken::HashFunctor>
 RenderEngine::Render(UsdTimeCode time_code) {
   UpdateAovsAndBuffers();
-  stage_scene_index_->SetTime(time_code);
+  // Pending stage edits must be absorbed *before* setting the time, so that
+  // SetTime operates on an up-to-date prim set. This matches the ordering in
+  // UsdImagingGLEngine::_PreSetTime; reversing it applies the time against
+  // prims that have not yet seen pending resyncs/removals.
   stage_scene_index_->ApplyPendingUpdates();
+  stage_scene_index_->SetTime(time_code);
   do {
     TF_PY_ALLOW_THREADS_IN_SCOPE();
     engine_->Execute(render_index_.get(), &tasks_);

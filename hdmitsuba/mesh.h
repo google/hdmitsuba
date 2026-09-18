@@ -74,8 +74,8 @@ class HdMitsubaMesh final : public HdMesh {
   PrimvarMap primvars_;
 
   void SyncTopology(HdSceneDelegate* sceneDelegate);
-  PrimvarMap SyncPrimvars(HdSceneDelegate* sceneDelegate,
-                          HdDirtyBits* dirtyBits);
+  // Refreshes `primvars_` in place; callers read the member directly.
+  void SyncPrimvars(HdSceneDelegate* sceneDelegate, HdDirtyBits* dirtyBits);
   void UpdateScene(HdSceneDelegate* sceneDelegate, HdRenderParam* renderParam,
                    const PrimvarMap& final_primvars, HdDirtyBits* dirtyBits);
 

@@ -116,6 +116,21 @@ HdMaterialNetwork2 ConvertMaterialNetwork(
   return network;
 }
 
+// Selects the material network to use for this renderer.
+//
+// Under scene index population the material data source carries one network per
+// render context and choosing between them is the renderer's job:
+// HdMaterialSchema::GetMaterialNetwork(context) performs no fallback.
+//
+// NOTE: this deliberately *merges* the universal network with the renderer
+// specific ones rather than taking the first matching context, which is what
+// hdPrman/hdStorm do. Renderer-specific networks here are commonly *partial*
+// overrides: e.g. test_assets/shapes/displacement_preview_surface.usda authors
+// a universal `outputs:surface` + `outputs:displacement` and overrides only
+// `outputs:mitsuba:displacement`. First-match-wins would silently drop that
+// material's surface terminal. Merging per terminal keeps the universal network
+// as the base and lets higher-priority contexts override individual terminals.
+// Covered by shape_test.py::test_render[displacement_preview_surface-*].
 HdMaterialNetwork2 ExtractMaterialNetwork(
     const HdMaterialSchema& material_schema,
     const TfTokenVector& render_contexts) {
@@ -137,6 +152,8 @@ HdMaterialNetwork2 ExtractMaterialNetwork(
     }
   };
 
+  // Universal network first, then contexts in reverse priority order, so that
+  // the highest-priority context is merged last and wins per terminal.
   merge_network(material_schema.GetMaterialNetwork());
   for (auto it = render_contexts.rbegin(); it != render_contexts.rend(); ++it) {
     if (!it->IsEmpty()) {
