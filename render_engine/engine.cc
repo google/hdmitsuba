@@ -119,16 +119,6 @@ class EngineSceneDelegate final : public HdSceneDelegate {
 
 namespace {
 
-bool IsConverged(const HdTaskSharedPtrVector& tasks) {
-  return std::all_of(
-      tasks.begin(), tasks.end(), [](const HdTaskSharedPtr& task) {
-        if (auto progressive_task = std::dynamic_pointer_cast<HdxTask>(task)) {
-          return progressive_task->IsConverged();
-        }
-        return true;
-      });
-}
-
 HdRenderSettingsMap SettingsMapFromVtDict(const VtDictionary& dict) {
   HdRenderSettingsMap settings;
   for (const auto& kv : dict) {
@@ -319,7 +309,6 @@ void RenderEngine::Configure(
   UsdRenderSettings render_settings;
   std::tie(settings_map, render_settings) =
       ReadRenderSettings(render_settings_prim_path);
-  render_settings_prim_path_ = render_settings_prim_path;
 
   // Merge overrides
   for (const auto& [key, value] : overrides) {
@@ -337,31 +326,29 @@ void RenderEngine::Configure(
   bool ndc_changed = (new_data_window_ndc != data_window_ndc_);
 
   // Unconditionally disable progressive refinement in the batch render engine
-  settings_map[pxr::HdRenderSettingsTokens->enableInteractive] =
-      pxr::VtValue(false);
+  settings_map.insert(
+      {pxr::HdRenderSettingsTokens->enableInteractive, pxr::VtValue(false)});
 
   bool rebuild_delegate =
+      !render_delegate_ || !scene_delegate_ ||
       (hydra_delegate_id != hydra_delegate_id_) ||
       (render_settings_prim_path != render_settings_prim_path_);
 
-  if (!rebuild_delegate && render_delegate_) {
-    // Helper to look up settings with a fallback default value.
-    auto get_setting = [](const HdRenderSettingsMap& map, const TfToken& key,
-                          const VtValue& default_val) {
-      auto it = map.find(key);
-      return (it != map.end()) ? it->second : default_val;
-    };
-
-    // Check if any creation-time settings changed
-    HdRenderSettingDescriptorList descriptors =
-        render_delegate_->GetRenderSettingDescriptors();
-    for (const auto& desc : descriptors) {
-      if (get_setting(settings_map, desc.key, desc.defaultValue) !=
-          get_setting(settings_map_, desc.key, desc.defaultValue)) {
-        rebuild_delegate = true;
-        break;
+  if (!rebuild_delegate) {
+    for (const auto& desc : render_delegate_->GetRenderSettingDescriptors()) {
+      auto it = settings_map.find(desc.key);
+      const VtValue& val =
+          (it != settings_map.end()) ? it->second : desc.defaultValue;
+      if (render_delegate_->GetRenderSetting(desc.key) != val) {
+        render_delegate_->SetRenderSetting(desc.key, val);
       }
     }
+    for (const auto& [key, value] : settings_map) {
+      if (render_delegate_->GetRenderSetting(key) != value) {
+        render_delegate_->SetRenderSetting(key, value);
+      }
+    }
+    settings_map_ = settings_map;
   }
 
   // Resolve target camera path upfront
@@ -415,11 +402,11 @@ void RenderEngine::Configure(
     width_ = resolved_width;
 
     if (rebuild_delegate) {
-      hydra_delegate_id_ = hydra_delegate_id;
-
       // Clean up any previous state in reverse order.
+      tasks_.clear();
       params_delegate_ = nullptr;
       scene_delegate_ = nullptr;
+      render_index_.reset();
       render_delegate_ = nullptr;
       aov_ids_.clear();
       render_buffer_ids_.clear();
@@ -444,6 +431,8 @@ void RenderEngine::Configure(
       scene_delegate_->Populate(stage_->GetPseudoRoot());
       params_delegate_ = std::make_unique<EngineSceneDelegate>(
           render_index_.get(), SdfPath{"/task_controller"});
+      hydra_delegate_id_ = hydra_delegate_id;
+      render_settings_prim_path_ = render_settings_prim_path;
       settings_map_ = settings_map;
     }
   }
@@ -455,6 +444,12 @@ void RenderEngine::Configure(
   }
 
   if (cache_invalid) {
+    if (!rebuild_delegate) {
+      ClearRenderBuffers();
+      if (!render_task_id_.IsEmpty()) {
+        render_index_->RemoveTask(render_task_id_);
+      }
+    }
     // This update is necessary to correctly update render buffer resolutions.
     CreateRenderBuffers();
 
@@ -548,12 +543,17 @@ void RenderEngine::UpdateAovsAndBuffers() {
 absl::flat_hash_map<pxr::TfToken, RenderEngine::OutputBuffer,
                     TfToken::HashFunctor>
 RenderEngine::Render(UsdTimeCode time_code) {
+  bool enable_interactive = false;
+  auto it = settings_map_.find(pxr::HdRenderSettingsTokens->enableInteractive);
+  if (it != settings_map_.end()) {
+    enable_interactive = it->second.GetWithDefault<bool>(false);
+  }
   UpdateAovsAndBuffers();
   scene_delegate_->SetTime(time_code);
   do {
     TF_PY_ALLOW_THREADS_IN_SCOPE();
     engine_->Execute(&scene_delegate_->GetRenderIndex(), &tasks_);
-  } while (!IsConverged(tasks_));
+  } while (!IsConverged() && !enable_interactive);
 
   for (size_t i = 0; i < render_buffer_ids_.size(); i++) {
     GetRenderBuffer(i)->Resolve();
@@ -578,6 +578,24 @@ RenderEngine::Render(UsdTimeCode time_code) {
   }
 
   return result;
+}
+
+bool RenderEngine::IsConverged() const {
+  return std::all_of(tasks_.begin(), tasks_.end(),
+                     [](const pxr::HdTaskSharedPtr& task) {
+                       if (auto progressive_task =
+                               std::dynamic_pointer_cast<pxr::HdxTask>(task)) {
+                         return progressive_task->IsConverged();
+                       }
+                       return true;
+                     });
+}
+
+pxr::VtDictionary RenderEngine::GetRenderStats() const {
+  if (!render_delegate_) {
+    return {};
+  }
+  return render_delegate_->GetRenderStats();
 }
 HdRenderBuffer* RenderEngine::GetRenderBuffer(size_t idx) const {
   if (idx >= render_buffer_ids_.size()) {

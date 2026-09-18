@@ -196,5 +196,19 @@ NB_MODULE(usd_render, m) {
             return result_map;
           },
           nb::arg("time_code") = nb::none(),
-          "Renders a single frame and returns a dictionary of AOV buffers.");
+          "Renders a single frame and returns a dictionary of AOV buffers.")
+      .def("is_converged", &hdmitsuba::RenderEngine::IsConverged,
+           "Returns whether the most recent render fully converged (reached "
+           "the target sample count).")
+      .def(
+          "get_render_stats",
+          [](const hdmitsuba::RenderEngine& engine) {
+            std::unordered_map<std::string, pxr::VtValue> result;
+            for (const auto& [key, val] : engine.GetRenderStats()) {
+              result[key] = val;
+            }
+            return result;
+          },
+          "Returns render stats dictionary from the underlying Hydra "
+          "delegate.");
 }

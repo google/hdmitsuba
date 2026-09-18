@@ -71,6 +71,11 @@ class SceneManager {
 
   virtual bool IsConverged() const = 0;
 
+  // Samples accumulated so far for the current frame vs. the target sample
+  // count; used to populate Hydra render stats.
+  virtual int GetCurrentSampleCount() const = 0;
+  virtual int GetTargetSampleCount() const = 0;
+
   virtual void CommitResources() = 0;
 
   virtual mitsuba::Object* GetScene() = 0;

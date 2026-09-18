@@ -233,6 +233,17 @@ class FrozenRender {
                       uint32_t sample_index,
                       uint32_t samples_to_render) {
     if constexpr (dr::is_jit_v<Float>) {
+      if (recorded_samples_to_render_ != 0 &&
+          recorded_samples_to_render_ != samples_to_render) {
+        TF_DEBUG(HDMITSUBA_LIFECYCLE)
+            .Msg(
+                "FrozenRender: samples_to_render changed (%u -> %u), "
+                "clearing recording\n",
+                recorded_samples_to_render_, samples_to_render);
+        Clear();
+      }
+      recorded_samples_to_render_ = samples_to_render;
+
       if (render_count_ == 0) {
         TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("FrozenRender: Warm-up pass (Frame 1)\n");
         TensorXf result = integrator->render(scene, sensor, sample_index, samples_to_render, true, true);
@@ -276,6 +287,7 @@ class FrozenRender {
   std::vector<uint32_t> output_indices_;
   dr::vector<size_t> output_shape_;
   size_t recorded_input_count_ = 0;
+  uint32_t recorded_samples_to_render_ = 0;
   int render_count_ = 0;
 };
 

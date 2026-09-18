@@ -29,6 +29,7 @@
 #include <pxr/imaging/hd/bprim.h>
 #include <pxr/imaging/hd/extComputation.h>
 #include <pxr/imaging/hd/instancer.h>
+#include <pxr/imaging/hd/perfLog.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/resourceRegistry.h>
 #include <pxr/imaging/hd/rprim.h>
@@ -100,23 +101,26 @@ HdMitsubaRenderDelegate::~HdMitsubaRenderDelegate() = default;
 
 void HdMitsubaRenderDelegate::Initialize() {
   // Initialize the settings and settings descriptors.
-  setting_descriptors_.resize(5);
+  setting_descriptors_.resize(6);
   setting_descriptors_[0] = {"Variant", HdMitsubaRenderSettingsTokens->variant,
                              VtValue(HdMitsubaConfig::GetInstance().variant)};
   setting_descriptors_[1] = {"Samples Per Pixel",
                              HdMitsubaRenderSettingsTokens->sample_count,
                              VtValue(128)};
-  setting_descriptors_[2] = {"Integrator Type",
+  setting_descriptors_[2] = {
+      "Interactive Samples Per Pass",
+      HdMitsubaRenderSettingsTokens->interactive_samples_per_pass, VtValue(1)};
+  setting_descriptors_[3] = {"Integrator Type",
                              HdMitsubaRenderSettingsTokens->integrator_type,
                              VtValue(std::string("path"))};
-  setting_descriptors_[3] = {"Enable Interactive Mode",
+  setting_descriptors_[4] = {"Enable Interactive Mode",
                              HdRenderSettingsTokens->enableInteractive,
                              VtValue(true)};
   bool default_freezing = false;
   if (HdMitsubaConfig::GetInstance().use_kernel_freezing == 1) {
     default_freezing = true;
   }
-  setting_descriptors_[4] = {"Enable Kernel Freezing (Experimental)",
+  setting_descriptors_[5] = {"Enable Kernel Freezing (Experimental)",
                              HdMitsubaRenderSettingsTokens->use_kernel_freezing,
                              VtValue(default_freezing)};
   _PopulateDefaultSettings(setting_descriptors_);
@@ -258,6 +262,10 @@ void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* tracker) {
       GetRenderSetting(HdMitsubaRenderSettingsTokens->variant);
   namespaced_settings[HdMitsubaRenderSettingsTokens->sample_count.GetString()] =
       GetRenderSetting(HdMitsubaRenderSettingsTokens->sample_count);
+  namespaced_settings[HdMitsubaRenderSettingsTokens
+                          ->interactive_samples_per_pass.GetString()] =
+      GetRenderSetting(
+          HdMitsubaRenderSettingsTokens->interactive_samples_per_pass);
   namespaced_settings[HdMitsubaRenderSettingsTokens->integrator_type
                           .GetString()] =
       GetRenderSetting(HdMitsubaRenderSettingsTokens->integrator_type);
@@ -270,6 +278,16 @@ void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* tracker) {
   scene_impl_->UpdateNamespacedSettings(namespaced_settings);
 
   scene_impl_->CommitResources();
+}
+
+VtDictionary HdMitsubaRenderDelegate::GetRenderStats() const {
+  VtDictionary stats;
+  if (scene_impl_) {
+    stats[HdPerfTokens->numCompletedSamples.GetString()] =
+        scene_impl_->GetCurrentSampleCount();
+    stats["totalSamples"] = scene_impl_->GetTargetSampleCount();
+  }
+  return stats;
 }
 
 TfTokenVector HdMitsubaRenderDelegate::GetMaterialRenderContexts() const {

@@ -891,6 +891,16 @@ class SceneModel final : public SceneManager {
       }
     }
 
+    if (sensor != last_sensor_) {
+      last_sensor_ = sensor;
+      reset_progressive_ = true;
+      if constexpr (dr::is_jit_v<Float>) {
+        if (frozen_render_) {
+          frozen_render_->Clear();
+        }
+      }
+    }
+
     Film* film = sensor->film();
     auto film_size = film->size();
     bool film_changed = false;
@@ -935,16 +945,18 @@ class SceneModel final : public SceneManager {
       render_integrator = pass_state.aov_integrator.get();
     }
 
-    if (reset_progressive_) {
+    if (reset_progressive_ || !progressive_rendering_) {
       accum_buffer_ = TensorXf();
       current_progressive_sample_ = 0;
       reset_progressive_ = false;
     }
+
     int samples_to_render = sample_count_;
     if (progressive_rendering_) {
+      int remaining =
+          static_cast<int>(sample_count_) - current_progressive_sample_;
       samples_to_render =
-          (current_progressive_sample_ < static_cast<int>(sample_count_)) ? 1
-                                                                          : 0;
+          std::max(0, std::min(interactive_samples_per_pass_, remaining));
     }
     TensorXf display_result;
     if (samples_to_render > 0) {
@@ -982,10 +994,20 @@ class SceneModel final : public SceneManager {
       // 4. Accumulate and average
       current_progressive_sample_ += samples_to_render;
       if (progressive_rendering_) {
-        if (current_progressive_sample_ == samples_to_render) {
-          accum_buffer_ = result;
+        // integrator->render() returns the per-pass mean over samples_to_render
+        // samples; weight by samples_to_render so passes of different sizes
+        // (e.g. 7 spp at 2 spp/pass -> 2, 2, 2, 1) contribute equally per sample.
+        TensorXf weighted(
+            result.array() * static_cast<float>(samples_to_render),
+            result.shape());
+        if (current_progressive_sample_ == samples_to_render ||
+            accum_buffer_.empty()) {
+          accum_buffer_ = std::move(weighted);
         } else {
-          accum_buffer_.array() += result.array();
+          accum_buffer_.array() += weighted.array();
+        }
+        if constexpr (dr::is_jit_v<Float>) {
+          dr::eval(accum_buffer_);  // keep the JIT graph bounded across passes
         }
         // Average for display
         display_result =
@@ -1045,16 +1067,34 @@ class SceneModel final : public SceneManager {
   }
 
   bool IsConverged() const override {
-    if (!progressive_rendering_) {
-      return true;
-    }
-    return current_progressive_sample_ >= static_cast<int>(sample_count_);
+    return !progressive_rendering_ ||
+           (current_progressive_sample_ >= static_cast<int>(sample_count_));
+  }
+
+  int GetCurrentSampleCount() const override {
+    return progressive_rendering_ ? current_progressive_sample_
+                                  : static_cast<int>(sample_count_);
+  }
+
+  int GetTargetSampleCount() const override {
+    return static_cast<int>(sample_count_);
   }
 
   void UpdateNamespacedSettings(
       const VtDictionary& namespaced_settings) override {
     absl::MutexLock state_lock(state_mutex_);
     absl::MutexLock aov_lock(aov_states_mutex_);
+    {
+      auto it =
+          namespaced_settings.find("mitsuba:interactive_samples_per_pass");
+      if (it != namespaced_settings.end()) {
+        int new_samples_per_pass = std::max(1, it->second.Get<int>());
+        if (new_samples_per_pass != interactive_samples_per_pass_) {
+          interactive_samples_per_pass_ = new_samples_per_pass;
+          reset_progressive_ = true;
+        }
+      }
+    }
     {
       auto it = namespaced_settings.find("mitsuba:integrator:type");
       if (it != namespaced_settings.end()) {
@@ -1078,7 +1118,11 @@ class SceneModel final : public SceneManager {
     {
       auto it = namespaced_settings.find("mitsuba:sample_count");
       if (it != namespaced_settings.end()) {
-        sample_count_ = it->second.Get<int>();
+        int new_sample_count = it->second.Get<int>();
+        if (static_cast<size_t>(new_sample_count) != sample_count_) {
+          sample_count_ = new_sample_count;
+          reset_progressive_ = true;
+        }
       }
     }
     {
@@ -1767,6 +1811,7 @@ class SceneModel final : public SceneManager {
   std::string integrator_type_ = "path";
   absl::flat_hash_map<const HdRenderPass*, RenderPassState> pass_aov_states_;
   size_t sample_count_ = kDefaultSampleCount;
+  int interactive_samples_per_pass_ = 1;
   bool has_instancing_ = false;
 
   // Progressive rendering state
@@ -1774,6 +1819,7 @@ class SceneModel final : public SceneManager {
   int current_progressive_sample_ = 0;
   TensorXf accum_buffer_;
   bool reset_progressive_ = true;
+  const Sensor* last_sensor_ = nullptr;  // identity-only comparison
 
   absl::Mutex state_mutex_;
   absl::Mutex aov_states_mutex_;

@@ -49,6 +49,7 @@ You can configure the render delegate by authoring a `RenderSettings` prim insid
 ### Custom Mitsuba Settings
 *   **`mitsuba:variant`**: The Mitsuba variant to use for rendering (e.g., `scalar_rgb`, `cuda_ad_rgb`, `llvm_ad_rgb`).
 *   **`mitsuba:sample_count`** : The target samples per pixel (SPP) for high-quality offline renders.
+*   **`mitsuba:interactive_samples_per_pass`**: Number of samples per pixel rendered in each Hydra pass while `enableInteractive` is `true` (default `1`). Larger values reduce per-pass overhead (and, with kernel freezing enabled, are replayed as a single frozen kernel) at the cost of coarser progressive updates. Changing `mitsuba:interactive_samples_per_pass` or `mitsuba:sample_count` resets progressive accumulation.
 *   **`mitsuba:integrator:type`**: The Mitsuba integrator to use (e.g., `path`, `aov`, `direct`).
 *   **`mitsuba:use_kernel_freezing`**: Enables Dr.Jit's kernel freezing. When enabled, the JIT compilation is frozen after the first frame, drastically reducing JIT tracing overhead for subsequent frames (extremely beneficial for interactive camera navigation in viewports). This is currently disabled by default, as it is still in a somewhat experimental state in its Hydra integration, and also will not work in all Mitsuba 3 scenes (e.g., with instancing).
 
@@ -74,6 +75,7 @@ def RenderSettings "/Render/MitsubaSettings"
     # Custom Mitsuba settings
     custom string mitsuba:variant = "llvm_ad_rgb"
     custom int mitsuba:sample_count = 256
+    custom int mitsuba:interactive_samples_per_pass = 4
     custom string mitsuba:integrator:type = "path"
 
     # Enable Dr.Jit kernel freezing for fast interactive viewport updates

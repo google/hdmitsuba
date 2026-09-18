@@ -29,6 +29,7 @@ PXR_NAMESPACE_OPEN_SCOPE
 #define HDMITSUBA_RENDER_SETTINGS_TOKENS \
   ((variant, "mitsuba:variant")) \
   ((sample_count, "mitsuba:sample_count")) \
+  ((interactive_samples_per_pass, "mitsuba:interactive_samples_per_pass")) \
   ((integrator_type, "mitsuba:integrator:type")) \
   ((use_kernel_freezing, "mitsuba:use_kernel_freezing"))
 
@@ -47,6 +48,8 @@ class HdMitsubaRenderDelegate final : public HdRenderDelegate {
   const TfTokenVector& GetSupportedRprimTypes() const override;
   const TfTokenVector& GetSupportedSprimTypes() const override;
   const TfTokenVector& GetSupportedBprimTypes() const override;
+
+  VtDictionary GetRenderStats() const override;
 
   HdRprim* CreateRprim(const TfToken& typeId, const SdfPath& rprimId) override;
   void DestroyRprim(HdRprim* rPrim) override;
