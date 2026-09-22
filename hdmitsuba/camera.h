@@ -15,7 +15,6 @@
 #pragma once
 
 #include <string>
-#include <string_view>
 
 #include <pxr/imaging/hd/camera.h>
 #include <pxr/imaging/hd/renderDelegate.h>
@@ -24,8 +23,6 @@
 #include <pxr/pxr.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
-
-inline constexpr std::string_view kMitsubaSensorPrefix = "mitsuba:sensor:";
 
 class HdMitsubaCamera final : public HdCamera {
  public:
