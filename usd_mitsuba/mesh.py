@@ -127,9 +127,7 @@ def convert_mesh(
     subdivision_level: The subdivision level.
     time: The time code.
     custom_transform: Optional transform to use instead of local-to-world.
-    sensor_bindings: Optional precomputed shape path -> sensor prim map, as
-      returned by `camera.get_surface_sensor_bindings`. Computed from the stage
-      when omitted.
+    sensor_bindings: Optional precomputed shape path -> sensor prim map.
 
   Returns:
     A dictionary mapping Mitsuba scene object IDs to mi.Mesh objects.

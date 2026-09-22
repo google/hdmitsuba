@@ -262,8 +262,6 @@ def convert_to_mitsuba(
   )
 
   prototype_paths = instancing.get_prototype_paths(stage)
-  # Surface sensors (e.g. irradiancemeters) are declared on the Camera prim but
-  # instantiated inside the shape they measure, so resolve the bindings up front.
   sensor_bindings = camera.get_surface_sensor_bindings(stage)
   # Traverse the stage using TraverseInstanceProxies. This flattens native USD
   # instances (instanceable=true), which means they will be duplicated in Mitsuba.

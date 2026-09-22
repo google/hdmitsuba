@@ -61,8 +61,6 @@ ScalarAffineTransform4f UsdToMitsubaSensorTransform(
   return to_world;
 }
 
-// Resolves `mitsuba:sensor:shape`, which names the shape a surface sensor
-// measures. Authored as a string for portability; an SdfPath is also accepted.
 std::optional<SdfPath> GetTargetShapeId(HdSceneDelegate* sceneDelegate,
                                         const SdfPath& id) {
   VtValue value = sceneDelegate->GetCameraParamValue(

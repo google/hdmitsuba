@@ -244,18 +244,12 @@ def test_irradiancemeter_render():
 
 
 def test_irradiancemeter_rebind():
-  """Re-pointing `mitsuba:sensor:shape` must move the sensor to the new shape.
-
-  Regression test for two pieces of plumbing that have no stock equivalent:
-  the adapter rule invalidating `mitsuba:sensor:*` on Camera prims, and the
-  scene manager rebuilding a shape when the sensor bound to it changes.
-  """
+  """Tests that changing `mitsuba:sensor:shape` rebinds the surface sensor."""
   stage = Usd.Stage.Open(
       f'{test_helpers.TEST_ASSETS_PATH}/shapes/irradiancemeter.usda'
   )
   test_helpers.create_render_settings(stage, resolution=(128, 128))
 
-  # A second, much smaller cube receives a different amount of light.
   second_cube = UsdGeom.Mesh.Define(stage, '/root/Cube2/Cube2')
   source_cube = UsdGeom.Mesh.Get(stage, '/root/Cube/Cube')
   second_cube.GetPointsAttr().Set(source_cube.GetPointsAttr().Get())
@@ -283,11 +277,9 @@ def test_irradiancemeter_rebind():
   image_rebound = engine.render()['color']
   test_helpers.write_image(image_rebound, 'test_irradiancemeter_rebind_b.png')
 
-  # The binding change must be picked up at all, ...
   assert not np.allclose(
       image_initial[..., :3], image_rebound[..., :3], atol=1e-3
   )
-  # ... and must agree with the offline translation of the edited stage.
   scene = mi.load_dict(usd_mitsuba.convert_to_mitsuba(stage))
   image_offline = np.array(mi.render(scene, spp=128))
   test_helpers.robust_assert_close(

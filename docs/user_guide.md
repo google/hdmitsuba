@@ -31,7 +31,7 @@ This document provides an overview of the USD features supported by `hdMitsuba`,
     *   Supports standard perspective cameras with horizontal/vertical aperture offsets.
     *   **Custom Sensor Type**: Customize the Mitsuba sensor backend by setting `mitsuba:sensor:type` (string, e.g., `perspective`, `irradiancemeter`, `radmeter`) on the Camera prim.
     *   **Pixel Filter**: Customize the film's pixel filter by setting `mitsuba:sensor:film:pixel_filter:type` (string) on the Camera prim.
-    *   **Surface Sensors**: Sensors such as `irradiancemeter` measure a specific surface rather than a view. Declare them on the Camera prim and name the measured geometry with `mitsuba:sensor:shape` (string path, e.g. `"/root/Cube/Cube"`); the sensor takes that shape's transform. Render through it by selecting the Camera prim as usual. Each shape may be measured by at most one sensor. An example is provided in `test_assets/shapes`.
+    *   **Surface Sensors**: Attach a surface sensor (e.g., `irradiancemeter`) to a Mesh geometry prim by setting `mitsuba:sensor:shape` (string/path) on the Camera prim. This allows measuring light hitting that specific surface (e.g., for irradiance mapping). An example is provided in `test_assets/shapes`.
 
 ### Hydra AOVs (Arbitrary Output Variables)
 When requested by the Hydra host, `hdMitsuba` automatically routes and maps standard AOVs to Mitsuba's AOV integrator. It supports the following standard USD AOVs:

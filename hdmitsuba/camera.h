@@ -25,10 +25,6 @@
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-// Renderer-specific camera attributes. These are plain namespaced attributes on
-// the Camera prim: UsdImaging passes any such attribute through to the camera
-// data source verbatim, so they need no adapter to be readable. `sensorPrefix`
-// is what HdMitsuba_APISchemaAdapter watches to invalidate them.
 #define HDMITSUBA_CAMERA_TOKENS                            \
   ((sensorPrefix, "mitsuba:sensor:"))                      \
   ((sensorType, "mitsuba:sensor:type"))                    \

@@ -115,9 +115,6 @@ struct CameraSpec : public BaseSpec {
   float near_clip = 0.01f;
   float far_clip = 1000.0f;
   std::string pixel_filter_type = "";
-  // Shape measured by this sensor, authored as `mitsuba:sensor:shape`. Only
-  // meaningful for surface sensor types (e.g. `irradiancemeter`), which
-  // Mitsuba instantiates as a child of the shape rather than standalone.
   std::optional<SdfPath> target_shape_id = std::nullopt;
 };
 

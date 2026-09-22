@@ -657,14 +657,13 @@ class SceneModel final : public SceneManager {
     auto prev_it = camera_specs_.find(spec.id);
     if (prev_it == camera_specs_.end()) {
       spec.needs_rebuild = true;
+    } else {
+      spec.needs_rebuild |= prev_it->second.needs_rebuild;
+      if (!spec.needs_rebuild) {
+        spec.dirty_bits |= prev_it->second.dirty_bits;
+      }
     }
-    if (prev_it != camera_specs_.end() && !spec.needs_rebuild) {
-      spec.dirty_bits |= prev_it->second.dirty_bits;
-    }
-    // A surface sensor is instantiated *inside* the Mitsuba shape it measures,
-    // so the shape has to be rebuilt whenever the binding moves or the sensor
-    // object itself is recreated. Hydra models no such cross-prim dependency;
-    // this mirrors how a structurally changed material rebuilds its meshes.
+    // Rebuild affected shapes if the surface sensor or its target changed.
     std::optional<SdfPath> prev_target =
         prev_it == camera_specs_.end() ? std::nullopt
                                        : SurfaceSensorTarget(prev_it->second);
@@ -1108,6 +1107,10 @@ class SceneModel final : public SceneManager {
           // this affects the used pixel filter type.
           for (auto& [_, camera_spec] : camera_specs_) {
             camera_spec.needs_rebuild = true;
+            if (auto target = SurfaceSensorTarget(camera_spec)) {
+              sensor_binding_dirty_.insert(*target);
+              shape_sensors_dirty_ = true;
+            }
           }
           reset_progressive_ = true;
         }
@@ -1188,6 +1191,9 @@ class SceneModel final : public SceneManager {
             needs_bsdf_update = true;
           }
         }
+        if (sensor_binding_dirty_.contains(spec.id)) {
+          spec.needs_rebuild = true;
+        }
       } else if constexpr (std::is_same_v<SpecType, CurveSpec>) {
         uint32_t mat_flags = 0;
         if (auto mat_it = material_dirty_flags_.find(spec.material_id);
@@ -1199,13 +1205,6 @@ class SceneModel final : public SceneManager {
         }
         if (mat_flags & DirtyFlags::kMaterialUpdated) {
           needs_bsdf_update = true;
-        }
-      }
-      if constexpr (std::is_same_v<SpecType, MeshSpec>) {
-        // The surface sensor is built into the Mitsuba shape, so a binding
-        // change on the sensor prim has to rebuild the shape it measures.
-        if (sensor_binding_dirty_.contains(spec.id)) {
-          spec.needs_rebuild = true;
         }
       }
       bool has_in_place_update = false;
@@ -1299,7 +1298,6 @@ class SceneModel final : public SceneManager {
         });
   }
 
-  // Shape measured by `spec`, if it is a sensor that lives inside a shape.
   static std::optional<SdfPath> SurfaceSensorTarget(const CameraSpec& spec) {
     if (spec.sensor_type != "irradiancemeter") {
       return std::nullopt;
@@ -1307,9 +1305,6 @@ class SceneModel final : public SceneManager {
     return spec.target_shape_id;
   }
 
-  // Recomputes the shape -> sensor lookup consumed while committing shapes.
-  // Cheap: proportional to the number of cameras, and only run when a binding
-  // actually changed.
   void RebuildShapeSensorMap() {
     shape_sensors_.clear();
     for (const auto& [camera_id, spec] : camera_specs_) {
@@ -1323,8 +1318,6 @@ class SceneModel final : public SceneManager {
       }
       if (!shape_sensors_.try_emplace(target->GetAsString(), sensor_it->second)
                .second) {
-        // Mitsuba attaches a sensor to exactly one shape, so the first binding
-        // wins rather than silently producing a shared, half-attached sensor.
         TF_WARN(
             "Shape %s is already measured by another sensor; ignoring sensor "
             "%s.",
@@ -1359,8 +1352,6 @@ class SceneModel final : public SceneManager {
           }
           return true;
         });
-    // Runs before CommitMeshes()/CommitCurves(), so shapes committed below
-    // observe the sensors instantiated above.
     if (shape_sensors_dirty_) {
       RebuildShapeSensorMap();
       shape_sensors_dirty_ = false;
@@ -1849,18 +1840,12 @@ class SceneModel final : public SceneManager {
   absl::flat_hash_map<SdfPath, LightSpec, SdfPath::Hash> light_specs_;
   absl::flat_hash_map<SdfPath, CameraSpec, SdfPath::Hash> camera_specs_;
   absl::flat_hash_map<SdfPath, uint32_t, SdfPath::Hash> material_dirty_flags_;
-  // Shapes whose sensor binding changed since the last commit; they are
-  // rebuilt so the sensor ends up inside the right Mitsuba shape.
   absl::flat_hash_set<SdfPath, SdfPath::Hash> sensor_binding_dirty_;
   bool shape_sensors_dirty_ = false;
 
   absl::flat_hash_map<std::string, ref<Sensor>> sensors_;
-  // Surface sensors, keyed by camera prim path. Owning.
-  absl::flat_hash_map<std::string, mitsuba::ref<Object>> surface_sensors_;
-  // Reverse binding, keyed by the measured shape's prim path. Holds a
-  // reference so that replacing an entry in `surface_sensors_` (a rebuilt
-  // sensor) can never leave this map pointing at a freed object.
-  absl::flat_hash_map<std::string, mitsuba::ref<Object>> shape_sensors_;
+  absl::flat_hash_map<std::string, mitsuba::ref<Object>> surface_sensors_;  // Camera path -> sensor
+  absl::flat_hash_map<std::string, mitsuba::ref<Object>> shape_sensors_;    // Shape path -> sensor
   absl::flat_hash_map<std::string, ref<Shape>> shapes_;
   absl::flat_hash_map<std::string, ref<Emitter>> emitters_;
   absl::flat_hash_map<std::string, ref<BSDF>> bsdfs_;
