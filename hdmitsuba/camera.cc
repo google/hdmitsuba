@@ -65,23 +65,19 @@ std::optional<SdfPath> GetTargetShapeId(HdSceneDelegate* sceneDelegate,
                                         const SdfPath& id) {
   VtValue value = sceneDelegate->GetCameraParamValue(
       id, HdMitsubaCameraTokens->sensorShape);
-  if (value.IsHolding<SdfPath>()) {
-    const SdfPath& path = value.UncheckedGet<SdfPath>();
-    return path.IsEmpty() ? std::nullopt : std::optional<SdfPath>(path);
+  if (!value.IsHolding<std::string>()) {
+    return std::nullopt;
   }
-  if (value.IsHolding<std::string>()) {
-    const std::string& path = value.UncheckedGet<std::string>();
-    if (path.empty()) {
-      return std::nullopt;
-    }
-    if (!SdfPath::IsValidPathString(path)) {
-      TF_WARN("Camera %s: mitsuba:sensor:shape is not a valid path: %s",
-              id.GetText(), path.c_str());
-      return std::nullopt;
-    }
-    return SdfPath(path);
+  const std::string& path = value.UncheckedGet<std::string>();
+  if (path.empty()) {
+    return std::nullopt;
   }
-  return std::nullopt;
+  if (!SdfPath::IsValidPathString(path)) {
+    TF_WARN("Camera %s: mitsuba:sensor:shape is not a valid path: %s",
+            id.GetText(), path.c_str());
+    return std::nullopt;
+  }
+  return SdfPath(path);
 }
 
 }  // namespace
