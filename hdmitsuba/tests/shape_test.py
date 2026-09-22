@@ -20,6 +20,7 @@ import mitsuba as mi
 import numpy as np
 import pytest
 
+from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
 from pxr import Vt
@@ -248,3 +249,41 @@ def test_modify_curve_transform_only():
   assert (
       np.max(np.abs(image_modified[..., :3] - image_original[..., :3])) > 0.2
   )
+
+
+def test_subdivision_refinement():
+  stage = Usd.Stage.Open(
+      f'{test_helpers.TEST_ASSETS_PATH}/shapes/subdiv_cube.usda'
+  )
+  test_helpers.create_render_settings(stage, resolution=(64, 64), spp=16)
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      refine_level_fallback=0,
+  )
+  img_coarse = engine.render()['color']
+
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      refine_level_fallback=2,
+  )
+  img_refined = engine.render()['color']
+  assert np.mean(np.abs(img_refined[..., :3] - img_coarse[..., :3])) > 0.005
+
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      refine_level_fallback=None,
+  )
+  np.testing.assert_allclose(engine.render()['color'], img_coarse, atol=1e-4)
+
+  # Per-mesh mitsuba:subdivision_level override and live invalidation.
+  subdiv_attr = stage.GetPrimAtPath('/root/Cube/Cube').CreateAttribute(
+      'mitsuba:subdivision_level', Sdf.ValueTypeNames.Int
+  )
+  subdiv_attr.Set(2)
+  np.testing.assert_allclose(engine.render()['color'], img_refined, atol=1e-4)
+
+  subdiv_attr.Set(0)
+  np.testing.assert_allclose(engine.render()['color'], img_coarse, atol=1e-4)
+
