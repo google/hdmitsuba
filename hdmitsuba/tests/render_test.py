@@ -97,6 +97,7 @@ def test_render_simple_scene(renderer):
   )
   outputs = engine.render()
   image = outputs['color']
+  assert np.mean(image[..., :3]) > 0.01
   extension = 'png' if image.dtype == np.uint8 else 'exr'
   test_helpers.write_image(image, f'simple_{renderer}.{extension}')
 
