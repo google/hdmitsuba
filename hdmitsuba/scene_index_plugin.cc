@@ -76,9 +76,6 @@ class HdMitsuba_MeshSubdivDataSource : public HdContainerDataSource {
   TfTokenVector GetNames() override { return {}; }
 
   HdDataSourceBaseHandle Get(const TfToken& name) override {
-    if (name == HdPrimvarsSchema::GetSchemaToken()) {
-      return HdContainerDataSourceHandle(this);
-    }
     if (name == HdMitsubaMeshTokens->subdivision_level) {
       UsdAttribute attr =
           prim_.GetAttribute(HdMitsubaMeshTokens->subdivision_level);
@@ -117,7 +114,9 @@ class HdMitsuba_APISchemaAdapter : public UsdImagingAPISchemaAdapter {
       const UsdImagingDataSourceStageGlobals& stage_globals) override {
     if (subprim.IsEmpty() && applied_instance_name.IsEmpty() &&
         prim.IsA<UsdGeomMesh>()) {
-      return HdMitsuba_MeshSubdivDataSource::New(prim, stage_globals);
+      return HdRetainedContainerDataSource::New(
+          HdPrimvarsSchema::GetSchemaToken(),
+          HdMitsuba_MeshSubdivDataSource::New(prim, stage_globals));
     }
     return nullptr;
   }
