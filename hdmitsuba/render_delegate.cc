@@ -312,14 +312,14 @@ HdAovDescriptor HdMitsubaRenderDelegate::GetDefaultAovDescriptor(
       name == TfToken("prim_index")) {
     return HdAovDescriptor(HdFormatInt32, false, VtValue(-1));
   }
-  if (name == HdAovTokens->normal || name == TfToken("geo_normal") ||
-      name == TfToken("position") || name == TfToken("albedo") ||
-      name == TfToken("dp_du") || name == TfToken("dp_dv")) {
+  if (name == HdAovTokens->normal || name == TfToken("sh_normal") ||
+      name == TfToken("geo_normal") || name == TfToken("position") ||
+      name == TfToken("albedo") || name == TfToken("dp_du") ||
+      name == TfToken("dp_dv")) {
     return HdAovDescriptor(HdFormatFloat32Vec3, false,
                            VtValue(GfVec3f(0.0f, 0.0f, 0.0f)));
   }
-  if (name == TfToken("uv") || name == TfToken("duv_dx") ||
-      name == TfToken("duv_dy")) {
+  if (name == TfToken("uv")) {
     return HdAovDescriptor(HdFormatFloat32Vec2, false,
                            VtValue(GfVec2f(0.0f, 0.0f)));
   }

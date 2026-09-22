@@ -814,6 +814,7 @@ class SceneModel final : public SceneManager {
                                 TfToken::HashFunctor>{
             {HdAovTokens->depth, {"depth:depth", 1}},
             {HdAovTokens->normal, {"sh_normal:sh_normal", 3}},
+            {TfToken("sh_normal"), {"sh_normal:sh_normal", 3}},
             {HdAovTokens->primId, {"primId:shape_index", 1}},
             {TfToken("shape_index"), {"shape_index:shape_index", 1}},
             {HdAovTokens->elementId, {"elementId:prim_index", 1}},
@@ -825,8 +826,6 @@ class SceneModel final : public SceneManager {
             {TfToken("geo_normal"), {"geo_normal:geo_normal", 3}},
             {TfToken("dp_du"), {"dp_du:dp_du", 3}},
             {TfToken("dp_dv"), {"dp_dv:dp_dv", 3}},
-            {TfToken("duv_dx"), {"duv_dx:duv_dx", 2}},
-            {TfToken("duv_dy"), {"duv_dy:duv_dy", 2}},
         };
 
     RenderPassState pass_state;

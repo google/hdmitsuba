@@ -31,8 +31,6 @@ _SUPPORTED_AOVS = frozenset([
     'sh_normal',
     'dp_du',
     'dp_dv',
-    'duv_dx',
-    'duv_dy',
     'prim_index',
     'shape_index',
 ])
