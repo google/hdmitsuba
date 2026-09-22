@@ -51,12 +51,12 @@ jobs:
       if: runner.os == 'Linux'
       run: |
         sudo apt-get update
-        sudo apt-get install -y llvm-dev
+        sudo apt-get install -y llvm-19-dev || sudo apt-get install -y llvm-18-dev
 
     - name: Install Conda Dependencies
       run: |
         if [ "$RUNNER_OS" = "macOS" ] || [ "$RUNNER_OS" = "Windows" ]; then
-          mamba install -y -c conda-forge openusd ninja llvm
+          mamba install -y -c conda-forge openusd ninja "llvm>=18"
         else
           mamba install -y -c conda-forge openusd ninja
         fi
@@ -125,19 +125,19 @@ jobs:
         if [ "$RUNNER_OS" = "macOS" ]; then
           LLVM_PATH=$(find $CONDA_PREFIX/lib -name "libLLVM.dylib" | head -n 1)
           if [ -z "$LLVM_PATH" ]; then
-            LLVM_PATH=$(find $CONDA_PREFIX/lib -name "libLLVM*.dylib" | head -n 1)
+            LLVM_PATH=$(find $CONDA_PREFIX/lib -name "libLLVM*.dylib" | sort -V | tail -n 1)
           fi
           echo "DRJIT_LIBLLVM_PATH=$LLVM_PATH" >> $GITHUB_ENV
           echo "Resolved macOS LLVM: $LLVM_PATH"
         elif [ "$RUNNER_OS" = "Windows" ]; then
-          LLVM_PATH=$(find $CONDA_PREFIX/Library/bin -iname "*llvm*.dll" | head -n 1)
+          LLVM_PATH=$(find $CONDA_PREFIX/Library/bin -iname "*llvm*.dll" | sort -V | tail -n 1)
           echo "DRJIT_LIBLLVM_PATH=$LLVM_PATH" >> $GITHUB_ENV
           echo "Resolved Windows LLVM: $LLVM_PATH"
         else
-          # Linux: Try system (to match Mesa)
-          LLVM_PATH=$(find /usr/lib/x86_64-linux-gnu -name "libLLVM-*.so*" | head -n 1)
+          # Linux: Try system (to match Mesa), selecting the highest installed version
+          LLVM_PATH=$(find /usr/lib/x86_64-linux-gnu -name "libLLVM-*.so*" | sort -V | tail -n 1)
           if [ -z "$LLVM_PATH" ]; then
-            LLVM_PATH=$(find /usr/lib -name "libLLVM*.so*" | head -n 1)
+            LLVM_PATH=$(find /usr/lib -name "libLLVM*.so*" | sort -V | tail -n 1)
           fi
           if [ -n "$LLVM_PATH" ]; then
             echo "DRJIT_LIBLLVM_PATH=$LLVM_PATH" >> $GITHUB_ENV
