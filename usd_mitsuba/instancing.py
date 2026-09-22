@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import mitsuba as mi
@@ -54,6 +55,7 @@ def convert_point_instancer(
     subdivision_level: int,
     time: Usd.TimeCode,
     mi_scene_dict: dict[str, Any],
+    sensor_bindings: Mapping[Sdf.Path, Usd.Prim],
 ) -> None:
   """Converts a PointInstancer prim to Mitsuba ShapeGroups and Instances.
 
@@ -62,6 +64,7 @@ def convert_point_instancer(
     subdivision_level: The subdivision level for prototype meshes.
     time: The time code to evaluate at.
     mi_scene_dict: The top-level Mitsuba scene dictionary to populate.
+    sensor_bindings: Precomputed shape path -> sensor prim map.
   """
   instancer = UsdGeom.PointInstancer(instancer_prim)
   instancer_id = util.get_mitsuba_id(instancer_prim)
@@ -100,6 +103,7 @@ def convert_point_instancer(
             child_prim,
             subdivision_level,
             time,
+            sensor_bindings,
             custom_transform=relative_trans,
         )
         for _, mesh_obj in meshes.items():

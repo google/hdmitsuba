@@ -281,12 +281,10 @@ def convert_to_mitsuba(
     mi_id = util.get_mitsuba_id(prim)
     if prim.IsA(UsdGeom.PointInstancer):
       instancing.convert_point_instancer(
-          prim, subdivision_level, time, mi_scene_dict)
+          prim, subdivision_level, time, mi_scene_dict, sensor_bindings)
     elif prim.IsA(UsdGeom.Mesh):
       mi_scene_dict.update(
-          mesh.convert_mesh(
-              prim, subdivision_level, time, sensor_bindings=sensor_bindings
-          )
+          mesh.convert_mesh(prim, subdivision_level, time, sensor_bindings)
       )
     elif prim.IsA(UsdGeom.Cube):
       mi_scene_dict[mi_id] = _convert_cube(prim, time)

@@ -117,8 +117,8 @@ def convert_mesh(
     prim: Usd.Prim,
     subdivision_level: int,
     time: Usd.TimeCode,
+    sensor_bindings: Mapping[Sdf.Path, Usd.Prim],
     custom_transform: Gf.Matrix4d | None = None,
-    sensor_bindings: Mapping[Sdf.Path, Usd.Prim] | None = None,
 ) -> dict[str, mi.Mesh]:
   """Converts a mesh prim and returns a dictionary of Mitsuba meshes.
 
@@ -126,16 +126,14 @@ def convert_mesh(
     prim: The USD prim.
     subdivision_level: The subdivision level.
     time: The time code.
+    sensor_bindings: Precomputed shape path -> sensor prim map.
     custom_transform: Optional transform to use instead of local-to-world.
-    sensor_bindings: Optional precomputed shape path -> sensor prim map.
 
   Returns:
     A dictionary mapping Mitsuba scene object IDs to mi.Mesh objects.
   """
   stage = prim.GetStage()
   path = prim.GetPath()
-  if sensor_bindings is None:
-    sensor_bindings = camera.get_surface_sensor_bindings(stage)
   has_displacement = material.has_displacement(prim)
   mesh_prim = UsdGeom.Mesh(prim)
   if level_attr := prim.GetAttribute('mitsuba:subdivision_level'):
