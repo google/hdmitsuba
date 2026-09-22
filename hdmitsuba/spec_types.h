@@ -66,7 +66,6 @@ struct MeshSpec : public BaseSpec {
   VtIntArray face_vertex_indices;
   PrimvarMap primvars;
   GfMatrix4d transform;
-  std::optional<SdfPath> attached_sensor_id = std::nullopt;
   std::optional<LightSpec> emitter_spec = std::nullopt;
   VtMatrix4dArray instance_transforms;
   bool transforms_dirty = false;
@@ -79,7 +78,6 @@ struct CurveSpec : public BaseSpec {
   std::string plugin_name;
   std::vector<float> control_points;  // Flat packed [x, y, z, r] control points
   std::vector<uint32_t> segment_indices;  // Precomputed segment indices
-  std::optional<SdfPath> attached_sensor_id = std::nullopt;
 };
 
 struct ParticleFieldSpec : public BaseSpec {
@@ -117,6 +115,10 @@ struct CameraSpec : public BaseSpec {
   float near_clip = 0.01f;
   float far_clip = 1000.0f;
   std::string pixel_filter_type = "";
+  // Shape measured by this sensor, authored as `mitsuba:sensor:shape`. Only
+  // meaningful for surface sensor types (e.g. `irradiancemeter`), which
+  // Mitsuba instantiates as a child of the shape rather than standalone.
+  std::optional<SdfPath> target_shape_id = std::nullopt;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

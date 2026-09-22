@@ -262,6 +262,9 @@ def convert_to_mitsuba(
   )
 
   prototype_paths = instancing.get_prototype_paths(stage)
+  # Surface sensors (e.g. irradiancemeters) are declared on the Camera prim but
+  # instantiated inside the shape they measure, so resolve the bindings up front.
+  sensor_bindings = camera.get_surface_sensor_bindings(stage)
   # Traverse the stage using TraverseInstanceProxies. This flattens native USD
   # instances (instanceable=true), which means they will be duplicated in Mitsuba.
   # This is since Mitsuba's instancing does not support BSDF or emitter changes
@@ -282,14 +285,20 @@ def convert_to_mitsuba(
       instancing.convert_point_instancer(
           prim, subdivision_level, time, mi_scene_dict)
     elif prim.IsA(UsdGeom.Mesh):
-      mi_scene_dict.update(mesh.convert_mesh(prim, subdivision_level, time))
+      mi_scene_dict.update(
+          mesh.convert_mesh(
+              prim, subdivision_level, time, sensor_bindings=sensor_bindings
+          )
+      )
     elif prim.IsA(UsdGeom.Cube):
       mi_scene_dict[mi_id] = _convert_cube(prim, time)
     elif prim.IsA(UsdGeom.Plane):
       mi_scene_dict[mi_id] = _convert_plane(prim, time)
     elif prim.IsA(UsdGeom.Camera):
-      mi_scene_dict[mi_id] = camera.usd_to_mitsuba(
-          UsdGeom.Camera(prim), time=time)
+      # A sensor bound to a shape is emitted as part of that shape.
+      if camera.get_target_shape_path(prim) is None:
+        mi_scene_dict[mi_id] = camera.usd_to_mitsuba(
+            UsdGeom.Camera(prim), time=time)
     elif prim.IsA(UsdLux.NonboundableLightBase) or prim.IsA(
         UsdLux.BoundableLightBase
     ):

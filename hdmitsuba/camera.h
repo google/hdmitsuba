@@ -16,6 +16,7 @@
 
 #include <string>
 
+#include <pxr/base/tf/staticTokens.h>
 #include <pxr/imaging/hd/camera.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
@@ -23,6 +24,18 @@
 #include <pxr/pxr.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
+
+// Renderer-specific camera attributes. These are plain namespaced attributes on
+// the Camera prim: UsdImaging passes any such attribute through to the camera
+// data source verbatim, so they need no adapter to be readable. `sensorPrefix`
+// is what HdMitsuba_APISchemaAdapter watches to invalidate them.
+#define HDMITSUBA_CAMERA_TOKENS                            \
+  ((sensorPrefix, "mitsuba:sensor:"))                      \
+  ((sensorType, "mitsuba:sensor:type"))                    \
+  ((sensorShape, "mitsuba:sensor:shape"))                  \
+  ((sensorPixelFilterType, "mitsuba:sensor:film:pixel_filter:type"))
+
+TF_DECLARE_PUBLIC_TOKENS(HdMitsubaCameraTokens, HDMITSUBA_CAMERA_TOKENS);
 
 class HdMitsubaCamera final : public HdCamera {
  public:

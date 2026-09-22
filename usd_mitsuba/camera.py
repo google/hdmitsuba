@@ -21,6 +21,7 @@ from typing import Any
 import drjit as dr
 import mitsuba as mi
 import numpy as np
+from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
 
@@ -42,6 +43,37 @@ def _get_camera_transform(camera: UsdGeom.Camera, time: Usd.TimeCode) -> mi.Scal
   return mi.ScalarTransform4f(
       dr.transform_compose(mi.ScalarMatrix3f(1.0), rotation, translation)
   )
+
+
+# Names the shape a surface sensor (e.g. an irradiancemeter) measures. Mitsuba
+# instantiates such sensors as a child of that shape rather than standalone.
+SENSOR_SHAPE_ATTR = 'mitsuba:sensor:shape'
+
+
+def get_target_shape_path(prim: Usd.Prim) -> Sdf.Path | None:
+  """Returns the shape path a sensor prim measures, if any."""
+  attr = prim.GetAttribute(SENSOR_SHAPE_ATTR)
+  if not attr:
+    return None
+  path = attr.Get()
+  if not path:
+    return None
+  path = Sdf.Path(str(path))
+  return path if not path.isEmpty else None
+
+
+def get_surface_sensor_bindings(stage: Usd.Stage) -> dict[Sdf.Path, Usd.Prim]:
+  """Maps each measured shape path to the camera prim that measures it."""
+  bindings: dict[Sdf.Path, Usd.Prim] = {}
+  for prim in stage.Traverse(Usd.TraverseInstanceProxies()):
+    if not prim.IsA(UsdGeom.Camera):
+      continue
+    shape_path = get_target_shape_path(prim)
+    if shape_path is None:
+      continue
+    # Mitsuba attaches a sensor to exactly one shape, so the first binding wins.
+    bindings.setdefault(shape_path, prim)
+  return bindings
 
 
 def usd_to_mitsuba(
@@ -82,6 +114,8 @@ def usd_to_mitsuba(
 
   if prim.GetAttribute('mitsuba:sensor:type').Get():
     sensor_dict = util.extract_nested_dict(prim, 'mitsuba:sensor:')
+    # A binding, not a plugin parameter: the shape it names owns the sensor.
+    sensor_dict.pop('shape', None)
     # Irradiancemeter sensors cannot have a transform.
     if sensor_dict.get('type') != 'irradiancemeter':
       sensor_dict['to_world'] = world_transform

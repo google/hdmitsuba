@@ -22,6 +22,7 @@ def Xform "root"
             token projection = "perspective"
             float verticalAperture = 0.36
             custom string mitsuba:sensor:type = "irradiancemeter"
+            custom string mitsuba:sensor:shape = "/root/Cube/Cube"
             custom string mitsuba:sensor:film:pixel_filter:type = "box"
         }
     }
@@ -46,7 +47,6 @@ def Xform "root"
                 interpolation = "faceVarying"
             )
             uniform token subdivisionScheme = "none"
-            custom string mitsuba:sensor = "/root/Camera/Camera"
         }
     }
 

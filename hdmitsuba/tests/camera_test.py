@@ -27,6 +27,7 @@ from pxr import UsdLux
 from pxr import UsdRender
 from pxr import UsdShade
 from hdmitsuba.tests import test_helpers
+from usd_mitsuba import translator as usd_mitsuba
 import usd_render
 
 
@@ -240,3 +241,56 @@ def test_irradiancemeter_render():
   test_helpers.assert_hydra_equal_to_offline(
       stage, '/root/Camera/Camera', 'test_irradiancemeter_render', atol=0.05
   )
+
+
+def test_irradiancemeter_rebind():
+  """Re-pointing `mitsuba:sensor:shape` must move the sensor to the new shape.
+
+  Regression test for two pieces of plumbing that have no stock equivalent:
+  the adapter rule invalidating `mitsuba:sensor:*` on Camera prims, and the
+  scene manager rebuilding a shape when the sensor bound to it changes.
+  """
+  stage = Usd.Stage.Open(
+      f'{test_helpers.TEST_ASSETS_PATH}/shapes/irradiancemeter.usda'
+  )
+  test_helpers.create_render_settings(stage, resolution=(128, 128))
+
+  # A second, much smaller cube receives a different amount of light.
+  second_cube = UsdGeom.Mesh.Define(stage, '/root/Cube2/Cube2')
+  source_cube = UsdGeom.Mesh.Get(stage, '/root/Cube/Cube')
+  second_cube.GetPointsAttr().Set(source_cube.GetPointsAttr().Get())
+  second_cube.GetFaceVertexCountsAttr().Set(
+      source_cube.GetFaceVertexCountsAttr().Get()
+  )
+  second_cube.GetFaceVertexIndicesAttr().Set(
+      source_cube.GetFaceVertexIndicesAttr().Get()
+  )
+  UsdGeom.Xformable(stage.GetPrimAtPath('/root/Cube2')).AddTranslateOp().Set(
+      (0.0, 0.0, -6.0)
+  )
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      camera_path='/root/Camera/Camera',
+  )
+  image_initial = engine.render()['color']
+  test_helpers.write_image(image_initial, 'test_irradiancemeter_rebind_a.png')
+
+  camera_prim = stage.GetPrimAtPath('/root/Camera/Camera')
+  camera_prim.GetAttribute('mitsuba:sensor:shape').Set('/root/Cube2/Cube2')
+
+  image_rebound = engine.render()['color']
+  test_helpers.write_image(image_rebound, 'test_irradiancemeter_rebind_b.png')
+
+  # The binding change must be picked up at all, ...
+  assert not np.allclose(
+      image_initial[..., :3], image_rebound[..., :3], atol=1e-3
+  )
+  # ... and must agree with the offline translation of the edited stage.
+  scene = mi.load_dict(usd_mitsuba.convert_to_mitsuba(stage))
+  image_offline = np.array(mi.render(scene, spp=128))
+  test_helpers.robust_assert_close(
+      image_rebound[..., :3], image_offline, atol=0.05
+  )
+

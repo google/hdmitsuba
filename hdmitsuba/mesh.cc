@@ -89,17 +89,6 @@ bool ValidatePrimvarSize(const VtValue& value, HdInterpolation interpolation,
   }
 }
 
-std::optional<SdfPath> GetAttachedSensorId(HdSceneDelegate* sceneDelegate,
-                                           const SdfPath& id) {
-  VtValue attached_sensor = sceneDelegate->Get(id, TfToken("mitsuba:sensor"));
-  if (attached_sensor.IsHolding<SdfPath>()) {
-    return attached_sensor.Get<SdfPath>();
-  } else if (attached_sensor.IsHolding<std::string>()) {
-    return SdfPath(attached_sensor.Get<std::string>());
-  }
-  return std::nullopt;
-}
-
 std::optional<LightSpec> GetMeshEmitterSpec(HdSceneDelegate* sceneDelegate,
                                             const SdfPath& id) {
   VtValue light_intensity =
@@ -321,8 +310,6 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
     return;
   }
 
-  std::optional<SdfPath> attached_sensor_id =
-      GetAttachedSensorId(sceneDelegate, id);
   std::optional<LightSpec> emitter_spec = GetMeshEmitterSpec(sceneDelegate, id);
 
   VtMatrix4dArray instance_transforms;
@@ -351,7 +338,6 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
   spec.material_ids = material_ids_;
   spec.primvars = primvars;
   spec.transform = sceneDelegate->GetTransform(id);
-  spec.attached_sensor_id = attached_sensor_id;
   spec.emitter_spec = emitter_spec;
   spec.instance_transforms = instance_transforms;
   spec.transforms_dirty = transforms_dirty;
