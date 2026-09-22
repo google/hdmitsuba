@@ -33,13 +33,14 @@
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/task.h>
 #include <pxr/imaging/hd/types.h>
+#include <pxr/imaging/hdsi/legacyDisplayStyleOverrideSceneIndex.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
 #include <pxr/usd/usd/common.h>
 #include <pxr/usd/usd/timeCode.h>
 #include <pxr/usd/usdRender/settings.h>
 #include <pxr/usd/usdRender/spec.h>
-#include <pxr/usdImaging/usdImaging/delegate.h>
+#include <pxr/usdImaging/usdImaging/stageSceneIndex.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -119,10 +120,12 @@ class RenderEngine {
   ReadRenderSettings(const std::optional<pxr::SdfPath>& path) const;
 
   pxr::UsdStageRefPtr stage_;
+  pxr::UsdImagingStageSceneIndexRefPtr stage_scene_index_;
+  pxr::HdsiLegacyDisplayStyleOverrideSceneIndexRefPtr
+      display_style_scene_index_;
   pxr::HdRendererPlugin* renderer_plugin_ = nullptr;
   pxr::HdPluginRenderDelegateUniqueHandle render_delegate_ = nullptr;
   std::unique_ptr<pxr::HdRenderIndex> render_index_;
-  std::unique_ptr<pxr::UsdImagingDelegate> scene_delegate_;
   std::unique_ptr<EngineSceneDelegate> params_delegate_;
   std::unique_ptr<pxr::HdEngine> engine_;
   pxr::GfVec2i resolution_;

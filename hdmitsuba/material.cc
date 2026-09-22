@@ -42,13 +42,11 @@ namespace {
 // Temporarily convert from material network schema to material network2.
 // In a later step, we will modify the prim_translator to directly work
 // using the schema.
-HdMaterialNetwork2 ConvertMaterialNetwork(
-    const HdMaterialNetworkSchema& network_schema) {
-  HdMaterialNetwork2 network;
-
+void ConvertMaterialNetwork(const HdMaterialNetworkSchema& network_schema,
+                            HdMaterialNetwork2& network) {
   HdMaterialNodeContainerSchema nodes_schema = network_schema.GetNodes();
   if (!nodes_schema.IsDefined()) {
-    return network;
+    return;
   }
 
   for (const TfToken& node_name : nodes_schema.GetNames()) {
@@ -97,7 +95,7 @@ HdMaterialNetwork2 ConvertMaterialNetwork(
 
   auto terminals_schema = network_schema.GetTerminals();
   if (!terminals_schema) {
-    return network;
+    return;
   }
 
   for (const TfToken& terminal_name : terminals_schema.GetNames()) {
@@ -112,8 +110,6 @@ HdMaterialNetwork2 ConvertMaterialNetwork(
       network.terminals[terminal_name] = conn;
     }
   }
-
-  return network;
 }
 
 }  // namespace
@@ -139,19 +135,27 @@ void HdMitsubaMaterial::Sync(HdSceneDelegate* scene_delegate,
   }
   HdMaterialSchema materialSchema =
       HdMaterialSchema::GetFromParent(scene_index->GetPrim(id).dataSource);
-  if (!materialSchema.IsDefined()) {
-    return;
-  }
-  HdMaterialNetworkSchema networkSchema = materialSchema.GetMaterialNetwork();
-  if (!networkSchema.IsDefined()) {
-    return;
+  HdMaterialNetwork2 network2;
+  if (materialSchema.IsDefined()) {
+    // Merge the universal network with renderer-specific contexts in reverse
+    // priority order so partial context overrides retain base terminals.
+    ConvertMaterialNetwork(materialSchema.GetMaterialNetwork(), network2);
+    const TfTokenVector contexts = scene_delegate->GetRenderIndex()
+                                       .GetRenderDelegate()
+                                       ->GetMaterialRenderContexts();
+    for (auto it = contexts.rbegin(); it != contexts.rend(); ++it) {
+      if (!it->IsEmpty()) {
+        ConvertMaterialNetwork(materialSchema.GetMaterialNetwork(*it),
+                               network2);
+      }
+    }
   }
 
   SceneManager* scene_manager =
       static_cast<HdMitsubaRenderParam*>(render_param)->GetScene();
   MaterialSpec spec;
   spec.id = id;
-  spec.network2 = ConvertMaterialNetwork(networkSchema);
+  spec.network2 = std::move(network2);
   spec.needs_rebuild = true;
   scene_manager->SyncMaterial(std::move(spec));
   *dirty_bits = HdChangeTracker::Clean;

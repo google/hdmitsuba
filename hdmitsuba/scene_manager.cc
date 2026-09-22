@@ -692,9 +692,16 @@ class SceneModel final : public SceneManager {
     auto prev_it = mesh_specs_.find(spec.id);
     if (prev_it == mesh_specs_.end()) {
       spec.needs_rebuild = true;
-    }
-    if (prev_it != mesh_specs_.end() && !spec.needs_rebuild) {
-      spec.dirty_bits = 1;
+    } else {
+      spec.needs_rebuild |= prev_it->second.needs_rebuild;
+      if (spec.emitter_spec.has_value() !=
+              prev_it->second.emitter_spec.has_value() ||
+          spec.material_ids != prev_it->second.material_ids) {
+        spec.needs_rebuild = true;
+      }
+      if (!spec.needs_rebuild) {
+        spec.dirty_bits = 1;
+      }
     }
     mesh_specs_[spec.id] = std::move(spec);
     reset_progressive_ = true;

@@ -334,3 +334,14 @@ def test_update_mesh_light_intensity():
   )
   # The bright image should be brighter than the original
   assert np.max(image_bright[..., :3]) > np.max(image_original[..., :3])
+
+  # 4. Remove and re-apply MeshLightAPI to exercise emitter_spec presence transitions.
+  mesh_light_prim.RemoveAPI(UsdLux.MeshLightAPI)
+  mesh_light_prim.RemoveProperty('inputs:intensity')
+  assert np.max(engine.render()['color'][..., :3]) < 0.01
+
+  UsdLux.MeshLightAPI.Apply(mesh_light_prim)
+  UsdLux.LightAPI(mesh_light_prim).CreateIntensityAttr().Set(5.0)
+  assert np.max(engine.render()['color'][..., :3]) > 0.1
+
+

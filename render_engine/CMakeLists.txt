@@ -27,6 +27,7 @@ target_link_libraries(engine_lib PUBLIC
   usdImaging
   usdRender
   hd
+  hdsi
   hdx
 )
 # Make sure we build with PIC since it will be loaded by Python extension

@@ -33,6 +33,7 @@ add_library(hdMitsuba SHARED
   render_pass.cc
   render_settings.cc
   renderer_plugin.cc
+  scene_index_plugin.cc
   scene_manager.cc
   particle_field.cc
   traversal.cc
@@ -57,11 +58,15 @@ target_link_libraries(hdMitsuba
     arch
     gf
     hd
+    hdsi
     hdx
     pxOsd
     sdf
     tf
     usdGeom
+    usdImaging
+    usdLux
+    usdShade
     usdVol
     vt
   PRIVATE

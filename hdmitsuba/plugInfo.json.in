@@ -9,6 +9,21 @@
                         ],
                         "displayName": "Mitsuba",
                         "priority": 99
+                    },
+                    "HdMitsuba_ImplicitSurfaceSceneIndexPlugin": {
+                        "bases": [
+                            "HdSceneIndexPlugin"
+                        ],
+                        "loadWithRenderer": "Mitsuba",
+                        "priority": 0,
+                        "displayName": "Scene Index to turn implicit surfaces into prims suitable for HdMitsuba"
+                    },
+                    "HdMitsuba_APISchemaAdapter": {
+                        "bases": [
+                            "UsdImagingAPISchemaAdapter"
+                        ],
+                        "displayName": "Fills UsdImaging invalidation gaps for HdMitsuba",
+                        "apiSchemaName": ""
                     }
                 }
             },

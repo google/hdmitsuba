@@ -56,11 +56,12 @@
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
 #include <pxr/usd/usd/common.h>
+#include <pxr/usd/usd/primRange.h>
 #include <pxr/usd/usd/timeCode.h>
 #include <pxr/usd/usdGeom/camera.h>
 #include <pxr/usd/usdRender/settings.h>
 #include <pxr/usd/usdRender/spec.h>
-#include <pxr/usdImaging/usdImaging/delegate.h>
+#include <pxr/usdImaging/usdImaging/sceneIndices.h>
 
 #include "absl/strings/str_cat.h"
 
@@ -330,7 +331,7 @@ void RenderEngine::Configure(
       {pxr::HdRenderSettingsTokens->enableInteractive, pxr::VtValue(false)});
 
   bool rebuild_delegate =
-      !render_delegate_ || !scene_delegate_ ||
+      !render_delegate_ || !stage_scene_index_ ||
       (hydra_delegate_id != hydra_delegate_id_) ||
       (render_settings_prim_path != render_settings_prim_path_);
 
@@ -405,13 +406,14 @@ void RenderEngine::Configure(
       // Clean up any previous state in reverse order.
       tasks_.clear();
       params_delegate_ = nullptr;
-      scene_delegate_ = nullptr;
       render_index_.reset();
+      display_style_scene_index_ = nullptr;
+      stage_scene_index_ = nullptr;
       render_delegate_ = nullptr;
       aov_ids_.clear();
       render_buffer_ids_.clear();
 
-      // Create render delegate, scene delegate, and params delegate.
+      // Create render delegate, scene index chain, and params delegate.
       renderer_plugin_ =
           HdRendererPluginRegistry::GetInstance().GetRendererPlugin(
               hydra_delegate_id);
@@ -426,9 +428,16 @@ void RenderEngine::Configure(
       if (!render_index_) {
         throw std::runtime_error("Failed to create render index.");
       }
-      scene_delegate_ = std::make_unique<UsdImagingDelegate>(
-          render_index_.get(), SdfPath::AbsoluteRootPath());
-      scene_delegate_->Populate(stage_->GetPseudoRoot());
+      UsdImagingCreateSceneIndicesInfo create_info;
+      create_info.stage = stage_;
+      const UsdImagingSceneIndices scene_indices =
+          UsdImagingCreateSceneIndices(create_info);
+      stage_scene_index_ = scene_indices.stageSceneIndex;
+      display_style_scene_index_ =
+          HdsiLegacyDisplayStyleOverrideSceneIndex::New(
+              scene_indices.finalSceneIndex);
+      render_index_->InsertSceneIndex(display_style_scene_index_,
+                                      SdfPath::AbsoluteRootPath());
       params_delegate_ = std::make_unique<EngineSceneDelegate>(
           render_index_.get(), SdfPath{"/task_controller"});
       hydra_delegate_id_ = hydra_delegate_id;
@@ -437,11 +446,7 @@ void RenderEngine::Configure(
     }
   }
 
-  if (refine_level_fallback.has_value() &&
-      refine_level_fallback.value() !=
-          scene_delegate_->GetRefineLevelFallback()) {
-    scene_delegate_->SetRefineLevelFallback(refine_level_fallback.value());
-  }
+  display_style_scene_index_->SetRefineLevelFallback(refine_level_fallback);
 
   if (cache_invalid) {
     if (!rebuild_delegate) {
@@ -473,6 +478,9 @@ void RenderEngine::Configure(
           render_task_id_, HdTokens->renderTags,
           TfTokenVector{HdRenderTagTokens->geometry});
       tasks_.push_back(render_index_->GetTask(render_task_id_));
+    }
+    if (!rebuild_delegate) {
+      stage_scene_index_->ApplyPendingUpdates();
     }
     SetCamera(camera_path_);
   } else if (ndc_changed) {
@@ -549,10 +557,11 @@ RenderEngine::Render(UsdTimeCode time_code) {
     enable_interactive = it->second.GetWithDefault<bool>(false);
   }
   UpdateAovsAndBuffers();
-  scene_delegate_->SetTime(time_code);
+  stage_scene_index_->ApplyPendingUpdates();
+  stage_scene_index_->SetTime(time_code);
   do {
     TF_PY_ALLOW_THREADS_IN_SCOPE();
-    engine_->Execute(&scene_delegate_->GetRenderIndex(), &tasks_);
+    engine_->Execute(render_index_.get(), &tasks_);
   } while (!IsConverged() && !enable_interactive);
 
   for (size_t i = 0; i < render_buffer_ids_.size(); i++) {

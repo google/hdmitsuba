@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
 from pxr import UsdRender
@@ -173,3 +174,111 @@ def test_invalid_camera_throws():
     pytest.skip("No renderers registered")
   with pytest.raises(RuntimeError, match="No camera found"):
     engine.configure(hydra_delegate_id=renderers[0])
+
+
+def _create_subdiv_cube_stage() -> Usd.Stage:
+  stage = _create_stage()
+  stage.RemovePrim('/mesh')
+  cube = UsdGeom.Mesh.Define(stage, '/cube')
+  cube.GetSubdivisionSchemeAttr().Set(UsdGeom.Tokens.catmullClark)
+  cube.GetPointsAttr().Set([
+      (-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1),
+      (-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1),
+  ])
+  cube.GetFaceVertexCountsAttr().Set([4] * 6)
+  cube.GetFaceVertexIndicesAttr().Set([
+      0, 3, 2, 1, 4, 5, 6, 7, 0, 1, 5, 4,
+      2, 3, 7, 6, 0, 4, 7, 3, 1, 2, 6, 5,
+  ])
+  return stage
+
+
+def _render_at_refine_level(stage: Usd.Stage, refine_level: int | None):
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      width=64,
+      refine_level_fallback=refine_level,
+  )
+  return engine.render()['color']
+
+
+def test_refine_level_fallback_reconfigure():
+  _skip_missing_delegate('HdMitsubaRendererPlugin')
+  img_coarse = _render_at_refine_level(_create_subdiv_cube_stage(), 0)
+  img_refined = _render_at_refine_level(_create_subdiv_cube_stage(), 2)
+  assert np.mean(np.abs(img_refined[..., :3] - img_coarse[..., :3])) > 0.005
+
+  engine = usd_render.RenderEngine(_create_subdiv_cube_stage())
+  for level, expected in [(0, img_coarse), (2, img_refined), (None, img_coarse)]:
+    engine.configure(
+        hydra_delegate_id='HdMitsubaRendererPlugin',
+        width=64,
+        refine_level_fallback=level,
+    )
+    np.testing.assert_allclose(engine.render()['color'], expected, atol=1e-4)
+
+
+@pytest.mark.parametrize("delegate_id", _DELEGATES)
+def test_configure_newly_added_camera(delegate_id: str):
+  _skip_missing_delegate(delegate_id)
+  stage = _create_stage()
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id=delegate_id, width=100, camera_path='/World/camera'
+  )
+  img_first = engine.render()['color']
+
+  new_camera = UsdGeom.Camera.Define(stage, '/World/new_camera')
+  new_camera.AddTranslateOp().Set((0, 8, 0))
+  new_camera.AddRotateXOp().Set(-90)
+
+  engine.configure(
+      hydra_delegate_id=delegate_id, width=100, camera_path='/World/new_camera'
+  )
+  img_second = engine.render()['color']
+  assert np.mean(np.abs(img_second - img_first)) > 0.05
+
+
+def test_mesh_subdivision_level_attribute():
+  _skip_missing_delegate('HdMitsubaRendererPlugin')
+  img_coarse = _render_at_refine_level(_create_subdiv_cube_stage(), 0)
+  img_refined = _render_at_refine_level(_create_subdiv_cube_stage(), 2)
+
+  stage = _create_subdiv_cube_stage()
+  subdiv_attr = stage.GetPrimAtPath('/cube').CreateAttribute(
+      'mitsuba:subdivision_level', Sdf.ValueTypeNames.Int
+  )
+  subdiv_attr.Set(2)
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      width=64,
+      refine_level_fallback=0,
+  )
+  np.testing.assert_allclose(engine.render()['color'], img_refined, atol=1e-4)
+
+  subdiv_attr.Set(0)
+  np.testing.assert_allclose(engine.render()['color'], img_coarse, atol=1e-4)
+
+
+def test_implicit_surface_scene_index_plugin():
+  _skip_missing_delegate('HdMitsubaRendererPlugin')
+  empty_stage = _create_stage()
+  empty_stage.RemovePrim('/mesh')
+  engine = usd_render.RenderEngine(empty_stage)
+  engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin', width=64)
+  img_empty = engine.render()['color']
+
+  sphere_stage = _create_stage()
+  sphere_stage.RemovePrim('/mesh')
+  UsdGeom.Sphere.Define(sphere_stage, '/sphere').GetRadiusAttr().Set(1.5)
+  engine = usd_render.RenderEngine(sphere_stage)
+  engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin', width=64)
+  img_sphere = engine.render()['color']
+
+  assert np.mean(np.abs(img_sphere[..., :3] - img_empty[..., :3])) > 0.01
+
+
+

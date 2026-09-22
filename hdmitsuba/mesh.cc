@@ -173,15 +173,22 @@ void HdMitsubaMesh::Sync(HdSceneDelegate* sceneDelegate,
       (HdChangeTracker::DirtyPrimvar | HdChangeTracker::DirtyPoints |
        HdChangeTracker::DirtyNormals | HdChangeTracker::DirtyTransform);
   bool instancer_dirty = *dirtyBits & (HdChangeTracker::DirtyInstancer |
-                                       HdChangeTracker::DirtyInstanceIndex);
+                                       HdChangeTracker::DirtyInstanceIndex |
+                                       HdChangeTracker::DirtyParams);
 
   if (topology_dirty) {
+    *dirtyBits |= HdChangeTracker::DirtyTopology |
+                  HdChangeTracker::DirtyPoints |
+                  HdChangeTracker::DirtyNormals |
+                  HdChangeTracker::DirtyPrimvar;
     SyncTopology(sceneDelegate);
   }
 
   if (topology_dirty || primvars_dirty || instancer_dirty) {
-    UpdateScene(sceneDelegate, renderParam,
-                SyncPrimvars(sceneDelegate, dirtyBits), dirtyBits);
+    if (topology_dirty || primvars_dirty) {
+      SyncPrimvars(sceneDelegate, dirtyBits);
+    }
+    UpdateScene(sceneDelegate, renderParam, primvars_, dirtyBits);
   }
 
   *dirtyBits = HdChangeTracker::Clean;
