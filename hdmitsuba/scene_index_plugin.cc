@@ -15,29 +15,20 @@
 
 // Scene-index plugins for HdMitsuba.
 //
-// Every value hdMitsuba reads off a prim is either a schema property or a USD
-// primvar, both of which UsdImaging surfaces natively -- renderer-specific
-// per-mesh controls are authored as `primvars:mitsuba:*`. Nothing here
-// contributes data sources; this file only fixes *invalidation*.
+// Nothing here contributes data sources -- every value hdMitsuba reads is a
+// schema property or a primvar UsdImaging already surfaces. This file only
+// fixes *invalidation*: UsdImagingStageSceneIndex drops a property change
+// unless some adapter claims it (_ComputeDirtiedEntries has no resync
+// fallback), and a few properties hdMitsuba cares about are claimed by nobody.
 //
-// UsdImagingStageSceneIndex forwards a property change only if some adapter
-// returns a non-empty locator set for it: _ComputeDirtiedEntries has no resync
-// fallback, so an unclaimed edit is silently dropped. A few properties
-// hdMitsuba cares about are claimed by nobody, hence the keyless API-schema
-// adapter below.
+// Contents: a scene index converting implicit surfaces to meshes, and a
+// keyless API-schema adapter covering those unclaimed properties.
 //
-// This file therefore contains:
-//   * a scene index that turns implicit surfaces into meshes, and
-//   * a keyless UsdImaging API-schema adapter that maps the unclaimed property
-//     changes onto the right data-source locators.
-//
-// TODO: unlike the scene index above, the keyless adapter cannot be scoped to
-// a renderer -- UsdImaging_AdapterManager constructs keyless adapters in its
-// constructor, which loads this library (and with it Mitsuba and Dr.Jit) into
-// *every* UsdImaging session, and makes every prim take the multi-adapter path
-// in UsdImagingStageSceneIndex. Moving the adapter into a small plugin library
-// without the Mitsuba dependency would avoid that.
-//
+// TODO: keyless adapters cannot be scoped to a renderer. Constructing them
+// loads this library -- and with it Mitsuba and Dr.Jit -- into every
+// UsdImaging session, and pushes every prim onto the multi-adapter path in
+// UsdImagingStageSceneIndex. A separate plugin library without the Mitsuba
+// dependency would avoid both.
 
 #include <string_view>
 
@@ -95,9 +86,8 @@ class HdMitsuba_ImplicitSurfaceSceneIndexPlugin : public HdSceneIndexPlugin {
   }
 };
 
-// Note: only the helper is given internal linkage. The two classes below must
-// stay at namespace scope -- `TfType::Define` registers them under their
-// demangled type name, which has to match the keys in plugInfo.json.
+// Helpers only: the registered classes must stay at namespace scope so their
+// demangled type names match the plugInfo.json keys.
 namespace {
 
 bool StartsWith(std::string_view s, std::string_view prefix) {
@@ -106,13 +96,9 @@ bool StartsWith(std::string_view s, std::string_view prefix) {
 
 }  // namespace
 
-// Keyless UsdImaging adapter filling property-invalidation gaps for custom
-// `mitsuba:sensor:*` attributes, the UsdLuxSphereLight/UsdLuxCylinderLight
-// `treatAsPoint`/`treatAsLine` attributes, and material output connections.
-//
-// Being keyless means this runs for every prim of every stage in the process,
-// including sessions driving another renderer -- see the TODO in the file
-// header.
+// Covers invalidation gaps for `mitsuba:sensor:*`, treatAsPoint/treatAsLine,
+// and material outputs. Being keyless, this runs for every prim of every stage
+// in the process -- see the TODO at the top of the file.
 class HdMitsuba_APISchemaAdapter : public UsdImagingAPISchemaAdapter {
  public:
   HdDataSourceLocatorSet InvalidateImagingSubprim(
@@ -125,26 +111,22 @@ class HdMitsuba_APISchemaAdapter : public UsdImagingAPISchemaAdapter {
 
     HdDataSourceLocatorSet result;
     for (const TfToken& prop : properties) {
-      // The name test comes first in each branch: it is a cheap compare, and
-      // it keeps the schema lookups off the path taken by the vast majority of
-      // prims, which match nothing here.
+      // Name test first: cheap, and keeps the schema lookups off the path
+      // taken by the vast majority of prims, which match nothing here.
       const std::string_view prop_name = prop.GetString();
       if (StartsWith(prop_name, kMitsubaSensorNamespace) &&
           prim.IsA<UsdGeomCamera>()) {
-        // UsdImagingDataSourceCameraPrim::Invalidate only maps names returned
-        // by UsdGeomCamera::GetSchemaAttributeNames().
+        // The camera adapter only maps UsdGeomCamera schema attributes.
         result.insert(HdCameraSchema::GetDefaultLocator());
       } else if ((prop == UsdLuxTokens->treatAsPoint ||
                   prop == UsdLuxTokens->treatAsLine) &&
                  prim.HasAPI<UsdLuxLightAPI>()) {
-        // UsdImagingLightAPIAdapter only claims `inputs:*` and `light:*`.
+        // The LightAPI adapter only claims `inputs:*` and `light:*`.
         result.insert(HdLightSchema::GetDefaultLocator());
       } else if (StartsWith(prop_name, UsdShadeTokens->outputs.GetString()) &&
                  prim.IsA<UsdShadeMaterial>()) {
-        // Narrow gap: UsdImagingMaterialAdapter already claims edits to any
-        // output it can still see via UsdShadeMaterial::GetOutputs(). What it
-        // cannot see is an output that was just *removed*, which is the case
-        // this branch exists for.
+        // The material adapter claims any output it can still see via
+        // GetOutputs(); this only adds the case of one being *removed*.
         result.insert(HdMaterialSchema::GetDefaultLocator());
       }
     }
@@ -160,10 +142,9 @@ TF_REGISTRY_FUNCTION(TfType) {
       .SetFactory<
           UsdImagingAPISchemaAdapterFactory<HdMitsuba_APISchemaAdapter>>();
 
-  // Mesh lights are `mesh` rprims that carry a `light` data source. The
-  // built-in rprim translator has no mapping for that locator, and custom
-  // translators are consulted *in addition to* the built-in ones, so this adds
-  // the missing edge without disturbing the standard mesh dirty bits.
+  // Mesh lights are `mesh` rprims carrying a `light` data source, which the
+  // built-in rprim translator has no mapping for. Custom translators run in
+  // addition to the built-ins, so only the forward direction needs filling in.
   HdDirtyBitsTranslator::RegisterTranslatorsForCustomRprimType(
       HdPrimTypeTokens->mesh,
       [](const HdDataSourceLocatorSet& set, HdDirtyBits* bits) {
@@ -171,8 +152,6 @@ TF_REGISTRY_FUNCTION(TfType) {
           *bits |= HdMitsubaMesh::DirtyLight;
         }
       },
-      // The reverse direction needs nothing: the built-in translator already
-      // produces the locators for every bit Hydra itself sets on a mesh.
       [](const HdDirtyBits, HdDataSourceLocatorSet*) {});
 }
 

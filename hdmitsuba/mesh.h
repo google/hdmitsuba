@@ -45,14 +45,8 @@ class HdMitsubaMesh final : public HdMesh {
   using PrimvarState = PXR_NS::PrimvarState;
   using PrimvarMap = PXR_NS::PrimvarMap;
 
-  // Raised when the `light` data source of a mesh light changes.
-  //
-  // Hydra has no standard rprim bit for this: in the legacy model lights are
-  // always sprims, so `HdDirtyBitsTranslator`'s built-in rprim table has no
-  // mapping for `HdLightSchema`. We therefore reserve a renderer-private bit
-  // and raise it from the custom translator registered in
-  // scene_index_plugin.cc. Do not use `HdChangeTracker::DirtyParams` here --
-  // that is a *task* bit whose value aliases `DirtyPrimID` for rprims.
+  // Custom dirty bit for mesh lights (may be removed in the future once 
+  // Hydra tracks these correctly automatically)
   static constexpr HdDirtyBits DirtyLight = HdChangeTracker::CustomBitsBegin;
 
   explicit HdMitsubaMesh(const SdfPath& id,
