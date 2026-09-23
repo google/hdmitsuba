@@ -71,9 +71,12 @@ class HdMitsubaMesh final : public HdMesh {
   HdMeshTopology topology_;
   PrimvarMap primvars_;
 
-  void SyncTopology(HdSceneDelegate* sceneDelegate);
-  PrimvarMap SyncPrimvars(HdSceneDelegate* sceneDelegate,
-                          HdDirtyBits* dirtyBits);
+  // Resolves the effective subdivision level from the display style and the
+  // optional `mitsuba:subdivision_level` override.
+  int ResolveRefineLevel(HdSceneDelegate* sceneDelegate) const;
+
+  void SyncTopology(HdSceneDelegate* sceneDelegate, int refineLevel);
+  void SyncPrimvars(HdSceneDelegate* sceneDelegate, HdDirtyBits* dirtyBits);
   void UpdateScene(HdSceneDelegate* sceneDelegate, HdRenderParam* renderParam,
                    const PrimvarMap& final_primvars, HdDirtyBits* dirtyBits);
 
@@ -84,6 +87,7 @@ class HdMitsubaMesh final : public HdMesh {
 
   size_t instance_count_ = 0;
   bool in_scene_ = false;
+  int refine_level_ = -1; // -1 means "not yet synced"
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

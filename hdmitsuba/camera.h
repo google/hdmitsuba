@@ -15,7 +15,9 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 
+#include <pxr/base/tf/staticTokens.h>
 #include <pxr/imaging/hd/camera.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
@@ -23,6 +25,15 @@
 #include <pxr/pxr.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
+
+inline constexpr std::string_view kMitsubaSensorNamespace = "mitsuba:sensor:";
+
+#define HDMITSUBA_CAMERA_TOKENS                    \
+  ((sensorType, "mitsuba:sensor:type"))            \
+  ((sensorShape, "mitsuba:sensor:shape"))          \
+  ((sensorPixelFilterType, "mitsuba:sensor:film:pixel_filter:type"))
+
+TF_DECLARE_PUBLIC_TOKENS(HdMitsubaCameraTokens, HDMITSUBA_CAMERA_TOKENS);
 
 class HdMitsubaCamera final : public HdCamera {
  public:

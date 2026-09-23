@@ -277,13 +277,12 @@ def test_subdivision_refinement():
   )
   np.testing.assert_allclose(engine.render()['color'], img_coarse, atol=1e-4)
 
-  # Per-mesh mitsuba:subdivision_level override and live invalidation.
-  subdiv_attr = stage.GetPrimAtPath('/root/Cube/Cube').CreateAttribute(
-      'mitsuba:subdivision_level', Sdf.ValueTypeNames.Int
-  )
-  subdiv_attr.Set(2)
+  subdiv_primvar = UsdGeom.PrimvarsAPI(
+      stage.GetPrimAtPath('/root/Cube/Cube')
+  ).CreatePrimvar('mitsuba:subdivision_level', Sdf.ValueTypeNames.Int)
+  subdiv_primvar.Set(2)
   np.testing.assert_allclose(engine.render()['color'], img_refined, atol=1e-4)
 
-  subdiv_attr.Set(0)
+  subdiv_primvar.Set(0)
   np.testing.assert_allclose(engine.render()['color'], img_coarse, atol=1e-4)
 

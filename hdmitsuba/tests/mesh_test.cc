@@ -41,6 +41,7 @@
 #include <pxr/usd/usd/common.h>
 #include <pxr/usd/usd/stage.h>
 #include <pxr/usd/usdGeom/mesh.h>
+#include <pxr/usd/usdGeom/primvarsAPI.h>
 #include <pxr/usd/usdGeom/tokens.h>
 #include <pxr/usdImaging/usdImaging/delegate.h>
 
@@ -155,10 +156,10 @@ TEST(HdMitsubaMeshTest, SubdivisionLevelAttribute) {
   pxr::HdDirtyBits dirty_bits = pxr::HdChangeTracker::AllDirty;
 
   // By default, refinement level is 0 if not specified in DisplayStyle.
-  // We'll set it to 1 via the attribute.
-  usd_mesh.GetPrim()
-      .CreateAttribute(pxr::TfToken("mitsuba:subdivision_level"),
-                       pxr::SdfValueTypeNames->Int)
+  // We'll set it to 1 via the primvar.
+  pxr::UsdGeomPrimvarsAPI(usd_mesh.GetPrim())
+      .CreatePrimvar(HdMitsubaMeshTokens->subdivision_level,
+                     pxr::SdfValueTypeNames->Int)
       .Set(1);
 
   mitsuba_mesh.Sync(scene_delegate.get(), render_param, &dirty_bits,
@@ -205,10 +206,11 @@ TEST(HdMitsubaMeshTest, SubdivisionLevelReactivity) {
   pxr::HdDirtyBits dirty_bits = pxr::HdChangeTracker::AllDirty;
 
   // Set initial level to 1.
-  usd_mesh.GetPrim()
-      .CreateAttribute(pxr::TfToken("mitsuba:subdivision_level"),
-                       pxr::SdfValueTypeNames->Int)
-      .Set(1);
+  pxr::UsdGeomPrimvar level_primvar =
+      pxr::UsdGeomPrimvarsAPI(usd_mesh.GetPrim())
+          .CreatePrimvar(HdMitsubaMeshTokens->subdivision_level,
+                         pxr::SdfValueTypeNames->Int);
+  level_primvar.Set(1);
 
   mitsuba_mesh.Sync(scene_delegate.get(), render_param, &dirty_bits,
                     pxr::HdReprTokens->hull);
@@ -221,9 +223,7 @@ TEST(HdMitsubaMeshTest, SubdivisionLevelReactivity) {
   }
 
   // Change level to 2.
-  usd_mesh.GetPrim()
-      .GetAttribute(pxr::TfToken("mitsuba:subdivision_level"))
-      .Set(2);
+  level_primvar.Set(2);
 
   // In a real scenario, UsdImaging would mark this as dirty.
   // We'll simulate it by manually marking it dirty in the render index.

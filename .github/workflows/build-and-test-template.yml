@@ -54,12 +54,17 @@ jobs:
         sudo apt-get install -y llvm-19-dev || sudo apt-get install -y llvm-18-dev
 
     - name: Install Conda Dependencies
+      env:
+        # hdmitsuba targets the OpenUSD 26.x scene-index pipeline; keep this in
+        # sync with HDMITSUBA_MIN_PXR_VERSION in CMakeLists.txt.
+        OPENUSD_SPEC: "openusd>=26.05,<27"
       run: |
         if [ "$RUNNER_OS" = "macOS" ] || [ "$RUNNER_OS" = "Windows" ]; then
-          mamba install -y -c conda-forge openusd ninja "llvm>=18"
+          mamba install -y -c conda-forge "$OPENUSD_SPEC" ninja "llvm>=18"
         else
-          mamba install -y -c conda-forge openusd ninja
+          mamba install -y -c conda-forge "$OPENUSD_SPEC" ninja
         fi
+        python -c "from pxr import Usd; print('OpenUSD version:', Usd.GetVersion())"
 
     - name: Install Python Dependencies
       run: |

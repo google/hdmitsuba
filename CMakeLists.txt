@@ -82,6 +82,26 @@ unset(BUILD_SHARED_LIBS)
 
 find_package(OpenGL REQUIRED)
 find_package(pxr REQUIRED)
+
+# hdmitsuba targets the OpenUSD 26.x scene-index pipeline.
+# Keep this in sync with the PXR_VERSION guard in hdmitsuba/scene_index_plugin.cc
+# and with the `openusd` version pinned in .github/workflows/build-and-test-template.yml.
+set(HDMITSUBA_MIN_PXR_VERSION 2605)
+if(NOT DEFINED PXR_VERSION)
+  message(FATAL_ERROR
+    "pxrConfig.cmake did not define PXR_VERSION. hdmitsuba requires OpenUSD "
+    "${HDMITSUBA_MIN_PXR_VERSION} (26.05) or newer.")
+endif()
+if(PXR_VERSION LESS HDMITSUBA_MIN_PXR_VERSION)
+  message(FATAL_ERROR
+    "hdmitsuba requires OpenUSD 26.05 or newer (PXR_VERSION >= "
+    "${HDMITSUBA_MIN_PXR_VERSION}), but found "
+    "${PXR_MAJOR_VERSION}.${PXR_MINOR_VERSION}.${PXR_PATCH_VERSION} "
+    "(PXR_VERSION=${PXR_VERSION}) at '${PXR_CMAKE_DIR}'. "
+    "Install a newer OpenUSD, e.g. `mamba install -c conda-forge \"openusd>=26.05\"`.")
+endif()
+message(STATUS "hdmitsuba: Using OpenUSD ${PXR_MAJOR_VERSION}.${PXR_MINOR_VERSION}.${PXR_PATCH_VERSION} (PXR_VERSION=${PXR_VERSION})")
+
 find_package(OpenSubdiv REQUIRED)
 
 find_library(MITSUBA_LIBRARY

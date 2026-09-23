@@ -39,11 +39,7 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 namespace dr = drjit;
 
-TF_DEFINE_PRIVATE_TOKENS(
-    _tokens,
-    ((sensorType, "mitsuba:sensor:type"))
-    ((sensorShape, "mitsuba:sensor:shape"))
-    ((sensorPixelFilterType, "mitsuba:sensor:film:pixel_filter:type")));
+TF_DEFINE_PUBLIC_TOKENS(HdMitsubaCameraTokens, HDMITSUBA_CAMERA_TOKENS);
 
 namespace {
 
@@ -68,7 +64,8 @@ ScalarAffineTransform4f UsdToMitsubaSensorTransform(
 
 std::optional<SdfPath> GetTargetShapeId(HdSceneDelegate* sceneDelegate,
                                         const SdfPath& id) {
-  VtValue value = sceneDelegate->GetCameraParamValue(id, _tokens->sensorShape);
+  VtValue value = sceneDelegate->GetCameraParamValue(
+      id, HdMitsubaCameraTokens->sensorShape);
   if (!value.IsHolding<std::string>()) {
     return std::nullopt;
   }
@@ -96,12 +93,14 @@ void HdMitsubaCamera::Sync(HdSceneDelegate* sceneDelegate,
   HdCamera::Sync(sceneDelegate, renderParam, dirtyBits);  // Clears dirty bits.
 
   std::string sensor_type =
-      sceneDelegate->GetCameraParamValue(GetId(), _tokens->sensorType)
+      sceneDelegate
+          ->GetCameraParamValue(GetId(), HdMitsubaCameraTokens->sensorType)
           .GetWithDefault<std::string>("perspective");
   if (dirty_bits_copy & HdCamera::DirtyParams) {
     film_pixel_filter_type_ =
         sceneDelegate
-            ->GetCameraParamValue(GetId(), _tokens->sensorPixelFilterType)
+            ->GetCameraParamValue(
+                GetId(), HdMitsubaCameraTokens->sensorPixelFilterType)
             .GetWithDefault<std::string>("");
   }
 

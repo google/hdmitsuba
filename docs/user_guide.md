@@ -7,7 +7,7 @@ This document provides an overview of the USD features supported by `hdMitsuba`,
 `hdMitsuba` translates many standard USD concepts into Mitsuba equivalents. We are continuously expanding the supported feature set, currently we support:
 
 ### Geometry & Animation
-*   **Meshes**: Flat meshes, subdivision surfaces (Catmull-Clark), and deforming geometry (such as skeletal animation). Subdivision surfaces are evaluated at a fixed subdivision level before rendering (no on-the-fly or adaptive tessellation). The subdivision level can be overridden per mesh by authoring the custom `mitsuba:subdivision_level` (int) attribute.
+*   **Meshes**: Flat meshes, subdivision surfaces (Catmull-Clark), and deforming geometry (such as skeletal animation). Subdivision surfaces are evaluated at a fixed subdivision level before rendering (no on-the-fly or adaptive tessellation). The subdivision level can be overridden per mesh by authoring the `primvars:mitsuba:subdivision_level` (int) primvar.
 *   **Curves**: Linear and cubic curves (translated to Mitsuba curve shapes). USD supports additional curve types (e.g., Bezier) which Mitsuba itself currently does not support.
 *   **Instancing**: Full support for USD point instancers and instanced geometry references. Note that Mitsuba's instances cannot be light sources currently.
 *   **Displacement Mapping**: Fully supports displacement mapping. The delegate evaluates connected displacement textures from both standard USD displacement terminals and `mitsuba:displacement` terminals.

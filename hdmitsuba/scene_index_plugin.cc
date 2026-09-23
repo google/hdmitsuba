@@ -12,17 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+
+// Scene-index plugins for HdMitsuba.
+//
+// Every value hdMitsuba reads off a prim is either a schema property or a USD
+// primvar, both of which UsdImaging surfaces natively -- renderer-specific
+// per-mesh controls are authored as `primvars:mitsuba:*`. Nothing here
+// contributes data sources; this file only fixes *invalidation*.
+//
+// UsdImagingStageSceneIndex forwards a property change only if some adapter
+// returns a non-empty locator set for it: _ComputeDirtiedEntries has no resync
+// fallback, so an unclaimed edit is silently dropped. A few properties
+// hdMitsuba cares about are claimed by nobody, hence the keyless API-schema
+// adapter below.
+//
+// This file therefore contains:
+//   * a scene index that turns implicit surfaces into meshes, and
+//   * a keyless UsdImaging API-schema adapter that maps the unclaimed property
+//     changes onto the right data-source locators.
+//
+
+#include <string_view>
+
 #include <pxr/base/tf/registryManager.h>
 #include <pxr/base/tf/staticTokens.h>
-#include <pxr/base/tf/stringUtils.h>
 #include <pxr/base/tf/type.h>
 #include <pxr/imaging/hd/cameraSchema.h>
 #include <pxr/imaging/hd/changeTracker.h>
 #include <pxr/imaging/hd/dirtyBitsTranslator.h>
 #include <pxr/imaging/hd/lightSchema.h>
 #include <pxr/imaging/hd/materialSchema.h>
-#include <pxr/imaging/hd/primvarSchema.h>
-#include <pxr/imaging/hd/primvarsSchema.h>
 #include <pxr/imaging/hd/retainedDataSource.h>
 #include <pxr/imaging/hd/sceneIndexPlugin.h>
 #include <pxr/imaging/hd/sceneIndexPluginRegistry.h>
@@ -30,14 +49,18 @@
 #include <pxr/imaging/hdsi/implicitSurfaceSceneIndex.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/usdGeom/camera.h>
-#include <pxr/usd/usdGeom/mesh.h>
 #include <pxr/usd/usdLux/lightAPI.h>
 #include <pxr/usd/usdLux/tokens.h>
 #include <pxr/usd/usdShade/material.h>
+#include <pxr/usd/usdShade/tokens.h>
 #include <pxr/usdImaging/usdImaging/apiSchemaAdapter.h>
-#include <pxr/usdImaging/usdImaging/dataSourceAttribute.h>
+#include <pxr/usdImaging/usdImaging/types.h>
 
-#include "hdmitsuba/mesh.h"
+#include "hdmitsuba/camera.h"
+
+#if PXR_VERSION < 2605
+#error "hdmitsuba requires OpenUSD 26.05 or newer."
+#endif
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -64,63 +87,15 @@ class HdMitsuba_ImplicitSurfaceSceneIndexPlugin : public HdSceneIndexPlugin {
   }
 };
 
-namespace {
+bool StartsWith(std::string_view s, std::string_view prefix) {
+  return s.substr(0, prefix.size()) == prefix;
+}
 
-// Exposes `mitsuba:subdivision_level` under `primvars` for HdSceneIndexAdapter
-// lookups while returning empty GetNames() so it is not treated as a geometric
-// primvar.
-class HdMitsuba_MeshSubdivDataSource : public HdContainerDataSource {
- public:
-  HD_DECLARE_DATASOURCE(HdMitsuba_MeshSubdivDataSource);
-
-  TfTokenVector GetNames() override { return {}; }
-
-  HdDataSourceBaseHandle Get(const TfToken& name) override {
-    if (name == HdMitsubaMeshTokens->subdivision_level) {
-      UsdAttribute attr =
-          prim_.GetAttribute(HdMitsubaMeshTokens->subdivision_level);
-      if (attr && attr.HasValue()) {
-        return HdPrimvarSchema::Builder()
-            .SetPrimvarValue(UsdImagingDataSourceAttribute<int>::New(
-                attr, stage_globals_, prim_.GetPath(),
-                HdPrimvarsSchema::GetDefaultLocator().Append(
-                    HdMitsubaMeshTokens->subdivision_level)))
-            .Build();
-      }
-    }
-    return nullptr;
-  }
-
- private:
-  HdMitsuba_MeshSubdivDataSource(
-      const UsdPrim& prim,
-      const UsdImagingDataSourceStageGlobals& stage_globals)
-      : prim_(prim), stage_globals_(stage_globals) {}
-
-  UsdPrim prim_;
-  const UsdImagingDataSourceStageGlobals& stage_globals_;
-};
-
-}  // namespace
-
-// Keyless UsdImaging adapter bridging data-source and property-invalidation
-// gaps for custom `mitsuba:*` attributes, UsdLux shaping flags, and material
-// output connections.
+// Keyless UsdImaging adapter filling property-invalidation gaps for custom
+// `mitsuba:sensor:*` attributes, UsdLux shaping flags, and material output
+// connections.
 class HdMitsuba_APISchemaAdapter : public UsdImagingAPISchemaAdapter {
  public:
-  HdContainerDataSourceHandle GetImagingSubprimData(
-      const UsdPrim& prim, const TfToken& subprim,
-      const TfToken& applied_instance_name,
-      const UsdImagingDataSourceStageGlobals& stage_globals) override {
-    if (subprim.IsEmpty() && applied_instance_name.IsEmpty() &&
-        prim.IsA<UsdGeomMesh>()) {
-      return HdRetainedContainerDataSource::New(
-          HdPrimvarsSchema::GetSchemaToken(),
-          HdMitsuba_MeshSubdivDataSource::New(prim, stage_globals));
-    }
-    return nullptr;
-  }
-
   HdDataSourceLocatorSet InvalidateImagingSubprim(
       const UsdPrim& prim, const TfToken& subprim,
       const TfToken& applied_instance_name, const TfTokenVector& properties,
@@ -131,20 +106,18 @@ class HdMitsuba_APISchemaAdapter : public UsdImagingAPISchemaAdapter {
 
     HdDataSourceLocatorSet result;
     for (const TfToken& prop : properties) {
-      if (TfStringStartsWith(prop.GetString(), "mitsuba:sensor:") &&
+      // Check prefix quickly to possibly skip immediately
+      const std::string_view prop_name = prop.GetString();
+      if (StartsWith(prop_name, kMitsubaSensorNamespace) &&
           prim.IsA<UsdGeomCamera>()) {
         result.insert(HdCameraSchema::GetDefaultLocator());
       } else if ((prop == UsdLuxTokens->treatAsPoint ||
                   prop == UsdLuxTokens->treatAsLine) &&
                  prim.HasAPI<UsdLuxLightAPI>()) {
         result.insert(HdLightSchema::GetDefaultLocator());
-      } else if (TfStringStartsWith(prop.GetString(), "outputs:") &&
+      } else if (StartsWith(prop_name, UsdShadeTokens->outputs.GetString()) &&
                  prim.IsA<UsdShadeMaterial>()) {
         result.insert(HdMaterialSchema::GetDefaultLocator());
-      } else if (prop == HdMitsubaMeshTokens->subdivision_level &&
-                 prim.IsA<UsdGeomMesh>()) {
-        result.insert(HdPrimvarsSchema::GetDefaultLocator().Append(
-            HdMitsubaMeshTokens->subdivision_level));
       }
     }
     return result;
@@ -159,7 +132,10 @@ TF_REGISTRY_FUNCTION(TfType) {
       .SetFactory<
           UsdImagingAPISchemaAdapterFactory<HdMitsuba_APISchemaAdapter>>();
 
-  // Map mesh-light schema changes to DirtyParams on mesh rprims.
+  // Mesh lights are `mesh` rprims that carry a `light` data source. The
+  // built-in rprim translator has no mapping for that locator, and custom
+  // translators are consulted *in addition to* the built-in ones, so this adds
+  // the missing edge without disturbing the standard mesh dirty bits.
   HdDirtyBitsTranslator::RegisterTranslatorsForCustomRprimType(
       HdPrimTypeTokens->mesh,
       [](const HdDataSourceLocatorSet& set, HdDirtyBits* bits) {

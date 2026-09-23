@@ -161,30 +161,34 @@ void HdMitsubaMesh::Sync(HdSceneDelegate* sceneDelegate,
   }
 
   // Update topology and/or primvars if the corresponding bits are set.
-  bool topology_dirty = *dirtyBits & (HdChangeTracker::DirtyTopology |
-                                      HdChangeTracker::DirtyMaterialId |
-                                      HdChangeTracker::DirtyDisplayStyle);
-  topology_dirty =
-      topology_dirty ||
-      HdChangeTracker::IsPrimvarDirty(*dirtyBits, GetId(),
-                                      HdMitsubaMeshTokens->subdivision_level);
-  bool primvars_dirty =
-      *dirtyBits &
-      (HdChangeTracker::DirtyPrimvar | HdChangeTracker::DirtyPoints |
-       HdChangeTracker::DirtyNormals | HdChangeTracker::DirtyTransform);
-  bool instancer_dirty = *dirtyBits & (HdChangeTracker::DirtyInstancer |
-                                       HdChangeTracker::DirtyInstanceIndex |
-                                       HdChangeTracker::DirtyParams);
+  int refine_level = refine_level_;
+  if (refine_level_ < 0 ||
+      (*dirtyBits & (HdChangeTracker::DirtyDisplayStyle |
+                     HdChangeTracker::DirtyPrimvar)) != 0) {
+    refine_level = ResolveRefineLevel(sceneDelegate);
+  }
+  const bool topology_dirty =
+      (*dirtyBits & (HdChangeTracker::DirtyTopology |
+                     HdChangeTracker::DirtyMaterialId)) != 0 ||
+      refine_level != refine_level_;
+  const bool primvars_dirty =
+      (*dirtyBits &
+       (HdChangeTracker::DirtyPrimvar | HdChangeTracker::DirtyPoints |
+        HdChangeTracker::DirtyNormals | HdChangeTracker::DirtyTransform)) != 0;
+  const bool scene_update_dirty =
+      (*dirtyBits & (HdChangeTracker::DirtyInstancer |
+                     HdChangeTracker::DirtyInstanceIndex |
+                     HdChangeTracker::DirtyParams)) != 0;
 
   if (topology_dirty) {
     *dirtyBits |= HdChangeTracker::DirtyTopology |
                   HdChangeTracker::DirtyPoints |
                   HdChangeTracker::DirtyNormals |
                   HdChangeTracker::DirtyPrimvar;
-    SyncTopology(sceneDelegate);
+    SyncTopology(sceneDelegate, refine_level);
   }
 
-  if (topology_dirty || primvars_dirty || instancer_dirty) {
+  if (topology_dirty || primvars_dirty || scene_update_dirty) {
     if (topology_dirty || primvars_dirty) {
       SyncPrimvars(sceneDelegate, dirtyBits);
     }
@@ -209,16 +213,19 @@ void HdMitsubaMesh::_InitRepr(const TfToken& reprToken,
   }
 }
 
-void HdMitsubaMesh::SyncTopology(HdSceneDelegate* sceneDelegate) {
-  TRACE_FUNCTION();
-  const HdDisplayStyle display_style = GetDisplayStyle(sceneDelegate);
-
-  int refineLevel = display_style.refineLevel;
-  VtValue subdivLevelValue =
+int HdMitsubaMesh::ResolveRefineLevel(HdSceneDelegate* sceneDelegate) const {
+  const VtValue subdiv_level_value =
       sceneDelegate->Get(GetId(), HdMitsubaMeshTokens->subdivision_level);
-  if (!subdivLevelValue.IsEmpty() && subdivLevelValue.IsHolding<int>()) {
-    refineLevel = subdivLevelValue.Get<int>();
+  if (subdiv_level_value.IsHolding<int>()) {
+    return subdiv_level_value.UncheckedGet<int>();
   }
+  return GetDisplayStyle(sceneDelegate).refineLevel;
+}
+
+void HdMitsubaMesh::SyncTopology(HdSceneDelegate* sceneDelegate,
+                                 int refineLevel) {
+  TRACE_FUNCTION();
+  refine_level_ = refineLevel;
   HdMeshTopology topology =
       HdMeshTopology(GetMeshTopology(sceneDelegate), refineLevel);
 
@@ -393,8 +400,8 @@ HdMitsubaMesh::GetAllPrimvarDescriptors(HdSceneDelegate* sceneDelegate) {
   return primvar_descriptors;
 }
 
-HdMitsubaMesh::PrimvarMap HdMitsubaMesh::SyncPrimvars(
-    HdSceneDelegate* sceneDelegate, HdDirtyBits* dirtyBits) {
+void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
+                                 HdDirtyBits* dirtyBits) {
   TRACE_FUNCTION();
   TF_DEBUG(HDMITSUBA_SYNC)
       .Msg("SyncPrimvars for %s dirtyBits: %d subdivided: %d\n",
@@ -511,8 +518,9 @@ HdMitsubaMesh::PrimvarMap HdMitsubaMesh::SyncPrimvars(
 
   // 3. Sync user primvars
   for (auto const& [token, descriptor] : primvar_descriptors) {
-    // Skip built-in geometric attributes that are handled explicitly
-    if (token == HdTokens->points || token == HdTokens->normals) {
+    // Skip explicitly handled attributes
+    if (token == HdTokens->points || token == HdTokens->normals ||
+        token == HdMitsubaMeshTokens->subdivision_level) {
       continue;
     }
     TF_DEBUG(HDMITSUBA_SYNC).Msg("SyncPrimvar: %s\n", token.GetText());
@@ -520,7 +528,6 @@ HdMitsubaMesh::PrimvarMap HdMitsubaMesh::SyncPrimvars(
       sync_primvar(token, descriptor);
     }
   }
-  return primvars_;
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

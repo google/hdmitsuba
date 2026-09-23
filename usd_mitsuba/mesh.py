@@ -136,9 +136,11 @@ def convert_mesh(
   path = prim.GetPath()
   has_displacement = material.has_displacement(prim)
   mesh_prim = UsdGeom.Mesh(prim)
-  if level_attr := prim.GetAttribute('mitsuba:subdivision_level'):
-    if (level := level_attr.Get()) is not None:
-      subdivision_level = level
+  level_primvar = UsdGeom.PrimvarsAPI(prim).GetPrimvar(
+      'mitsuba:subdivision_level'
+  )
+  if level_primvar and (level := level_primvar.Get()) is not None:
+    subdivision_level = level
 
   mesh_data, sub_meshes = geom_lib.extract_and_process_meshes(
       stage, path, time, subdivision_level, has_displacement
