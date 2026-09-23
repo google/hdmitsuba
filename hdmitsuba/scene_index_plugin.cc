@@ -31,6 +31,13 @@
 //   * a keyless UsdImaging API-schema adapter that maps the unclaimed property
 //     changes onto the right data-source locators.
 //
+// TODO: unlike the scene index above, the keyless adapter cannot be scoped to
+// a renderer -- UsdImaging_AdapterManager constructs keyless adapters in its
+// constructor, which loads this library (and with it Mitsuba and Dr.Jit) into
+// *every* UsdImaging session, and makes every prim take the multi-adapter path
+// in UsdImagingStageSceneIndex. Moving the adapter into a small plugin library
+// without the Mitsuba dependency would avoid that.
+//
 
 #include <string_view>
 
@@ -57,6 +64,7 @@
 #include <pxr/usdImaging/usdImaging/types.h>
 
 #include "hdmitsuba/camera.h"
+#include "hdmitsuba/mesh.h"
 
 #if PXR_VERSION < 2605
 #error "hdmitsuba requires OpenUSD 26.05 or newer."
@@ -87,13 +95,24 @@ class HdMitsuba_ImplicitSurfaceSceneIndexPlugin : public HdSceneIndexPlugin {
   }
 };
 
+// Note: only the helper is given internal linkage. The two classes below must
+// stay at namespace scope -- `TfType::Define` registers them under their
+// demangled type name, which has to match the keys in plugInfo.json.
+namespace {
+
 bool StartsWith(std::string_view s, std::string_view prefix) {
   return s.substr(0, prefix.size()) == prefix;
 }
 
+}  // namespace
+
 // Keyless UsdImaging adapter filling property-invalidation gaps for custom
-// `mitsuba:sensor:*` attributes, UsdLux shaping flags, and material output
-// connections.
+// `mitsuba:sensor:*` attributes, the UsdLuxSphereLight/UsdLuxCylinderLight
+// `treatAsPoint`/`treatAsLine` attributes, and material output connections.
+//
+// Being keyless means this runs for every prim of every stage in the process,
+// including sessions driving another renderer -- see the TODO in the file
+// header.
 class HdMitsuba_APISchemaAdapter : public UsdImagingAPISchemaAdapter {
  public:
   HdDataSourceLocatorSet InvalidateImagingSubprim(
@@ -106,17 +125,26 @@ class HdMitsuba_APISchemaAdapter : public UsdImagingAPISchemaAdapter {
 
     HdDataSourceLocatorSet result;
     for (const TfToken& prop : properties) {
-      // Check prefix quickly to possibly skip immediately
+      // The name test comes first in each branch: it is a cheap compare, and
+      // it keeps the schema lookups off the path taken by the vast majority of
+      // prims, which match nothing here.
       const std::string_view prop_name = prop.GetString();
       if (StartsWith(prop_name, kMitsubaSensorNamespace) &&
           prim.IsA<UsdGeomCamera>()) {
+        // UsdImagingDataSourceCameraPrim::Invalidate only maps names returned
+        // by UsdGeomCamera::GetSchemaAttributeNames().
         result.insert(HdCameraSchema::GetDefaultLocator());
       } else if ((prop == UsdLuxTokens->treatAsPoint ||
                   prop == UsdLuxTokens->treatAsLine) &&
                  prim.HasAPI<UsdLuxLightAPI>()) {
+        // UsdImagingLightAPIAdapter only claims `inputs:*` and `light:*`.
         result.insert(HdLightSchema::GetDefaultLocator());
       } else if (StartsWith(prop_name, UsdShadeTokens->outputs.GetString()) &&
                  prim.IsA<UsdShadeMaterial>()) {
+        // Narrow gap: UsdImagingMaterialAdapter already claims edits to any
+        // output it can still see via UsdShadeMaterial::GetOutputs(). What it
+        // cannot see is an output that was just *removed*, which is the case
+        // this branch exists for.
         result.insert(HdMaterialSchema::GetDefaultLocator());
       }
     }
@@ -140,9 +168,11 @@ TF_REGISTRY_FUNCTION(TfType) {
       HdPrimTypeTokens->mesh,
       [](const HdDataSourceLocatorSet& set, HdDirtyBits* bits) {
         if (set.Intersects(HdLightSchema::GetDefaultLocator())) {
-          *bits |= HdChangeTracker::DirtyParams;
+          *bits |= HdMitsubaMesh::DirtyLight;
         }
       },
+      // The reverse direction needs nothing: the built-in translator already
+      // produces the locators for every bit Hydra itself sets on a mesh.
       [](const HdDirtyBits, HdDataSourceLocatorSet*) {});
 }
 

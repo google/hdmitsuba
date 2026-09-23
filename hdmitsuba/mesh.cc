@@ -178,7 +178,7 @@ void HdMitsubaMesh::Sync(HdSceneDelegate* sceneDelegate,
   const bool scene_update_dirty =
       (*dirtyBits & (HdChangeTracker::DirtyInstancer |
                      HdChangeTracker::DirtyInstanceIndex |
-                     HdChangeTracker::DirtyParams)) != 0;
+                     HdMitsubaMesh::DirtyLight)) != 0;
 
   if (topology_dirty) {
     *dirtyBits |= HdChangeTracker::DirtyTopology |
