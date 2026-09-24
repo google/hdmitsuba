@@ -1052,7 +1052,7 @@ class SceneModel final : public SceneManager {
     }
 
     // 5. Copy the data to the output render buffers.
-    size_t base_channels = sensor->film()->base_channels_count();
+    size_t base_channels = sensor->film()->base_channels().size();
     size_t total_channels = display_result.shape()[2];
     destinations_.clear();
     destinations_.reserve(1 + pass_state.aov_requests.size());

@@ -131,9 +131,9 @@ def test_aovs_multiple_products():
   image_mi_aov_np = np.array(image_mi_aov)
 
   for aov_name, channel_slice, atol in [
-      ("albedo", slice(0, 3), 0.05),
-      ("normal", slice(3, 6), 0.05),
-      ("depth", slice(6, 7), 0.5),
+      ("albedo", slice(3, 6), 0.05),
+      ("normal", slice(6, 9), 0.05),
+      ("depth", slice(9, 10), 0.5),
   ]:
     hd_img = results_hd[aov_name]
     mi_img = image_mi_aov_np[:, :, channel_slice]
