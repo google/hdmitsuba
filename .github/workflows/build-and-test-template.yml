@@ -66,6 +66,33 @@ jobs:
         fi
         python -c "from pxr import Usd; print('OpenUSD version:', Usd.GetVersion())"
 
+    - name: Resolve LLVM Path for DrJit
+      run: |
+        if [ "$RUNNER_OS" = "macOS" ]; then
+          LLVM_PATH=$(find $CONDA_PREFIX/lib -name "libLLVM.dylib" | head -n 1)
+          if [ -z "$LLVM_PATH" ]; then
+            LLVM_PATH=$(find $CONDA_PREFIX/lib -name "libLLVM*.dylib" | sort -V | tail -n 1)
+          fi
+          echo "DRJIT_LIBLLVM_PATH=$LLVM_PATH" >> $GITHUB_ENV
+          echo "Resolved macOS LLVM: $LLVM_PATH"
+        elif [ "$RUNNER_OS" = "Windows" ]; then
+          LLVM_PATH=$(find $CONDA_PREFIX/Library/bin -iname "*llvm*.dll" | sort -V | tail -n 1)
+          echo "DRJIT_LIBLLVM_PATH=$LLVM_PATH" >> $GITHUB_ENV
+          echo "Resolved Windows LLVM: $LLVM_PATH"
+        else
+          # Linux: Try system (to match Mesa), selecting the highest installed version
+          LLVM_PATH=$(find /usr/lib/x86_64-linux-gnu -name "libLLVM-*.so*" | sort -V | tail -n 1)
+          if [ -z "$LLVM_PATH" ]; then
+            LLVM_PATH=$(find /usr/lib -name "libLLVM*.so*" | sort -V | tail -n 1)
+          fi
+          if [ -n "$LLVM_PATH" ]; then
+            echo "DRJIT_LIBLLVM_PATH=$LLVM_PATH" >> $GITHUB_ENV
+            echo "Resolved Linux LLVM: $LLVM_PATH"
+          else
+            echo "System LLVM not found, letting DrJit resolve it"
+          fi
+        fi
+
     - name: Install Python Dependencies
       run: |
         pip install numpy pytest pyrefly nanobind_backend
@@ -124,33 +151,6 @@ jobs:
     - name: Build hdmitsuba
       run: |
         cmake --build build --config Release
-
-    - name: Resolve LLVM Path for DrJit
-      run: |
-        if [ "$RUNNER_OS" = "macOS" ]; then
-          LLVM_PATH=$(find $CONDA_PREFIX/lib -name "libLLVM.dylib" | head -n 1)
-          if [ -z "$LLVM_PATH" ]; then
-            LLVM_PATH=$(find $CONDA_PREFIX/lib -name "libLLVM*.dylib" | sort -V | tail -n 1)
-          fi
-          echo "DRJIT_LIBLLVM_PATH=$LLVM_PATH" >> $GITHUB_ENV
-          echo "Resolved macOS LLVM: $LLVM_PATH"
-        elif [ "$RUNNER_OS" = "Windows" ]; then
-          LLVM_PATH=$(find $CONDA_PREFIX/Library/bin -iname "*llvm*.dll" | sort -V | tail -n 1)
-          echo "DRJIT_LIBLLVM_PATH=$LLVM_PATH" >> $GITHUB_ENV
-          echo "Resolved Windows LLVM: $LLVM_PATH"
-        else
-          # Linux: Try system (to match Mesa), selecting the highest installed version
-          LLVM_PATH=$(find /usr/lib/x86_64-linux-gnu -name "libLLVM-*.so*" | sort -V | tail -n 1)
-          if [ -z "$LLVM_PATH" ]; then
-            LLVM_PATH=$(find /usr/lib -name "libLLVM*.so*" | sort -V | tail -n 1)
-          fi
-          if [ -n "$LLVM_PATH" ]; then
-            echo "DRJIT_LIBLLVM_PATH=$LLVM_PATH" >> $GITHUB_ENV
-            echo "Resolved Linux LLVM: $LLVM_PATH"
-          else
-            echo "System LLVM not found, letting DrJit resolve it"
-          fi
-        fi
 
     - name: Run Python Tests
       timeout-minutes: 10
