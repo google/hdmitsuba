@@ -1884,16 +1884,8 @@ class SceneModel final : public SceneManager {
   absl::Mutex state_mutex_;
   absl::Mutex aov_states_mutex_;
 
-  absl::flat_hash_map<SdfPath, MaterialSpec, SdfPath::Hash> material_specs_;
-  absl::flat_hash_map<SdfPath, MeshSpec, SdfPath::Hash> mesh_specs_;
-  absl::flat_hash_map<SdfPath, CurveSpec, SdfPath::Hash> curve_specs_;
-  absl::flat_hash_map<SdfPath, ParticleFieldSpec, SdfPath::Hash>
-      particle_field_specs_;
-  absl::flat_hash_map<SdfPath, LightSpec, SdfPath::Hash> light_specs_;
-  absl::flat_hash_map<SdfPath, CameraSpec, SdfPath::Hash> camera_specs_;
   absl::flat_hash_map<SdfPath, uint32_t, SdfPath::Hash> material_dirty_flags_;
   absl::flat_hash_set<SdfPath, SdfPath::Hash> sensor_binding_dirty_;
-  bool shape_sensors_dirty_ = false;
 
   absl::flat_hash_map<std::string, ref<Sensor>> sensors_;
   absl::flat_hash_map<std::string, mitsuba::ref<Object>> surface_sensors_;  // Camera path -> sensor

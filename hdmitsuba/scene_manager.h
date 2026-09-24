@@ -16,8 +16,10 @@
 
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 #include <absl/base/const_init.h>
+#include <absl/container/flat_hash_map.h>
 #include <absl/synchronization/mutex.h>
 #include <mitsuba/core/object.h>
 #include <pxr/base/tf/token.h>
@@ -80,7 +82,33 @@ class SceneManager {
 
   virtual mitsuba::Object* GetScene() = 0;
 
+  void TransferSpecsFrom(SceneManager& other) {
+    material_specs_ = std::move(other.material_specs_);
+    mesh_specs_ = std::move(other.mesh_specs_);
+    curve_specs_ = std::move(other.curve_specs_);
+    particle_field_specs_ = std::move(other.particle_field_specs_);
+    light_specs_ = std::move(other.light_specs_);
+    camera_specs_ = std::move(other.camera_specs_);
+    for (auto& [_, spec] : material_specs_) spec.needs_rebuild = true;
+    for (auto& [_, spec] : mesh_specs_) spec.needs_rebuild = true;
+    for (auto& [_, spec] : curve_specs_) spec.needs_rebuild = true;
+    for (auto& [_, spec] : particle_field_specs_) spec.needs_rebuild = true;
+    for (auto& [_, spec] : light_specs_) spec.needs_rebuild = true;
+    for (auto& [_, spec] : camera_specs_) spec.needs_rebuild = true;
+    shape_sensors_dirty_ = !camera_specs_.empty();
+  }
+
   static SceneManager* CreateSceneManager(const std::string& variant);
+
+ protected:
+  absl::flat_hash_map<SdfPath, MaterialSpec, SdfPath::Hash> material_specs_;
+  absl::flat_hash_map<SdfPath, MeshSpec, SdfPath::Hash> mesh_specs_;
+  absl::flat_hash_map<SdfPath, CurveSpec, SdfPath::Hash> curve_specs_;
+  absl::flat_hash_map<SdfPath, ParticleFieldSpec, SdfPath::Hash>
+      particle_field_specs_;
+  absl::flat_hash_map<SdfPath, LightSpec, SdfPath::Hash> light_specs_;
+  absl::flat_hash_map<SdfPath, CameraSpec, SdfPath::Hash> camera_specs_;
+  bool shape_sensors_dirty_ = false;
 
  private:
   inline static absl::Mutex lifecycle_mutex_{absl::kConstInit};

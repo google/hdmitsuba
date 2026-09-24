@@ -222,25 +222,7 @@ HdBprim* HdMitsubaRenderDelegate::CreateFallbackBprim(const TfToken& typeId) {
   return nullptr;
 }
 
-void HdMitsubaRenderDelegate::MarkAllPrimsDirty(HdChangeTracker* tracker) {
-  tracker->MarkAllRprimsDirty(HdChangeTracker::AllDirty);
-  if (render_index_) {
-    for (const TfToken& sprim_type : GetSupportedSprimTypes()) {
-      for (const SdfPath& id : render_index_->GetSprimSubtree(
-               sprim_type, SdfPath::AbsoluteRootPath())) {
-        tracker->MarkSprimDirty(id, HdChangeTracker::AllDirty);
-      }
-    }
-    for (const TfToken& bprim_type : GetSupportedBprimTypes()) {
-      for (const SdfPath& id : render_index_->GetBprimSubtree(
-               bprim_type, SdfPath::AbsoluteRootPath())) {
-        tracker->MarkBprimDirty(id, HdChangeTracker::AllDirty);
-      }
-    }
-  }
-}
-
-void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* tracker) {
+void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* /*tracker*/) {
   std::string target_variant =
       GetRenderSetting(HdMitsubaRenderSettingsTokens->variant)
           .GetWithDefault<std::string>(HdMitsubaConfig::GetInstance().variant);
@@ -250,11 +232,14 @@ void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* tracker) {
             "Mitsuba variant changed from '%s' to '%s'. Recreating "
             "SceneManager.\n",
             current_variant_.c_str(), target_variant.c_str());
-    scene_impl_ = std::unique_ptr<SceneManager>(
+    auto new_scene = std::unique_ptr<SceneManager>(
         SceneManager::CreateSceneManager(target_variant));
+    if (scene_impl_) {
+      new_scene->TransferSpecsFrom(*scene_impl_);
+    }
+    scene_impl_ = std::move(new_scene);
     render_param_->SetScene(scene_impl_.get());
     current_variant_ = target_variant;
-    MarkAllPrimsDirty(tracker);
   }
 
   VtDictionary namespaced_settings;

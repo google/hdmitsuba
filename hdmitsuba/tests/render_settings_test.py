@@ -263,6 +263,7 @@ def test_variant_change_dynamic():
 
   # Change the variant setting dynamically on the same stage and render engine
   settings_prim.GetAttribute("mitsuba:variant").Set("llvm_ad_rgb")
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
   results_llvm = engine.render()
 
   test_helpers.robust_assert_close(
