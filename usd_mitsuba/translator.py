@@ -142,7 +142,8 @@ def _convert_curves(
   curve_points = pts_world_homog[:, :3] / pts_world_homog[:, 3:4]
   bsdf, _, _ = material.convert_material(prim)
 
-  widths = np.array(widths)
+  world_scale = float(np.mean(np.linalg.norm(world_mat[:3, :3], axis=1)))
+  widths = np.array(widths, dtype=np.float32) * world_scale
   if widths.ndim == 0 or widths.size == 1:
     radius = np.full((curve_points.shape[0], 1), widths.item() * 0.5)
   elif widths.size == curve_points.shape[0]:
@@ -155,14 +156,14 @@ def _convert_curves(
   curve_point_counts = np.array(
       curve_prim.GetCurveVertexCountsAttr().Get(time))
 
-  # TODO: Correctly parse this from the USD prim.
   curve_type = 'linearcurve'
-  if (
-      hasattr(curve_prim, 'GetTypeAttr')
-      and curve_prim.GetTypeAttr().Get(time) == 'cubic'
-      and curve_prim.GetBasisAttr().Get(time) == 'bspline'
-  ):
-    curve_type = 'bsplinecurve'
+  if prim.IsA(UsdGeom.BasisCurves):
+    basis_curves = UsdGeom.BasisCurves(prim)
+    if (
+        basis_curves.GetTypeAttr().Get(time) == UsdGeom.Tokens.cubic
+        and basis_curves.GetBasisAttr().Get(time) == UsdGeom.Tokens.bspline
+    ):
+      curve_type = 'bsplinecurve'
   elif prim.IsA(UsdGeom.NurbsCurves):
     curve_type = 'bsplinecurve'
   curve_obj = _create_empty_mitsuba_curve(curve_type, bsdf)

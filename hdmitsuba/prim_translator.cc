@@ -1027,6 +1027,12 @@ PrimTranslator<Float, Spectrum>::BuildCurves(const CurveSpec& spec,
   using ScalarSize = typename mitsuba::Shape<Float, Spectrum>::ScalarSize;
 
   using Point3f = mitsuba::Point<float, 3>;
+  using Vector3f = mitsuba::Vector<float, 3>;
+  const float world_scale =
+      (dr::norm(spec.transform * Vector3f(1.f, 0.f, 0.f)) +
+       dr::norm(spec.transform * Vector3f(0.f, 1.f, 0.f)) +
+       dr::norm(spec.transform * Vector3f(0.f, 0.f, 1.f))) /
+      3.f;
   std::vector<float> world_control_points = spec.control_points;
   for (size_t i = 0; i < world_control_points.size(); i += 4) {
     Point3f p(world_control_points[i], world_control_points[i + 1],
@@ -1035,6 +1041,7 @@ PrimTranslator<Float, Spectrum>::BuildCurves(const CurveSpec& spec,
     world_control_points[i + 0] = p[0];
     world_control_points[i + 1] = p[1];
     world_control_points[i + 2] = p[2];
+    world_control_points[i + 3] *= world_scale;
   }
 
   cb.set<ScalarSize>("control_point_count", world_control_points.size() / 4);
