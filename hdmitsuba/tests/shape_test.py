@@ -251,6 +251,57 @@ def test_modify_curve_transform_only():
   )
 
 
+def test_curve_bspline_type():
+  stage = Usd.Stage.Open(f'{test_helpers.TEST_ASSETS_PATH}/shapes/curve.usda')
+  test_helpers.create_render_settings(stage, resolution=(128, 128))
+  curve = UsdGeom.BasisCurves.Get(stage, '/root/mycurve/curve')
+  curve.GetBasisAttr().Set(UsdGeom.Tokens.bspline)
+  curve.GetTypeAttr().Set(UsdGeom.Tokens.cubic)
+  test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      output_prefix='test_curve_bspline_type',
+      atol=0.05,
+  )
+
+
+def test_curve_width_world_scale():
+  stage_ref = Usd.Stage.Open(
+      f'{test_helpers.TEST_ASSETS_PATH}/shapes/curve.usda'
+  )
+  test_helpers.create_render_settings(stage_ref, resolution=(128, 128))
+  image_ref_hd, image_ref_usd = test_helpers.assert_hydra_equal_to_offline(
+      stage_ref,
+      output_prefix='test_curve_width_world_scale_ref',
+      atol=0.05,
+  )
+
+  stage_scaled = Usd.Stage.Open(
+      f'{test_helpers.TEST_ASSETS_PATH}/shapes/curve.usda'
+  )
+  test_helpers.create_render_settings(stage_scaled, resolution=(128, 128))
+  curve_xform = UsdGeom.Xformable.Get(stage_scaled, '/root/mycurve')
+  curve_xform.AddScaleOp(opSuffix='cm_scale').Set((0.01, 0.01, 0.01))
+  curve = UsdGeom.BasisCurves.Get(stage_scaled, '/root/mycurve/curve')
+  curve.GetPointsAttr().Set(
+      Vt.Vec3fArray.FromNumpy(np.array(curve.GetPointsAttr().Get()) * 100.0)
+  )
+  curve.GetWidthsAttr().Set(
+      Vt.FloatArray.FromNumpy(np.array(curve.GetWidthsAttr().Get()) * 100.0)
+  )
+
+  image_scaled_hd, image_scaled_usd = (
+      test_helpers.assert_hydra_equal_to_offline(
+          stage_scaled,
+          output_prefix='test_curve_width_world_scale_scaled',
+          atol=0.05,
+      )
+  )
+  np.testing.assert_allclose(
+      image_scaled_hd[..., :3], image_ref_hd[..., :3], atol=0.05
+  )
+  np.testing.assert_allclose(image_scaled_usd, image_ref_usd, atol=0.05)
+
+
 def test_subdivision_refinement():
   stage = Usd.Stage.Open(
       f'{test_helpers.TEST_ASSETS_PATH}/shapes/subdiv_cube.usda'
