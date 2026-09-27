@@ -22,6 +22,7 @@ from typing import Any
 import mitsuba as mi
 import numpy as np
 
+from pxr import Gf
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
@@ -50,6 +51,17 @@ def get_prototype_paths(stage: Usd.Stage) -> set[Sdf.Path]:
   return prototype_paths
 
 
+def _compute_instance_transforms(
+    instancer: UsdGeom.PointInstancer, time: Usd.TimeCode
+) -> list[Gf.Matrix4d]:
+  """Returns the instance-to-world transforms of a PointInstancer."""
+  instancer_transform = instancer.ComputeLocalToWorldTransform(time)
+  return [
+      transform * instancer_transform
+      for transform in instancer.ComputeInstanceTransformsAtTime(time, time)
+  ]
+
+
 def convert_point_instancer(
     instancer_prim: Usd.Prim,
     subdivision_level: int,
@@ -68,7 +80,7 @@ def convert_point_instancer(
   """
   instancer = UsdGeom.PointInstancer(instancer_prim)
   instancer_id = util.get_mitsuba_id(instancer_prim)
-  transforms = instancer.ComputeInstanceTransformsAtTime(time, time)
+  transforms = _compute_instance_transforms(instancer, time)
   if not transforms:
     return
   proto_indices = instancer.GetProtoIndicesAttr().Get(time)

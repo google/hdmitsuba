@@ -738,9 +738,11 @@ class SceneModel final : public SceneManager {
     auto prev_it = light_specs_.find(spec.id);
     if (prev_it == light_specs_.end()) {
       spec.needs_rebuild = true;
-    }
-    if (prev_it != light_specs_.end() && !spec.needs_rebuild) {
-      spec.dirty_bits |= prev_it->second.dirty_bits;
+    } else {
+      spec.needs_rebuild |= prev_it->second.needs_rebuild;
+      if (!spec.needs_rebuild) {
+        spec.dirty_bits |= prev_it->second.dirty_bits;
+      }
     }
     light_specs_[spec.id] = std::move(spec);
     reset_progressive_ = true;
@@ -1499,13 +1501,17 @@ class SceneModel final : public SceneManager {
     const auto& spec = *(work->spec);
     std::string id_str = spec.id.GetAsString();
     if (spec.needs_rebuild) {
-      bool warned_emitter = false;
-      if (spec.emitter_spec.has_value()) {
+      if (HasEmitter(spec)) {
         TF_WARN(
             "Mesh %s is instanced but has an emitter attached. Mitsuba "
             "does not support emitters on instances. Ignoring emitter.",
             spec.id.GetText());
-        warned_emitter = true;
+      }
+      if (shape_sensors_.contains(id_str)) {
+        TF_WARN(
+            "Mesh %s is instanced but has a sensor attached. Mitsuba does "
+            "not support sensors on instances. Ignoring sensor.",
+            spec.id.GetText());
       }
 
       // Run geometry pipeline
@@ -1516,20 +1522,11 @@ class SceneModel final : public SceneManager {
       std::vector<mitsuba::ref<Shape>> prototype_shapes;
       prototype_shapes.reserve(sub_meshes.size());
       for (const auto& sub_mesh : sub_meshes) {
-        auto env = ResolveEmitterAndSensor(std::nullopt, sub_mesh.material_id,
-                                           spec.id);
-        if (env.emitter_ptr != nullptr && !warned_emitter) {
-          TF_WARN(
-              "Mesh %s is instanced but has an emitter attached. Mitsuba "
-              "does not support emitters on instances. Ignoring emitter.",
-              spec.id.GetText());
-          warned_emitter = true;
-        }
         ref<BSDF> bsdf = ResolveBsdf(sub_mesh.material_id, sub_mesh.primvars);
 
         auto mesh = PrimTranslator::BuildMesh(sub_mesh.id, sub_mesh.triangles,
                                               sub_mesh.primvars, bsdf.get(),
-                                              nullptr, env.sensor_ptr);
+                                              nullptr, nullptr);
         if (mesh) {
           prototype_shapes.push_back(mesh);
           res.meshes.push_back(mesh);
@@ -1606,6 +1603,15 @@ class SceneModel final : public SceneManager {
       shapes_[absl::StrCat(kInstancePrefix, id_str, "_", i)] = res.instances[i];
     }
     return true;  // Rebuild scene
+  }
+
+  bool HasEmitter(const MeshSpec& spec) const {
+    return spec.emitter_spec.has_value() ||
+           std::any_of(spec.material_ids.begin(), spec.material_ids.end(),
+                       [&](const SdfPath& material_id) {
+                         return material_emitters_.contains(
+                             material_id.GetAsString());
+                       });
   }
 
   bool CommitMeshes() {

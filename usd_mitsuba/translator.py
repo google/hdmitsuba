@@ -50,9 +50,10 @@ def _convert_cube(
         'Displacement is not supported for cubes. Please use a mesh.'
     )
 
+  size = UsdGeom.Cube(prim).GetSizeAttr().Get(time)
   mi_cube: dict[str, Any] = {
       'type': 'cube',
-      'to_world': util.get_world_transform(prim, time),
+      'to_world': util.get_world_transform(prim, time).scale(0.5 * size),
   }
   if bsdf is not None:
     mi_cube['bsdf'] = bsdf

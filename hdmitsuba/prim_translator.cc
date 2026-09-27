@@ -737,7 +737,6 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateLightInPlace(
     mitsuba::Object* light_obj, const LightSpec& spec) {
   using AffineTransform4f = mitsuba::Transform<mitsuba::Point<Float, 4>, true>;
   using Color3f = mitsuba::Color<Float, 3>;
-  using Point3f = mitsuba::Point<Float, 3>;
 
   ScalarAffineTransform4f to_world = spec.transform;
   mitsuba::Color<float, 3> color(spec.emission[0], spec.emission[1],
@@ -763,25 +762,18 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateLightInPlace(
 
     if (spec.prim_type == HdPrimTypeTokens->sphereLight &&
         spec.treat_as_point) {
+      cb.set<AffineTransform4f>("to_world",
+                                AffineTransform4f(to_world.matrix));
+      cb.set<Color3f>("intensity.value", Color3f(color[0], color[1], color[2]));
       if (spec.shaping_cone_angle != 0.0f) {
-        cb.set<AffineTransform4f>("to_world",
-                                  AffineTransform4f(to_world.matrix));
-        cb.set<Color3f>("intensity.value",
-                        Color3f(color[0], color[1], color[2]));
         cb.set<Float>("beam_width", spec.shaping_cone_beam_width);
         cb.set<Float>("cutoff_angle", spec.shaping_cone_angle);
-      } else {
-        auto pos = to_world.translation();
-        cb.set<Point3f>("position", Point3f(pos[0], pos[1], pos[2]));
-        cb.set<Color3f>("intensity.value",
-                        Color3f(color[0], color[1], color[2]));
       }
     } else if (spec.prim_type == HdPrimTypeTokens->domeLight) {
       if (!spec.texture_file_path.empty()) {
         cb.set<AffineTransform4f>("to_world",
                                   AffineTransform4f(to_world.matrix));
-        float scale = (color[0] + color[1] + color[2]) / 3.f;
-        cb.set<Float>("scale", scale);
+        cb.set<Float>("scale", (color[0] + color[1] + color[2]) / 3.f);
         emitter->parameters_changed({"scale", "to_world"});
         return;
       } else {
