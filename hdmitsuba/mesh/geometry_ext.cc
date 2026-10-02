@@ -324,12 +324,9 @@ NB_MODULE(geometry_ext, m) {
     bool is_subdivided = subdiv.IsSubdivided();
     std::vector<int> refined_to_coarse_map;
 
-    bool had_normals = primvars.find(HdTokens->normals) != primvars.end();
     if (is_subdivided) {
       // Normals will be recomputed after subdivision, skip refining them here.
-      if (had_normals) {
-        primvars.erase(HdTokens->normals);
-      }
+      primvars.erase(HdTokens->normals);
       for (auto& [token, state] : primvars) {
         state.value = subdiv.RefinePrimvar(
             state.value, state.descriptor.interpolation, token);
@@ -340,7 +337,7 @@ NB_MODULE(geometry_ext, m) {
                                         subdiv.GetRefinedFaceVertexIndices());
       refined_to_coarse_map = subdiv.GetRefinedToCoarseMap();
     }
-    bool needs_normals = has_displacement || (is_subdivided && had_normals);
+    bool needs_normals = has_displacement || is_subdivided;
     if (primvars.find(HdTokens->normals) == primvars.end() && needs_normals) {
       GeometryProcessor::ComputeNormals(primvars, refined_topology);
     }
