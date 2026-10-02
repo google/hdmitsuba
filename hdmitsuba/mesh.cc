@@ -174,9 +174,10 @@ void HdMitsubaMesh::Sync(HdSceneDelegate* sceneDelegate,
   const bool primvars_dirty =
       (*dirtyBits &
        (HdChangeTracker::DirtyPrimvar | HdChangeTracker::DirtyPoints |
-        HdChangeTracker::DirtyNormals | HdChangeTracker::DirtyTransform)) != 0;
+        HdChangeTracker::DirtyNormals)) != 0;
   const bool scene_update_dirty =
-      (*dirtyBits & (HdChangeTracker::DirtyInstancer |
+      (*dirtyBits & (HdChangeTracker::DirtyTransform |
+                     HdChangeTracker::DirtyInstancer |
                      HdChangeTracker::DirtyInstanceIndex |
                      HdMitsubaMesh::DirtyLight)) != 0;
 
@@ -327,16 +328,12 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
   std::optional<LightSpec> emitter_spec = GetMeshEmitterSpec(sceneDelegate, id);
 
   VtMatrix4dArray instance_transforms;
-  bool transforms_dirty = false;
   const SdfPath& instancer_id = GetInstancerId();
   if (!instancer_id.IsEmpty()) {
     HdMitsubaInstancer* instancer = static_cast<HdMitsubaInstancer*>(
         sceneDelegate->GetRenderIndex().GetInstancer(instancer_id));
     if (instancer) {
       instance_transforms = instancer->ComputeInstanceTransforms(id);
-      transforms_dirty =
-          (dirtyBits && (*dirtyBits & HdChangeTracker::DirtyInstancer)) ||
-          (dirtyBits && (*dirtyBits & HdChangeTracker::DirtyInstanceIndex));
     }
   }
 
@@ -354,8 +351,8 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
   spec.transform = sceneDelegate->GetTransform(id);
   spec.emitter_spec = emitter_spec;
   spec.instance_transforms = instance_transforms;
-  spec.transforms_dirty = transforms_dirty;
   spec.needs_rebuild = needs_rebuild;
+  spec.dirty_bits = dirtyBits ? *dirtyBits : HdChangeTracker::Clean;
   spec.is_subdivided = subdiv_evaluator_.IsSubdivided();
 
   if (subdiv_evaluator_.IsSubdivided()) {
@@ -426,16 +423,13 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
     primvars_.erase(HdTokens->normals);
   }
 
-  bool transform_dirty = *dirtyBits & HdChangeTracker::DirtyTransform;
-
   // Query and evaluate computed primvars.
   HdExtComputationPrimvarDescriptorVector computed_primvar_descs;
   for (size_t i = 0; i < HdInterpolationCount; ++i) {
     HdInterpolation interp = static_cast<HdInterpolation>(i);
     auto descs = sceneDelegate->GetExtComputationPrimvarDescriptors(id, interp);
     for (const auto& desc : descs) {
-      if (HdChangeTracker::IsPrimvarDirty(*dirtyBits, id, desc.name) ||
-          transform_dirty) {
+      if (HdChangeTracker::IsPrimvarDirty(*dirtyBits, id, desc.name)) {
         computed_primvar_descs.push_back(desc);
       }
     }
@@ -469,7 +463,7 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
   };
 
   // 1. Explicitly sync points (built-in geometric attribute)
-  if ((*dirtyBits & HdChangeTracker::DirtyPoints) || transform_dirty) {
+  if (*dirtyBits & HdChangeTracker::DirtyPoints) {
     HdPrimvarDescriptor desc{HdTokens->points, HdInterpolationVertex,
                              HdPrimvarRoleTokens->point};
     sync_primvar(HdTokens->points, desc);
@@ -477,7 +471,7 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
 
   // 2. Explicitly sync normals (only if no subdivision is used).
   if (!subdiv_evaluator_.IsSubdivided() &&
-      ((*dirtyBits & HdChangeTracker::DirtyNormals) || transform_dirty)) {
+      (*dirtyBits & HdChangeTracker::DirtyNormals)) {
     VtValue value = resolve_primvar_value(HdTokens->normals);
     if (!value.IsEmpty()) {
       HdPrimvarDescriptor desc;

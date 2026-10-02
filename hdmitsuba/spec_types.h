@@ -68,7 +68,6 @@ struct MeshSpec : public BaseSpec {
   GfMatrix4d transform;
   std::optional<LightSpec> emitter_spec = std::nullopt;
   VtMatrix4dArray instance_transforms;
-  bool transforms_dirty = false;
   bool is_subdivided = false;
 };
 

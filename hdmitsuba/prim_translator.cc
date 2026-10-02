@@ -951,7 +951,7 @@ PrimTranslator<Float, Spectrum>::BuildMesh(const SdfPath& id,
 
 MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateMeshInPlace(
     mitsuba::Object* mesh_obj, const VtIntArray& face_indices,
-    const PrimvarMap& primvars) {
+    const PrimvarMap& primvars, HdDirtyBits dirty_bits) {
   using Mesh = mitsuba::Mesh<Float, Spectrum>;
   using TensorXf32 = typename Mesh::TensorXf32;
   using TensorXu32 = typename Mesh::TensorXu32;
@@ -968,11 +968,21 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateMeshInPlace(
   TraversalCallback cb("", nullptr, /*recurse_objects=*/false);
   mesh->traverse(&cb);
 
-  std::vector<std::string> keys = {"positions", "faces"};
+  const bool update_topology_and_uvs =
+      (dirty_bits & (HdChangeTracker::DirtyTopology |
+                     HdChangeTracker::DirtyPrimvar |
+                     HdChangeTracker::DirtyNormals)) != 0 ||
+      vertex_count != mesh->vertex_count() ||
+      face_count != mesh->face_count();
+
+  std::vector<std::string> keys = {"positions"};
   cb.set<TensorXf32>(
       "positions", LoadFloatTensor<Mesh, 3>(points_array.data(), vertex_count));
-  cb.set<TensorXu32>("faces",
-                     LoadFaceTensor<Mesh>(face_indices.data(), face_count));
+  if (update_topology_and_uvs) {
+    cb.set<TensorXu32>("faces",
+                       LoadFaceTensor<Mesh>(face_indices.data(), face_count));
+    keys.push_back("faces");
+  }
 
   auto normals_it = primvars.find(HdTokens->normals);
   if (normals_it != primvars.end() && mesh->has_normals()) {
@@ -986,14 +996,16 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateMeshInPlace(
   // delegate.
   keys.push_back("normals");
 
-  auto texcoords_it = primvars.find(TfToken("st"));
-  if (texcoords_it != primvars.end() && mesh->has_texcoords()) {
-    const auto& texcoords_array =
-        texcoords_it->second.value.Get<VtVec2fArray>();
-    cb.set<TensorXf32>("texcoords",
-                       LoadFloatTensor<Mesh, 2>(texcoords_array.data(),
-                                                texcoords_array.size()));
-    keys.push_back("texcoords");
+  if (update_topology_and_uvs) {
+    auto texcoords_it = primvars.find(TfToken("st"));
+    if (texcoords_it != primvars.end() && mesh->has_texcoords()) {
+      const auto& texcoords_array =
+          texcoords_it->second.value.Get<VtVec2fArray>();
+      cb.set<TensorXf32>("texcoords",
+                         LoadFloatTensor<Mesh, 2>(texcoords_array.data(),
+                                                  texcoords_array.size()));
+      keys.push_back("texcoords");
+    }
   }
 
   mesh->parameters_changed(keys);

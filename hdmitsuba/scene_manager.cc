@@ -700,7 +700,7 @@ class SceneModel final : public SceneManager {
         spec.needs_rebuild = true;
       }
       if (!spec.needs_rebuild) {
-        spec.dirty_bits = 1;
+        spec.dirty_bits |= prev_it->second.dirty_bits;
       }
     }
     mesh_specs_[spec.id] = std::move(spec);
@@ -1465,6 +1465,11 @@ class SceneModel final : public SceneManager {
       }
     } else {
       // Update in place.
+      constexpr HdDirtyBits kMeshGeometryDirty =
+          HdChangeTracker::DirtyPoints | HdChangeTracker::DirtyTransform |
+          HdChangeTracker::DirtyNormals | HdChangeTracker::DirtyPrimvar |
+          HdChangeTracker::DirtyTopology;
+      const bool geometry_dirty = (spec.dirty_bits & kMeshGeometryDirty) != 0;
       auto sub_meshes = RunGeometryPipeline(spec, work->displacement_textures);
       for (const auto& sub_mesh : sub_meshes) {
         std::string sub_mesh_id_str = sub_mesh.id.GetAsString();
@@ -1474,21 +1479,23 @@ class SceneModel final : public SceneManager {
           continue;
         }
         ref<BSDF> bsdf = ResolveBsdf(sub_mesh.material_id, sub_mesh.primvars);
-        if (spec.dirty_bits != 0) {
-          PrimTranslator::UpdateMeshInPlace(
-              it->second.get(), sub_mesh.triangles, sub_mesh.primvars);
+        if (geometry_dirty) {
+          PrimTranslator::UpdateMeshInPlace(it->second.get(),
+                                            sub_mesh.triangles,
+                                            sub_mesh.primvars, spec.dirty_bits);
+        }
+        if (spec.dirty_bits != 0 && it->second->is_emitter() &&
+            spec.emitter_spec.has_value()) {
           // Update emissive mesh radiance in-place
-          if (it->second->is_emitter() && spec.emitter_spec.has_value()) {
-            auto* emitter = it->second->emitter();
-            TraversalCallback cb_emitter;
-            emitter->traverse(&cb_emitter);
-            using Color3f = mitsuba::Color<Float, 3>;
-            cb_emitter.set<Color3f>("radiance.value",
-                                    Color3f(spec.emitter_spec->emission[0],
-                                            spec.emitter_spec->emission[1],
-                                            spec.emitter_spec->emission[2]));
-            emitter->parameters_changed();
-          }
+          auto* emitter = it->second->emitter();
+          TraversalCallback cb_emitter;
+          emitter->traverse(&cb_emitter);
+          using Color3f = mitsuba::Color<Float, 3>;
+          cb_emitter.set<Color3f>("radiance.value",
+                                  Color3f(spec.emitter_spec->emission[0],
+                                          spec.emitter_spec->emission[1],
+                                          spec.emitter_spec->emission[2]));
+          emitter->parameters_changed();
         }
         it->second->set_bsdf(bsdf.get());
       }
@@ -1560,6 +1567,11 @@ class SceneModel final : public SceneManager {
       }
     } else {
       // Update in place
+      constexpr HdDirtyBits kMeshGeometryDirty =
+          HdChangeTracker::DirtyPoints | HdChangeTracker::DirtyTransform |
+          HdChangeTracker::DirtyNormals | HdChangeTracker::DirtyPrimvar |
+          HdChangeTracker::DirtyTopology;
+      const bool geometry_dirty = (spec.dirty_bits & kMeshGeometryDirty) != 0;
       auto sub_meshes = RunGeometryPipeline(spec, work->displacement_textures);
       for (const auto& sub_mesh : sub_meshes) {
         std::string sub_mesh_id_str = sub_mesh.id.GetAsString();
@@ -1567,14 +1579,16 @@ class SceneModel final : public SceneManager {
         if (TF_VERIFY(it != shapes_.end())) {
           ref<BSDF> bsdf = ResolveBsdf(sub_mesh.material_id, sub_mesh.primvars);
 
-          if (spec.dirty_bits != 0) {
+          if (geometry_dirty) {
             PrimTranslator::UpdateMeshInPlace(
-                it->second.get(), sub_mesh.triangles, sub_mesh.primvars);
+                it->second.get(), sub_mesh.triangles, sub_mesh.primvars,
+                spec.dirty_bits);
           }
           it->second->set_bsdf(bsdf.get());
         }
       }
-      if (spec.transforms_dirty) {
+      if (spec.dirty_bits & (HdChangeTracker::DirtyInstancer |
+                             HdChangeTracker::DirtyInstanceIndex)) {
         for (size_t i = 0; i < spec.instance_transforms.size(); ++i) {
           auto inst_it =
               shapes_.find(absl::StrCat(kInstancePrefix, id_str, "_", i));

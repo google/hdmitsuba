@@ -98,7 +98,8 @@ class PrimTranslator {
 
   static void UpdateMeshInPlace(mitsuba::Object* mesh_obj,
                                 const VtIntArray& face_indices,
-                                const PrimvarMap& primvars);
+                                const PrimvarMap& primvars,
+                                HdDirtyBits dirty_bits);
 
   static mitsuba::ref<mitsuba::Shape<Float, Spectrum>> BuildCurves(
       const CurveSpec& spec, mitsuba::Object* bsdf);
