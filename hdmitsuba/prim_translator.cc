@@ -172,27 +172,13 @@ void SetMitsubaPropertyFromValue(mitsuba::Properties& props,
   } else if (val.IsHolding<int>()) {
     props.set(name, val.Get<int>());
   } else if (val.IsHolding<GfMatrix3f>()) {
-    auto m = val.Get<GfMatrix3f>();
-    dr::Matrix<float, 3> matrix(m[0][0], m[0][1], m[0][2], m[1][0], m[1][1],
-                                m[1][2], m[2][0], m[2][1], m[2][2]);
-    props.set(name, mitsuba::Transform<mitsuba::Point<float, 3>, true>(matrix));
+    props.set(name, UsdToMitsubaTransform(GfMatrix3d(val.Get<GfMatrix3f>())));
   } else if (val.IsHolding<GfMatrix3d>()) {
-    auto m = val.Get<GfMatrix3d>();
-    dr::Matrix<float, 3> matrix(m[0][0], m[0][1], m[0][2], m[1][0], m[1][1],
-                                m[1][2], m[2][0], m[2][1], m[2][2]);
-    props.set(name, mitsuba::Transform<mitsuba::Point<float, 3>, true>(matrix));
+    props.set(name, UsdToMitsubaTransform(val.Get<GfMatrix3d>()));
   } else if (val.IsHolding<GfMatrix4f>()) {
-    auto m = val.Get<GfMatrix4f>();
-    dr::Matrix<float, 4> matrix(
-        m[0][0], m[0][1], m[0][2], m[0][3], m[1][0], m[1][1], m[1][2], m[1][3],
-        m[2][0], m[2][1], m[2][2], m[2][3], m[3][0], m[3][1], m[3][2], m[3][3]);
-    props.set(name, ScalarAffineTransform4f(matrix));
+    props.set(name, UsdToMitsubaTransform(GfMatrix4d(val.Get<GfMatrix4f>())));
   } else if (val.IsHolding<GfMatrix4d>()) {
-    auto m = val.Get<GfMatrix4d>();
-    dr::Matrix<float, 4> matrix(
-        m[0][0], m[0][1], m[0][2], m[0][3], m[1][0], m[1][1], m[1][2], m[1][3],
-        m[2][0], m[2][1], m[2][2], m[2][3], m[3][0], m[3][1], m[3][2], m[3][3]);
-    props.set(name, ScalarAffineTransform4f(matrix));
+    props.set(name, UsdToMitsubaTransform(val.Get<GfMatrix4d>()));
   } else if (val.IsHolding<std::string>()) {
     props.set(name, val.Get<std::string>());
   } else if (val.IsHolding<TfToken>()) {

@@ -18,6 +18,7 @@
 
 #include <drjit/matrix.h>
 #include <mitsuba/core/transform.h>
+#include <pxr/base/gf/matrix3d.h>
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/tf/diagnostic.h>
 #include <pxr/base/tf/type.h>
@@ -64,17 +65,27 @@ T GetParam(const HdContainerDataSourceHandle& container,
   return default_value;
 }
 
+using ScalarAffineTransform3f =
+    mitsuba::Transform<mitsuba::Point<float, 3>, true>;
 using ScalarAffineTransform4f =
     mitsuba::Transform<mitsuba::Point<float, 4>, true>;
 
-inline ScalarAffineTransform4f UsdToMitsubaTransform(const GfMatrix4d& transform) {
-  const double* m = transform.GetArray();
-  drjit::Matrix<float, 4> to_world_mat(
-      static_cast<float>(m[0]), static_cast<float>(m[4]), static_cast<float>(m[8]), static_cast<float>(m[12]),
-      static_cast<float>(m[1]), static_cast<float>(m[5]), static_cast<float>(m[9]), static_cast<float>(m[13]),
-      static_cast<float>(m[2]), static_cast<float>(m[6]), static_cast<float>(m[10]), static_cast<float>(m[14]),
-      static_cast<float>(m[3]), static_cast<float>(m[7]), static_cast<float>(m[11]), static_cast<float>(m[15]));
-  return ScalarAffineTransform4f(to_world_mat);
+// USD's Gf matrices use the row-vector convention (p' = p * M, translation in
+// the last row) while Mitsuba uses column vectors (p' = M * p). Converting is
+// therefore a transpose. All USD -> Mitsuba matrix conversions must go through
+// these helpers so the convention is applied consistently.
+inline ScalarAffineTransform4f UsdToMitsubaTransform(const GfMatrix4d& m) {
+  drjit::Matrix<float, 4> t;
+  for (int i = 0; i < 4; ++i)
+    for (int j = 0; j < 4; ++j) t(i, j) = static_cast<float>(m[j][i]);
+  return ScalarAffineTransform4f(t);
+}
+
+inline ScalarAffineTransform3f UsdToMitsubaTransform(const GfMatrix3d& m) {
+  drjit::Matrix<float, 3> t;
+  for (int i = 0; i < 3; ++i)
+    for (int j = 0; j < 3; ++j) t(i, j) = static_cast<float>(m[j][i]);
+  return ScalarAffineTransform3f(t);
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE
