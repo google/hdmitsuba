@@ -150,6 +150,7 @@ void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
   bool treat_as_point =
       GetParam<bool>(light_container, treat_as_point_token, radius == 0.0f);
 
+  float angle = GetParam<float>(light_container, HdLightTokens->angle, 0.0f);
   float shaping_cone_angle =
       GetParam<float>(light_container, HdLightTokens->shapingConeAngle, 0.0f);
   float shaping_cone_softness = GetParam<float>(
@@ -176,6 +177,7 @@ void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
   spec.prim_type = type_id_;
   spec.transform = UsdToMitsubaTransform(to_world);
   spec.emission = emission;
+  spec.angle = angle;
   spec.shaping_cone_angle = shaping_cone_angle;
   spec.shaping_cone_beam_width = shaping_cone_beam_width;
   spec.treat_as_point = treat_as_point;
@@ -184,11 +186,13 @@ void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
   // 5. Determine if rebuild is needed using a clean declarative check
   bool needs_rebuild =
       !is_instantiated_ || (treat_as_point != treat_as_point_) ||
+      ((angle_ > 0.0f) != (angle > 0.0f)) ||
       ((shaping_cone_angle_ != 0.0f) != (shaping_cone_angle != 0.0f)) ||
       (texture_file_path != texture_file_path_);
 
   is_instantiated_ = true;
   treat_as_point_ = treat_as_point;
+  angle_ = angle;
   shaping_cone_angle_ = shaping_cone_angle;
   texture_file_path_ = texture_file_path;
 

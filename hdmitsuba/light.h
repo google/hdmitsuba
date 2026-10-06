@@ -45,6 +45,7 @@ class HdMitsubaLight final : public HdLight {
   TfToken type_id_;
   bool is_instantiated_ = false;
   bool treat_as_point_ = false;
+  float angle_ = 0.0f;
   float shaping_cone_angle_ = 0.0f;
   std::string texture_file_path_;
 };

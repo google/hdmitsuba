@@ -60,6 +60,7 @@ struct LightSpec : public BaseSpec {
   TfToken prim_type;
   ScalarAffineTransform4f transform;
   GfVec3f emission;
+  float angle = 0.0f;
   float shaping_cone_angle = 0.0f;
   float shaping_cone_beam_width = 0.0f;
   bool treat_as_point = false;

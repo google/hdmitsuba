@@ -120,10 +120,13 @@ def _convert_distant_light(
     intensity: float,
     time: Usd.TimeCode,
 ) -> dict[str, Any]:
+  distant_light = UsdLux.DistantLight(prim)
+  angle = distant_light.GetAngleAttr().Get(time)
   return {
       'type': 'directional',
       'to_world': world_transform.rotate([1, 0, 0], 180),
       'irradiance': {'type': 'rgb', 'value': color * intensity},
+      'angle': float(angle) if angle is not None else 0.0,
   }
 
 

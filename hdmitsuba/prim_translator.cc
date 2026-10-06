@@ -595,6 +595,7 @@ PrimTranslator<Float, Spectrum>::BuildLightProperties(const LightSpec& spec) {
     mitsuba::Properties props("directional");
     props.set("irradiance", color);
     props.set("to_world", to_world);
+    props.set("angle", spec.angle);
     return props;
   }
 
@@ -661,6 +662,7 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateLightInPlace(
       cb.set<AffineTransform4f>("to_world", AffineTransform4f(to_world.matrix));
       cb.set<Color3f>("irradiance.value",
                       Color3f(color[0], color[1], color[2]));
+      cb.set<Float>("angle", spec.angle);
     }
     emitter->parameters_changed();
   }

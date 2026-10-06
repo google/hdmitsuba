@@ -60,12 +60,14 @@ def test_distant_light():
   usd_light.GetColorAttr().Set(Gf.Vec3f(1.0, 0.5, 0.25))
   usd_light.GetIntensityAttr().Set(2.0)
   usd_light.GetExposureAttr().Set(2.0)  # 2.0 * 2^2 = 8.0 intensity
+  usd_light.GetAngleAttr().Set(1.5)
   transform_api = UsdGeom.Xformable(prim)
   transform_api.AddRotateXOp().Set(90.0)
 
   emitter_dict = light.convert_light(prim)
 
   assert emitter_dict['type'] == 'directional'
+  assert emitter_dict['angle'] == pytest.approx(1.5)
   np.testing.assert_allclose(
       emitter_dict['irradiance']['value'],
       mi.ScalarColor3f(8.0, 4.0, 2.0),
