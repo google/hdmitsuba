@@ -62,10 +62,6 @@ class SubdivisionEvaluator {
     return refined_face_vertex_indices_;
   }
 
-  const std::vector<int>& GetRefinedToCoarseMap() const {
-    return refined_to_coarse_map_;
-  }
-
   VtIntArray MapRefinedMaterialIndices(
       const VtIntArray& coarse_material_indices) const;
 
