@@ -17,8 +17,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstring>
-#include <functional>
-#include <memory>
+#include <optional>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -64,100 +63,115 @@ inline int AsInt(float f) {
   return i;
 }
 
-using PrimvarArrayVariant = std::variant<VtVec2fArray, VtVec3fArray>;
-
-struct PrimvarProcessor {
-  std::function<void(VertexDataKey& key, int face, int corner,
-                     const VtIntArray& face_indices)>
-      appendToKey;
-
-  std::function<void(int face, int corner, const VtIntArray& face_indices)>
-      appendToFinalArray;
-
-  std::function<PrimvarArrayVariant()> createStorage;
-
-  std::function<void(PrimvarArrayVariant& storage)> captureStorage;
-};
+using PrimvarArrayVariant =
+    std::variant<VtFloatArray, VtVec2fArray, VtVec3fArray>;
 
 template <typename T>
-PrimvarProcessor CreateProcessor(const VtArray<T>& data,
-                                 HdInterpolation interpolation) {
-  PrimvarProcessor p;
-
-  auto get_value = GeometryProcessor::GetInterpolator(data, interpolation);
-
-  p.appendToKey = [=](VertexDataKey& key, int face, int corner,
-                      const VtIntArray& face_indices) {
-    switch (interpolation) {
-      case HdInterpolationVertex:
-      case HdInterpolationVarying:
-        key.push_back(face_indices[corner]);
-        break;
-      case HdInterpolationFaceVarying: {
-        const T val = get_value(face, corner, corner, face_indices);
-        for (size_t i = 0; i < val.dimension; ++i) {
-          key.push_back(AsInt(val[i]));
-        }
-        break;
-      }
-      case HdInterpolationUniform:
-        key.push_back(face);
-        break;
-      case HdInterpolationConstant:
-        key.push_back(0);
-        break;
-      default:
-        // TODO: Check if there are other cases to be handled.
-        break;
-    }
-  };
-
-  struct State {
-    VtArray<T>* active_array = nullptr;
-  };
-  auto state = std::make_shared<State>();
-
-  p.appendToFinalArray = [=](int face, int corner,
-                             const VtIntArray& face_indices) {
-    if (state->active_array) {
-      state->active_array->push_back(
-          get_value(face, corner, corner, face_indices));
-    }
-  };
-
-  p.createStorage = []() { return PrimvarArrayVariant(VtArray<T>()); };
-
-  p.captureStorage = [state](PrimvarArrayVariant& storage) {
-    state->active_array = &std::get<VtArray<T>>(storage);
-  };
-
-  return p;
+constexpr size_t PrimvarDimension() {
+  if constexpr (std::is_same_v<T, float>) {
+    return 1;
+  } else {
+    return T::dimension;
+  }
 }
 
-struct PrimvarCompactor {
-  std::function<void(int old_vertex_index)> compact_vertex;
-  std::function<VtValue()> get_compacted_value;
-  HdPrimvarDescriptor descriptor;
-};
+inline void AppendValueToKey(VertexDataKey& key, float val) {
+  key.push_back(AsInt(val));
+}
+
+template <typename Vec>
+inline void AppendValueToKey(VertexDataKey& key, const Vec& val) {
+  for (size_t i = 0; i < Vec::dimension; ++i) {
+    key.push_back(AsInt(val[i]));
+  }
+}
 
 template <typename T>
-PrimvarCompactor CreateCompactor(const VtArray<T>& source_array,
-                                 const HdPrimvarDescriptor& descriptor,
-                                 size_t reserve_size) {
-  PrimvarCompactor compactor;
-  compactor.descriptor = descriptor;
-  auto compacted_array = std::make_shared<VtArray<T>>();
-  compacted_array->reserve(reserve_size);
+T SamplePrimvar(const VtArray<T>& data, HdInterpolation interpolation, int face,
+                int corner, const VtIntArray& face_indices) {
+  if (data.empty()) return T(0.f);
+  switch (interpolation) {
+    case HdInterpolationConstant:
+      return data[0];
+    case HdInterpolationUniform:
+      return data[face];
+    case HdInterpolationVertex:
+    case HdInterpolationVarying:
+      return data[face_indices[corner]];
+    case HdInterpolationFaceVarying:
+      return data[corner];
+    default:
+      return T(0.f);
+  }
+}
 
-  compactor.compact_vertex = [source_array,
-                              compacted_array](int old_vertex_index) {
-    compacted_array->push_back(source_array[old_vertex_index]);
-  };
+struct ExpandChannel {
+  TfToken name;
+  HdPrimvarDescriptor descriptor;
+  PrimvarArrayVariant src;
+  PrimvarArrayVariant dst;
+};
 
-  compactor.get_compacted_value = [compacted_array]() {
-    return VtValue(std::move(*compacted_array));
-  };
-  return compactor;
+void AppendChannelToKey(const ExpandChannel& channel, VertexDataKey& key,
+                        int face, int corner, const VtIntArray& face_indices) {
+  switch (channel.descriptor.interpolation) {
+    case HdInterpolationVertex:
+    case HdInterpolationVarying:
+      key.push_back(face_indices[corner]);
+      break;
+    case HdInterpolationFaceVarying:
+      std::visit(
+          [&](const auto& src) {
+            AppendValueToKey(key, SamplePrimvar(src, HdInterpolationFaceVarying,
+                                                face, corner, face_indices));
+          },
+          channel.src);
+      break;
+    case HdInterpolationUniform:
+      key.push_back(face);
+      break;
+    case HdInterpolationConstant:
+      key.push_back(0);
+      break;
+    default:
+      break;
+  }
+}
+
+void AppendChannelValue(ExpandChannel& channel, int face, int corner,
+                        const VtIntArray& face_indices) {
+  const HdInterpolation interp = channel.descriptor.interpolation;
+  std::visit(
+      [&](const auto& src) {
+        using ArrayType = std::decay_t<decltype(src)>;
+        std::get<ArrayType>(channel.dst)
+            .push_back(SamplePrimvar(src, interp, face, corner, face_indices));
+      },
+      channel.src);
+}
+
+std::optional<PrimvarArrayVariant> ExtractPrimvarArray(const VtValue& value) {
+  if (value.IsHolding<VtVec3fArray>()) {
+    return value.UncheckedGet<VtVec3fArray>();
+  }
+  if (value.IsHolding<VtVec2fArray>()) {
+    return value.UncheckedGet<VtVec2fArray>();
+  }
+  if (value.IsHolding<VtFloatArray>()) {
+    return value.UncheckedGet<VtFloatArray>();
+  }
+  return std::nullopt;
+}
+
+template <typename T>
+VtValue GatherVertices(const VtArray<T>& src,
+                       absl::Span<const int> unique_old_vertices) {
+  VtArray<T> out;
+  out.reserve(unique_old_vertices.size());
+  for (int old_v : unique_old_vertices) {
+    out.push_back(src[old_v]);
+  }
+  return VtValue(std::move(out));
 }
 
 template <typename T>
@@ -314,36 +328,24 @@ std::pair<VtIntArray, PrimvarMap> GeometryProcessor::ExpandPrimData(
     const VtIntArray& face_vertex_indices, const VtIntArray& face_vertex_counts,
     const PrimvarMap& primvars) {
   TRACE_FUNCTION();
-  absl::flat_hash_map<TfToken, PrimvarProcessor, TfToken::HashFunctor>
-      primvar_processors;
-
   absl::Time start = absl::Now();
 
+  std::vector<ExpandChannel> channels;
+  channels.reserve(primvars.size());
   size_t total_primvar_dim = 0;
   for (const auto& [token, state] : primvars) {
-    const auto& interpolation = state.descriptor.interpolation;
-    if (state.value.IsHolding<VtVec3fArray>()) {
-      primvar_processors[token] = CreateProcessor<GfVec3f>(
-          state.value.Get<VtVec3fArray>(), interpolation);
-      total_primvar_dim += 3;
-    } else if (state.value.IsHolding<VtVec2fArray>()) {
-      primvar_processors[token] = CreateProcessor<GfVec2f>(
-          state.value.Get<VtVec2fArray>(), interpolation);
-      total_primvar_dim += 2;
-    }
-  }
-
-  absl::flat_hash_map<TfToken, PrimvarArrayVariant, TfToken::HashFunctor>
-      intermediate_primvars;
-  for (const auto& [token, processor] : primvar_processors) {
-    intermediate_primvars[token] = processor.createStorage();
-  }
-
-  std::vector<PrimvarProcessor> active_work_items;
-  active_work_items.reserve(primvar_processors.size());
-  for (auto& [token, processor] : primvar_processors) {
-    processor.captureStorage(intermediate_primvars[token]);
-    active_work_items.push_back(processor);
+    auto src_opt = ExtractPrimvarArray(state.value);
+    if (!src_opt) continue;
+    PrimvarArrayVariant dst = std::visit(
+        [&](const auto& arr) -> PrimvarArrayVariant {
+          using ArrayType = std::decay_t<decltype(arr)>;
+          total_primvar_dim +=
+              PrimvarDimension<typename ArrayType::value_type>();
+          return ArrayType();
+        },
+        *src_opt);
+    channels.push_back(
+        {token, state.descriptor, std::move(*src_opt), std::move(dst)});
   }
 
   size_t num_face_varyings = 0;
@@ -361,9 +363,9 @@ std::pair<VtIntArray, PrimvarMap> GeometryProcessor::ExpandPrimData(
       if constexpr (kUseMeshCompression) {
         VertexDataKey key;
         key.reserve(total_primvar_dim);
-        for (const auto& processor : active_work_items) {
-          processor.appendToKey(key, face_idx, corner_index,
-                                face_vertex_indices);
+        for (const auto& channel : channels) {
+          AppendChannelToKey(channel, key, face_idx, corner_index,
+                             face_vertex_indices);
         }
         vertex_index = unique_vertex_map.size();
         auto [it, inserted] = unique_vertex_map.try_emplace(key, vertex_index);
@@ -374,9 +376,9 @@ std::pair<VtIntArray, PrimvarMap> GeometryProcessor::ExpandPrimData(
       }
       final_face_indices[corner_index] = vertex_index;
       if (is_new_vertex) {
-        for (auto& processor : active_work_items) {
-          processor.appendToFinalArray(face_idx, corner_index,
-                                       face_vertex_indices);
+        for (auto& channel : channels) {
+          AppendChannelValue(channel, face_idx, corner_index,
+                             face_vertex_indices);
         }
       }
       corner_index++;
@@ -392,17 +394,15 @@ std::pair<VtIntArray, PrimvarMap> GeometryProcessor::ExpandPrimData(
   }
 
   PrimvarMap final_primvars;
-  for (auto const& pair : intermediate_primvars) {
-    const auto& token = pair.first;
-    const auto& variant_array = pair.second;
+  for (auto& channel : channels) {
     std::visit(
-        [&](const auto& specific_array) {
+        [&](auto& specific_array) {
           if (!specific_array.empty()) {
-            final_primvars[token].value = VtValue(specific_array);
-            final_primvars[token].descriptor = primvars.at(token).descriptor;
+            final_primvars[channel.name] = {VtValue(std::move(specific_array)),
+                                            channel.descriptor};
           }
         },
-        variant_array);
+        channel.dst);
   }
 
   return {final_face_indices, final_primvars};
@@ -444,47 +444,42 @@ std::vector<SubMeshOutput> GeometryProcessor::SplitAndCompactMeshes(
 
   absl::flat_hash_map<int, int> old_to_new_vertex_map;
   old_to_new_vertex_map.reserve(total_source_vertices);
+  std::vector<int> unique_old_vertices;
 
   for (size_t i = 0; i < material_ids.size(); ++i) {
     if (material_indices[i].empty()) continue;
     old_to_new_vertex_map.clear();
+    unique_old_vertices.clear();
 
     size_t max_vertices =
         std::min(material_indices[i].size(), total_source_vertices > 0
                                                  ? total_source_vertices
                                                  : material_indices[i].size());
+    unique_old_vertices.reserve(max_vertices);
 
     VtIntArray submesh_triangles;
     submesh_triangles.reserve(material_indices[i].size());
 
-    // Prepare helpers for compacting the primvars per material.
-    std::vector<std::pair<TfToken, PrimvarCompactor>> compactors;
-    compactors.reserve(final_primvars.size());
-    for (const auto& [token, state] : final_primvars) {
-      if (state.value.IsHolding<VtVec3fArray>()) {
-        compactors.emplace_back(
-            token, CreateCompactor(state.value.Get<VtVec3fArray>(),
-                                   state.descriptor, max_vertices));
-      } else if (state.value.IsHolding<VtVec2fArray>()) {
-        compactors.emplace_back(
-            token, CreateCompactor(state.value.Get<VtVec2fArray>(),
-                                   state.descriptor, max_vertices));
+    // Compact the triangles and record unique source vertex indices.
+    for (const int vertex_index : material_indices[i]) {
+      auto [it, inserted] = old_to_new_vertex_map.try_emplace(
+          vertex_index, static_cast<int>(unique_old_vertices.size()));
+      submesh_triangles.push_back(it->second);
+      if (inserted) {
+        unique_old_vertices.push_back(vertex_index);
       }
     }
 
-    // Compact the triangles and primvars per material.
-    for (const int vertex_index : material_indices[i]) {
-      auto [it, inserted] = old_to_new_vertex_map.try_emplace(
-          vertex_index, old_to_new_vertex_map.size());
-      submesh_triangles.push_back(it->second);
-      if (!inserted) continue;
-      for (auto& [token, compactor] : compactors) {
-        compactor.compact_vertex(vertex_index);
-      }
-    }
     PrimvarMap primvars;
-    for (const auto& [token, compactor] : compactors) {
-      primvars[token] = {compactor.get_compacted_value(), compactor.descriptor};
+    for (const auto& [token, state] : final_primvars) {
+      if (auto src_opt = ExtractPrimvarArray(state.value)) {
+        VtValue compacted = std::visit(
+            [&](const auto& src) {
+              return GatherVertices(src, unique_old_vertices);
+            },
+            *src_opt);
+        primvars[token] = {std::move(compacted), state.descriptor};
+      }
     }
 
     std::string mat_name =

@@ -71,6 +71,12 @@ TEST(SubdivisionEvaluatorTest, RefinePrimvar) {
   const VtVec3fArray& refined_points = refined_val.Get<VtVec3fArray>();
 
   EXPECT_EQ(refined_points.size(), 13);
+
+  pxr::VtFloatArray scalars = {0.f, 1.f, 2.f, 3.f};
+  VtValue refined_scalars_val = subdiv.RefinePrimvar(
+      VtValue(scalars), pxr::HdInterpolationVertex, TfToken("scalar"));
+  ASSERT_TRUE(refined_scalars_val.IsHolding<pxr::VtFloatArray>());
+  EXPECT_EQ(refined_scalars_val.Get<pxr::VtFloatArray>().size(), 13);
 }
 
 }  // namespace

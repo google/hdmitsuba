@@ -245,6 +245,9 @@ VtValue SubdivisionEvaluator::RefinePrimvar(const VtValue& value,
   if (value.IsHolding<VtVec2fArray>()) {
     return RefinePrimvarImpl<VtVec2fArray>(value, stencil, fvar_channel);
   }
+  if (value.IsHolding<VtFloatArray>()) {
+    return RefinePrimvarImpl<VtFloatArray>(value, stencil, fvar_channel);
+  }
   return value;
 }
 

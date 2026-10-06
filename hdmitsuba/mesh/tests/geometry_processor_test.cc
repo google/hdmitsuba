@@ -81,6 +81,12 @@ TEST(GeometryProcessorTest, ExpandPrimData) {
                          GfVec3f(0, 1, 0), GfVec3f(2, 1, 0), GfVec3f(2, 0, 0)};
   primvars[HdTokens->points] = {VtValue(points), points_desc};
 
+  HdPrimvarDescriptor weights_desc;
+  weights_desc.name = TfToken("weights");
+  weights_desc.interpolation = pxr::HdInterpolationUniform;
+  pxr::VtFloatArray weights = {0.25f, 0.75f};
+  primvars[TfToken("weights")] = {VtValue(weights), weights_desc};
+
   auto [expanded_indices, expanded_primvars] =
       GeometryProcessor::ExpandPrimData(topology, primvars);
 
@@ -88,7 +94,14 @@ TEST(GeometryProcessorTest, ExpandPrimData) {
   ASSERT_TRUE(expanded_primvars.find(HdTokens->points) != expanded_primvars.end());
   const VtVec3fArray& expanded_points =
       expanded_primvars.at(HdTokens->points).value.Get<VtVec3fArray>();
-  EXPECT_EQ(expanded_points.size(), 6);
+  EXPECT_EQ(expanded_points.size(), 8);
+  ASSERT_TRUE(expanded_primvars.find(TfToken("weights")) !=
+              expanded_primvars.end());
+  const pxr::VtFloatArray& expanded_weights =
+      expanded_primvars.at(TfToken("weights")).value.Get<pxr::VtFloatArray>();
+  EXPECT_EQ(expanded_weights.size(), 8);
+  EXPECT_FLOAT_EQ(expanded_weights[0], 0.25f);
+  EXPECT_FLOAT_EQ(expanded_weights[4], 0.75f);
 }
 
 TEST(GeometryProcessorTest, SplitAndCompactMeshes) {
@@ -106,6 +119,12 @@ TEST(GeometryProcessorTest, SplitAndCompactMeshes) {
                          GfVec3f(11, 10, 10), GfVec3f(10, 11, 10)};
   primvars[HdTokens->points] = {VtValue(points), points_desc};
 
+  HdPrimvarDescriptor scalar_desc;
+  scalar_desc.name = TfToken("scalar");
+  scalar_desc.interpolation = pxr::HdInterpolationVertex;
+  pxr::VtFloatArray scalars = {1.f, 2.f, 3.f, 4.f, 5.f, 6.f};
+  primvars[TfToken("scalar")] = {VtValue(scalars), scalar_desc};
+
   std::vector<SdfPath> material_ids = {SdfPath("/mat1"), SdfPath("/mat2")};
   VtIntArray face_material_indices = {0, 1};
   auto sub_meshes = GeometryProcessor::SplitAndCompactMeshes(
@@ -120,6 +139,10 @@ TEST(GeometryProcessorTest, SplitAndCompactMeshes) {
       sub_meshes[0].primvars.at(HdTokens->points).value.Get<VtVec3fArray>();
   ASSERT_EQ(sub0_points.size(), 3);
   EXPECT_EQ(sub0_points[0], GfVec3f(0, 0, 0));
+  const pxr::VtFloatArray& sub0_scalars =
+      sub_meshes[0].primvars.at(TfToken("scalar")).value.Get<pxr::VtFloatArray>();
+  ASSERT_EQ(sub0_scalars.size(), 3);
+  EXPECT_FLOAT_EQ(sub0_scalars[0], 1.f);
 
   EXPECT_EQ(sub_meshes[1].material_id, SdfPath("/mat2"));
   EXPECT_EQ(sub_meshes[1].triangles.size(), 3);
@@ -127,6 +150,10 @@ TEST(GeometryProcessorTest, SplitAndCompactMeshes) {
       sub_meshes[1].primvars.at(HdTokens->points).value.Get<VtVec3fArray>();
   ASSERT_EQ(sub1_points.size(), 3);
   EXPECT_EQ(sub1_points[0], GfVec3f(10, 10, 10));
+  const pxr::VtFloatArray& sub1_scalars =
+      sub_meshes[1].primvars.at(TfToken("scalar")).value.Get<pxr::VtFloatArray>();
+  ASSERT_EQ(sub1_scalars.size(), 3);
+  EXPECT_FLOAT_EQ(sub1_scalars[0], 4.f);
 }
 
 TEST(GeometryProcessorTest, TransformPrimvars) {
