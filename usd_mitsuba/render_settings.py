@@ -24,6 +24,10 @@ from pxr import UsdRender
 _SUPPORTED_AOVS = frozenset([
     'color',
     'albedo',
+    'diffuse_albedo',
+    'specular_reflectance',
+    'specular_transmittance',
+    'roughness',
     'depth',
     'position',
     'uv',

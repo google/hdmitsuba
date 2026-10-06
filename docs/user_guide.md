@@ -40,7 +40,7 @@ When requested by the Hydra host, `hdMitsuba` automatically routes and maps stan
 *   `primId` / `instanceId` $\rightarrow$ `shape_index` (1 channel)
 *   `elementId` $\rightarrow$ `prim_index` (1 channel)
 
-Additionally, Mitsuba's native AOV names are also supported (e.g., `albedo`, `position`, `uv`, `geo_normal`, `sh_normal`, `dp_du`, `dp_dv`).
+Additionally, Mitsuba's native AOV names are also supported (e.g., `albedo`, `diffuse_albedo`, `specular_reflectance`, `specular_transmittance`, `roughness`, `position`, `uv`, `geo_normal`, `sh_normal`, `dp_du`, `dp_dv`).
 
 ## 2. Render Settings Configuration
 
