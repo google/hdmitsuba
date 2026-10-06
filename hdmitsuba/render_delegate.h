@@ -92,7 +92,6 @@ class HdMitsubaRenderDelegate final : public HdRenderDelegate {
 
   std::unique_ptr<SceneManager> scene_impl_;
   std::unique_ptr<HdMitsubaRenderParam> render_param_;
-  HdRenderIndex* render_index_ = nullptr;
   std::string current_variant_;
 
   HdRenderSettingDescriptorList setting_descriptors_;

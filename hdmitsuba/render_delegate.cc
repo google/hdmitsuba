@@ -187,7 +187,6 @@ void HdMitsubaRenderDelegate::DestroyBprim(HdBprim* bPrim) { delete bPrim; }
 
 HdRenderPassSharedPtr HdMitsubaRenderDelegate::CreateRenderPass(
     HdRenderIndex* index, const HdRprimCollection& collection) {
-  render_index_ = index;
   return std::make_shared<HdMitsubaRenderPass>(index, collection);
 }
 
