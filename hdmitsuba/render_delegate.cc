@@ -17,6 +17,8 @@
 #include <memory>
 #include <string>
 
+#include <absl/base/no_destructor.h>
+#include <absl/container/flat_hash_map.h>
 #include <pxr/base/gf/vec2f.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/gf/vec4f.h>
@@ -282,30 +284,60 @@ TfToken HdMitsubaRenderDelegate::GetMaterialBindingPurpose() const {
   return HdTokens->full;
 }
 
+const MitsubaAovSpec* FindMitsubaAovSpec(const TfToken& name) {
+  static const absl::NoDestructor<
+      absl::flat_hash_map<TfToken, MitsubaAovSpec, TfToken::HashFunctor>>
+      kAovSpecs({
+          {HdAovTokens->color,
+           {"", 4, HdFormatFloat32Vec4,
+            VtValue(GfVec4f(0.0f, 0.0f, 0.0f, 1.0f))}},
+          {TfToken("raw"),
+           {"", 4, HdFormatFloat32Vec4,
+            VtValue(GfVec4f(0.0f, 0.0f, 0.0f, 1.0f))}},
+          {HdAovTokens->depth,
+           {"depth:depth", 1, HdFormatFloat32, VtValue(1.0f)}},
+          {HdAovTokens->primId,
+           {"primId:shape_index", 1, HdFormatInt32, VtValue(-1)}},
+          {TfToken("shape_index"),
+           {"shape_index:shape_index", 1, HdFormatInt32, VtValue(-1)}},
+          {HdAovTokens->elementId,
+           {"elementId:prim_index", 1, HdFormatInt32, VtValue(-1)}},
+          {TfToken("prim_index"),
+           {"prim_index:prim_index", 1, HdFormatInt32, VtValue(-1)}},
+          {HdAovTokens->instanceId,
+           {"instanceId:shape_index", 1, HdFormatInt32, VtValue(-1)}},
+          {HdAovTokens->normal,
+           {"sh_normal:sh_normal", 3, HdFormatFloat32Vec3,
+            VtValue(GfVec3f(0.0f, 0.0f, 0.0f))}},
+          {TfToken("sh_normal"),
+           {"sh_normal:sh_normal", 3, HdFormatFloat32Vec3,
+            VtValue(GfVec3f(0.0f, 0.0f, 0.0f))}},
+          {TfToken("geo_normal"),
+           {"geo_normal:geo_normal", 3, HdFormatFloat32Vec3,
+            VtValue(GfVec3f(0.0f, 0.0f, 0.0f))}},
+          {TfToken("position"),
+           {"position:position", 3, HdFormatFloat32Vec3,
+            VtValue(GfVec3f(0.0f, 0.0f, 0.0f))}},
+          {TfToken("albedo"),
+           {"albedo:albedo", 3, HdFormatFloat32Vec3,
+            VtValue(GfVec3f(0.0f, 0.0f, 0.0f))}},
+          {TfToken("dp_du"),
+           {"dp_du:dp_du", 3, HdFormatFloat32Vec3,
+            VtValue(GfVec3f(0.0f, 0.0f, 0.0f))}},
+          {TfToken("dp_dv"),
+           {"dp_dv:dp_dv", 3, HdFormatFloat32Vec3,
+            VtValue(GfVec3f(0.0f, 0.0f, 0.0f))}},
+          {TfToken("uv"),
+           {"uv:uv", 2, HdFormatFloat32Vec2, VtValue(GfVec2f(0.0f, 0.0f))}},
+      });
+  auto it = kAovSpecs->find(name);
+  return it != kAovSpecs->end() ? &it->second : nullptr;
+}
+
 HdAovDescriptor HdMitsubaRenderDelegate::GetDefaultAovDescriptor(
     const TfToken& name) const {
-  if (name == HdAovTokens->color || name == TfToken("raw")) {
-    return HdAovDescriptor(HdFormatFloat32Vec4, false,
-                           VtValue(GfVec4f(0.0f, 0.0f, 0.0f, 1.0f)));
-  }
-  if (name == HdAovTokens->depth) {
-    return HdAovDescriptor(HdFormatFloat32, false, VtValue(1.0f));
-  }
-  if (name == HdAovTokens->primId || name == HdAovTokens->instanceId ||
-      name == HdAovTokens->elementId || name == TfToken("shape_index") ||
-      name == TfToken("prim_index")) {
-    return HdAovDescriptor(HdFormatInt32, false, VtValue(-1));
-  }
-  if (name == HdAovTokens->normal || name == TfToken("sh_normal") ||
-      name == TfToken("geo_normal") || name == TfToken("position") ||
-      name == TfToken("albedo") || name == TfToken("dp_du") ||
-      name == TfToken("dp_dv")) {
-    return HdAovDescriptor(HdFormatFloat32Vec3, false,
-                           VtValue(GfVec3f(0.0f, 0.0f, 0.0f)));
-  }
-  if (name == TfToken("uv")) {
-    return HdAovDescriptor(HdFormatFloat32Vec2, false,
-                           VtValue(GfVec2f(0.0f, 0.0f)));
+  if (const MitsubaAovSpec* spec = FindMitsubaAovSpec(name)) {
+    return HdAovDescriptor(spec->format, false, spec->clear_value);
   }
   return HdAovDescriptor();
 }

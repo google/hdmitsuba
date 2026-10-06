@@ -15,13 +15,16 @@
 #pragma once
 
 #include <memory>
+#include <string>
 
 #include <pxr/base/tf/staticTokens.h>
 #include <pxr/base/tf/token.h>
+#include <pxr/base/vt/value.h>
 #include <pxr/imaging/hd/aov.h>
 #include <pxr/imaging/hd/changeTracker.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/rprimCollection.h>
+#include <pxr/imaging/hd/types.h>
 #include <pxr/pxr.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -35,6 +38,15 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 TF_DECLARE_PUBLIC_TOKENS(HdMitsubaRenderSettingsTokens,
                          HDMITSUBA_RENDER_SETTINGS_TOKENS);
+
+struct MitsubaAovSpec {
+  std::string mitsuba_aov;  // Empty for primary color/raw buffer
+  int channels;
+  HdFormat format;
+  VtValue clear_value;
+};
+
+const MitsubaAovSpec* FindMitsubaAovSpec(const TfToken& name);
 
 class HdMitsubaRenderParam;
 class SceneManager;

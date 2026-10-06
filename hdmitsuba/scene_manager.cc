@@ -84,6 +84,7 @@
 #include "hdmitsuba/mesh/geometry_processor.h"
 #include "hdmitsuba/prim_translator.h"
 #include "hdmitsuba/render_buffer.h"
+#include "hdmitsuba/render_delegate.h"
 #include "hdmitsuba/spec_types.h"
 #include "hdmitsuba/texture_cache.h"
 #include "hdmitsuba/traversal.h"
@@ -765,43 +766,23 @@ class SceneModel final : public SceneManager {
       return;
     }
 
-    static const auto* aov_map =
-        new absl::flat_hash_map<TfToken, std::pair<std::string, int>,
-                                TfToken::HashFunctor>{
-            {HdAovTokens->depth, {"depth:depth", 1}},
-            {HdAovTokens->normal, {"sh_normal:sh_normal", 3}},
-            {TfToken("sh_normal"), {"sh_normal:sh_normal", 3}},
-            {HdAovTokens->primId, {"primId:shape_index", 1}},
-            {TfToken("shape_index"), {"shape_index:shape_index", 1}},
-            {HdAovTokens->elementId, {"elementId:prim_index", 1}},
-            {TfToken("prim_index"), {"prim_index:prim_index", 1}},
-            {HdAovTokens->instanceId, {"instanceId:shape_index", 1}},
-            {TfToken("albedo"), {"albedo:albedo", 3}},
-            {TfToken("position"), {"position:position", 3}},
-            {TfToken("uv"), {"uv:uv", 2}},
-            {TfToken("geo_normal"), {"geo_normal:geo_normal", 3}},
-            {TfToken("dp_du"), {"dp_du:dp_du", 3}},
-            {TfToken("dp_dv"), {"dp_dv:dp_dv", 3}},
-        };
-
     RenderPassState pass_state;
     pass_state.aov_requests.reserve(aov_bindings.size());
     std::vector<std::string> aov_strings;
     aov_strings.reserve(aov_bindings.size());
     for (const auto& binding : aov_bindings) {
       auto* buf = static_cast<HdMitsubaRenderBuffer*>(binding.renderBuffer);
-      if (binding.aovName == HdAovTokens->color ||
-          binding.aovName == TfToken("raw")) {
+      const MitsubaAovSpec* spec = FindMitsubaAovSpec(binding.aovName);
+      if (!TF_VERIFY(spec != nullptr, "Unsupported AOV: %s",
+                     binding.aovName.GetText())) {
+        return;
+      }
+      if (spec->mitsuba_aov.empty()) {
         pass_state.color_buffer = buf;
       } else {
-        auto it = aov_map->find(binding.aovName);
-        if (!TF_VERIFY(it != aov_map->end(), "Unsupported AOV: %s",
-                       binding.aovName.GetText())) {
-          return;
-        }
-        const auto& [mitsuba_name, channels] = it->second;
-        pass_state.aov_requests.push_back({mitsuba_name, buf, channels});
-        aov_strings.push_back(mitsuba_name);
+        pass_state.aov_requests.push_back(
+            {spec->mitsuba_aov, buf, spec->channels});
+        aov_strings.push_back(spec->mitsuba_aov);
       }
     }
     pass_state.aov_integrator_keys = absl::StrJoin(aov_strings, ",");
