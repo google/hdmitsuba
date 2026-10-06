@@ -1312,11 +1312,47 @@ class SceneModel final : public SceneManager {
     return pair;
   }
 
+  void UpdateSubMeshesInPlace(const MeshSpec& spec,
+                              const std::vector<SubMeshOutput>& sub_meshes,
+                              std::string_view key_prefix) {
+    constexpr HdDirtyBits kMeshGeometryDirty =
+        HdChangeTracker::DirtyPoints | HdChangeTracker::DirtyTransform |
+        HdChangeTracker::DirtyNormals | HdChangeTracker::DirtyPrimvar |
+        HdChangeTracker::DirtyTopology;
+    const bool geometry_dirty = (spec.dirty_bits & kMeshGeometryDirty) != 0;
+    for (const auto& sub_mesh : sub_meshes) {
+      std::string key = absl::StrCat(key_prefix, sub_mesh.id.GetAsString());
+      auto it = shapes_.find(key);
+      if (!TF_VERIFY(it != shapes_.end(), "Sub-mesh not found: %s",
+                     key.c_str())) {
+        continue;
+      }
+      ref<BSDF> bsdf = ResolveBsdf(sub_mesh.material_id, sub_mesh.primvars);
+      if (geometry_dirty) {
+        PrimTranslator::UpdateMeshInPlace(it->second.get(), sub_mesh.triangles,
+                                          sub_mesh.primvars, spec.dirty_bits);
+      }
+      if (key_prefix.empty() && spec.dirty_bits != 0 &&
+          it->second->is_emitter() && spec.emitter_spec.has_value()) {
+        // Update emissive mesh radiance in-place
+        auto* emitter = it->second->emitter();
+        TraversalCallback cb_emitter;
+        emitter->traverse(&cb_emitter);
+        using Color3f = mitsuba::Color<Float, 3>;
+        cb_emitter.set<Color3f>("radiance.value",
+                                Color3f(spec.emitter_spec->emission[0],
+                                        spec.emitter_spec->emission[1],
+                                        spec.emitter_spec->emission[2]));
+        emitter->parameters_changed();
+      }
+      it->second->set_bsdf(bsdf.get());
+    }
+  }
+
   void CommitNonInstancedMeshWork(MeshCommitWork* work, CommittedMesh& res) {
     const auto& spec = *(work->spec);
+    auto sub_meshes = RunGeometryPipeline(spec, work->displacement_textures);
     if (spec.needs_rebuild) {
-      // Run geometry pipeline to get sub-meshes
-      auto sub_meshes = RunGeometryPipeline(spec, work->displacement_textures);
       res.meshes.reserve(sub_meshes.size());
       for (const auto& sub_mesh : sub_meshes) {
         auto env = ResolveEmitterAndSensor(spec.emitter_spec,
@@ -1330,41 +1366,7 @@ class SceneModel final : public SceneManager {
         }
       }
     } else {
-      // Update in place.
-      constexpr HdDirtyBits kMeshGeometryDirty =
-          HdChangeTracker::DirtyPoints | HdChangeTracker::DirtyTransform |
-          HdChangeTracker::DirtyNormals | HdChangeTracker::DirtyPrimvar |
-          HdChangeTracker::DirtyTopology;
-      const bool geometry_dirty = (spec.dirty_bits & kMeshGeometryDirty) != 0;
-      auto sub_meshes = RunGeometryPipeline(spec, work->displacement_textures);
-      for (const auto& sub_mesh : sub_meshes) {
-        std::string sub_mesh_id_str = sub_mesh.id.GetAsString();
-        auto it = shapes_.find(sub_mesh_id_str);
-        if (!TF_VERIFY(it != shapes_.end(), "Sub-mesh not found: %s",
-                       sub_mesh_id_str.c_str())) {
-          continue;
-        }
-        ref<BSDF> bsdf = ResolveBsdf(sub_mesh.material_id, sub_mesh.primvars);
-        if (geometry_dirty) {
-          PrimTranslator::UpdateMeshInPlace(it->second.get(),
-                                            sub_mesh.triangles,
-                                            sub_mesh.primvars, spec.dirty_bits);
-        }
-        if (spec.dirty_bits != 0 && it->second->is_emitter() &&
-            spec.emitter_spec.has_value()) {
-          // Update emissive mesh radiance in-place
-          auto* emitter = it->second->emitter();
-          TraversalCallback cb_emitter;
-          emitter->traverse(&cb_emitter);
-          using Color3f = mitsuba::Color<Float, 3>;
-          cb_emitter.set<Color3f>("radiance.value",
-                                  Color3f(spec.emitter_spec->emission[0],
-                                          spec.emitter_spec->emission[1],
-                                          spec.emitter_spec->emission[2]));
-          emitter->parameters_changed();
-        }
-        it->second->set_bsdf(bsdf.get());
-      }
+      UpdateSubMeshesInPlace(spec, sub_meshes, "");
     }
   }
 
@@ -1428,26 +1430,8 @@ class SceneModel final : public SceneManager {
       }
     } else {
       // Update in place
-      constexpr HdDirtyBits kMeshGeometryDirty =
-          HdChangeTracker::DirtyPoints | HdChangeTracker::DirtyTransform |
-          HdChangeTracker::DirtyNormals | HdChangeTracker::DirtyPrimvar |
-          HdChangeTracker::DirtyTopology;
-      const bool geometry_dirty = (spec.dirty_bits & kMeshGeometryDirty) != 0;
       auto sub_meshes = RunGeometryPipeline(spec, work->displacement_textures);
-      for (const auto& sub_mesh : sub_meshes) {
-        std::string sub_mesh_id_str = sub_mesh.id.GetAsString();
-        auto it = shapes_.find(absl::StrCat(kProtoPrefix, sub_mesh_id_str));
-        if (TF_VERIFY(it != shapes_.end())) {
-          ref<BSDF> bsdf = ResolveBsdf(sub_mesh.material_id, sub_mesh.primvars);
-
-          if (geometry_dirty) {
-            PrimTranslator::UpdateMeshInPlace(
-                it->second.get(), sub_mesh.triangles, sub_mesh.primvars,
-                spec.dirty_bits);
-          }
-          it->second->set_bsdf(bsdf.get());
-        }
-      }
+      UpdateSubMeshesInPlace(spec, sub_meshes, kProtoPrefix);
       if (spec.dirty_bits & (HdChangeTracker::DirtyInstancer |
                              HdChangeTracker::DirtyInstanceIndex)) {
         for (size_t i = 0; i < spec.instance_transforms.size(); ++i) {
