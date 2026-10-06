@@ -1123,37 +1123,29 @@ class SceneModel final : public SceneManager {
     using SpecType = typename MapType::mapped_type;
     std::vector<SpecType*> pending_specs;
     pending_specs.reserve(specs_map.size());
+    auto apply_material_dirty = [&](const SdfPath& mat_id, BaseSpec& s,
+                                    bool& bsdf_updated) {
+      if (auto it = material_dirty_flags_.find(mat_id);
+          it != material_dirty_flags_.end()) {
+        if (it->second & DirtyFlags::kNeedsStructureRebuild) {
+          s.needs_rebuild = true;
+        }
+        if (it->second & DirtyFlags::kMaterialUpdated) {
+          bsdf_updated = true;
+        }
+      }
+    };
     for (auto& [id, spec] : specs_map) {
       bool needs_bsdf_update = false;
       if constexpr (std::is_same_v<SpecType, MeshSpec>) {
         for (const auto& mat_id : spec.material_ids) {
-          uint32_t mat_flags = 0;
-          if (auto mat_it = material_dirty_flags_.find(mat_id);
-              mat_it != material_dirty_flags_.end()) {
-            mat_flags = mat_it->second;
-          }
-          if (mat_flags & DirtyFlags::kNeedsStructureRebuild) {
-            spec.needs_rebuild = true;
-          }
-          if (mat_flags & DirtyFlags::kMaterialUpdated) {
-            needs_bsdf_update = true;
-          }
+          apply_material_dirty(mat_id, spec, needs_bsdf_update);
         }
         if (sensor_binding_dirty_.contains(spec.id)) {
           spec.needs_rebuild = true;
         }
       } else if constexpr (std::is_same_v<SpecType, CurveSpec>) {
-        uint32_t mat_flags = 0;
-        if (auto mat_it = material_dirty_flags_.find(spec.material_id);
-            mat_it != material_dirty_flags_.end()) {
-          mat_flags = mat_it->second;
-        }
-        if (mat_flags & DirtyFlags::kNeedsStructureRebuild) {
-          spec.needs_rebuild = true;
-        }
-        if (mat_flags & DirtyFlags::kMaterialUpdated) {
-          needs_bsdf_update = true;
-        }
+        apply_material_dirty(spec.material_id, spec, needs_bsdf_update);
       }
       bool has_in_place_update = false;
       if constexpr (std::is_same_v<SpecType, ParticleFieldSpec>) {
