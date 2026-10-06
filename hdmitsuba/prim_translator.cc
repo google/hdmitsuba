@@ -511,10 +511,6 @@ PrimTranslator<Float, Spectrum>::BuildMaterial(
   return res;
 }
 
-MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateMaterialInPlace(
-    mitsuba::Object* /*bsdf*/, const MaterialSpec& /*spec*/,
-    const TextureCache<Float, Spectrum>& /*texture_cache*/) {}
-
 MI_VARIANT typename PrimTranslator<Float, Spectrum>::TranslatedLight
 PrimTranslator<Float, Spectrum>::BuildLight(const LightSpec& spec) {
   mitsuba::Properties props = BuildLightProperties(spec);

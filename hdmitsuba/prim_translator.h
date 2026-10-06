@@ -52,9 +52,6 @@ class PrimTranslator {
   static TranslatedMaterial BuildMaterial(
       const MaterialSpec& spec,
       const TextureCache<Float, Spectrum>& texture_cache);
-  static void UpdateMaterialInPlace(
-      mitsuba::Object* bsdf, const MaterialSpec& spec,
-      const TextureCache<Float, Spectrum>& texture_cache);
 
   struct TranslatedLight {
     mitsuba::ref<mitsuba::Shape<Float, Spectrum>> shape = nullptr;

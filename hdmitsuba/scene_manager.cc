@@ -1247,15 +1247,6 @@ class SceneModel final : public SceneManager {
     for (size_t i = 0; i < pending_specs.size(); ++i) {
       if (pending_specs[i]->needs_rebuild) {
         rebuild |= merge_fn(pending_specs[i], results[i]);
-      } else if (pending_specs[i]->dirty_bits != 0) {
-        if constexpr (std::is_same_v<typename MapType::mapped_type,
-                                     MaterialSpec>) {
-          std::string id_str = pending_specs[i]->id.GetAsString();
-          if (bsdfs_.contains(id_str)) {
-            material_dirty_flags_[pending_specs[i]->id] |=
-                DirtyFlags::kMaterialUpdated;
-          }
-        }
       }
       pending_specs[i]->MarkClean();
     }
@@ -1275,17 +1266,7 @@ class SceneModel final : public SceneManager {
         material_specs_,
         [&](MaterialSpec* spec,
             typename PrimTranslator::TranslatedMaterial& res) {
-          if (spec->needs_rebuild) {
-            res = PrimTranslator::BuildMaterial(*spec, texture_cache_);
-          } else if (spec->dirty_bits != 0) {
-            auto bsdf_it = bsdfs_.find(spec->id.GetAsString());
-            if (!TF_VERIFY(bsdf_it != bsdfs_.end(), "Material not found: %s",
-                           spec->id.GetText())) {
-              return;
-            }
-            PrimTranslator::UpdateMaterialInPlace(bsdf_it->second.get(), *spec,
-                                                  texture_cache_);
-          }
+          res = PrimTranslator::BuildMaterial(*spec, texture_cache_);
         },
         [&](MaterialSpec* spec,
             typename PrimTranslator::TranslatedMaterial& trans) {
