@@ -66,6 +66,9 @@ class SubdivisionEvaluator {
     return refined_to_coarse_map_;
   }
 
+  VtIntArray MapRefinedMaterialIndices(
+      const VtIntArray& coarse_material_indices) const;
+
  private:
   template <typename T>
   VtValue RefinePrimvarImpl(const VtValue& value,

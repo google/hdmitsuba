@@ -321,7 +321,6 @@ NB_MODULE(geometry_ext, m) {
     HdMeshTopology refined_topology = topology;
     PrimvarMap primvars = mesh_data.primvars;
     bool is_subdivided = subdiv.IsSubdivided();
-    std::vector<int> refined_to_coarse_map;
 
     if (is_subdivided) {
       // Normals will be recomputed after subdivision, skip refining them here.
@@ -334,7 +333,6 @@ NB_MODULE(geometry_ext, m) {
       refined_topology = HdMeshTopology(mesh_data.scheme, mesh_data.orientation,
                                         subdiv.GetRefinedFaceVertexCounts(),
                                         subdiv.GetRefinedFaceVertexIndices());
-      refined_to_coarse_map = subdiv.GetRefinedToCoarseMap();
     }
     bool needs_normals = has_displacement || is_subdivided;
     if (primvars.find(HdTokens->normals) == primvars.end() && needs_normals) {
@@ -347,16 +345,8 @@ NB_MODULE(geometry_ext, m) {
         GeometryProcessor::TriangulateWithFaceMapping(
             refined_topology.GetFaceVertexCounts(), face_indices);
 
-    VtIntArray mapped_material_indices;
-    if (is_subdivided) {
-      mapped_material_indices.resize(refined_to_coarse_map.size());
-      for (size_t i = 0; i < refined_to_coarse_map.size(); ++i) {
-        mapped_material_indices[i] =
-            mesh_data.face_material_indices[refined_to_coarse_map[i]];
-      }
-    } else {
-      mapped_material_indices = mesh_data.face_material_indices;
-    }
+    VtIntArray mapped_material_indices =
+        subdiv.MapRefinedMaterialIndices(mesh_data.face_material_indices);
 
     auto sub_meshes = GeometryProcessor::SplitAndCompactMeshes(
         mesh_data.id, triangles, prim_params, expanded, mesh_data.material_ids,

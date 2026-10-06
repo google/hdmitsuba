@@ -349,17 +349,12 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
   spec.dirty_bits = dirtyBits ? *dirtyBits : HdChangeTracker::Clean;
   spec.is_subdivided = subdiv_evaluator_.IsSubdivided();
 
+  spec.face_material_indices =
+      subdiv_evaluator_.MapRefinedMaterialIndices(face_material_indices_);
   if (subdiv_evaluator_.IsSubdivided()) {
-    const auto& refined_to_coarse = subdiv_evaluator_.GetRefinedToCoarseMap();
-    spec.face_material_indices.resize(refined_to_coarse.size());
-    for (size_t i = 0; i < refined_to_coarse.size(); ++i) {
-      spec.face_material_indices[i] =
-          face_material_indices_[refined_to_coarse[i]];
-    }
     spec.face_vertex_counts = subdiv_evaluator_.GetRefinedFaceVertexCounts();
     spec.face_vertex_indices = subdiv_evaluator_.GetRefinedFaceVertexIndices();
   } else {
-    spec.face_material_indices = face_material_indices_;
     spec.face_vertex_counts = topology_.GetFaceVertexCounts();
     spec.face_vertex_indices = topology_.GetFaceVertexIndices();
   }

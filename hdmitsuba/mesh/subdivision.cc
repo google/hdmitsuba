@@ -186,6 +186,16 @@ void SubdivisionEvaluator::Clear() {
   refined_face_vertex_indices_.clear();
 }
 
+VtIntArray SubdivisionEvaluator::MapRefinedMaterialIndices(
+    const VtIntArray& coarse_material_indices) const {
+  if (!IsSubdivided()) return coarse_material_indices;
+  VtIntArray mapped(refined_to_coarse_map_.size());
+  for (size_t i = 0; i < refined_to_coarse_map_.size(); ++i) {
+    mapped[i] = coarse_material_indices[refined_to_coarse_map_[i]];
+  }
+  return mapped;
+}
+
 template <typename T>
 VtValue SubdivisionEvaluator::RefinePrimvarImpl(
     const VtValue& value, const OpenSubdiv::Far::StencilTable* stencil,
