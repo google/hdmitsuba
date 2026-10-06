@@ -678,13 +678,8 @@ class SceneModel final : public SceneManager {
     }
 
     // Erase split sub-meshes
-    for (auto it = shapes_.begin(); it != shapes_.end();) {
-      if (absl::StartsWith(it->first, id_str + "/")) {
-        shapes_.erase(it++);
-        erased = true;
-      } else {
-        ++it;
-      }
+    if (EraseShapesWithPrefix(absl::StrCat(id_str, "/"))) {
+      erased = true;
     }
 
     if (CleanUpInstancing(id)) {
@@ -1571,13 +1566,7 @@ class SceneModel final : public SceneManager {
         // Clean up old shapes
         CleanUpInstancing(spec->id);
         shapes_.erase(id_str);
-        for (auto it = shapes_.begin(); it != shapes_.end();) {
-          if (absl::StartsWith(it->first, id_str + "/")) {
-            shapes_.erase(it++);
-          } else {
-            ++it;
-          }
-        }
+        EraseShapesWithPrefix(absl::StrCat(id_str, "/"));
         if (!spec->instance_transforms.empty()) {
           rebuild |= MergeInstancedMesh(results[i], id_str);
         } else {
@@ -1845,19 +1834,26 @@ class SceneModel final : public SceneManager {
     return false;
   }
 
-  bool CleanUpInstancing(const SdfPath& id) {
-    std::string id_str = id.GetAsString();
+  bool EraseShapesWithPrefix(std::string_view prefix) {
     bool erased = false;
-    if (shapes_.erase(absl::StrCat(kProtoPrefix, id_str)) > 0) erased = true;
-    // Erase prototype sub-meshes
-    std::string proto_prefix = absl::StrCat(kProtoPrefix, id_str, "/");
     for (auto it = shapes_.begin(); it != shapes_.end();) {
-      if (absl::StartsWith(it->first, proto_prefix)) {
+      if (absl::StartsWith(it->first, prefix)) {
         shapes_.erase(it++);
         erased = true;
       } else {
         ++it;
       }
+    }
+    return erased;
+  }
+
+  bool CleanUpInstancing(const SdfPath& id) {
+    std::string id_str = id.GetAsString();
+    bool erased = false;
+    if (shapes_.erase(absl::StrCat(kProtoPrefix, id_str)) > 0) erased = true;
+    // Erase prototype sub-meshes
+    if (EraseShapesWithPrefix(absl::StrCat(kProtoPrefix, id_str, "/"))) {
+      erased = true;
     }
     if (shapes_.erase(absl::StrCat(kProtoGroupPrefix, id_str)) > 0)
       erased = true;
