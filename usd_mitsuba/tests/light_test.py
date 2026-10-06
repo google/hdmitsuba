@@ -111,7 +111,7 @@ def test_dome_light_textured():
 
 
 def test_dome_light_textured_1x1():
-  """USD scenes may provide 1x1 environment maps which need to be resampled for Mitsuba."""
+  """USD scenes may provide 1x1 environment maps which Mitsuba supports directly."""
   path_1x1 = os.path.abspath(
       'hdmitsuba/test_assets/lights/textures/envmap_1x1.png')
   stage, prim = _create_stage_with_light(UsdLux.DomeLight)
@@ -124,9 +124,11 @@ def test_dome_light_textured_1x1():
   assert emitter_dict['type'] == 'envmap'
   assert 'bitmap' in emitter_dict
   bitmap = emitter_dict['bitmap']
-  assert bitmap.width() == 2
-  assert bitmap.height() == 3
+  assert bitmap.width() == 1
+  assert bitmap.height() == 1
   assert emitter_dict['scale'] == 2.5
+  emitter = mi.load_dict(emitter_dict)
+  assert emitter is not None
 
 
 def test_sphere_light_point():

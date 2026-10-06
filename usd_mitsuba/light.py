@@ -48,14 +48,9 @@ def _convert_dome_light(
   texture_file_attr = dome_light.CreateTextureFileAttr().Get(time)
   if texture_file_attr:
     filename = texture_file_attr.resolvedPath
-    bitmap = mi.Bitmap(filename)
-    if bitmap.width() < 2 or bitmap.height() < 3:
-      target_w, target_h = max(2, bitmap.width()), max(3, bitmap.height())
-      bitmap = bitmap.convert(
-          mi.Bitmap.PixelFormat.RGB, mi.Struct.Type.Float32, False).resample([target_w, target_h])
     return {
         'type': 'envmap',
-        'bitmap': bitmap,
+        'bitmap': mi.Bitmap(filename),
         'to_world': world_transform,
         'scale': intensity,
     }
