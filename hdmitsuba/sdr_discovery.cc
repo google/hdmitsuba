@@ -70,6 +70,7 @@ class SdrMitsubaDiscoveryPlugin : public SdrDiscoveryPlugin {
         "srgb",
         "bitmap",
         "checkerboard",
+        "lut",
         "mesh_attribute",
         "volume",
     };

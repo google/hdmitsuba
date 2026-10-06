@@ -70,6 +70,7 @@
 #include <pxr/imaging/hd/material.h>
 #include <pxr/imaging/hd/tokens.h>
 #include <pxr/pxr.h>
+#include <pxr/usd/sdf/assetPath.h>
 #include <pxr/usd/sdf/path.h>
 
 #include "hdmitsuba/spec_types.h"
@@ -149,6 +150,10 @@ void SetMitsubaPropertyFromValue(mitsuba::Properties& props,
     props.set(name, val.Get<std::string>());
   } else if (val.IsHolding<TfToken>()) {
     props.set(name, val.Get<TfToken>().GetString());
+  } else if (val.IsHolding<SdfAssetPath>()) {
+    const auto& asset_path = val.Get<SdfAssetPath>();
+    const std::string& resolved = asset_path.GetResolvedPath();
+    props.set(name, resolved.empty() ? asset_path.GetAssetPath() : resolved);
   }
 }
 
