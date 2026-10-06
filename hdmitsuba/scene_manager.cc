@@ -20,12 +20,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>
 #include <map>
 #include <optional>
 #include <string>
 #include <utility>
-#include <variant>
 #include <vector>
 
 #include <absl/container/flat_hash_map.h>
@@ -51,11 +49,9 @@
 #include <mitsuba/core/util.h>
 #include <mitsuba/render/fwd.h>
 #include <mitsuba/render/integrator.h>
-#include <mitsuba/render/interaction.h>
 #include <mitsuba/render/mesh.h>
 #include <mitsuba/render/scene.h>
 #include <nanothread/nanothread.h>
-#include <pxr/base/gf/vec2f.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/tf/diagnostic.h>
 #include <pxr/base/tf/token.h>
@@ -80,7 +76,9 @@
 #endif
 
 #include "hdmitsuba/debug_codes.h"
-#include "hdmitsuba/mesh.h"
+#include "hdmitsuba/framebuffer.h"
+#include "hdmitsuba/kernel_freezing.h"
+#include "hdmitsuba/mesh/displacement.h"
 #include "hdmitsuba/mesh/geometry_processor.h"
 #include "hdmitsuba/prim_translator.h"
 #include "hdmitsuba/render_buffer.h"
@@ -89,7 +87,6 @@
 #include "hdmitsuba/texture_cache.h"
 #include "hdmitsuba/traversal.h"
 #include "hdmitsuba/utils.h"
-#include "hdmitsuba/kernel_freezing.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -134,197 +131,6 @@ constexpr std::string_view kProtoPrefix = "proto_";
 constexpr std::string_view kProtoGroupPrefix = "proto_group_";
 constexpr std::string_view kInstancePrefix = "instance_";
 
-// Copies data from a Mitsuba Tensor to a Hydra Render Buffer (Scalar/CPU path).
-template <typename TensorT>
-void ScalarCopyToRenderBuffer(HdMitsubaRenderBuffer* render_buffer,
-                              const TensorT& tensor, int src_offset, int channels,
-                              bool is_int,
-                              const std::optional<GfRect2i>& crop_window = std::nullopt) {
-  if (!TF_VERIFY(render_buffer, "Render buffer is null.")) {
-    return;
-  }
-  int dst_channels = HdGetComponentCount(render_buffer->GetFormat());
-  if (!TF_VERIFY(
-          dst_channels == channels || (dst_channels == 4 && channels == 3),
-          "Destination and source channel counts do not match (%d vs %d)",
-          dst_channels, channels)) {
-    return;
-  }
-
-  size_t dst_width = render_buffer->GetWidth();
-  size_t dst_height = render_buffer->GetHeight();
-  size_t src_channels = tensor.shape()[2];
-  void* dst_ptr = render_buffer->Map();
-
-  size_t crop_x = 0;
-  size_t crop_y = 0;
-  size_t crop_w = dst_width;
-  size_t crop_h = dst_height;
-  if (crop_window.has_value()) {
-    crop_x = crop_window->GetMinX();
-    crop_y = crop_window->GetMinY();
-    crop_w = crop_window->GetWidth();
-    crop_h = crop_window->GetHeight();
-  }
-
-  if (crop_w != tensor.shape()[1] || crop_h != tensor.shape()[0]) {
-    TF_FATAL_ERROR(
-        "Tensor dimensions do not match crop window: %lu x %lu vs %lu x %lu",
-        crop_w, crop_h, tensor.shape()[1], tensor.shape()[0]);
-  }
-
-  const float* src_data = tensor.array().data();
-  if (is_int) {
-    int32_t* dst_int = static_cast<int32_t*>(dst_ptr);
-    for (size_t src_y = 0; src_y < crop_h; ++src_y) {
-      size_t dst_y = (dst_height - 1) - (crop_y + src_y);
-      for (size_t src_x = 0; src_x < crop_w; ++src_x) {
-        size_t src_idx = (src_y * crop_w + src_x) * src_channels + src_offset;
-        size_t dst_idx = (dst_y * dst_width + (crop_x + src_x)) * dst_channels;
-        for (int c = 0; c < channels && c < dst_channels; ++c) {
-          dst_int[dst_idx + c] = static_cast<int32_t>(src_data[src_idx + c]);
-        }
-      }
-    }
-  } else {
-    float* dst_float = static_cast<float*>(dst_ptr);
-    for (size_t src_y = 0; src_y < crop_h; ++src_y) {
-      size_t dst_y = (dst_height - 1) - (crop_y + src_y);
-      for (size_t src_x = 0; src_x < crop_w; ++src_x) {
-        size_t src_idx = (src_y * crop_w + src_x) * src_channels + src_offset;
-        size_t dst_idx = (dst_y * dst_width + (crop_x + src_x)) * dst_channels;
-        for (int c = 0; c < channels && c < dst_channels; ++c) {
-          dst_float[dst_idx + c] = src_data[src_idx + c];
-        }
-        // Fill alpha if needed.
-        if (dst_channels == 4 && channels == 3) {
-          dst_float[dst_idx + 3] = 1.0f;
-        }
-      }
-    }
-  }
-  render_buffer->SetConverged(true);
-  render_buffer->Unmap();
-}
-
-struct CopyDestination {
-  HdMitsubaRenderBuffer* buffer;
-  int src_offset;
-  int channels;
-  bool is_int;
-};
-
-// Helper function to batch copy all output buffers / AOVs to hydra's render
-// buffers.
-template <typename Float, typename TensorT>
-void PerformBatchedCopy(const TensorT& tensor,
-                        const std::vector<CopyDestination>& destinations,
-                        const std::optional<GfRect2i>& crop_window = std::nullopt) {
-  if constexpr (dr::is_jit_v<Float>) {
-    using Int32 = dr::int32_array_t<Float>;
-    using MigratedFloat = std::decay_t<decltype(dr::migrate(
-        std::declval<Float>(), JitBackend::None))>;
-    using MigratedInt = std::decay_t<decltype(dr::migrate(std::declval<Int32>(),
-                                                          JitBackend::None))>;
-
-    std::vector<std::variant<Float, Int32>> gathered_vars;
-    gathered_vars.reserve(destinations.size());
-    for (const auto& dest : destinations) {
-      int dst_channels = HdGetComponentCount(dest.buffer->GetFormat());
-      using UInt32 = dr::uint32_array_t<Float>;
-      size_t dst_width = dest.buffer->GetWidth();
-      size_t dst_height = dest.buffer->GetHeight();
-      size_t dst_pixel_count = dst_width * dst_height;
-
-      size_t crop_x = 0;
-      size_t crop_y = 0;
-      size_t crop_w = dst_width;
-      size_t crop_h = dst_height;
-      if (crop_window.has_value()) {
-        crop_x = crop_window->GetMinX();
-        crop_y = crop_window->GetMinY();
-        crop_w = crop_window->GetWidth();
-        crop_h = crop_window->GetHeight();
-      }
-
-      UInt32 dst_pixel_idx = dr::arange<UInt32>(dst_pixel_count);
-      UInt32 dst_x = dst_pixel_idx % dst_width;
-      UInt32 dst_row = dst_pixel_idx / dst_width;
-      UInt32 r_topdown = dst_height - 1 - dst_row;
-
-      auto in_crop = (dst_x >= crop_x) && (dst_x < crop_x + crop_w) &&
-                     (r_topdown >= crop_y) && (r_topdown < crop_y + crop_h);
-
-      UInt32 src_x = dst_x - crop_x;
-      UInt32 src_y_down = r_topdown - crop_y;
-      UInt32 src_pixel_idx =
-          dr::select(in_crop, src_y_down * crop_w + src_x, 0);
-
-      UInt32 repeated_pixel_idx =
-          dr::repeat(src_pixel_idx, dst_channels);
-      UInt32 channel_offsets =
-          dr::tile(dr::arange<UInt32>(dst_channels), dst_pixel_count);
-      UInt32 final_idx = repeated_pixel_idx * tensor.shape()[2] +
-                         dest.src_offset + channel_offsets;
-
-      auto in_crop_channel = dr::repeat(in_crop, dst_channels);
-      auto valid_channel = in_crop_channel && (channel_offsets < dest.channels);
-
-      if (dest.is_int) {
-        Int32 gathered_int = Int32(dr::gather<Float>(
-            tensor.array(), final_idx, valid_channel));
-        dr::schedule(gathered_int);
-        gathered_vars.push_back(gathered_int);
-      } else {
-        Float gathered_float = dr::gather<Float>(
-            tensor.array(), final_idx, valid_channel);
-        if (dst_channels == 4 && dest.channels == 3) {
-          gathered_float = dr::select(
-              in_crop_channel && (channel_offsets == 3), 1.0f, gathered_float);
-        }
-        dr::schedule(gathered_float);
-        gathered_vars.push_back(gathered_float);
-      }
-    }
-    dr::eval();
-
-    // Migrate result back to host memory.
-    std::vector<std::variant<MigratedFloat, MigratedInt>> migrated_vars;
-    migrated_vars.reserve(destinations.size());
-    for (size_t i = 0; i < destinations.size(); ++i) {
-      std::visit(
-          [&](auto& var) {
-            migrated_vars.push_back(dr::migrate(var, JitBackend::None));
-          },
-          gathered_vars[i]);
-    }
-    dr::sync_thread();
-
-    for (size_t i = 0; i < destinations.size(); ++i) {
-      const auto& dest = destinations[i];
-      void* dst_ptr = dest.buffer->Map();
-      int dst_channels = HdGetComponentCount(dest.buffer->GetFormat());
-      size_t dst_width = dest.buffer->GetWidth();
-      size_t dst_height = dest.buffer->GetHeight();
-      size_t element_size = dest.is_int ? sizeof(int32_t) : sizeof(float);
-      size_t size_bytes = dst_width * dst_height * dst_channels * element_size;
-
-      std::visit(
-          [&](auto& host_arr) {
-            memcpy(dst_ptr, host_arr.data(), size_bytes);
-          },
-          migrated_vars[i]);
-      dest.buffer->SetConverged(true);
-      dest.buffer->Unmap();
-    }
-  } else {
-    for (const auto& dest : destinations) {
-      ScalarCopyToRenderBuffer(dest.buffer, tensor, dest.src_offset,
-                               dest.channels, dest.is_int, crop_window);
-    }
-  }
-}
-
 template <typename Float, typename Spectrum>
 void SetTransform(
     mitsuba::Shape<Float, Spectrum>* instance,
@@ -336,112 +142,18 @@ void SetTransform(
   instance->parameters_changed({"to_world"});
 }
 
-template <typename Float, typename Spectrum>
-void ApplyDisplacement(
-    const SdfPath& mesh_id,
-    const mitsuba::Texture<Float, Spectrum>* displacement_texture,
-    const VtIntArray& vertex_indices, const VtIntArray& face_counts,
-    const std::vector<int>& global_face_indices,
-    const std::vector<int>& global_corner_indices, PrimvarMap& primvars) {
-  TRACE_FUNCTION();
-  if (!displacement_texture) return;
-
-  using Vector2f = mitsuba::Vector<Float, 2>;
-  using Vector3f = mitsuba::Vector<Float, 3>;
-  using UInt32 = dr::uint32_array_t<Float>;
-
-  // 1) Retrieve vector of UV coordinates Vec2f, normals and target vertex
-  // index.
-  VtVec2fArray uv_coords;
-  VtVec3fArray normals;
-  VtIntArray target_vertex_indices;
-  absl::flat_hash_set<int> target_vertex_indices_set;
-  auto uv_it = primvars.find(TfToken("st"));
-  auto normal_it = primvars.find(HdTokens->normals);
-  auto points_it = primvars.find(HdTokens->points);
-  if (uv_it == primvars.end() || normal_it == primvars.end() ||
-      points_it == primvars.end()) {
-    TF_RUNTIME_ERROR("Missing required primvars for displacement on %s",
-                     mesh_id.GetText());
-    return;
-  }
-  if (!uv_it->second.value.IsHolding<VtVec2fArray>() ||
-      !normal_it->second.value.IsHolding<VtVec3fArray>() ||
-      !points_it->second.value.IsHolding<VtVec3fArray>()) {
-    TF_RUNTIME_ERROR("Invalid primvar types for displacement on %s",
-                     mesh_id.GetText());
-    return;
-  }
-  const auto& uv_primvar = uv_it->second;
-  const auto& normal_primvar = normal_it->second;
-  VtVec3fArray points = points_it->second.value.Get<VtVec3fArray>();
-
-  auto uv_interpolator =
-      GeometryProcessor::GetInterpolator(uv_primvar.value.Get<VtVec2fArray>(),
-                                         uv_primvar.descriptor.interpolation);
-  auto normal_interpolator = GeometryProcessor::GetInterpolator(
-      normal_primvar.value.Get<VtVec3fArray>(),
-      normal_primvar.descriptor.interpolation);
-
-  size_t corner = 0;
-  const float bias = 0.5f;
-  for (size_t face = 0; face < face_counts.size(); ++face) {
-    for (int v = 0; v < face_counts[face]; ++v) {
-      int vertex_index = vertex_indices[corner];
-      // Each vertex should only be displaced once, even if it is part of
-      // multiple faces.
-      if (target_vertex_indices_set.contains(vertex_index)) {
-        corner++;
-        continue;
-      }
-      uv_coords.push_back(uv_interpolator(global_face_indices[face], corner,
-                                          global_corner_indices[corner],
-                                          vertex_indices));
-      normals.push_back(normal_interpolator(global_face_indices[face], corner,
-                                            global_corner_indices[corner],
-                                            vertex_indices));
-      target_vertex_indices.push_back(vertex_index);
-      target_vertex_indices_set.insert(vertex_index);
-      corner++;
-    }
-  }
-
-  // 2) Query displacement and scatter add on vertices at target index.
-  using FloatStorage = mitsuba::DynamicBuffer<dr::float32_array_t<Float>>;
-  if constexpr (!dr::is_dynamic_v<Float>) {
-    for (size_t i = 0; i < target_vertex_indices.size(); ++i) {
-      int vertex_index = target_vertex_indices[i];
-      GfVec2f uv = uv_coords[i];
-      GfVec3f normal = normals[i];
-      mitsuba::SurfaceInteraction<Float, Spectrum> si;
-      si.uv = {uv[0], 1.0f - uv[1]};
-      GfVec3f displacement = (displacement_texture->eval_1(si) - bias) * normal;
-      points[vertex_index] += displacement;
-    }
-  } else {
-    size_t n_vertices = target_vertex_indices.size();
-    FloatStorage uv = dr::load<FloatStorage>(uv_coords.data(), n_vertices * 2);
-    FloatStorage normal =
-        dr::load<FloatStorage>(normals.data(), n_vertices * 3);
-    UInt32 indices = dr::arange<UInt32>(n_vertices);
-    Vector2f uv_vec = dr::gather<Vector2f>(uv, indices);
-    mitsuba::SurfaceInteraction<Float, Spectrum> si;
-    si.uv = {uv_vec[0], 1.0f - uv_vec[1]};
-    Vector3f displacement = (displacement_texture->eval_1(si) - bias) *
-                            dr::gather<Vector3f>(normal, indices);
-    Float displacement_flat = dr::ravel(displacement);
-    dr::eval(displacement_flat);
-    auto&& host_displacement = dr::migrate(displacement_flat, JitBackend::None);
-    dr::sync_thread();
-    for (size_t i = 0; i < n_vertices; ++i) {
-      GfVec3f offset(host_displacement[3 * i + 0], host_displacement[3 * i + 1],
-                     host_displacement[3 * i + 2]);
-      points[target_vertex_indices[i]] += offset;
-    }
-  }
-  primvars[HdTokens->points].value = VtValue(std::move(points));
-}
-
+// Runs the full post-subdivision mesh preparation pipeline on `spec` to produce
+// triangle sub-meshes ready for `PrimTranslator::BuildMesh` /
+// `UpdateMeshInPlace`:
+//   1. Computes smooth vertex normals if missing and needed by subdivision or
+//      displacement.
+//   2. Applies per-material displacement textures (`displacement_textures[i]` corresponds
+//      to `spec.material_ids[i]`) in object space via `ApplyDisplacement`.
+//   3. Transforms points and normals by `spec.transform`, then recomputes smooth
+//      vertex normals if any displacement occurred.
+//   4. Expands face-varying/uniform primvars into vertex-indexed buffers,
+//      triangulates polygons, and splits/compacts the mesh into one
+//      `SubMeshOutput` per assigned material.
 template <typename Float, typename Spectrum>
 std::vector<SubMeshOutput> RunGeometryPipeline(
     const MeshSpec& spec,
