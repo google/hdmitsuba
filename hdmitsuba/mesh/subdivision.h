@@ -39,7 +39,6 @@ class SubdivisionEvaluator {
   // Initializes the OpenSubdiv refiner and stencil tables for the given mesh
   // topology.
   void Initialize(const PxOsdMeshTopology& topology, int refine_level,
-                  const TfToken& scheme, const PxOsdSubdivTags& subdiv_tags,
                   const std::vector<VtIntArray>& fvar_topologies,
                   const absl::flat_hash_map<TfToken, int, TfToken::HashFunctor>&
                       fvar_primvar_to_channel,
@@ -65,10 +64,6 @@ class SubdivisionEvaluator {
 
   const std::vector<int>& GetRefinedToCoarseMap() const {
     return refined_to_coarse_map_;
-  }
-
-  const OpenSubdiv::Far::PatchTable* GetPatchTable() const {
-    return patch_table_.get();
   }
 
  private:

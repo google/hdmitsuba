@@ -290,7 +290,6 @@ void HdMitsubaMesh::SyncTopology(HdSceneDelegate* sceneDelegate,
   topology.SetSubdivTags(GetSubdivTags(sceneDelegate));
 
   subdiv_evaluator_.Initialize(topology.GetPxOsdMeshTopology(), refineLevel,
-                               scheme, topology.GetSubdivTags(),
                                fvar_topologies, fvar_primvar_to_channel,
                                TfToken(GetId().GetText()));
 

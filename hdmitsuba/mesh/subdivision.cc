@@ -93,14 +93,14 @@ VtArray<T> EvalSubdivisionStencil(
 }  // namespace
 
 void SubdivisionEvaluator::Initialize(
-    const PxOsdMeshTopology& topology, int refine_level, const TfToken& scheme,
-    const PxOsdSubdivTags& /*subdiv_tags*/,
+    const PxOsdMeshTopology& topology, int refine_level,
     const std::vector<VtIntArray>& fvar_topologies,
     const absl::flat_hash_map<TfToken, int, TfToken::HashFunctor>&
         fvar_primvar_to_channel,
     const TfToken& mesh_name) {
   Clear();
 
+  const TfToken scheme = topology.GetScheme();
   if ((scheme != PxOsdOpenSubdivTokens->catmullClark &&
        scheme != PxOsdOpenSubdivTokens->loop) ||
       refine_level <= 0) {

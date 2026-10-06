@@ -61,8 +61,7 @@ TEST(SubdivisionEvaluatorTest, RefinePrimvar) {
   absl::flat_hash_map<TfToken, int, TfToken::HashFunctor> fvar_map;
 
   SubdivisionEvaluator subdiv;
-  subdiv.Initialize(topo, 1, pxr::UsdGeomTokens->catmullClark, tags,
-                    fvar_topologies, fvar_map, TfToken("quad"));
+  subdiv.Initialize(topo, 1, fvar_topologies, fvar_map, TfToken("quad"));
 
   ASSERT_TRUE(subdiv.IsSubdivided());
 

@@ -316,7 +316,6 @@ NB_MODULE(geometry_ext, m) {
     }
 
     subdiv.Initialize(topology.GetPxOsdMeshTopology(), refine_level,
-                      mesh_data.scheme, topology.GetSubdivTags(),
                       fvar_topologies, fvar_map, mesh_data.id.GetNameToken());
 
     HdMeshTopology refined_topology = topology;
