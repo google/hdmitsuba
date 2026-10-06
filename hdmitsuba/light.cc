@@ -105,36 +105,22 @@ HdMitsubaLight::HdMitsubaLight(const SdfPath& id, const TfToken& typeId)
 
 void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
                           HdRenderParam* renderParam, HdDirtyBits* dirtyBits) {
-  static const HdDataSourceLocator transform_locator(
-      HdXformSchema::GetSchemaToken(), HdXformSchemaTokens->matrix);
-  static const HdDataSourceLocator visibility_locator(
-      HdVisibilitySchema::GetSchemaToken(),
-      HdVisibilitySchemaTokens->visibility);
-
   const SdfPath& id = GetId();
   SceneManager* scene =
       static_cast<HdMitsubaRenderParam*>(renderParam)->GetScene();
 
-  HdSceneIndexBaseRefPtr scene_index =
-      sceneDelegate->GetRenderIndex().GetTerminalSceneIndex();
-
-  if (!TF_VERIFY(scene_index)) {
-    return;
-  }
-  HdContainerDataSourceHandle data_source = scene_index->GetPrim(id).dataSource;
+  HdContainerDataSourceHandle data_source =
+      GetPrimDataSource(sceneDelegate, id);
 
   // 1. Visibility
-  const bool visible = GetParam<bool>(data_source, visibility_locator, true);
-
-  if (!visible) {
+  if (!GetPrimVisible(data_source)) {
     RemoveFromScene(scene);
     *dirtyBits = HdChangeTracker::Clean;
     return;
   }
 
   // 2. Transform
-  const GfMatrix4d transform =
-      GetParam<GfMatrix4d>(data_source, transform_locator, GfMatrix4d(1.0));
+  const GfMatrix4d transform = GetPrimTransform(data_source);
 
   // 3. Light Parameters
   HdLightSchema light_schema = HdLightSchema::GetFromParent(data_source);

@@ -36,6 +36,7 @@
 #include "hdmitsuba/render_param.h"
 #include "hdmitsuba/scene_manager.h"
 #include "hdmitsuba/spec_types.h"
+#include "hdmitsuba/utils.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -65,22 +66,16 @@ void HdMitsubaParticleField::Sync(HdSceneDelegate* sceneDelegate,
   if (*dirtyBits == HdChangeTracker::Clean) return;
 
   const SdfPath& id = GetId();
-  HdSceneIndexBaseRefPtr scene_index =
-      sceneDelegate->GetRenderIndex().GetTerminalSceneIndex();
-  if (!TF_VERIFY(scene_index)) return;
+  HdContainerDataSourceHandle prim_source =
+      GetPrimDataSource(sceneDelegate, id);
 
-  HdContainerDataSourceHandle prim_source = scene_index->GetPrim(id).dataSource;
-
-  // 1. Visibility & Transform (using Pixar schema wrappers directly)
-  if (auto vis_schema = HdVisibilitySchema::GetFromParent(prim_source)) {
-    if (vis_schema.GetVisibility() &&
-        !vis_schema.GetVisibility()->GetValue(0.0f).Get<bool>()) {
-      auto* mitsubaRenderParam =
-          static_cast<HdMitsubaRenderParam*>(renderParam);
-      RemoveFromScene(mitsubaRenderParam->GetScene());
-      *dirtyBits = HdChangeTracker::Clean;
-      return;
-    }
+  // 1. Visibility & Transform
+  if (!GetPrimVisible(prim_source)) {
+    auto* mitsubaRenderParam =
+        static_cast<HdMitsubaRenderParam*>(renderParam);
+    RemoveFromScene(mitsubaRenderParam->GetScene());
+    *dirtyBits = HdChangeTracker::Clean;
+    return;
   }
 
   const size_t previous_count = points_.size();
@@ -97,11 +92,7 @@ void HdMitsubaParticleField::Sync(HdSceneDelegate* sceneDelegate,
   bool sh_dirty = false;
 
   if (HdChangeTracker::IsTransformDirty(*dirtyBits, id)) {
-    if (auto xform_schema = HdXformSchema::GetFromParent(prim_source)) {
-      if (xform_schema.GetMatrix()) {
-        transform_ = xform_schema.GetMatrix()->GetValue(0.0f).Get<GfMatrix4d>();
-      }
-    }
+    transform_ = GetPrimTransform(prim_source);
     geometry_dirty = true;
   }
 

@@ -29,7 +29,13 @@
 #include <pxr/base/tf/type.h>
 #include <pxr/base/vt/value.h>
 #include <pxr/imaging/hd/dataSource.h>
+#include <pxr/imaging/hd/renderIndex.h>
+#include <pxr/imaging/hd/sceneDelegate.h>
+#include <pxr/imaging/hd/sceneIndex.h>
+#include <pxr/imaging/hd/visibilitySchema.h>
+#include <pxr/imaging/hd/xformSchema.h>
 #include <pxr/pxr.h>
+#include <pxr/usd/sdf/path.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -68,6 +74,34 @@ T GetParam(const HdContainerDataSourceHandle& container,
     }
   }
   return default_value;
+}
+
+inline HdContainerDataSourceHandle GetPrimDataSource(
+    HdSceneDelegate* scene_delegate, const SdfPath& id) {
+  HdSceneIndexBaseRefPtr scene_index =
+      scene_delegate->GetRenderIndex().GetTerminalSceneIndex();
+  if (!TF_VERIFY(scene_index)) return nullptr;
+  return scene_index->GetPrim(id).dataSource;
+}
+
+inline bool GetPrimVisible(const HdContainerDataSourceHandle& prim_source,
+                           bool default_visible = true) {
+  if (auto schema = HdVisibilitySchema::GetFromParent(prim_source)) {
+    if (auto vis = schema.GetVisibility()) {
+      return vis->GetValue(0.0f).Get<bool>();
+    }
+  }
+  return default_visible;
+}
+
+inline GfMatrix4d GetPrimTransform(
+    const HdContainerDataSourceHandle& prim_source) {
+  if (auto schema = HdXformSchema::GetFromParent(prim_source)) {
+    if (auto matrix = schema.GetMatrix()) {
+      return matrix->GetValue(0.0f).Get<GfMatrix4d>();
+    }
+  }
+  return GfMatrix4d(1.0);
 }
 
 using ScalarAffineTransform3f =

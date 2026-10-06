@@ -91,15 +91,10 @@ void HdMitsubaCurves::Sync(HdSceneDelegate* sceneDelegate,
   static const HdDataSourceLocator widths_locator(
       HdPrimvarsSchema::GetSchemaToken(), HdTokens->widths,
       HdPrimvarSchemaTokens->primvarValue);
-  static const HdDataSourceLocator transform_locator(
-      HdXformSchema::GetSchemaToken(), HdXformSchemaTokens->matrix);
   static const HdDataSourceLocator material_locator(
       HdMaterialBindingsSchema::GetSchemaToken(),
       HdMaterialBindingsSchemaTokens->allPurpose,
       HdMaterialBindingSchemaTokens->path);
-  static const HdDataSourceLocator visibility_locator(
-      HdVisibilitySchema::GetSchemaToken(),
-      HdVisibilitySchemaTokens->visibility);
   static const HdDataSourceLocator basis_locator(
       TfToken("basisCurves"), TfToken("topology"),
       HdBasisCurvesTopologySchemaTokens->basis);
@@ -113,15 +108,11 @@ void HdMitsubaCurves::Sync(HdSceneDelegate* sceneDelegate,
   if (*dirtyBits == HdChangeTracker::Clean) return;
 
   const SdfPath& id = GetId();
-  HdSceneIndexBaseRefPtr scene_index =
-      sceneDelegate->GetRenderIndex().GetTerminalSceneIndex();
-  if (!TF_VERIFY(scene_index)) {
-    return;
-  }
-  HdContainerDataSourceHandle data_source = scene_index->GetPrim(id).dataSource;
+  HdContainerDataSourceHandle data_source =
+      GetPrimDataSource(sceneDelegate, id);
 
   // 1. Visibility
-  bool visible = GetParam<bool>(data_source, visibility_locator, true);
+  bool visible = GetPrimVisible(data_source);
   if ((*dirtyBits & HdChangeTracker::DirtyVisibility) && visible) {
     *dirtyBits |= HdChangeTracker::AllDirty;
   }
@@ -135,8 +126,7 @@ void HdMitsubaCurves::Sync(HdSceneDelegate* sceneDelegate,
   }
 
   // 2. Transform
-  GfMatrix4d transform =
-      GetParam<GfMatrix4d>(data_source, transform_locator, GfMatrix4d(1.0));
+  GfMatrix4d transform = GetPrimTransform(data_source);
 
   // 3. Primvars (Points and Widths)
   if (points_.empty() || widths_.empty() ||
