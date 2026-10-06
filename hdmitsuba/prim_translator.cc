@@ -35,7 +35,6 @@
 #include <mitsuba/core/config.h>
 #include <mitsuba/core/filesystem.h>
 #include <mitsuba/core/fwd.h>
-#include <mitsuba/core/mstream.h>
 #include <mitsuba/core/object.h>
 #include <mitsuba/core/plugin.h>
 #include <mitsuba/core/properties.h>
@@ -71,10 +70,6 @@
 #include <pxr/imaging/hd/material.h>
 #include <pxr/imaging/hd/tokens.h>
 #include <pxr/pxr.h>
-#include <pxr/usd/ar/asset.h>
-#include <pxr/usd/ar/resolvedPath.h>
-#include <pxr/usd/ar/resolver.h>
-#include <pxr/usd/sdf/assetPath.h>
 #include <pxr/usd/sdf/path.h>
 
 #include "hdmitsuba/spec_types.h"
@@ -90,62 +85,38 @@ namespace {
 using ScalarVector3f = mitsuba::Vector<float, 3>;
 using ScalarVector2u = mitsuba::Vector<uint32_t, 2>;
 
-// Loads a bitmap through USD's asset resolver so textures embedded in .usdz
-// packages (or served by custom resolvers) can be read from memory. Falls back
-// to reading directly from the filesystem.
-mitsuba::ref<mitsuba::Bitmap> LoadBitmap(const std::string& path) {
-  if (std::shared_ptr<ArAsset> asset =
-          ArGetResolver().OpenAsset(ArResolvedPath(path))) {
-    if (std::shared_ptr<const char> buffer = asset->GetBuffer()) {
-      mitsuba::ref<mitsuba::MemoryStream> stream = new mitsuba::MemoryStream(
-          const_cast<char*>(buffer.get()), asset->GetSize());
-      return new mitsuba::Bitmap(stream.get());
-    }
-  }
-  return new mitsuba::Bitmap(path);
+// The helpers below encode material-graph rules that are shared between the
+// texture pre-pass (DiscoverTextures) and the actual material parsers. Keep
+// both sides going through these so that they cannot drift apart: a texture
+// that is parsed but not discovered silently falls back to a constant color.
+
+bool IsTextureNode(const HdMaterialNode2& node) {
+  return node.nodeTypeId == TfToken("UsdUVTexture") ||
+         node.nodeTypeId == TfToken("mitsuba_bitmap");
 }
 
-std::string ResolvePathFromValue(const VtValue& value) {
-  if (value.IsHolding<SdfAssetPath>()) {
-    const auto& asset_path = value.Get<SdfAssetPath>();
-    const std::string& resolved = asset_path.GetResolvedPath();
-    return resolved.empty() ? asset_path.GetAssetPath() : resolved;
-  } else if (value.IsHolding<std::string>()) {
-    return value.Get<std::string>();
+bool IsPrincipledNode(const HdMaterialNode2& node) {
+  return node.nodeTypeId == TfToken("UsdPreviewSurface") ||
+         node.nodeTypeId == TfToken("mitsuba_principled");
+}
+
+// Mitsuba's principled BSDF only accepts constants for these inputs.
+bool IsScalarOnlyPrincipledInput(const TfToken& input_name) {
+  return input_name == TfToken("specular") || input_name == TfToken("ior") ||
+         input_name == TfToken("eta");
+}
+
+// Returns the upstream node of the displacement terminal, preferring the
+// Mitsuba-specific `mitsuba:displacement` output over the generic one.
+SdfPath FindDisplacementNode(const HdMaterialNetwork2& network) {
+  auto it = network.terminals.find(TfToken("mitsuba:displacement"));
+  if (it == network.terminals.end()) {
+    it = network.terminals.find(HdMaterialTerminalTokens->displacement);
   }
-  return {};
+  return it == network.terminals.end() ? SdfPath() : it->second.upstreamNode;
 }
 
 }  // namespace
-
-// Converts the source color space to the Mitsuba Bitmap's `raw` flag.
-// Non-color inputs are classified based on the UsdPreviewSurface's
-// specification.
-bool UseRawBitmap(const TfToken& source_color_space,
-                  const TfToken& input_name) {
-  static const absl::NoDestructor<
-      absl::flat_hash_set<TfToken, TfToken::HashFunctor>>
-      kNonColorInputs({
-          TfToken("normal"),
-          TfToken("normalmap"),
-          TfToken("bump"),
-          TfToken("bumpmap"),
-          TfToken("roughness"),
-          TfToken("metallic"),
-          TfToken("displacement"),
-          TfToken("specular"),
-          TfToken("clearcoat"),
-          TfToken("clearcoatRoughness"),
-          TfToken("ior"),
-          TfToken("opacity"),
-      });
-  const bool is_non_color = kNonColorInputs->contains(input_name);
-  if (source_color_space == TfToken("auto")) {
-    return is_non_color;
-  } else {
-    return (source_color_space == TfToken("raw")) && is_non_color;
-  }
-}
 
 void SetMitsubaPropertyFromValue(mitsuba::Properties& props,
                                  std::string_view name, const VtValue& val,
@@ -186,58 +157,49 @@ void SetMitsubaPropertyFromValue(mitsuba::Properties& props,
   }
 }
 
-std::optional<mitsuba::Properties> ExtractTextureProperties(
-    const std::map<TfToken, VtValue>& parameters, const TfToken& nodeTypeId,
-    const TfToken& input_name) {
-  std::string resolved_path;
-  bool found = false;
-  if (nodeTypeId == TfToken("UsdUVTexture")) {
-    auto file_it = parameters.find(TfToken("file"));
-    if (file_it != parameters.end()) {
-      resolved_path = ResolvePathFromValue(file_it->second);
-      found = !resolved_path.empty();
-    }
-  } else if (nodeTypeId == TfToken("mitsuba_bitmap")) {
-    auto filename_it = parameters.find(TfToken("filename"));
-    if (filename_it != parameters.end()) {
-      resolved_path = ResolvePathFromValue(filename_it->second);
-      found = !resolved_path.empty();
-    }
+void DiscoverTextures(
+    const HdMaterialNetwork2& network,
+    const std::function<void(const TextureKey& tex_key)>& callback) {
+  absl::flat_hash_set<SdfPath, SdfPath::Hash> visited_nodes;
+  std::function<void(const SdfPath&, const TfToken&)> visit =
+      [&](const SdfPath& node_path, const TfToken& input_name) {
+        auto it = network.nodes.find(node_path);
+        if (it == network.nodes.end()) {
+          return;
+        }
+        const auto& node = it->second;
+        if (IsTextureNode(node)) {
+          // Texture nodes are keyed by input_name as well, so they are
+          // intentionally not deduplicated via visited_nodes.
+          if (auto key_opt = ExtractTextureKey(
+                  node.parameters, node.nodeTypeId, input_name)) {
+            callback(*key_opt);
+          }
+          return;
+        }
+        if (!visited_nodes.insert(node_path).second) {
+          return;
+        }
+        const bool is_principled = IsPrincipledNode(node);
+        for (const auto& [conn_input, connections] : node.inputConnections) {
+          if (connections.empty()) {
+            continue;
+          }
+          if (is_principled && IsScalarOnlyPrincipledInput(conn_input)) {
+            continue;
+          }
+          visit(connections[0].upstreamNode, conn_input);
+        }
+      };
+
+  if (SdfPath disp_node = FindDisplacementNode(network); !disp_node.IsEmpty()) {
+    visit(disp_node, HdMaterialTerminalTokens->displacement);
   }
-  if (!found) {
-    return std::nullopt;
+  auto surf_it = network.terminals.find(HdMaterialTerminalTokens->surface);
+  if (surf_it != network.terminals.end() &&
+      !surf_it->second.upstreamNode.IsEmpty()) {
+    visit(surf_it->second.upstreamNode, HdMaterialTerminalTokens->surface);
   }
-  mitsuba::Properties props("bitmap");
-  props.set("filename", resolved_path);
-  props.set("is_normal", (input_name == TfToken("normal") ||
-                          input_name == TfToken("normalmap")));
-  if (nodeTypeId == TfToken("UsdUVTexture")) {
-    auto source_color_space_it = parameters.find(TfToken("sourceColorSpace"));
-    TfToken source_color_space = TfToken("auto");
-    if (source_color_space_it != parameters.end() &&
-        source_color_space_it->second.IsHolding<TfToken>()) {
-      source_color_space = source_color_space_it->second.Get<TfToken>();
-    }
-    bool is_raw = UseRawBitmap(source_color_space, input_name);
-    props.set("raw", is_raw);
-    auto wrap_s_it = parameters.find(TfToken("wrapS"));
-    if (wrap_s_it != parameters.end() &&
-        wrap_s_it->second.IsHolding<TfToken>()) {
-      TfToken wrap_s = wrap_s_it->second.Get<TfToken>();
-      if (wrap_s == TfToken("repeat") || wrap_s == TfToken("clamp") ||
-          wrap_s == TfToken("mirror")) {
-        props.set("wrap_mode", wrap_s.GetString());
-      }
-    }
-  } else if (nodeTypeId == TfToken("mitsuba_bitmap")) {
-    for (const auto& [param_token, param_value] : parameters) {
-      std::string name = param_token.GetString();
-      if (name != "filename") {
-        SetMitsubaPropertyFromValue(props, name, param_value);
-      }
-    }
-  }
-  return props;
 }
 
 namespace {
@@ -245,14 +207,31 @@ namespace {
 template <typename Float, typename Spectrum>
 mitsuba::ref<mitsuba::Object> GetTexture(
     const std::map<TfToken, VtValue>& parameters, const TfToken& nodeTypeId,
-    const TfToken& input_name, const TextureCache& texture_cache) {
+    const TfToken& input_name,
+    const TextureCache<Float, Spectrum>& texture_cache) {
+  const bool is_normal =
+      (input_name == TfToken("normal") || input_name == TfToken("normalmap"));
   // Attempt to find the texture from the texture cache. This
-  // assumes the texture cache was pre-populated.
-  if (auto props_opt =
-          ExtractTextureProperties(parameters, nodeTypeId, input_name)) {
-    auto cache_it = texture_cache.find(*props_opt);
-    if (cache_it != texture_cache.end()) {
-      return cache_it->second;
+  // assumes the texture cache was pre-populated by DiscoverTextures.
+  if (auto key_opt =
+          ExtractTextureKey(parameters, nodeTypeId, input_name)) {
+    const CachedTexture* cached = texture_cache.Find(*key_opt);
+    if (!cached) {
+      // The texture discovery pass disagrees with the parser about which
+      // inputs are textured. That is a bug; make it visible rather than
+      // silently rendering a fallback color. (A file that failed to load is
+      // cached as an empty entry and was already warned about.)
+      TF_WARN("Texture '%s' (input '%s') was not preloaded; using fallback.",
+              key_opt->filename.c_str(), input_name.GetText());
+    } else if (cached->texture) {
+      if (is_normal && cached->channel_count < 3) {
+        TF_WARN(
+            "Normal map texture '%s' has only %d channels! Normal maps require "
+            "at least 3 channels.",
+            key_opt->filename.c_str(), static_cast<int>(cached->channel_count));
+      } else {
+        return cached->texture;
+      }
     }
   }
   // Instantiate a fallback texture.
@@ -261,7 +240,7 @@ mitsuba::ref<mitsuba::Object> GetTexture(
   if (fallback_it != parameters.end()) {
     SetMitsubaPropertyFromValue(fallback_props, "color", fallback_it->second);
   } else {
-    if (input_name == TfToken("normal") || input_name == TfToken("normalmap")) {
+    if (is_normal) {
       fallback_props.set("color", mitsuba::Color<float, 3>(0.5f, 0.5f, 1.0f));
     } else {
       fallback_props.set("color", mitsuba::Color<float, 3>(1.0f, 0.0f, 1.0f));
@@ -275,7 +254,8 @@ mitsuba::ref<mitsuba::Object> GetTexture(
 template <typename Float, typename Spectrum>
 mitsuba::ref<mitsuba::Object> ResolveConnectedTexture(
     const HdMaterialNetwork2& network2, const HdMaterialNode2& downstream_node,
-    const TfToken& input_name, const TextureCache& texture_cache) {
+    const TfToken& input_name,
+    const TextureCache<Float, Spectrum>& texture_cache) {
   auto conn_it = downstream_node.inputConnections.find(input_name);
   if (conn_it == downstream_node.inputConnections.end() ||
       conn_it->second.empty()) {
@@ -286,12 +266,10 @@ mitsuba::ref<mitsuba::Object> ResolveConnectedTexture(
     return nullptr;
   }
   const HdMaterialNode2& upstream_node = node_it->second;
-  const auto& type_id = upstream_node.nodeTypeId;
-  static const TfToken usd_uv_texture("UsdUVTexture");
-  static const TfToken mitsuba_bitmap("mitsuba_bitmap");
-  if (type_id == usd_uv_texture || type_id == mitsuba_bitmap) {
-    return GetTexture<Float, Spectrum>(upstream_node.parameters, type_id,
-                                       input_name, texture_cache);
+  if (IsTextureNode(upstream_node)) {
+    return GetTexture<Float, Spectrum>(upstream_node.parameters,
+                                       upstream_node.nodeTypeId, input_name,
+                                       texture_cache);
   }
   return nullptr;
 }
@@ -301,11 +279,7 @@ mitsuba::ref<mitsuba::Object> ParseNodeRecursive(
     const SdfPath& nodePath, const HdMaterialNetwork2& network,
     absl::flat_hash_map<SdfPath, mitsuba::ref<mitsuba::Object>, SdfPath::Hash>&
         cache,
-    TfToken input_name, const TextureCache& texture_cache) {
-  if (auto it = cache.find(nodePath); it != cache.end()) {
-    return it->second;
-  }
-
+    TfToken input_name, const TextureCache<Float, Spectrum>& texture_cache) {
   auto it = network.nodes.find(nodePath);
   if (it == network.nodes.end()) {
     TF_RUNTIME_ERROR("Node %s not found in material network.",
@@ -313,15 +287,17 @@ mitsuba::ref<mitsuba::Object> ParseNodeRecursive(
     return nullptr;
   }
 
-  // Specifically handle textures due to caching.
+  // Specifically handle textures via TextureCache so that a shared texture node
+  // connected to multiple inputs with different color-space requirements
+  // resolves the appropriate texture variant per input_name.
   const auto& node = it->second;
-  bool is_texture = (node.nodeTypeId == TfToken("UsdUVTexture") ||
-                     node.nodeTypeId == TfToken("mitsuba_bitmap"));
-  if (is_texture) {
-    mitsuba::ref<mitsuba::Object> texture = GetTexture<Float, Spectrum>(
-        node.parameters, node.nodeTypeId, input_name, texture_cache);
-    cache[nodePath] = texture;
-    return texture;
+  if (IsTextureNode(node)) {
+    return GetTexture<Float, Spectrum>(node.parameters, node.nodeTypeId,
+                                       input_name, texture_cache);
+  }
+
+  if (auto cache_it = cache.find(nodePath); cache_it != cache.end()) {
+    return cache_it->second;
   }
 
   // Handle other nodes (native mitsuba plugins, etc.)
@@ -341,22 +317,19 @@ mitsuba::ref<mitsuba::Object> ParseNodeRecursive(
 
   for (const auto& [input_token, connections] : node.inputConnections) {
     if (connections.empty()) continue;
+    if (IsPrincipledNode(node) && IsScalarOnlyPrincipledInput(input_token)) {
+      TF_WARN(
+          "Mitsuba's principled BSDF does not support texture connection for "
+          "'%s'. Ignoring connection.",
+          input_token.GetText());
+      continue;
+    }
     mitsuba::ref<mitsuba::Object> upstream_object =
         ParseNodeRecursive<Float, Spectrum>(connections[0].upstreamNode,
                                             network, cache, input_token,
                                             texture_cache);
     if (upstream_object) {
-      bool is_scalar_only =
-          (mitsuba_plugin_name == "principled") &&
-          (input_token == TfToken("specular") || input_token == TfToken("eta"));
-      if (is_scalar_only) {
-        TF_WARN(
-            "Mitsuba's principled BSDF does not support texture connection for "
-            "'%s'. Ignoring connection.",
-            input_token.GetText());
-      } else {
-        props.set(input_token.GetString(), upstream_object);
-      }
+      props.set(input_token.GetString(), upstream_object);
     }
   }
 
@@ -389,7 +362,7 @@ MI_VARIANT typename PrimTranslator<Float, Spectrum>::TranslatedMaterial
 PrimTranslator<Float, Spectrum>::ParsePreviewSurface(
     const HdMaterialNetwork2& network2,
     const HdMaterialNode2& preview_surface_node,
-    const TextureCache& texture_cache) {
+    const TextureCache<Float, Spectrum>& texture_cache) {
   TranslatedMaterial res;
   struct ParamMapping {
     TfToken usd_name;
@@ -410,8 +383,7 @@ PrimTranslator<Float, Spectrum>::ParsePreviewSurface(
   mitsuba::Properties props("principled");
   bool spec_trans_is_texture = false;
   for (const auto& mapping : *param_mappings) {
-    bool is_scalar_only =
-        (mapping.mitsuba_name == "specular") || (mapping.mitsuba_name == "eta");
+    const bool is_scalar_only = IsScalarOnlyPrincipledInput(mapping.usd_name);
     mitsuba::ref<mitsuba::Object> texture = nullptr;
     if (!is_scalar_only) {
       texture = ResolveConnectedTexture<Float, Spectrum>(
@@ -488,69 +460,21 @@ PrimTranslator<Float, Spectrum>::ParsePreviewSurface(
   return res;
 }
 
-MI_VARIANT mitsuba::ref<mitsuba::Object>
-PrimTranslator<Float, Spectrum>::LoadTexture(const mitsuba::Properties& props) {
-  std::string path = props.get<std::string>("filename");
-  bool is_normal = false;
-  if (props.has_property("is_normal")) {
-    is_normal = props.get<bool>("is_normal");
-  }
-  mitsuba::Properties local_props = props;
-  if (local_props.has_property("is_normal")) {
-    local_props.remove_property("is_normal");
-  }
-  try {
-    mitsuba::ref<mitsuba::Bitmap> bmp = LoadBitmap(path);
-    if (is_normal) {
-      if (bmp->channel_count() < 3) {
-        TF_WARN(
-            "Normal map texture '%s' has only %d channels! Normal maps require "
-            "at least 3 channels.",
-            path.c_str(), (int)bmp->channel_count());
-        return nullptr;
-      }
-    }
-    local_props.set("bitmap", mitsuba::ref<mitsuba::Object>(bmp));
-    if (local_props.has_property("filename")) {
-      local_props.remove_property("filename");
-    }
-    mitsuba::ref<mitsuba::Object> texture =
-        mitsuba::PluginManager::instance()->create_object(
-            local_props, mitsuba::Texture<Float, Spectrum>::Variant,
-            mitsuba::Texture<Float, Spectrum>::Type);
-    std::vector<mitsuba::ref<mitsuba::Object>> expanded_texture =
-        texture->expand();
-    if (!expanded_texture.empty()) {
-      texture = expanded_texture[0];
-    }
-    return texture;
-  } catch (const std::exception& e) {
-    TF_WARN("Failed to load texture '%s': %s.", path.c_str(), e.what());
-    return nullptr;
-  }
-}
-
 MI_VARIANT typename PrimTranslator<Float, Spectrum>::TranslatedMaterial
 PrimTranslator<Float, Spectrum>::BuildMaterial(
-    const MaterialSpec& spec, const TextureCache& texture_cache) {
+    const MaterialSpec& spec,
+    const TextureCache<Float, Spectrum>& texture_cache) {
   TranslatedMaterial res;
   const HdMaterialNetwork2& network2 = spec.network2;
   const std::string id_str = spec.id.GetAsString();
 
-  auto disp_it = network2.terminals.find(TfToken("mitsuba:displacement"));
-  if (disp_it == network2.terminals.end()) {
-    disp_it = network2.terminals.find(HdMaterialTerminalTokens->displacement);
-  }
-  if (disp_it != network2.terminals.end()) {
-    auto terminal_connection = disp_it->second;
-    if (!network2.nodes.empty() &&
-        !terminal_connection.upstreamNode.IsEmpty()) {
-      absl::flat_hash_map<SdfPath, mitsuba::ref<mitsuba::Object>, SdfPath::Hash>
-          cache;
-      res.displacement_texture = ParseNodeRecursive<Float, Spectrum>(
-          terminal_connection.upstreamNode, network2, cache,
-          HdMaterialTerminalTokens->displacement, texture_cache);
-    }
+  if (SdfPath disp_node = FindDisplacementNode(network2);
+      !disp_node.IsEmpty()) {
+    absl::flat_hash_map<SdfPath, mitsuba::ref<mitsuba::Object>, SdfPath::Hash>
+        cache;
+    res.displacement_texture = ParseNodeRecursive<Float, Spectrum>(
+        disp_node, network2, cache, HdMaterialTerminalTokens->displacement,
+        texture_cache);
   }
 
   auto terminal_it = network2.terminals.find(HdMaterialTerminalTokens->surface);
@@ -590,7 +514,7 @@ PrimTranslator<Float, Spectrum>::BuildMaterial(
 
 MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateMaterialInPlace(
     mitsuba::Object* /*bsdf*/, const MaterialSpec& /*spec*/,
-    const TextureCache& /*texture_cache*/) {}
+    const TextureCache<Float, Spectrum>& /*texture_cache*/) {}
 
 MI_VARIANT typename PrimTranslator<Float, Spectrum>::TranslatedLight
 PrimTranslator<Float, Spectrum>::BuildLight(const LightSpec& spec) {
@@ -652,7 +576,7 @@ PrimTranslator<Float, Spectrum>::BuildLightProperties(const LightSpec& spec) {
     if (!spec.texture_file_path.empty()) {
       try {
         mitsuba::ref<mitsuba::Bitmap> bitmap =
-            LoadBitmap(spec.texture_file_path);
+            ReadBitmap(spec.texture_file_path);
         mitsuba::Properties props("envmap");
         props.set("to_world", to_world);
         props.set("scale", (color[0] + color[1] + color[2]) / 3.f);

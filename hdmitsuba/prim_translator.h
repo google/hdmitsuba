@@ -14,14 +14,10 @@
 
 #pragma once
 
-#include <array>
+#include <functional>
 #include <optional>
 #include <string_view>
-#include <tuple>
-#include <utility>
 
-#include <absl/container/flat_hash_map.h>
-#include <absl/hash/hash.h>
 #include <mitsuba/core/fwd.h>
 #include <mitsuba/core/object.h>
 #include <mitsuba/core/properties.h>
@@ -30,33 +26,19 @@
 #include <pxr/pxr.h>
 
 #include "hdmitsuba/spec_types.h"
+#include "hdmitsuba/texture_cache.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
-
-struct PropertiesHash {
-  size_t operator()(const mitsuba::Properties& p) const { return p.hash(); }
-};
-
-struct PropertiesEqual {
-  bool operator()(const mitsuba::Properties& a,
-                  const mitsuba::Properties& b) const {
-    return a == b;
-  }
-};
-
-using TextureCache =
-    absl::flat_hash_map<mitsuba::Properties, mitsuba::ref<mitsuba::Object>,
-                        PropertiesHash, PropertiesEqual>;
-
-bool UseRawBitmap(const TfToken& source_color_space, const TfToken& input_name);
 
 void SetMitsubaPropertyFromValue(mitsuba::Properties& props,
                                  std::string_view name, const pxr::VtValue& val,
                                  bool invert_float = false);
 
-std::optional<mitsuba::Properties> ExtractTextureProperties(
-    const std::map<TfToken, pxr::VtValue>& parameters,
-    const TfToken& nodeTypeId, const TfToken& input_name);
+// Invokes `callback` with the key of every texture the material parsers will
+// look up for `network`, so the TextureCache can be preloaded beforehand.
+void DiscoverTextures(
+    const HdMaterialNetwork2& network,
+    const std::function<void(const TextureKey& tex_key)>& callback);
 
 MI_VARIANT
 class PrimTranslator {
@@ -67,13 +49,12 @@ class PrimTranslator {
     mitsuba::ref<mitsuba::Object> displacement_texture = nullptr;
   };
 
-  static TranslatedMaterial BuildMaterial(const MaterialSpec& spec,
-                                          const TextureCache& texture_cache);
-  static void UpdateMaterialInPlace(mitsuba::Object* bsdf,
-                                    const MaterialSpec& spec,
-                                    const TextureCache& texture_cache);
-  static mitsuba::ref<mitsuba::Object> LoadTexture(
-      const mitsuba::Properties& props);
+  static TranslatedMaterial BuildMaterial(
+      const MaterialSpec& spec,
+      const TextureCache<Float, Spectrum>& texture_cache);
+  static void UpdateMaterialInPlace(
+      mitsuba::Object* bsdf, const MaterialSpec& spec,
+      const TextureCache<Float, Spectrum>& texture_cache);
 
   struct TranslatedLight {
     mitsuba::ref<mitsuba::Shape<Float, Spectrum>> shape = nullptr;
@@ -119,7 +100,7 @@ class PrimTranslator {
   static TranslatedMaterial ParsePreviewSurface(
       const HdMaterialNetwork2& network2,
       const HdMaterialNode2& preview_surface_node,
-      const TextureCache& texture_cache);
+      const TextureCache<Float, Spectrum>& texture_cache);
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

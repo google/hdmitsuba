@@ -85,6 +85,7 @@
 #include "hdmitsuba/prim_translator.h"
 #include "hdmitsuba/render_buffer.h"
 #include "hdmitsuba/spec_types.h"
+#include "hdmitsuba/texture_cache.h"
 #include "hdmitsuba/traversal.h"
 #include "hdmitsuba/utils.h"
 #include "hdmitsuba/kernel_freezing.h"
@@ -128,73 +129,9 @@ void SyncMitsubaPythonVariant(const std::string& variant) {
 #endif
 }
 
-void DiscoverTextures(
-    const HdMaterialNetwork2& network,
-    const std::function<void(const mitsuba::Properties& tex_props)>& callback) {
-  auto process_connection = [&](const TfToken& input_name,
-                                const SdfPath& upstream_node_path) {
-    auto upstream_it = network.nodes.find(upstream_node_path);
-    if (upstream_it != network.nodes.end()) {
-      const auto& node = upstream_it->second;
-      if (node.nodeTypeId == TfToken("UsdUVTexture") ||
-          node.nodeTypeId == TfToken("mitsuba_bitmap")) {
-        if (auto props_opt = ExtractTextureProperties(
-                node.parameters, node.nodeTypeId, input_name)) {
-          callback(*props_opt);
-        }
-      }
-    }
-  };
-  // 1. Traverse all connections between nodes
-  for (const auto& [node_path, node] : network.nodes) {
-    for (const auto& [input_name, connections] : node.inputConnections) {
-      if (!connections.empty()) {
-        process_connection(input_name, connections[0].upstreamNode);
-      }
-    }
-  }
-  // 2. Traverse all terminal connections (e.g., surface, displacement)
-  for (const auto& [terminal_name, connection] : network.terminals) {
-    if (!connection.upstreamNode.IsEmpty()) {
-      process_connection(terminal_name, connection.upstreamNode);
-    }
-  }
-}
-
 constexpr std::string_view kProtoPrefix = "proto_";
 constexpr std::string_view kProtoGroupPrefix = "proto_group_";
 constexpr std::string_view kInstancePrefix = "instance_";
-
-// Using Dr.Jit in a multithreaded environment requires explicitly creating
-// JIT scopes on each thread. This RAII struct should be used in code blocks
-// that may be executed on different threads, with dependencies crossing
-// thread boundaries (e.g., accessing a texture that was initialized on a
-// different thread).
-template <typename Float>
-struct JitScopeGuard {
-  uint32_t backend = 0;
-  uint32_t prev_scope = 0;
-
-  JitScopeGuard() {
-    if constexpr (dr::is_cuda_v<Float>) {
-      backend = (uint32_t)JitBackend::CUDA;
-    } else if constexpr (dr::is_llvm_v<Float>) {
-      backend = (uint32_t)JitBackend::LLVM;
-    } else if constexpr (dr::is_metal_v<Float>) {
-      backend = (uint32_t)JitBackend::Metal;
-    }
-    if (backend) {
-      prev_scope = jit_scope((JitBackend)backend);
-      jit_new_scope((JitBackend)backend);
-    }
-  }
-
-  ~JitScopeGuard() {
-    if (backend) {
-      jit_set_scope((JitBackend)backend, prev_scope);
-    }
-  }
-};
 
 // Copies data from a Mitsuba Tensor to a Hydra Render Buffer (Scalar/CPU path).
 template <typename TensorT>
@@ -753,6 +690,7 @@ class SceneModel final : public SceneManager {
     TF_DEBUG(HDMITSUBA_SYNC).Msg("SyncMaterial: %s\n", spec.id.GetText());
     absl::MutexLock lock(state_mutex_);
     material_specs_[spec.id] = std::move(spec);
+    texture_cache_.MarkDirty();
     reset_progressive_ = true;
   }
 
@@ -801,10 +739,19 @@ class SceneModel final : public SceneManager {
 
   void RemoveMaterial(const SdfPath& id) override {
     TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("RemoveMaterial: %s\n", id.GetText());
+    std::string id_str = id.GetAsString();
     absl::MutexLock lock(state_mutex_);
     material_specs_.erase(id);
-    bsdfs_.erase(id.GetAsString());
-    material_emitters_.erase(id.GetAsString());
+    bsdfs_.erase(id_str);
+    uint32_t dirty_flags = DirtyFlags::kMaterialUpdated;
+    if (displacement_textures_.erase(id_str) > 0) {
+      dirty_flags |= DirtyFlags::kNeedsStructureRebuild;
+    }
+    if (material_emitters_.erase(id_str) > 0) {
+      dirty_flags |= DirtyFlags::kNeedsStructureRebuild;
+    }
+    material_dirty_flags_[id] |= dirty_flags;
+    texture_cache_.MarkDirty();
     scene_dirty_ = true;
     reset_progressive_ = true;
   }
@@ -1203,9 +1150,12 @@ class SceneModel final : public SceneManager {
           disp_it->second != trans.displacement_texture.get()) {
         displacement_textures_[id_str] =
             static_cast<Texture*>(trans.displacement_texture.get());
+        dirty_flags |= DirtyFlags::kNeedsStructureRebuild;
       }
     } else {
-      displacement_textures_.erase(id_str);
+      if (displacement_textures_.erase(id_str) > 0) {
+        dirty_flags |= DirtyFlags::kNeedsStructureRebuild;
+      }
     }
     if (trans.shape_emitter_props.has_value()) {
       auto em_it = material_emitters_.find(id_str);
@@ -1831,14 +1781,21 @@ class SceneModel final : public SceneManager {
     rebuild_scene |= CommitParticleFields();
     rebuild_scene |= CommitLights();
 
-    if (rebuild_scene) {
+    const bool materials_changed = !material_dirty_flags_.empty();
+    if (!rebuild_scene && materials_changed &&
+        NeedsRebuildForFilteredTextures()) {
+      rebuild_scene = true;
+    }
+
+    if (rebuild_scene || materials_changed) {
+      // In-place material updates swap BSDF/Texture objects whose JIT class
+      // pointers may be baked into a frozen kernel, so it must be invalidated
+      // even when the Scene itself is not rebuilt.
       if constexpr (dr::is_jit_v<Float>) {
         if (frozen_render_) {
           frozen_render_->Clear();
         }
       }
-    }
-    if (rebuild_scene || !material_dirty_flags_.empty()) {
       reset_progressive_ = true;
     }
 
@@ -1863,7 +1820,7 @@ class SceneModel final : public SceneManager {
 
     // Run Garbage Collection after all resources are committed, ensuring
     // that all active shapes, mesh emitters, and sensors are instantiated.
-    GarbageCollectTextureCache();
+    texture_cache_.GarbageCollect();
 
     material_dirty_flags_.clear();
     sensor_binding_dirty_.clear();
@@ -1919,61 +1876,47 @@ class SceneModel final : public SceneManager {
   absl::flat_hash_map<std::tuple<float, float, float>, ref<BSDF>> color_bsdfs_;
   absl::Mutex color_bsdfs_mutex_;
 
-  TextureCache texture_cache_;
+  TextureCache<Float, Spectrum> texture_cache_;
   std::unique_ptr<FrozenRender<Float, Spectrum>> frozen_render_ = nullptr;
 
   void PreloadTextures(const std::vector<MaterialSpec*>& pending_specs) {
-    absl::flat_hash_set<mitsuba::Properties, PropertiesHash, PropertiesEqual>
-        textures_to_load;
+    absl::flat_hash_set<TextureKey> keys;
     for (const auto* spec : pending_specs) {
-      const HdMaterialNetwork2& network2 = spec->network2;
-      DiscoverTextures(network2, [&](const mitsuba::Properties& tex_props) {
-        // Find any textures that still need to be loaded.
-        if (!texture_cache_.contains(tex_props) &&
-            !textures_to_load.contains(tex_props)) {
-          textures_to_load.insert(tex_props);
-        }
-      });
+      DiscoverTextures(spec->network2,
+                       [&](const TextureKey& key) { keys.insert(key); });
     }
-    if (textures_to_load.empty()) return;
-    std::vector<mitsuba::Properties> texture_list(textures_to_load.begin(),
-                                                  textures_to_load.end());
-    std::vector<mitsuba::ref<mitsuba::Object>> loaded_textures(
-        texture_list.size());
-    drjit::parallel_for(drjit::blocked_range<size_t>(0, texture_list.size()),
-                        [&](drjit::blocked_range<size_t> r) {
-                          for (size_t i = r.begin(); i != r.end(); ++i) {
-                            JitScopeGuard<Float> jit_guard;
-                            loaded_textures[i] =
-                                PrimTranslator::LoadTexture(texture_list[i]);
-                          }
-                          if constexpr (dr::is_metal_v<Float>) {
-                            jit_flush_thread();
-                          }
-                        });
-    for (size_t i = 0; i < texture_list.size(); ++i) {
-      if (loaded_textures[i]) {
-        texture_cache_[texture_list[i]] = loaded_textures[i];
-      }
-    }
+    texture_cache_.Preload(keys);
   }
 
-  void GarbageCollectTextureCache() {
-    absl::flat_hash_set<mitsuba::Properties, PropertiesHash, PropertiesEqual>
-        active_textures;
-    for (const auto& [id, spec] : material_specs_) {
-      const HdMaterialNetwork2& network2 = spec.network2;
-      DiscoverTextures(network2, [&](const mitsuba::Properties& tex_props) {
-        active_textures.insert(tex_props);
-      });
-    }
-    for (auto it = texture_cache_.begin(); it != texture_cache_.end();) {
-      if (!active_textures.contains(it->first)) {
-        texture_cache_.erase(it++);
-      } else {
-        ++it;
+  // Mitsuba's Scene only scans for filtered (trilinear/anisotropic) textures
+  // in its constructor, not in parameters_changed(). If an in-place material
+  // update introduces the first such texture, the scene would keep stripping
+  // ray footprints, so force a rebuild. The scan deliberately mirrors
+  // Scene::update_filtered_textures() (textures reachable from shapes) so
+  // that a rebuild always satisfies the condition; scanning the texture cache
+  // instead would re-trigger a rebuild on every material change if a filtered
+  // texture is cached but not reachable from any shape (e.g. displacement).
+  bool NeedsRebuildForFilteredTextures() const {
+    if (!scene_ || scene_->has_filtered_textures()) return false;
+    struct Scan : public mitsuba::TraversalCallback {
+      bool found = false;
+      void put_object(std::string_view, mitsuba::Object* obj,
+                      uint32_t) override {
+        if (found || !obj) return;
+        if (auto* texture = dynamic_cast<Texture*>(obj)) {
+          found = texture->filtered();
+        }
+        if (!found) obj->traverse(this);
       }
+      void put_value(std::string_view, void*, uint32_t,
+                     const std::type_info&) override {}
+    } scan;
+    for (const auto& [id, shape] : shapes_) {
+      // traverse() is not const even though this scan is read-only.
+      const_cast<Shape*>(shape.get())->traverse(&scan);
+      if (scan.found) return true;
     }
+    return false;
   }
 
   bool CleanUpInstancing(const SdfPath& id) {

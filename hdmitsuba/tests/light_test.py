@@ -89,6 +89,23 @@ def test_dome_light_untextured():
   )
 
 
+def test_dome_light_corrupt_texture_falls_back_to_constant():
+  stage = _create_stage()
+  test_helpers.create_render_settings(stage, resolution=_RENDER_RESOLUTION)
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin')
+  reference = engine.render()['color'][..., :3]
+
+  # Invalid envmap path should get ignored.
+  dome_light = UsdLux.DomeLight.Get(stage, '/domeLight')
+  dome_light.CreateTextureFileAttr().Set(
+      f'{test_helpers.TEST_ASSETS_PATH}/lights/envmap.usda'
+  )
+  image = engine.render()['color'][..., :3]
+
+  np.testing.assert_allclose(image, reference, atol=0.1)
+
+
 @pytest.mark.parametrize(
     'scene_name',
     [

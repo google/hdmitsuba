@@ -38,6 +38,7 @@ add_library(hdMitsuba SHARED
   particle_field.cc
   traversal.cc
   prim_translator.cc
+  texture_cache.cc
 )
 
 target_include_directories(hdMitsuba PUBLIC

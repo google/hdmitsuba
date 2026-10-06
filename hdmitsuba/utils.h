@@ -14,8 +14,10 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 
+#include <drjit-core/jit.h>
 #include <drjit/matrix.h>
 #include <mitsuba/core/transform.h>
 #include <pxr/base/gf/matrix3d.h>
@@ -87,5 +89,36 @@ inline ScalarAffineTransform3f UsdToMitsubaTransform(const GfMatrix3d& m) {
     for (int j = 0; j < 3; ++j) t(i, j) = static_cast<float>(m[j][i]);
   return ScalarAffineTransform3f(t);
 }
+
+// Using Dr.Jit in a multithreaded environment requires explicitly creating
+// JIT scopes on each thread. This RAII struct should be used in code blocks
+// that may be executed on different threads, with dependencies crossing
+// thread boundaries (e.g., accessing a texture that was initialized on a
+// different thread).
+template <typename Float>
+struct JitScopeGuard {
+  uint32_t backend = 0;
+  uint32_t prev_scope = 0;
+
+  JitScopeGuard() {
+    if constexpr (drjit::is_cuda_v<Float>) {
+      backend = (uint32_t)JitBackend::CUDA;
+    } else if constexpr (drjit::is_llvm_v<Float>) {
+      backend = (uint32_t)JitBackend::LLVM;
+    } else if constexpr (drjit::is_metal_v<Float>) {
+      backend = (uint32_t)JitBackend::Metal;
+    }
+    if (backend) {
+      prev_scope = jit_scope((JitBackend)backend);
+      jit_new_scope((JitBackend)backend);
+    }
+  }
+
+  ~JitScopeGuard() {
+    if (backend) {
+      jit_set_scope((JitBackend)backend, prev_scope);
+    }
+  }
+};
 
 PXR_NAMESPACE_CLOSE_SCOPE
