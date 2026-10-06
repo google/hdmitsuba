@@ -589,24 +589,29 @@ class SceneModel final : public SceneManager {
     return DefaultBsdf();
   }
 
+  template <typename MapType, typename SpecType>
+  static auto& UpsertSpec(MapType& map, SpecType&& spec) {
+    auto it = map.find(spec.id);
+    if (it == map.end()) {
+      spec.needs_rebuild = true;
+    } else {
+      spec.FoldPendingFrom(it->second);
+    }
+    return map[spec.id] = std::forward<SpecType>(spec);
+  }
+
   void SyncCamera(CameraSpec spec) override {
     TF_DEBUG(HDMITSUBA_SYNC).Msg("SyncCamera: %s\n", spec.id.GetText());
     absl::MutexLock lock(state_mutex_);
     auto prev_it = camera_specs_.find(spec.id);
-    if (prev_it == camera_specs_.end()) {
-      spec.needs_rebuild = true;
-    } else {
-      spec.needs_rebuild |= prev_it->second.needs_rebuild;
-      if (!spec.needs_rebuild) {
-        spec.dirty_bits |= prev_it->second.dirty_bits;
-      }
-    }
-    // Rebuild affected shapes if the surface sensor or its target changed.
     std::optional<SdfPath> prev_target =
         prev_it == camera_specs_.end() ? std::nullopt
                                        : SurfaceSensorTarget(prev_it->second);
-    std::optional<SdfPath> target = SurfaceSensorTarget(spec);
-    if (prev_target != target || (target.has_value() && spec.needs_rebuild)) {
+    const CameraSpec& stored = UpsertSpec(camera_specs_, std::move(spec));
+    // Rebuild affected shapes if the surface sensor or its target changed.
+    std::optional<SdfPath> target = SurfaceSensorTarget(stored);
+    if (prev_target != target ||
+        (target.has_value() && stored.needs_rebuild)) {
       if (prev_target.has_value()) {
         sensor_binding_dirty_.insert(*prev_target);
       }
@@ -615,7 +620,6 @@ class SceneModel final : public SceneManager {
       }
       shape_sensors_dirty_ = true;
     }
-    camera_specs_[spec.id] = std::move(spec);
     reset_progressive_ = true;
   }
 
@@ -627,21 +631,7 @@ class SceneModel final : public SceneManager {
              spec.material_ids.empty() ? "none"
                                        : spec.material_ids[0].GetText());
     absl::MutexLock lock(state_mutex_);
-    auto prev_it = mesh_specs_.find(spec.id);
-    if (prev_it == mesh_specs_.end()) {
-      spec.needs_rebuild = true;
-    } else {
-      spec.needs_rebuild |= prev_it->second.needs_rebuild;
-      if (spec.emitter_spec.has_value() !=
-              prev_it->second.emitter_spec.has_value() ||
-          spec.material_ids != prev_it->second.material_ids) {
-        spec.needs_rebuild = true;
-      }
-      if (!spec.needs_rebuild) {
-        spec.dirty_bits |= prev_it->second.dirty_bits;
-      }
-    }
-    mesh_specs_[spec.id] = std::move(spec);
+    UpsertSpec(mesh_specs_, std::move(spec));
     reset_progressive_ = true;
   }
 
@@ -655,34 +645,14 @@ class SceneModel final : public SceneManager {
   void SyncParticleField(ParticleFieldSpec spec) override {
     TF_DEBUG(HDMITSUBA_SYNC).Msg("SyncParticleField: %s\n", spec.id.GetText());
     absl::MutexLock lock(state_mutex_);
-    auto it = particle_field_specs_.find(spec.id);
-    if (it == particle_field_specs_.end()) {
-      spec.needs_rebuild = true;
-    } else {
-      // Fold in anything the previous spec still had pending, so a second sync
-      // arriving before the next commit cannot drop an update.
-      spec.needs_rebuild |= it->second.needs_rebuild;
-      spec.geometry_dirty |= it->second.geometry_dirty;
-      spec.opacities_dirty |= it->second.opacities_dirty;
-      spec.sh_dirty |= it->second.sh_dirty;
-    }
-    particle_field_specs_[spec.id] = std::move(spec);
+    UpsertSpec(particle_field_specs_, std::move(spec));
     reset_progressive_ = true;
   }
 
   void SyncLight(LightSpec spec) override {
     TF_DEBUG(HDMITSUBA_SYNC).Msg("SyncLight: %s\n", spec.id.GetText());
     absl::MutexLock lock(state_mutex_);
-    auto prev_it = light_specs_.find(spec.id);
-    if (prev_it == light_specs_.end()) {
-      spec.needs_rebuild = true;
-    } else {
-      spec.needs_rebuild |= prev_it->second.needs_rebuild;
-      if (!spec.needs_rebuild) {
-        spec.dirty_bits |= prev_it->second.dirty_bits;
-      }
-    }
-    light_specs_[spec.id] = std::move(spec);
+    UpsertSpec(light_specs_, std::move(spec));
     reset_progressive_ = true;
   }
 

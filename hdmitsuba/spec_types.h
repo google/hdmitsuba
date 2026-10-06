@@ -39,6 +39,13 @@ struct BaseSpec {
   bool needs_rebuild = false;
   HdDirtyBits dirty_bits = 0;
 
+  void FoldPendingFrom(const BaseSpec& prev) {
+    needs_rebuild |= prev.needs_rebuild;
+    if (!needs_rebuild) {
+      dirty_bits |= prev.dirty_bits;
+    }
+  }
+
   void MarkClean() {
     needs_rebuild = false;
     dirty_bits = 0;
@@ -69,6 +76,14 @@ struct MeshSpec : public BaseSpec {
   std::optional<LightSpec> emitter_spec = std::nullopt;
   VtMatrix4dArray instance_transforms;
   bool is_subdivided = false;
+
+  void FoldPendingFrom(const MeshSpec& prev) {
+    if (emitter_spec.has_value() != prev.emitter_spec.has_value() ||
+        material_ids != prev.material_ids) {
+      needs_rebuild = true;
+    }
+    BaseSpec::FoldPendingFrom(prev);
+  }
 };
 
 struct CurveSpec : public BaseSpec {
@@ -96,6 +111,13 @@ struct ParticleFieldSpec : public BaseSpec {
   bool sh_dirty = true;
 
   bool attributes_dirty() const { return opacities_dirty || sh_dirty; }
+
+  void FoldPendingFrom(const ParticleFieldSpec& prev) {
+    needs_rebuild |= prev.needs_rebuild;
+    geometry_dirty |= prev.geometry_dirty;
+    opacities_dirty |= prev.opacities_dirty;
+    sh_dirty |= prev.sh_dirty;
+  }
 
   void MarkClean() {
     BaseSpec::MarkClean();
