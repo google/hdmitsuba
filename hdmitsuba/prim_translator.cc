@@ -83,7 +83,6 @@ namespace dr = drjit;
 namespace {
 
 using ScalarVector3f = mitsuba::Vector<float, 3>;
-using ScalarVector2u = mitsuba::Vector<uint32_t, 2>;
 
 // The helpers below encode material-graph rules that are shared between the
 // texture pre-pass (DiscoverTextures) and the actual material parsers. Keep
@@ -580,20 +579,6 @@ PrimTranslator<Float, Spectrum>::BuildLightProperties(const LightSpec& spec) {
         mitsuba::Properties props("envmap");
         props.set("to_world", to_world);
         props.set("scale", (color[0] + color[1] + color[2]) / 3.f);
-        // If needed, resample to Mitsuba's minimum envmap size.
-        if (bitmap->width() < 2 || bitmap->height() < 3) {
-          uint32_t target_w = std::max(2u, bitmap->width());
-          uint32_t target_h = std::max(3u, bitmap->height());
-          TF_DEBUG(HDMITSUBA_SYNC)
-              .Msg(
-                  "Resampling environment map '%s' from %ux%u to %ux%u due to "
-                  "Mitsuba size limits\n",
-                  spec.texture_file_path.c_str(), bitmap->width(),
-                  bitmap->height(), target_w, target_h);
-          bitmap = bitmap->convert(mitsuba::Bitmap::PixelFormat::RGB,
-                                   mitsuba::struct_type_v<float>, false);
-          bitmap = bitmap->resample(ScalarVector2u(target_w, target_h));
-        }
         props.set("bitmap", mitsuba::ref<mitsuba::Object>(bitmap));
         return props;
       } catch (const std::exception& e) {
