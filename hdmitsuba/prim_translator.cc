@@ -141,14 +141,10 @@ void SetMitsubaPropertyFromValue(mitsuba::Properties& props,
     props.set(name, val.Get<bool>());
   } else if (val.IsHolding<int>()) {
     props.set(name, val.Get<int>());
-  } else if (val.IsHolding<GfMatrix3f>()) {
-    props.set(name, UsdToMitsubaTransform(GfMatrix3d(val.Get<GfMatrix3f>())));
-  } else if (val.IsHolding<GfMatrix3d>()) {
-    props.set(name, UsdToMitsubaTransform(val.Get<GfMatrix3d>()));
-  } else if (val.IsHolding<GfMatrix4f>()) {
-    props.set(name, UsdToMitsubaTransform(GfMatrix4d(val.Get<GfMatrix4f>())));
-  } else if (val.IsHolding<GfMatrix4d>()) {
-    props.set(name, UsdToMitsubaTransform(val.Get<GfMatrix4d>()));
+  } else if (auto t3 = ExtractTransform3f(val)) {
+    props.set(name, *t3);
+  } else if (auto t4 = ExtractTransform4f(val)) {
+    props.set(name, *t4);
   } else if (val.IsHolding<std::string>()) {
     props.set(name, val.Get<std::string>());
   } else if (val.IsHolding<TfToken>()) {

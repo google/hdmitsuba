@@ -96,14 +96,10 @@ bool UseRawBitmap(const TfToken& source_color_space,
 // which is what Properties::get<Transform3f>() would do with them anyway.
 std::optional<TextureKey::UvMatrix> UvMatrixFromValue(const VtValue& val) {
   ScalarAffineTransform3f t;
-  if (val.IsHolding<GfMatrix3f>()) {
-    t = UsdToMitsubaTransform(GfMatrix3d(val.Get<GfMatrix3f>()));
-  } else if (val.IsHolding<GfMatrix3d>()) {
-    t = UsdToMitsubaTransform(val.Get<GfMatrix3d>());
-  } else if (val.IsHolding<GfMatrix4f>()) {
-    t = UsdToMitsubaTransform(GfMatrix4d(val.Get<GfMatrix4f>())).extract();
-  } else if (val.IsHolding<GfMatrix4d>()) {
-    t = UsdToMitsubaTransform(val.Get<GfMatrix4d>()).extract();
+  if (auto t3 = ExtractTransform3f(val)) {
+    t = *t3;
+  } else if (auto t4 = ExtractTransform4f(val)) {
+    t = t4->extract();
   } else {
     return std::nullopt;
   }

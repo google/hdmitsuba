@@ -15,13 +15,16 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 #include <drjit-core/jit.h>
 #include <drjit/matrix.h>
 #include <mitsuba/core/transform.h>
 #include <pxr/base/gf/matrix3d.h>
+#include <pxr/base/gf/matrix3f.h>
 #include <pxr/base/gf/matrix4d.h>
+#include <pxr/base/gf/matrix4f.h>
 #include <pxr/base/tf/diagnostic.h>
 #include <pxr/base/tf/type.h>
 #include <pxr/base/vt/value.h>
@@ -88,6 +91,28 @@ inline ScalarAffineTransform3f UsdToMitsubaTransform(const GfMatrix3d& m) {
   for (int i = 0; i < 3; ++i)
     for (int j = 0; j < 3; ++j) t(i, j) = static_cast<float>(m[j][i]);
   return ScalarAffineTransform3f(t);
+}
+
+inline std::optional<ScalarAffineTransform3f> ExtractTransform3f(
+    const VtValue& val) {
+  if (val.IsHolding<GfMatrix3f>()) {
+    return UsdToMitsubaTransform(GfMatrix3d(val.Get<GfMatrix3f>()));
+  }
+  if (val.IsHolding<GfMatrix3d>()) {
+    return UsdToMitsubaTransform(val.Get<GfMatrix3d>());
+  }
+  return std::nullopt;
+}
+
+inline std::optional<ScalarAffineTransform4f> ExtractTransform4f(
+    const VtValue& val) {
+  if (val.IsHolding<GfMatrix4f>()) {
+    return UsdToMitsubaTransform(GfMatrix4d(val.Get<GfMatrix4f>()));
+  }
+  if (val.IsHolding<GfMatrix4d>()) {
+    return UsdToMitsubaTransform(val.Get<GfMatrix4d>());
+  }
+  return std::nullopt;
 }
 
 // Using Dr.Jit in a multithreaded environment requires explicitly creating
