@@ -244,13 +244,9 @@ class SceneModel final : public SceneManager {
   };
 
   SceneModel() {
-    jit_init(1u << static_cast<uint32_t>(JitBackend::LLVM));
-#if defined(MI_ENABLE_CUDA)
-    jit_init(1u << static_cast<uint32_t>(JitBackend::CUDA));
-#endif
-#if defined(MI_ENABLE_METAL)
-    jit_init(1u << static_cast<uint32_t>(JitBackend::Metal));
-#endif
+    if constexpr (dr::is_jit_v<Float>) {
+      jit_init(1u << static_cast<uint32_t>(dr::backend_v<Float>));
+    }
 
     default_bsdf_ = mitsuba::PluginManager::instance()
                         ->create_object<mitsuba::BSDF<Float, Spectrum>>(
