@@ -60,6 +60,9 @@ class PrimTranslator {
 
   static TranslatedLight BuildLight(const LightSpec& spec);
 
+  static mitsuba::ref<mitsuba::Object> CreateAreaEmitter(
+      const GfVec3f& emission);
+
   static void UpdateLightInPlace(mitsuba::Object* light_obj,
                                  const LightSpec& spec);
 

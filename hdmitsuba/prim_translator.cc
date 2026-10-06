@@ -527,12 +527,29 @@ PrimTranslator<Float, Spectrum>::BuildLight(const LightSpec& spec) {
   return res;
 }
 
+MI_VARIANT mitsuba::ref<mitsuba::Object>
+PrimTranslator<Float, Spectrum>::CreateAreaEmitter(const GfVec3f& emission) {
+  mitsuba::Properties emitter_props("area");
+  emitter_props.set(
+      "radiance",
+      mitsuba::Color<float, 3>(emission[0], emission[1], emission[2]));
+  return mitsuba::PluginManager::instance()->create_object(
+      emitter_props, mitsuba::Emitter<Float, Spectrum>::Variant,
+      mitsuba::Emitter<Float, Spectrum>::Type);
+}
+
 MI_VARIANT mitsuba::Properties
 PrimTranslator<Float, Spectrum>::BuildLightProperties(const LightSpec& spec) {
   const std::string id_str = spec.id.GetAsString();
   ScalarAffineTransform4f to_world = spec.transform;
   mitsuba::Color<float, 3> color(spec.emission[0], spec.emission[1],
                                  spec.emission[2]);
+  auto make_area_shape_props = [&](std::string_view shape_plugin) {
+    mitsuba::Properties props(shape_plugin);
+    props.set("to_world", to_world);
+    props.set("emitter", CreateAreaEmitter(spec.emission));
+    return props;
+  };
 
   if (spec.prim_type == HdPrimTypeTokens->sphereLight) {
     if (spec.treat_as_point) {
@@ -550,16 +567,7 @@ PrimTranslator<Float, Spectrum>::BuildLightProperties(const LightSpec& spec) {
         return point_props;
       }
     } else {
-      mitsuba::Properties sphere_props("sphere");
-      sphere_props.set("to_world", to_world);
-      mitsuba::Properties emitter_props("area");
-      emitter_props.set("radiance", color);
-      mitsuba::ref<mitsuba::Object> area_emitter =
-          mitsuba::PluginManager::instance()->create_object(
-              emitter_props, mitsuba::Emitter<Float, Spectrum>::Variant,
-              mitsuba::Emitter<Float, Spectrum>::Type);
-      sphere_props.set("emitter", area_emitter);
-      return sphere_props;
+      return make_area_shape_props("sphere");
     }
   }
 
@@ -591,29 +599,11 @@ PrimTranslator<Float, Spectrum>::BuildLightProperties(const LightSpec& spec) {
   }
 
   if (spec.prim_type == HdPrimTypeTokens->rectLight) {
-    mitsuba::Properties props("rectangle");
-    mitsuba::Properties emitter_props("area");
-    emitter_props.set("radiance", color);
-    mitsuba::ref<mitsuba::Object> area_emitter =
-        mitsuba::PluginManager::instance()->create_object(
-            emitter_props, mitsuba::Emitter<Float, Spectrum>::Variant,
-            mitsuba::Emitter<Float, Spectrum>::Type);
-    props.set("emitter", area_emitter);
-    props.set("to_world", to_world);
-    return props;
+    return make_area_shape_props("rectangle");
   }
 
   if (spec.prim_type == HdPrimTypeTokens->diskLight) {
-    mitsuba::Properties props("disk");
-    mitsuba::Properties emitter_props("area");
-    emitter_props.set("radiance", color);
-    mitsuba::ref<mitsuba::Object> area_emitter =
-        mitsuba::PluginManager::instance()->create_object(
-            emitter_props, mitsuba::Emitter<Float, Spectrum>::Variant,
-            mitsuba::Emitter<Float, Spectrum>::Type);
-    props.set("emitter", area_emitter);
-    props.set("to_world", to_world);
-    return props;
+    return make_area_shape_props("disk");
   }
 
   mitsuba::Properties props("constant");

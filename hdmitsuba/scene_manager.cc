@@ -1350,14 +1350,8 @@ class SceneModel final : public SceneManager {
       const SdfPath& shape_id) {
     EmitterSensorPair pair;
     if (emitter_spec.has_value()) {
-      const LightSpec& l_spec = emitter_spec.value();
-      mitsuba::Properties emitter_props("area");
-      emitter_props.set("radiance", mitsuba::Color<float, 3>(
-                                        l_spec.emission[0], l_spec.emission[1],
-                                        l_spec.emission[2]));
-      pair.mesh_emitter = mitsuba::PluginManager::instance()->create_object(
-          emitter_props, mitsuba::Emitter<Float, Spectrum>::Variant,
-          mitsuba::Emitter<Float, Spectrum>::Type);
+      pair.mesh_emitter =
+          PrimTranslator::CreateAreaEmitter(emitter_spec->emission);
       pair.emitter_ptr = pair.mesh_emitter.get();
     }
     if (pair.emitter_ptr == nullptr) {
