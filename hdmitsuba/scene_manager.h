@@ -15,7 +15,6 @@
 #pragma once
 
 #include <string>
-#include <unordered_map>
 #include <utility>
 
 #include <absl/base/const_init.h>
@@ -32,7 +31,6 @@
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
 
-#include "hdmitsuba/mesh.h"
 #include "hdmitsuba/spec_types.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -41,9 +39,6 @@ class HdRenderPass;
 
 class SceneManager {
  public:
-  using PrimvarMap = std::unordered_map<TfToken, HdMitsubaMesh::PrimvarState,
-                                        TfToken::HashFunctor>;
-
   SceneManager();
   virtual ~SceneManager();
 

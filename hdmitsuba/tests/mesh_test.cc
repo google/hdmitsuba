@@ -90,7 +90,7 @@ TEST(HdMitsubaMeshTest, ComputeNormalsMatchesMitsuba) {
     face_vertex_counts.push_back(3);
   }
 
-  HdMitsubaMesh::PrimvarMap primvars;
+  PrimvarMap primvars;
   HdPrimvarDescriptor points_descriptor;
   points_descriptor.interpolation = pxr::HdInterpolationVertex;
   points_descriptor.role = HdPrimvarRoleTokens->point;

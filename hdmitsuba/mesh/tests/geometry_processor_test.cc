@@ -29,7 +29,6 @@
 #include <pxr/imaging/pxOsd/tokens.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
-#include "hdmitsuba/mesh.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -37,7 +36,6 @@ namespace {
 
 using pxr::GfVec3f;
 using pxr::HdMeshTopology;
-using pxr::HdMitsubaMesh;
 using pxr::HdPrimvarDescriptor;
 using pxr::HdPrimvarRoleTokens;
 using pxr::HdTokens;
@@ -74,7 +72,7 @@ TEST(GeometryProcessorTest, ExpandPrimData) {
                           pxr::HdTokens->rightHanded, face_vertex_counts,
                           face_vertex_indices);
 
-  HdMitsubaMesh::PrimvarMap primvars;
+  PrimvarMap primvars;
   HdPrimvarDescriptor points_desc;
   points_desc.name = HdTokens->points;
   points_desc.interpolation = pxr::HdInterpolationVertex;
@@ -98,7 +96,7 @@ TEST(GeometryProcessorTest, SplitAndCompactMeshes) {
   VtIntArray triangles = {0, 1, 2, 3, 4, 5};
   VtIntArray primitive_params = {0, 1};
 
-  HdMitsubaMesh::PrimvarMap primvars;
+  PrimvarMap primvars;
   HdPrimvarDescriptor points_desc;
   points_desc.name = HdTokens->points;
   points_desc.interpolation = pxr::HdInterpolationVertex;
@@ -132,7 +130,7 @@ TEST(GeometryProcessorTest, SplitAndCompactMeshes) {
 }
 
 TEST(GeometryProcessorTest, TransformPrimvars) {
-  HdMitsubaMesh::PrimvarMap primvars;
+  PrimvarMap primvars;
   HdPrimvarDescriptor points_desc;
   points_desc.name = HdTokens->points;
   points_desc.role = HdPrimvarRoleTokens->point;
