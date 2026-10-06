@@ -31,8 +31,6 @@ class HdMitsubaParticleField final : public HdRprim {
   explicit HdMitsubaParticleField(const SdfPath& id);
   ~HdMitsubaParticleField() override = default;
 
-  HdDirtyBits GetInitialDirtyBits() const;
-
   TfTokenVector const& GetBuiltinPrimvarNames() const override;
 
   void Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderParam,

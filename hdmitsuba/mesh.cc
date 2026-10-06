@@ -119,12 +119,7 @@ std::optional<LightSpec> GetMeshEmitterSpec(HdSceneDelegate* sceneDelegate,
 
 TF_DEFINE_PUBLIC_TOKENS(HdMitsubaMeshTokens, HDMITSUBA_MESH_TOKENS);
 
-HdMitsubaMesh::HdMitsubaMesh(const SdfPath& id, const SdfPath& /*instancerId*/)
-    : HdMesh(id) {}
-
-HdDirtyBits HdMitsubaMesh::GetInitialDirtyBits() const {
-  return HdChangeTracker::AllDirty;
-}
+HdMitsubaMesh::HdMitsubaMesh(const SdfPath& id) : HdMesh(id) {}
 
 HdDirtyBits HdMitsubaMesh::GetInitialDirtyBitsMask() const {
   return HdChangeTracker::AllDirty;

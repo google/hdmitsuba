@@ -49,11 +49,8 @@ class HdMitsubaMesh final : public HdMesh {
   // Hydra tracks these correctly automatically)
   static constexpr HdDirtyBits DirtyLight = HdChangeTracker::CustomBitsBegin;
 
-  explicit HdMitsubaMesh(const SdfPath& id,
-                         const SdfPath& instancerId = SdfPath());
+  explicit HdMitsubaMesh(const SdfPath& id);
   ~HdMitsubaMesh() override = default;
-
-  HdDirtyBits GetInitialDirtyBits() const;
 
   void Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderParam,
             HdDirtyBits* dirtyBits, const TfToken& reprToken) override;

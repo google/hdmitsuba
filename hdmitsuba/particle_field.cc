@@ -42,10 +42,6 @@ PXR_NAMESPACE_OPEN_SCOPE
 HdMitsubaParticleField::HdMitsubaParticleField(const SdfPath& id)
     : HdRprim(id) {}
 
-HdDirtyBits HdMitsubaParticleField::GetInitialDirtyBits() const {
-  return GetInitialDirtyBitsMask();
-}
-
 HdDirtyBits HdMitsubaParticleField::GetInitialDirtyBitsMask() const {
   return HdChangeTracker::Clean | HdChangeTracker::DirtyPrimvar |
          HdChangeTracker::DirtyTransform | HdChangeTracker::DirtyVisibility;

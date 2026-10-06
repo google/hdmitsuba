@@ -31,8 +31,6 @@ class HdMitsubaCurves final : public HdBasisCurves {
   explicit HdMitsubaCurves(const SdfPath& id);
   ~HdMitsubaCurves() override = default;
 
-  HdDirtyBits GetInitialDirtyBits() const;
-
   void Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderParam,
             HdDirtyBits* dirtyBits, const TfToken& reprToken) override;
 

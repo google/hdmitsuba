@@ -75,10 +75,6 @@ std::vector<float> PackControlPoints(const VtVec3fArray& points,
 
 HdMitsubaCurves::HdMitsubaCurves(const SdfPath& id) : HdBasisCurves(id) {}
 
-HdDirtyBits HdMitsubaCurves::GetInitialDirtyBits() const {
-  return GetInitialDirtyBitsMask();
-}
-
 HdDirtyBits HdMitsubaCurves::GetInitialDirtyBitsMask() const {
   return HdChangeTracker::Clean | HdChangeTracker::DirtyPrimvar |
          HdChangeTracker::DirtyRepr | HdChangeTracker::DirtyTopology |
