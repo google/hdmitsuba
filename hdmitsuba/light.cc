@@ -29,10 +29,8 @@
 #include <pxr/imaging/hd/lightSchema.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
-#include <pxr/imaging/hd/sceneIndex.h>
 #include <pxr/imaging/hd/types.h>
 #include <pxr/imaging/hd/visibilitySchema.h>
-#include <pxr/imaging/hd/xformSchema.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/assetPath.h>
 
@@ -44,56 +42,105 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 namespace {
 
-std::pair<GfMatrix4d, GfVec3f> ComputeLightTransformAndEmission(
-    const TfToken& type_id, const GfMatrix4d& transform,
-    const GfVec3f& base_emission, float radius, float width, float height,
-    bool normalize, bool treat_as_point, float shaping_cone_angle) {
+struct LightParams {
+  GfVec3f color{1.0f};
+  float intensity = 1.0f;
+  float exposure = 0.0f;
+  float radius = 1.0f;
+  float width = 1.0f;
+  float height = 1.0f;
+  bool normalize = false;
+  bool treat_as_point = false;
+  float angle = 0.0f;
+  float shaping_cone_angle = 0.0f;
+  float shaping_cone_softness = 1.0f;
+  std::string texture_file_path;
+
+  GfVec3f BaseEmission() const {
+    return color * intensity * std::exp2(exposure);
+  }
+  float ShapingConeBeamWidth() const {
+    return shaping_cone_angle * (1.0f - shaping_cone_softness);
+  }
+};
+
+LightParams ReadLightParams(const HdContainerDataSourceHandle& container) {
+  static const TfToken treat_as_point_token("treatAsPoint");
+  LightParams p;
+  p.color = GetParam<GfVec3f>(container, HdLightTokens->color, GfVec3f(1.0f));
+  p.intensity = GetParam<float>(container, HdLightTokens->intensity, 1.0f);
+  p.exposure = GetParam<float>(container, HdLightTokens->exposure, 0.0f);
+  p.radius = GetParam<float>(container, HdLightTokens->radius, 1.0f);
+  p.width = GetParam<float>(container, HdLightTokens->width, 1.0f);
+  p.height = GetParam<float>(container, HdLightTokens->height, 1.0f);
+  p.normalize = GetParam<bool>(container, HdLightTokens->normalize, false);
+  p.treat_as_point =
+      GetParam<bool>(container, treat_as_point_token, p.radius == 0.0f);
+  p.angle = GetParam<float>(container, HdLightTokens->angle, 0.0f);
+  p.shaping_cone_angle =
+      GetParam<float>(container, HdLightTokens->shapingConeAngle, 0.0f);
+  p.shaping_cone_softness =
+      GetParam<float>(container, HdLightTokens->shapingConeSoftness, 1.0f);
+  p.texture_file_path =
+      GetParam<SdfAssetPath>(container, HdLightTokens->textureFile)
+          .GetResolvedPath();
+  return p;
+}
+
+ScalarAffineTransform4f ComputeLightTransform(const TfToken& type_id,
+                                              const GfMatrix4d& transform,
+                                              const LightParams& params) {
   GfMatrix4d align_rotation;
   align_rotation.SetRotate(GfRotation(GfVec3d(1, 0, 0), 180.0));
-  GfMatrix4d to_world = transform;
-  GfVec3f emission = base_emission;
   if (type_id == HdPrimTypeTokens->rectLight) {
     GfMatrix4d scale;
-    scale.SetScale(GfVec3d(0.5 * width, 0.5 * height, 1.0));
-    to_world = scale * align_rotation * transform;
-    if (normalize) {
-      GfVec3d w_vec = transform.TransformDir(GfVec3d(width, 0, 0));
-      GfVec3d h_vec = transform.TransformDir(GfVec3d(0, height, 0));
-      double area = GfCross(w_vec, h_vec).GetLength();
-      if (area > 0.0) emission /= area;
-    }
-  } else if (type_id == HdPrimTypeTokens->diskLight) {
-    GfMatrix4d scale;
-    scale.SetScale(GfVec3d(radius, radius, 1.0));
-    to_world = scale * align_rotation * transform;
-    if (normalize) {
-      GfVec3d r_vec = transform.TransformDir(GfVec3d(radius, 0, 0));
-      double area = drjit::Pi<double> * r_vec.GetLengthSq();
-      if (area > 0.0) emission /= area;
-    }
-  } else if (type_id == HdPrimTypeTokens->sphereLight) {
-    if (treat_as_point) {
-      if (shaping_cone_angle != 0.0f) {
-        to_world = align_rotation * transform;
-      }
-      if (normalize) {
-        emission *= 0.25f;  // Match Mitsuba's point light normalization (1/4)
-      }
-    } else {
-      GfMatrix4d scale;
-      scale.SetScale(GfVec3d(radius, radius, radius));
-      to_world = scale * transform;
-      if (normalize) {
-        GfVec3d r_vec = transform.TransformDir(GfVec3d(radius, 0, 0));
-        double area = 4.0 * drjit::Pi<double> * r_vec.GetLengthSq();
-        if (area > 0.0) emission /= area;
-      }
-    }
-  } else if (type_id == HdPrimTypeTokens->distantLight) {
-    to_world = align_rotation * transform;
+    scale.SetScale(GfVec3d(0.5 * params.width, 0.5 * params.height, 1.0));
+    return UsdToMitsubaTransform(scale * align_rotation * transform);
   }
+  if (type_id == HdPrimTypeTokens->diskLight) {
+    GfMatrix4d scale;
+    scale.SetScale(GfVec3d(params.radius, params.radius, 1.0));
+    return UsdToMitsubaTransform(scale * align_rotation * transform);
+  }
+  if (type_id == HdPrimTypeTokens->sphereLight && !params.treat_as_point) {
+    GfMatrix4d scale;
+    scale.SetScale(GfVec3d(params.radius, params.radius, params.radius));
+    return UsdToMitsubaTransform(scale * transform);
+  }
+  if ((type_id == HdPrimTypeTokens->sphereLight &&
+       params.shaping_cone_angle != 0.0f) ||
+      type_id == HdPrimTypeTokens->distantLight) {
+    return UsdToMitsubaTransform(align_rotation * transform);
+  }
+  return UsdToMitsubaTransform(transform);
+}
 
-  return {to_world, emission};
+GfVec3f ComputeLightEmission(const TfToken& type_id,
+                             const GfMatrix4d& transform,
+                             const LightParams& params) {
+  GfVec3f emission = params.BaseEmission();
+  if (!params.normalize) {
+    return emission;
+  }
+  if (type_id == HdPrimTypeTokens->rectLight) {
+    GfVec3d w_vec = transform.TransformDir(GfVec3d(params.width, 0, 0));
+    GfVec3d h_vec = transform.TransformDir(GfVec3d(0, params.height, 0));
+    double area = GfCross(w_vec, h_vec).GetLength();
+    if (area > 0.0) emission /= area;
+  } else if (type_id == HdPrimTypeTokens->diskLight) {
+    GfVec3d r_vec = transform.TransformDir(GfVec3d(params.radius, 0, 0));
+    double area = drjit::Pi<double> * r_vec.GetLengthSq();
+    if (area > 0.0) emission /= area;
+  } else if (type_id == HdPrimTypeTokens->sphereLight) {
+    if (params.treat_as_point) {
+      emission *= 0.25f;  // Match Mitsuba's point light normalization (1/4)
+    } else {
+      GfVec3d r_vec = transform.TransformDir(GfVec3d(params.radius, 0, 0));
+      double area = 4.0 * drjit::Pi<double> * r_vec.GetLengthSq();
+      if (area > 0.0) emission /= area;
+    }
+  }
+  return emission;
 }
 
 }  // namespace
@@ -112,17 +159,12 @@ void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
   HdContainerDataSourceHandle data_source =
       GetPrimDataSource(sceneDelegate, id);
 
-  // 1. Visibility
   if (!GetPrimVisible(data_source)) {
     RemoveFromScene(scene);
     *dirtyBits = HdChangeTracker::Clean;
     return;
   }
 
-  // 2. Transform
-  const GfMatrix4d transform = GetPrimTransform(data_source);
-
-  // 3. Light Parameters
   HdLightSchema light_schema = HdLightSchema::GetFromParent(data_source);
   HdContainerDataSourceHandle light_container =
       light_schema.IsDefined() ? light_schema.GetContainer() : nullptr;
@@ -134,69 +176,26 @@ void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
     return;
   }
 
-  GfVec3f color =
-      GetParam<GfVec3f>(light_container, HdLightTokens->color, GfVec3f(1.0f));
-  float intensity =
-      GetParam<float>(light_container, HdLightTokens->intensity, 1.0f);
-  float exposure =
-      GetParam<float>(light_container, HdLightTokens->exposure, 0.0f);
-  float radius = GetParam<float>(light_container, HdLightTokens->radius, 1.0f);
-  float width = GetParam<float>(light_container, HdLightTokens->width, 1.0f);
-  float height = GetParam<float>(light_container, HdLightTokens->height, 1.0f);
-  bool normalize =
-      GetParam<bool>(light_container, HdLightTokens->normalize, false);
+  const GfMatrix4d transform = GetPrimTransform(data_source);
+  const LightParams params = ReadLightParams(light_container);
 
-  static const TfToken treat_as_point_token("treatAsPoint");
-  bool treat_as_point =
-      GetParam<bool>(light_container, treat_as_point_token, radius == 0.0f);
-
-  float angle = GetParam<float>(light_container, HdLightTokens->angle, 0.0f);
-  float shaping_cone_angle =
-      GetParam<float>(light_container, HdLightTokens->shapingConeAngle, 0.0f);
-  float shaping_cone_softness = GetParam<float>(
-      light_container, HdLightTokens->shapingConeSoftness, 1.0f);
-
-  std::string texture_file_path =
-      GetParam<SdfAssetPath>(light_container, HdLightTokens->textureFile)
-          .GetResolvedPath();
-
-  float shaping_cone_beam_width =
-      shaping_cone_angle * (1.0f - shaping_cone_softness);
-
-  // 2. Calculate base emission (color * intensity * exp2(exposure))
-  GfVec3f base_emission = color * intensity * std::exp2(exposure);
-
-  // 3. Calculate final to_world transform and normalized emission
-  auto [to_world, emission] = ComputeLightTransformAndEmission(
-      type_id_, transform, base_emission, radius, width, height, normalize,
-      treat_as_point, shaping_cone_angle);
-
-  // 4. Populate LightSpec
   LightSpec spec;
   spec.id = id;
   spec.prim_type = type_id_;
-  spec.transform = UsdToMitsubaTransform(to_world);
-  spec.emission = emission;
-  spec.angle = angle;
-  spec.shaping_cone_angle = shaping_cone_angle;
-  spec.shaping_cone_beam_width = shaping_cone_beam_width;
-  spec.treat_as_point = treat_as_point;
-  spec.texture_file_path = texture_file_path;
+  spec.transform = ComputeLightTransform(type_id_, transform, params);
+  spec.emission = ComputeLightEmission(type_id_, transform, params);
+  spec.angle = params.angle;
+  spec.shaping_cone_angle = params.shaping_cone_angle;
+  spec.shaping_cone_beam_width = params.ShapingConeBeamWidth();
+  spec.treat_as_point = params.treat_as_point;
+  spec.texture_file_path = params.texture_file_path;
 
-  // 5. Determine if rebuild is needed using a clean declarative check
-  bool needs_rebuild =
-      !is_instantiated_ || (treat_as_point != treat_as_point_) ||
-      ((angle_ > 0.0f) != (angle > 0.0f)) ||
-      ((shaping_cone_angle_ != 0.0f) != (shaping_cone_angle != 0.0f)) ||
-      (texture_file_path != texture_file_path_);
+  const RebuildKey rebuild_key{
+      params.treat_as_point, params.angle > 0.0f,
+      params.shaping_cone_angle != 0.0f, params.texture_file_path};
+  spec.needs_rebuild = rebuild_key_ != rebuild_key;
+  rebuild_key_ = rebuild_key;
 
-  is_instantiated_ = true;
-  treat_as_point_ = treat_as_point;
-  angle_ = angle;
-  shaping_cone_angle_ = shaping_cone_angle;
-  texture_file_path_ = texture_file_path;
-
-  spec.needs_rebuild = needs_rebuild;
   spec.dirty_bits = *dirtyBits;
 
   scene->SyncLight(std::move(spec));
@@ -213,7 +212,7 @@ void HdMitsubaLight::Finalize(HdRenderParam* renderParam) {
 
 void HdMitsubaLight::RemoveFromScene(SceneManager* scene) {
   scene->RemoveLight(GetId());
-  is_instantiated_ = false;
+  rebuild_key_.reset();
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

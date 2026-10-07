@@ -14,7 +14,9 @@
 
 #pragma once
 
+#include <optional>
 #include <string>
+#include <tuple>
 
 #include <pxr/base/tf/token.h>
 #include <pxr/imaging/hd/light.h>
@@ -42,12 +44,25 @@ class HdMitsubaLight final : public HdLight {
  private:
   void RemoveFromScene(SceneManager* scene);
 
+  // Properties that determine the Mitsuba plugin type, whose changes require
+  // rebuilding the light object rather than updating it in place.
+  struct RebuildKey {
+    bool treat_as_point = false;
+    bool has_positive_angle = false;
+    bool is_spot = false;
+    std::string texture_file_path;
+
+    bool operator==(const RebuildKey& o) const {
+      return std::tie(treat_as_point, has_positive_angle, is_spot,
+                      texture_file_path) ==
+             std::tie(o.treat_as_point, o.has_positive_angle, o.is_spot,
+                      o.texture_file_path);
+    }
+    bool operator!=(const RebuildKey& o) const { return !(*this == o); }
+  };
+
   TfToken type_id_;
-  bool is_instantiated_ = false;
-  bool treat_as_point_ = false;
-  float angle_ = 0.0f;
-  float shaping_cone_angle_ = 0.0f;
-  std::string texture_file_path_;
+  std::optional<RebuildKey> rebuild_key_;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE
