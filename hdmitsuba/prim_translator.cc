@@ -650,7 +650,10 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateLightInPlace(
         cb.set<Float>("cutoff_angle", spec.shaping_cone_angle);
       }
     } else if (spec.prim_type == HdPrimTypeTokens->domeLight) {
-      if (!spec.texture_file_path.empty()) {
+      // A domeLight with a missing/corrupt texture falls back to a "constant"
+      // emitter in BuildLightProperties, which has "radiance.value" rather than
+      // "scale" and "to_world".
+      if (cb.data.contains("scale")) {
         cb.set<AffineTransform4f>("to_world",
                                   AffineTransform4f(to_world.matrix));
         cb.set<Float>("scale", (color[0] + color[1] + color[2]) / 3.f);
