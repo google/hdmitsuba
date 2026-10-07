@@ -107,12 +107,18 @@ ScalarAffineTransform4f ComputeLightTransform(const TfToken& type_id,
     scale.SetScale(GfVec3d(params.radius, params.radius, params.radius));
     return UsdToMitsubaTransform(scale * transform);
   }
+  // Non-area emitters (point, spot, directional, envmap) do not support scale
+  // or shear.
+  ScalarAffineTransform4f to_world =
+      RemoveScaleFromTransform(UsdToMitsubaTransform(transform));
   if ((type_id == HdPrimTypeTokens->sphereLight &&
        params.shaping_cone_angle != 0.0f) ||
       type_id == HdPrimTypeTokens->distantLight) {
-    return UsdToMitsubaTransform(align_rotation * transform);
+    using ScalarVector3f = mitsuba::Vector<float, 3>;
+    to_world = to_world *
+               ScalarAffineTransform4f::rotate(ScalarVector3f(1, 0, 0), 180);
   }
-  return UsdToMitsubaTransform(transform);
+  return to_world;
 }
 
 GfVec3f ComputeLightEmission(const TfToken& type_id,

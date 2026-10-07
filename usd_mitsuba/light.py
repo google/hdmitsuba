@@ -61,6 +61,34 @@ def _convert_dome_light(
     }
 
 
+def _is_point_light(
+    sphere_light: UsdLux.SphereLight, time: Usd.TimeCode
+) -> bool:
+  return (
+      sphere_light.GetTreatAsPointAttr().Get(time)
+      or sphere_light.GetRadiusAttr().Get(time) == 0
+  )
+
+
+def _is_area_light(prim: Usd.Prim, time: Usd.TimeCode) -> bool:
+  """Returns whether the light `prim` is converted to a Mitsuba shape.
+
+  Mirrors `LightSpec::IsAreaLight` in hdmitsuba/spec_types.h.
+
+  Args:
+    prim: The USD light prim.
+    time: The time code to evaluate at.
+
+  Returns:
+    True if the light is converted to a shape with an area emitter.
+  """
+  if prim.IsA(UsdLux.RectLight) or prim.IsA(UsdLux.DiskLight):
+    return True
+  return prim.IsA(UsdLux.SphereLight) and not _is_point_light(
+      UsdLux.SphereLight(prim), time
+  )
+
+
 def _convert_sphere_light(
     prim: Usd.Prim,
     world_transform: mi.ScalarTransform4f,
@@ -72,7 +100,7 @@ def _convert_sphere_light(
   sphere_light = UsdLux.SphereLight(prim)
   normalize = sphere_light.GetNormalizeAttr().Get(time)
   radius = sphere_light.GetRadiusAttr().Get(time)
-  if sphere_light.GetTreatAsPointAttr().Get(time) or radius == 0:
+  if _is_point_light(sphere_light, time):
     if normalize:
       color *= 0.25
     emitter_dict = {
@@ -209,6 +237,10 @@ def convert_light(
   """
   _check_ies_profile(prim, time)
   world_transform = util.get_world_transform(prim, time)
+  # Non-area emitters (point, spot, directional, envmap) do not support scale
+  # or shear.
+  if not _is_area_light(prim, time):
+    world_transform = util.remove_scale_from_transform(world_transform)
 
   usd_light = (
       UsdLux.BoundableLightBase(prim)
