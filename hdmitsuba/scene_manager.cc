@@ -148,8 +148,8 @@ void SetTransform(
 // `UpdateMeshInPlace`:
 //   1. Computes smooth vertex normals if missing and needed by subdivision or
 //      displacement.
-//   2. Applies per-material displacement textures (`displacement_textures[i]` corresponds
-//      to `spec.material_ids[i]`) in object space via `ApplyDisplacement`.
+//   2. Applies per-material displacements (`displacements[i]` corresponds to
+//      `spec.material_ids[i]`) in object space via `ApplyDisplacement`.
 //   3. Transforms points and normals by `spec.transform`, then recomputes smooth
 //      vertex normals if any displacement occurred.
 //   4. Expands face-varying/uniform primvars into vertex-indexed buffers,
@@ -158,14 +158,13 @@ void SetTransform(
 template <typename Float, typename Spectrum>
 std::vector<SubMeshOutput> RunGeometryPipeline(
     const MeshSpec& spec,
-    const std::vector<const mitsuba::Texture<Float, Spectrum>*>&
-        displacement_textures) {
+    const std::vector<MaterialDisplacement>& displacements) {
   TRACE_FUNCTION();
   PrimvarMap final_primvars = spec.primvars;
   if (final_primvars.find(HdTokens->normals) == final_primvars.end()) {
     bool has_displacement = false;
-    for (const auto* tex : displacement_textures) {
-      if (tex != nullptr) {
+    for (const auto& displacement : displacements) {
+      if (displacement.texture) {
         has_displacement = true;
         break;
       }
@@ -177,7 +176,7 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
   }
   bool displaced = false;
   for (size_t i = 0; i < spec.material_ids.size(); ++i) {
-    if (displacement_textures[i]) {
+    if (displacements[i].texture) {
       VtIntArray material_vertex_indices;
       VtIntArray material_face_counts;
       std::vector<int> global_face_indices;
@@ -199,10 +198,10 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
         corner_index += vertex_count;
       }
       if (!material_vertex_indices.empty()) {
-        ApplyDisplacement(spec.id, displacement_textures[i],
-                          material_vertex_indices, material_face_counts,
-                          global_face_indices, global_corner_indices,
-                          final_primvars);
+        ApplyDisplacement<Float, Spectrum>(
+            spec.id, displacements[i], material_vertex_indices,
+            material_face_counts, global_face_indices, global_corner_indices,
+            final_primvars);
         displaced = true;
       }
     }
@@ -241,7 +240,7 @@ class SceneModel final : public SceneManager {
 
   struct MeshCommitWork {
     const MeshSpec* spec;
-    std::vector<const Texture*> displacement_textures;
+    std::vector<MaterialDisplacement> displacements;
   };
 
   SceneModel() {
@@ -427,7 +426,7 @@ class SceneModel final : public SceneManager {
     material_specs_.erase(id);
     bsdfs_.erase(id_str);
     uint32_t dirty_flags = DirtyFlags::kMaterialUpdated;
-    if (displacement_textures_.erase(id_str) > 0) {
+    if (displacements_.erase(id_str) > 0) {
       dirty_flags |= DirtyFlags::kNeedsStructureRebuild;
     }
     if (material_emitters_.erase(id_str) > 0) {
@@ -806,9 +805,8 @@ class SceneModel final : public SceneManager {
     kMaterialUpdated = 1 << 1
   };
 
-  uint32_t UpdateMaterialStructure(
-      absl::string_view id_str,
-      typename PrimTranslator::TranslatedMaterial& trans) {
+  uint32_t UpdateMaterialStructure(absl::string_view id_str,
+                                   TranslatedMaterial& trans) {
     uint32_t dirty_flags = 0;
     auto update = [&](auto& map, auto* val) {
       if (val) {
@@ -821,9 +819,8 @@ class SceneModel final : public SceneManager {
         dirty_flags |= DirtyFlags::kNeedsStructureRebuild;
       }
     };
-    ref<Texture> disp_tex(
-        static_cast<Texture*>(trans.displacement_texture.get()));
-    update(displacement_textures_, disp_tex ? &disp_tex : nullptr);
+    update(displacements_,
+           trans.displacement.texture ? &trans.displacement : nullptr);
     update(material_emitters_,
            trans.shape_emitter_props ? &*trans.shape_emitter_props : nullptr);
     update(mesh_attributes_,
@@ -912,15 +909,12 @@ class SceneModel final : public SceneManager {
       PreloadTextures(pending_specs);
     }
 
-    ParallelCommit<decltype(material_specs_),
-                   typename PrimTranslator::TranslatedMaterial>(
+    ParallelCommit<decltype(material_specs_), TranslatedMaterial>(
         material_specs_,
-        [&](MaterialSpec* spec,
-            typename PrimTranslator::TranslatedMaterial& res) {
+        [&](MaterialSpec* spec, TranslatedMaterial& res) {
           res = PrimTranslator::BuildMaterial(*spec, texture_cache_);
         },
-        [&](MaterialSpec* spec,
-            typename PrimTranslator::TranslatedMaterial& trans) {
+        [&](MaterialSpec* spec, TranslatedMaterial& trans) {
           std::string id_str = spec->id.GetAsString();
           if (trans.bsdf) {
             bsdfs_[id_str] = dynamic_cast<BSDF*>(trans.bsdf.get());
@@ -1069,7 +1063,8 @@ class SceneModel final : public SceneManager {
 
   void CommitNonInstancedMeshWork(MeshCommitWork* work, CommittedMesh& res) {
     const auto& spec = *(work->spec);
-    auto sub_meshes = RunGeometryPipeline(spec, work->displacement_textures);
+    auto sub_meshes =
+        RunGeometryPipeline<Float, Spectrum>(spec, work->displacements);
     if (spec.needs_rebuild) {
       res.meshes.reserve(sub_meshes.size());
       for (const auto& sub_mesh : sub_meshes) {
@@ -1108,7 +1103,8 @@ class SceneModel final : public SceneManager {
       }
 
       // Run geometry pipeline
-      auto sub_meshes = RunGeometryPipeline(spec, work->displacement_textures);
+      auto sub_meshes =
+          RunGeometryPipeline<Float, Spectrum>(spec, work->displacements);
       if (sub_meshes.empty()) return;
 
       // 1. Build prototype meshes
@@ -1151,7 +1147,8 @@ class SceneModel final : public SceneManager {
       }
     } else {
       // Update in place
-      auto sub_meshes = RunGeometryPipeline(spec, work->displacement_textures);
+      auto sub_meshes =
+          RunGeometryPipeline<Float, Spectrum>(spec, work->displacements);
       UpdateSubMeshesInPlace(spec, sub_meshes, kProtoPrefix);
       if (spec.dirty_bits & (HdChangeTracker::DirtyInstancer |
                              HdChangeTracker::DirtyInstanceIndex)) {
@@ -1217,14 +1214,13 @@ class SceneModel final : public SceneManager {
     for (size_t i = 0; i < pending_specs.size(); ++i) {
       const MeshSpec* spec = pending_specs[i];
       work_items[i].spec = spec;
-      work_items[i].displacement_textures.reserve(spec->material_ids.size());
+      work_items[i].displacements.reserve(spec->material_ids.size());
       for (const auto& material_id : spec->material_ids) {
-        auto texture_it =
-            displacement_textures_.find(material_id.GetAsString());
-        if (texture_it != displacement_textures_.end()) {
-          work_items[i].displacement_textures.push_back(texture_it->second);
+        auto disp_it = displacements_.find(material_id.GetAsString());
+        if (disp_it != displacements_.end()) {
+          work_items[i].displacements.push_back(disp_it->second);
         } else {
-          work_items[i].displacement_textures.push_back(nullptr);
+          work_items[i].displacements.emplace_back();
         }
       }
     }
@@ -1478,7 +1474,7 @@ class SceneModel final : public SceneManager {
   absl::flat_hash_map<std::string, ref<Shape>> shapes_;
   absl::flat_hash_map<std::string, ref<Emitter>> emitters_;
   absl::flat_hash_map<std::string, ref<BSDF>> bsdfs_;
-  absl::flat_hash_map<std::string, ref<Texture>> displacement_textures_;
+  absl::flat_hash_map<std::string, MaterialDisplacement> displacements_;
   absl::flat_hash_map<std::string, mitsuba::Properties> material_emitters_;
   absl::flat_hash_map<std::string, MeshAttributeRequests> mesh_attributes_;
   ref<BSDF> default_bsdf_ = nullptr;

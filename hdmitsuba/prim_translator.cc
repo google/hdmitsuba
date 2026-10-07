@@ -110,17 +110,16 @@ bool IsScalarOnlyPrincipledInput(const TfToken& input_name) {
          input_name == TfToken("eta");
 }
 
-// Returns the upstream node of the displacement terminal, preferring the
-// Mitsuba-specific `mitsuba:displacement` output over the generic one.
-SdfPath FindDisplacementNode(const HdMaterialNetwork2& network) {
+}  // namespace
+
+SdfPath FindDisplacementTerminal(const HdMaterialNetwork2& network) {
+  // An empty `mitsuba:displacement` terminal does not shadow `displacement`.
   auto it = network.terminals.find(TfToken("mitsuba:displacement"));
-  if (it == network.terminals.end()) {
+  if (it == network.terminals.end() || it->second.upstreamNode.IsEmpty()) {
     it = network.terminals.find(HdMaterialTerminalTokens->displacement);
   }
-  return it == network.terminals.end() ? SdfPath() : it->second.upstreamNode;
+  return it != network.terminals.end() ? it->second.upstreamNode : SdfPath();
 }
-
-}  // namespace
 
 std::string MeshAttributeName(std::string_view primvar, int channels) {
   return absl::StrCat(kVertexAttributePrefix,
@@ -202,7 +201,8 @@ void DiscoverTextures(
         }
       };
 
-  if (SdfPath disp_node = FindDisplacementNode(network); !disp_node.IsEmpty()) {
+  if (SdfPath disp_node = FindDisplacementTerminal(network);
+      !disp_node.IsEmpty()) {
     visit(disp_node, HdMaterialTerminalTokens->displacement);
   }
   auto surf_it = network.terminals.find(HdMaterialTerminalTokens->surface);
@@ -363,7 +363,7 @@ PrimTranslator<Float, Spectrum>::DefaultBsdf(std::string_view id_str) {
   return bsdf;
 }
 
-MI_VARIANT typename PrimTranslator<Float, Spectrum>::TranslatedMaterial
+MI_VARIANT TranslatedMaterial
 PrimTranslator<Float, Spectrum>::ParsePreviewSurface(
     const HdMaterialNetwork2& network2,
     const HdMaterialNode2& preview_surface_node,
@@ -465,7 +465,7 @@ PrimTranslator<Float, Spectrum>::ParsePreviewSurface(
   return res;
 }
 
-MI_VARIANT typename PrimTranslator<Float, Spectrum>::TranslatedMaterial
+MI_VARIANT TranslatedMaterial
 PrimTranslator<Float, Spectrum>::BuildMaterial(
     const MaterialSpec& spec,
     const TextureCache<Float, Spectrum>& texture_cache) {
@@ -473,11 +473,11 @@ PrimTranslator<Float, Spectrum>::BuildMaterial(
   const HdMaterialNetwork2& network2 = spec.network2;
   const std::string id_str = spec.id.GetAsString();
 
-  if (SdfPath disp_node = FindDisplacementNode(network2);
+  if (SdfPath disp_node = FindDisplacementTerminal(network2);
       !disp_node.IsEmpty()) {
     absl::flat_hash_map<SdfPath, mitsuba::ref<mitsuba::Object>, SdfPath::Hash>
         cache;
-    res.displacement_texture = ParseNodeRecursive<Float, Spectrum>(
+    res.displacement.texture = ParseNodeRecursive<Float, Spectrum>(
         disp_node, network2, cache, HdMaterialTerminalTokens->displacement,
         texture_cache);
   }
@@ -499,7 +499,7 @@ PrimTranslator<Float, Spectrum>::BuildMaterial(
     auto preview_res =
         ParsePreviewSurface(network2, surface_node, texture_cache);
     preview_res.bsdf->set_id(id_str);
-    preview_res.displacement_texture = res.displacement_texture;
+    preview_res.displacement = res.displacement;
     return preview_res;
   } else {
     absl::flat_hash_map<SdfPath, mitsuba::ref<mitsuba::Object>, SdfPath::Hash>

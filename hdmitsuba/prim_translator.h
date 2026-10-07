@@ -57,17 +57,42 @@ void DiscoverTextures(
     const HdMaterialNetwork2& network,
     const std::function<void(const TextureKey& tex_key)>& callback);
 
+// Returns the upstream node path of the network's displacement terminal
+// (`mitsuba:displacement` or `displacement`), or an empty path if none exists.
+SdfPath FindDisplacementTerminal(const HdMaterialNetwork2& network);
+
+// Displacement texture of a material.
+struct MaterialDisplacement {
+  mitsuba::ref<mitsuba::Object> texture = nullptr;
+  // Scalar bias subtracted from 1D displacement values before scaling by the
+  // surface normal (0.5 for [0, 1]-centered maps, 0.0 for signed displacement).
+  float bias = 0.5f;
+  // Whether evaluating `texture` requires UV coordinates ("st") on the mesh.
+  bool requires_uv = true;
+  // Whether `texture` returns a 3D vector displacement in
+  // (dPdu, dPdv, N) tangent space, instead of a scalar along the normal.
+  bool is_vector = false;
+
+  bool operator==(const MaterialDisplacement& other) const {
+    return texture == other.texture && bias == other.bias &&
+           requires_uv == other.requires_uv && is_vector == other.is_vector;
+  }
+  bool operator!=(const MaterialDisplacement& other) const {
+    return !(*this == other);
+  }
+};
+
+struct TranslatedMaterial {
+  mitsuba::ref<mitsuba::Object> bsdf = nullptr;
+  std::optional<mitsuba::Properties> shape_emitter_props = std::nullopt;
+  MaterialDisplacement displacement;
+  // Primvars that the BSDF and shape emitter read as mesh attributes.
+  MeshAttributeRequests mesh_attributes;
+};
+
 MI_VARIANT
 class PrimTranslator {
  public:
-  struct TranslatedMaterial {
-    mitsuba::ref<mitsuba::Object> bsdf = nullptr;
-    std::optional<mitsuba::Properties> shape_emitter_props = std::nullopt;
-    mitsuba::ref<mitsuba::Object> displacement_texture = nullptr;
-    // Primvars that the BSDF and shape emitter read as mesh attributes.
-    MeshAttributeRequests mesh_attributes;
-  };
-
   static TranslatedMaterial BuildMaterial(
       const MaterialSpec& spec,
       const TextureCache<Float, Spectrum>& texture_cache);
