@@ -51,12 +51,17 @@ struct TextureKey {
   std::string format = "auto";
   bool accel = true;
   UvMatrix to_uv = kIdentityUv;
+  // Mitsuba's `bitmap` texture plugin only stores 1 or 3 channels and strips
+  // the alpha channel when expanding RGBA/YA bitmaps. When true, the image's
+  // alpha channel is extracted into a separate single-channel texture; images
+  // without alpha yield no texture.
+  bool alpha_channel = false;
 
  private:
   // Single source of truth for equality and hashing. Add new fields here.
   auto Fields() const {
     return std::tie(filename, raw, wrap_mode, filter_type, max_anisotropy,
-                    format, accel, to_uv);
+                    format, accel, to_uv, alpha_channel);
   }
 
  public:

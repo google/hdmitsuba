@@ -16,6 +16,7 @@
 
 #include <utility>
 
+#include <pxr/base/tf/token.h>
 #include <pxr/base/vt/value.h>
 #include <pxr/imaging/hd/changeTracker.h>
 #include <pxr/imaging/hd/material.h>
@@ -29,6 +30,7 @@
 #include <pxr/imaging/hd/sceneIndex.h>
 #include <pxr/imaging/hd/types.h>
 #include <pxr/pxr.h>
+#include <pxr/usd/sdf/path.h>
 
 #include "hdmitsuba/debug_codes.h"
 #include "hdmitsuba/render_param.h"
@@ -62,6 +64,11 @@ void ConvertMaterialNetwork(const HdMaterialNetworkSchema& network_schema,
         if (auto param_schema = params_schema.Get(param_name)) {
           if (auto val_ds = param_schema.GetValue()) {
             node.parameters[param_name] = val_ds->GetValue(0.0f);
+          }
+          if (auto cs_ds = param_schema.GetColorSpace()) {
+            node.parameters[TfToken(SdfPath::JoinIdentifier(
+                HdMaterialNodeParameterSchemaTokens->colorSpace, param_name))] =
+                cs_ds->GetValue(0.0f);
           }
         }
       }

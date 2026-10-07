@@ -39,6 +39,7 @@ add_library(hdMitsuba SHARED
   traversal.cc
   prim_translator.cc
   texture_cache.cc
+  utils.cc
 )
 
 target_include_directories(hdMitsuba PUBLIC

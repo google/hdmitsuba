@@ -17,10 +17,13 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include <drjit-core/jit.h>
 #include <drjit/matrix.h>
 #include <drjit/transform.h>
+#include <mitsuba/core/object.h>
+#include <mitsuba/core/properties.h>
 #include <mitsuba/core/transform.h>
 #include <pxr/base/gf/matrix3d.h>
 #include <pxr/base/gf/matrix3f.h>
@@ -162,6 +165,17 @@ inline std::optional<ScalarAffineTransform4f> ExtractTransform4f(
   }
   return std::nullopt;
 }
+
+// Returns the resolved path of an `SdfAssetPath` value (or its asset path if
+// it is unresolved), or an empty string otherwise.
+std::string ResolvePathFromValue(const VtValue& value);
+
+// Creates the Mitsuba object of type `type` described by `props`, and returns
+// the first object of its expansion (e.g. the texture that a `bitmap` plugin
+// expands to), or the object itself if it does not expand.
+mitsuba::ref<mitsuba::Object> CreateExpandedObject(
+    const mitsuba::Properties& props, std::string_view variant,
+    mitsuba::ObjectType type);
 
 // Using Dr.Jit in a multithreaded environment requires explicitly creating
 // JIT scopes on each thread. This RAII struct should be used in code blocks

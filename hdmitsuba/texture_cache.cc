@@ -14,9 +14,11 @@
 
 #include "hdmitsuba/texture_cache.h"
 
+#include <cstring>
 #include <exception>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -24,6 +26,7 @@
 #include <absl/base/no_destructor.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
+#include <absl/strings/match.h>
 #include <drjit-core/jit.h>
 #include <drjit/matrix.h>
 #include <mitsuba/core/config.h>
@@ -50,17 +53,6 @@ PXR_NAMESPACE_OPEN_SCOPE
 namespace dr = drjit;
 
 namespace {
-
-std::string ResolvePathFromValue(const VtValue& value) {
-  if (value.IsHolding<SdfAssetPath>()) {
-    const auto& asset_path = value.Get<SdfAssetPath>();
-    const std::string& resolved = asset_path.GetResolvedPath();
-    return resolved.empty() ? asset_path.GetAssetPath() : resolved;
-  } else if (value.IsHolding<std::string>()) {
-    return value.Get<std::string>();
-  }
-  return {};
-}
 
 // Converts the source color space to the Mitsuba Bitmap's `raw` flag.
 // Non-color inputs are classified based on the UsdPreviewSurface's
@@ -112,6 +104,54 @@ std::optional<TextureKey::UvMatrix> UvMatrixFromValue(const VtValue& val) {
 ScalarAffineTransform3f UvMatrixToTransform(const TextureKey::UvMatrix& m) {
   return ScalarAffineTransform3f(
       dr::Matrix<float, 3>(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]));
+}
+
+mitsuba::ref<mitsuba::Object> CreateBitmapTexture(const TextureKey& key,
+                                                  const mitsuba::Bitmap& bitmap,
+                                                  std::string_view variant) {
+  mitsuba::ref<mitsuba::Bitmap> view;
+  if (key.alpha_channel) {
+    if (!bitmap.has_alpha()) return nullptr;
+    // Alpha is stored linearly and is the last channel.
+    view = new mitsuba::Bitmap(mitsuba::Bitmap::PixelFormat::Y,
+                               bitmap.component_format(), bitmap.size());
+    view->set_srgb_gamma(false);
+    const size_t bpp = bitmap.bytes_per_pixel();
+    const size_t ch_bytes = bpp / bitmap.channel_count();
+    const uint8_t* src = bitmap.uint8_data();
+    uint8_t* dst = view->uint8_data();
+    for (size_t i = 0, n = view->pixel_count(); i < n; ++i) {
+      std::memcpy(dst + i * ch_bytes, src + (i + 1) * bpp - ch_bytes, ch_bytes);
+    }
+  } else {
+    // Wrap the decoded pixel buffer in a non-owning Bitmap header view so
+    // BitmapTexture::load_bitmap() can safely mutate srgb_gamma in-place
+    // (when raw == true) without copying pixel memory or racing across
+    // threads that share the same source Bitmap.
+    //
+    // Lifetime: the expanded texture copies the pixels into its own tensor
+    // (either via Bitmap::convert() or the TensorXf constructor) and the
+    // un-expanded BitmapTexture holding `view` is dropped below, so neither
+    // `view` nor `bitmap` needs to outlive this function.
+    view = new mitsuba::Bitmap(bitmap.pixel_format(), bitmap.component_format(),
+                               bitmap.size(), bitmap.channel_count(), {},
+                               const_cast<uint8_t*>(bitmap.uint8_data()));
+    view->set_srgb_gamma(bitmap.srgb_gamma());
+    view->set_premultiplied_alpha(bitmap.premultiplied_alpha());
+  }
+
+  mitsuba::Properties props("bitmap");
+  props.set("bitmap", mitsuba::ref<mitsuba::Object>(view.get()));
+  props.set("raw", key.raw);
+  props.set("wrap_mode", key.wrap_mode);
+  props.set("filter_type", key.filter_type);
+  props.set("max_anisotropy", key.max_anisotropy);
+  props.set("format", key.format);
+  props.set("accel", key.accel);
+  if (key.to_uv != TextureKey::kIdentityUv) {
+    props.set("to_uv", UvMatrixToTransform(key.to_uv));
+  }
+  return CreateExpandedObject(props, variant, mitsuba::ObjectType::Texture);
 }
 
 }  // namespace
@@ -176,6 +216,8 @@ std::optional<TextureKey> ExtractTextureKey(
       bool ok = true;
       if (name == "filename" || name == "fallback") {
         // Consumed above / by the material parser's fallback texture.
+      } else if (absl::StartsWith(name, "colorSpace:")) {
+        // Color space metadata of another parameter.
       } else if (name == "raw") {
         ok = set_as(val, key.raw);
       } else if (name == "accel") {
@@ -299,43 +341,9 @@ TextureCache<Float, Spectrum>::LoadBitmap(const std::string& filename) {
 MI_VARIANT CachedTexture TextureCache<Float, Spectrum>::LoadTexture(
     const TextureKey& key, const mitsuba::Bitmap& bitmap) {
   try {
-    size_t channel_count = bitmap.channel_count();
-    // Wrap the decoded pixel buffer in a non-owning Bitmap header view so
-    // BitmapTexture::load_bitmap() can safely mutate srgb_gamma in-place
-    // (when raw == true) without copying pixel memory or racing across
-    // threads that share the same source Bitmap.
-    //
-    // Lifetime: the expanded texture copies the pixels into its own tensor
-    // (either via Bitmap::convert() or the TensorXf constructor) and the
-    // un-expanded BitmapTexture holding `view` is dropped below, so neither
-    // `view` nor `bitmap` needs to outlive this function.
-    mitsuba::ref<mitsuba::Bitmap> view = new mitsuba::Bitmap(
-        bitmap.pixel_format(), bitmap.component_format(), bitmap.size(),
-        channel_count, {}, const_cast<uint8_t*>(bitmap.uint8_data()));
-    view->set_srgb_gamma(bitmap.srgb_gamma());
-    view->set_premultiplied_alpha(bitmap.premultiplied_alpha());
-
-    mitsuba::Properties props("bitmap");
-    props.set("bitmap", mitsuba::ref<mitsuba::Object>(view.get()));
-    props.set("raw", key.raw);
-    props.set("wrap_mode", key.wrap_mode);
-    props.set("filter_type", key.filter_type);
-    props.set("max_anisotropy", key.max_anisotropy);
-    props.set("format", key.format);
-    props.set("accel", key.accel);
-    if (key.to_uv != TextureKey::kIdentityUv) {
-      props.set("to_uv", UvMatrixToTransform(key.to_uv));
-    }
-
-    mitsuba::ref<mitsuba::Object> texture =
-        mitsuba::PluginManager::instance()->create_object(
-            props, mitsuba::Texture<Float, Spectrum>::Variant,
-            mitsuba::Texture<Float, Spectrum>::Type);
-    std::vector<mitsuba::ref<mitsuba::Object>> expanded_texture =
-        texture->expand();
-    if (!expanded_texture.empty()) {
-      texture = expanded_texture[0];
-    }
+    size_t channel_count = key.alpha_channel ? 1 : bitmap.channel_count();
+    mitsuba::ref<mitsuba::Object> texture = CreateBitmapTexture(
+        key, bitmap, mitsuba::Texture<Float, Spectrum>::Variant);
     return CachedTexture{std::move(texture), channel_count};
   } catch (const std::exception& e) {
     TF_WARN("Failed to load texture '%s': %s.", key.filename.c_str(), e.what());

@@ -26,6 +26,7 @@
 #include <absl/base/no_destructor.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
+#include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/strip.h>
 #include <drjit/matrix.h>
@@ -121,6 +122,8 @@ SdfPath FindDisplacementNode(const HdMaterialNetwork2& network) {
 void SetMitsubaPropertyFromValue(mitsuba::Properties& props,
                                  std::string_view name, const VtValue& val,
                                  bool invert_float) {
+  // Color space metadata is consumed when building texture keys.
+  if (absl::StartsWith(name, "colorSpace:")) return;
   if (val.IsHolding<GfVec3f>()) {
     auto c = val.Get<GfVec3f>();
     props.set(name, mitsuba::Color<float, 3>(c[0], c[1], c[2]));
@@ -146,14 +149,12 @@ void SetMitsubaPropertyFromValue(mitsuba::Properties& props,
     props.set(name, *t3);
   } else if (auto t4 = ExtractTransform4f(val)) {
     props.set(name, *t4);
-  } else if (val.IsHolding<std::string>()) {
-    props.set(name, val.Get<std::string>());
   } else if (val.IsHolding<TfToken>()) {
     props.set(name, val.Get<TfToken>().GetString());
+  } else if (val.IsHolding<std::string>()) {
+    props.set(name, val.Get<std::string>());
   } else if (val.IsHolding<SdfAssetPath>()) {
-    const auto& asset_path = val.Get<SdfAssetPath>();
-    const std::string& resolved = asset_path.GetResolvedPath();
-    props.set(name, resolved.empty() ? asset_path.GetAssetPath() : resolved);
+    props.set(name, ResolvePathFromValue(val));
   }
 }
 
@@ -335,13 +336,8 @@ mitsuba::ref<mitsuba::Object> ParseNodeRecursive(
 
   mitsuba::ObjectType object_type =
       mitsuba::PluginManager::instance()->plugin_type(mitsuba_plugin_name);
-  mitsuba::ref<mitsuba::Object> result =
-      mitsuba::PluginManager::instance()->create_object(
-          props, mitsuba::Scene<Float, Spectrum>::Variant, object_type);
-  std::vector<mitsuba::ref<mitsuba::Object>> result_objects = result->expand();
-  if (!result_objects.empty()) {
-    result = result_objects[0];
-  }
+  mitsuba::ref<mitsuba::Object> result = CreateExpandedObject(
+      props, mitsuba::Scene<Float, Spectrum>::Variant, object_type);
   cache[nodePath] = result;
   return result;
 }
