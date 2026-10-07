@@ -174,6 +174,7 @@ void HdMitsubaMesh::Sync(HdSceneDelegate* sceneDelegate,
       (*dirtyBits & (HdChangeTracker::DirtyTransform |
                      HdChangeTracker::DirtyInstancer |
                      HdChangeTracker::DirtyInstanceIndex |
+                     HdChangeTracker::DirtyDoubleSided |
                      HdMitsubaMesh::DirtyLight)) != 0;
 
   if (topology_dirty) {
@@ -348,6 +349,7 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
   spec.needs_rebuild = needs_rebuild;
   spec.dirty_bits = dirtyBits ? *dirtyBits : HdChangeTracker::Clean;
   spec.is_subdivided = subdiv_evaluator_.IsSubdivided();
+  spec.double_sided = IsDoubleSided(sceneDelegate);
 
   spec.face_material_indices =
       subdiv_evaluator_.MapRefinedMaterialIndices(face_material_indices_);

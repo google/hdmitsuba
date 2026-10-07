@@ -16,7 +16,10 @@
 
 #include <functional>
 #include <optional>
+#include <set>
+#include <string>
 #include <string_view>
+#include <utility>
 
 #include <mitsuba/core/fwd.h>
 #include <mitsuba/core/object.h>
@@ -29,6 +32,20 @@
 #include "hdmitsuba/texture_cache.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
+
+// Prefix used for Mitsuba mesh vertex attributes created from USD primvars.
+inline constexpr std::string_view kVertexAttributePrefix = "vertex_";
+
+// Primvars that a material reads as mesh attributes, paired with the number of
+// channels read (1 or 3). A primvar read with both channel counts appears
+// twice.
+using MeshAttributeRequests = std::set<std::pair<std::string, int>>;
+
+// Returns the name of the Mitsuba vertex attribute holding `primvar` with
+// `channels` channels. Mitsuba stores 3-channel attributes whose name contains
+// "color" as rgb2spec coefficients in spectral variants, so "color" is
+// capitalized to keep the raw values.
+std::string MeshAttributeName(std::string_view primvar, int channels);
 
 void SetMitsubaPropertyFromValue(mitsuba::Properties& props,
                                  std::string_view name, const pxr::VtValue& val,
@@ -47,6 +64,8 @@ class PrimTranslator {
     mitsuba::ref<mitsuba::Object> bsdf = nullptr;
     std::optional<mitsuba::Properties> shape_emitter_props = std::nullopt;
     mitsuba::ref<mitsuba::Object> displacement_texture = nullptr;
+    // Primvars that the BSDF and shape emitter read as mesh attributes.
+    MeshAttributeRequests mesh_attributes;
   };
 
   static TranslatedMaterial BuildMaterial(
@@ -72,14 +91,19 @@ class PrimTranslator {
   static void UpdateSensorInPlace(mitsuba::Object* sensor_obj,
                                   const CameraSpec& spec);
 
+  // Builds a mesh from expanded per-vertex `primvars`. The primvars listed in
+  // `mesh_attributes` are uploaded as vertex attributes named by
+  // `MeshAttributeName`.
   static mitsuba::ref<mitsuba::Shape<Float, Spectrum>> BuildMesh(
       const SdfPath& id, const VtIntArray& face_indices,
-      const PrimvarMap& primvars, mitsuba::Object* bsdf,
-      mitsuba::Object* emitter_ptr, mitsuba::Object* sensor_ptr);
+      const PrimvarMap& primvars, const MeshAttributeRequests& mesh_attributes,
+      mitsuba::Object* bsdf, mitsuba::Object* emitter_ptr,
+      mitsuba::Object* sensor_ptr);
 
   static void UpdateMeshInPlace(mitsuba::Object* mesh_obj,
                                 const VtIntArray& face_indices,
                                 const PrimvarMap& primvars,
+                                const MeshAttributeRequests& mesh_attributes,
                                 HdDirtyBits dirty_bits);
 
   static mitsuba::ref<mitsuba::Shape<Float, Spectrum>> BuildCurves(

@@ -86,10 +86,12 @@ struct MeshSpec : public BaseSpec {
   std::optional<LightSpec> emitter_spec = std::nullopt;
   VtMatrix4dArray instance_transforms;
   bool is_subdivided = false;
+  bool double_sided = false;
 
   void FoldPendingFrom(const MeshSpec& prev) {
     if (emitter_spec.has_value() != prev.emitter_spec.has_value() ||
-        material_ids != prev.material_ids) {
+        material_ids != prev.material_ids ||
+        double_sided != prev.double_sided) {
       needs_rebuild = true;
     }
     BaseSpec::FoldPendingFrom(prev);

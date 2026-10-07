@@ -26,6 +26,7 @@
 #include <utility>
 #include <vector>
 
+#include <absl/base/no_destructor.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/strings/match.h>
@@ -297,6 +298,14 @@ class SceneModel final : public SceneManager {
     return DefaultBsdf();
   }
 
+  // Returns the primvars that `material_id` reads as mesh attributes.
+  const MeshAttributeRequests& ResolveMeshAttributes(
+      const SdfPath& material_id) const {
+    static const absl::NoDestructor<MeshAttributeRequests> kNone;
+    auto it = mesh_attributes_.find(material_id.GetAsString());
+    return it != mesh_attributes_.end() ? it->second : *kNone;
+  }
+
   template <typename MapType, typename SpecType>
   static auto& UpsertSpec(MapType& map, SpecType&& spec) {
     auto it = map.find(spec.id);
@@ -422,6 +431,9 @@ class SceneModel final : public SceneManager {
       dirty_flags |= DirtyFlags::kNeedsStructureRebuild;
     }
     if (material_emitters_.erase(id_str) > 0) {
+      dirty_flags |= DirtyFlags::kNeedsStructureRebuild;
+    }
+    if (mesh_attributes_.erase(id_str) > 0) {
       dirty_flags |= DirtyFlags::kNeedsStructureRebuild;
     }
     material_dirty_flags_[id] |= dirty_flags;
@@ -798,31 +810,24 @@ class SceneModel final : public SceneManager {
       absl::string_view id_str,
       typename PrimTranslator::TranslatedMaterial& trans) {
     uint32_t dirty_flags = 0;
-    if (trans.displacement_texture) {
-      auto disp_it = displacement_textures_.find(id_str);
-      if (disp_it == displacement_textures_.end() ||
-          disp_it->second != trans.displacement_texture.get()) {
-        displacement_textures_[id_str] =
-            static_cast<Texture*>(trans.displacement_texture.get());
+    auto update = [&](auto& map, auto* val) {
+      if (val) {
+        auto it = map.find(id_str);
+        if (it == map.end() || it->second != *val) {
+          map[id_str] = std::move(*val);
+          dirty_flags |= DirtyFlags::kNeedsStructureRebuild;
+        }
+      } else if (map.erase(id_str) > 0) {
         dirty_flags |= DirtyFlags::kNeedsStructureRebuild;
       }
-    } else {
-      if (displacement_textures_.erase(id_str) > 0) {
-        dirty_flags |= DirtyFlags::kNeedsStructureRebuild;
-      }
-    }
-    if (trans.shape_emitter_props.has_value()) {
-      auto em_it = material_emitters_.find(id_str);
-      if (em_it == material_emitters_.end() ||
-          em_it->second != trans.shape_emitter_props.value()) {
-        material_emitters_[id_str] = trans.shape_emitter_props.value();
-        dirty_flags |= DirtyFlags::kNeedsStructureRebuild;
-      }
-    } else {
-      if (material_emitters_.erase(id_str) > 0) {
-        dirty_flags |= DirtyFlags::kNeedsStructureRebuild;
-      }
-    }
+    };
+    ref<Texture> disp_tex(
+        static_cast<Texture*>(trans.displacement_texture.get()));
+    update(displacement_textures_, disp_tex ? &disp_tex : nullptr);
+    update(material_emitters_,
+           trans.shape_emitter_props ? &*trans.shape_emitter_props : nullptr);
+    update(mesh_attributes_,
+           !trans.mesh_attributes.empty() ? &trans.mesh_attributes : nullptr);
     return dirty_flags;
   }
 
@@ -993,7 +998,7 @@ class SceneModel final : public SceneManager {
 
   EmitterSensorPair ResolveEmitterAndSensor(
       const std::optional<LightSpec>& emitter_spec, const SdfPath& material_id,
-      const SdfPath& shape_id) {
+      const SdfPath& shape_id, bool double_sided) {
     EmitterSensorPair pair;
     if (emitter_spec.has_value()) {
       pair.mesh_emitter =
@@ -1003,8 +1008,12 @@ class SceneModel final : public SceneManager {
     if (pair.emitter_ptr == nullptr) {
       auto emitter_it = material_emitters_.find(material_id.GetAsString());
       if (emitter_it != material_emitters_.end()) {
+        mitsuba::Properties emitter_props = emitter_it->second;
+        if (double_sided) {
+          emitter_props.set("twosided", true, false);
+        }
         pair.mesh_emitter = mitsuba::PluginManager::instance()->create_object(
-            emitter_it->second, mitsuba::Emitter<Float, Spectrum>::Variant,
+            emitter_props, mitsuba::Emitter<Float, Spectrum>::Variant,
             mitsuba::Emitter<Float, Spectrum>::Type);
         pair.emitter_ptr = pair.mesh_emitter.get();
       }
@@ -1037,8 +1046,9 @@ class SceneModel final : public SceneManager {
       }
       ref<BSDF> bsdf = ResolveBsdf(sub_mesh.material_id, sub_mesh.primvars);
       if (geometry_dirty) {
-        PrimTranslator::UpdateMeshInPlace(it->second.get(), sub_mesh.triangles,
-                                          sub_mesh.primvars, spec.dirty_bits);
+        PrimTranslator::UpdateMeshInPlace(
+            it->second.get(), sub_mesh.triangles, sub_mesh.primvars,
+            ResolveMeshAttributes(sub_mesh.material_id), spec.dirty_bits);
       }
       if (key_prefix.empty() && spec.dirty_bits != 0 &&
           it->second->is_emitter() && spec.emitter_spec.has_value()) {
@@ -1064,11 +1074,13 @@ class SceneModel final : public SceneManager {
       res.meshes.reserve(sub_meshes.size());
       for (const auto& sub_mesh : sub_meshes) {
         auto env = ResolveEmitterAndSensor(spec.emitter_spec,
-                                           sub_mesh.material_id, spec.id);
+                                           sub_mesh.material_id, spec.id,
+                                           spec.double_sided);
         ref<BSDF> bsdf = ResolveBsdf(sub_mesh.material_id, sub_mesh.primvars);
-        auto mesh = PrimTranslator::BuildMesh(sub_mesh.id, sub_mesh.triangles,
-                                              sub_mesh.primvars, bsdf.get(),
-                                              env.emitter_ptr, env.sensor_ptr);
+        auto mesh = PrimTranslator::BuildMesh(
+            sub_mesh.id, sub_mesh.triangles, sub_mesh.primvars,
+            ResolveMeshAttributes(sub_mesh.material_id), bsdf.get(),
+            env.emitter_ptr, env.sensor_ptr);
         if (mesh) {
           res.meshes.push_back(mesh);
         }
@@ -1105,9 +1117,10 @@ class SceneModel final : public SceneManager {
       for (const auto& sub_mesh : sub_meshes) {
         ref<BSDF> bsdf = ResolveBsdf(sub_mesh.material_id, sub_mesh.primvars);
 
-        auto mesh = PrimTranslator::BuildMesh(sub_mesh.id, sub_mesh.triangles,
-                                              sub_mesh.primvars, bsdf.get(),
-                                              nullptr, nullptr);
+        auto mesh = PrimTranslator::BuildMesh(
+            sub_mesh.id, sub_mesh.triangles, sub_mesh.primvars,
+            ResolveMeshAttributes(sub_mesh.material_id), bsdf.get(), nullptr,
+            nullptr);
         if (mesh) {
           prototype_shapes.push_back(mesh);
           res.meshes.push_back(mesh);
@@ -1467,6 +1480,7 @@ class SceneModel final : public SceneManager {
   absl::flat_hash_map<std::string, ref<BSDF>> bsdfs_;
   absl::flat_hash_map<std::string, ref<Texture>> displacement_textures_;
   absl::flat_hash_map<std::string, mitsuba::Properties> material_emitters_;
+  absl::flat_hash_map<std::string, MeshAttributeRequests> mesh_attributes_;
   ref<BSDF> default_bsdf_ = nullptr;
   absl::flat_hash_map<std::tuple<float, float, float>, ref<BSDF>> color_bsdfs_;
   absl::Mutex color_bsdfs_mutex_;
