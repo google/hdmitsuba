@@ -18,9 +18,11 @@ from __future__ import annotations
 
 from typing import Any
 
+import drjit as dr
 import mitsuba as mi
 import numpy as np
 
+from pxr import Gf
 from pxr import Usd
 from pxr import UsdGeom
 
@@ -92,5 +94,37 @@ def get_world_transform(
   Returns:
     The Mitsuba world transform as a `ScalarTransform4f`.
   """
-  transform = UsdGeom.Imageable(prim).ComputeLocalToWorldTransform(time)
-  return mi.ScalarTransform4f(np.array(transform, dtype=np.float32).T)
+  return to_mitsuba_transform(
+      UsdGeom.Imageable(prim).ComputeLocalToWorldTransform(time)
+  )
+
+
+def to_mitsuba_transform(matrix: Gf.Matrix4d) -> mi.ScalarTransform4f:
+  """Converts a USD (row-vector) matrix to a Mitsuba transform.
+
+  Args:
+    matrix: The USD matrix.
+
+  Returns:
+    The Mitsuba transform.
+  """
+  return mi.ScalarTransform4f(np.array(matrix, dtype=np.float32).T)
+
+
+def remove_scale_from_transform(
+    transform: mi.ScalarTransform4f,
+) -> mi.ScalarTransform4f:
+  """Strips scale and shear from `transform`, keeping rotation and translation.
+
+  Args:
+    transform: The Mitsuba transform.
+
+  Returns:
+    The transform with unit scale and no shear.
+  """
+  if not transform.has_scale():
+    return transform
+  _, rotation, translation = dr.transform_decompose(transform.matrix)
+  return mi.ScalarTransform4f(
+      dr.transform_compose(mi.ScalarMatrix3f(1.0), rotation, translation)
+  )

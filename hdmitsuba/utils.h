@@ -20,6 +20,7 @@
 
 #include <drjit-core/jit.h>
 #include <drjit/matrix.h>
+#include <drjit/transform.h>
 #include <mitsuba/core/transform.h>
 #include <pxr/base/gf/matrix3d.h>
 #include <pxr/base/gf/matrix3f.h>
@@ -125,6 +126,19 @@ inline ScalarAffineTransform3f UsdToMitsubaTransform(const GfMatrix3d& m) {
   for (int i = 0; i < 3; ++i)
     for (int j = 0; j < 3; ++j) t(i, j) = static_cast<float>(m[j][i]);
   return ScalarAffineTransform3f(t);
+}
+
+// Strips scale and shear from `transform`, keeping only rotation and
+// translation.
+inline ScalarAffineTransform4f RemoveScaleFromTransform(
+    const ScalarAffineTransform4f& transform) {
+  if (!transform.has_scale()) {
+    return transform;
+  }
+  auto [s, q, t] = drjit::transform_decompose(transform.matrix);
+  return ScalarAffineTransform4f(
+      drjit::transform_compose<drjit::Matrix<float, 4>>(
+          drjit::Matrix<float, 3>(1.0f), q, t));
 }
 
 inline std::optional<ScalarAffineTransform3f> ExtractTransform3f(

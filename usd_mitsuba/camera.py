@@ -20,7 +20,6 @@ from typing import Any
 
 import drjit as dr
 import mitsuba as mi
-import numpy as np
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
@@ -31,18 +30,10 @@ from usd_mitsuba.render_settings import get_render_settings
 
 def _get_camera_transform(camera: UsdGeom.Camera, time: Usd.TimeCode) -> mi.ScalarTransform4f:
   """Returns the Mitsuba sensor transform for a given USD camera and time code."""
-  world_transform = camera.ComputeLocalToWorldTransform(time)
-
   # Mitsuba sensors generally do not support scaling.
-  _, rotation, translation = dr.transform_decompose(
-      mi.ScalarMatrix4f(np.array(world_transform).T)
-  )
-  rotation = rotation * dr.rotate(
-      mi.ScalarQuaternion4f, mi.ScalarVector3f(0, 1, 0), dr.deg2rad(180)
-  )
-  return mi.ScalarTransform4f(
-      dr.transform_compose(mi.ScalarMatrix3f(1.0), rotation, translation)
-  )
+  return util.remove_scale_from_transform(
+      util.get_world_transform(camera.GetPrim(), time)
+  ).rotate([0, 1, 0], 180)
 
 
 SENSOR_SHAPE_ATTR = 'mitsuba:sensor:shape'
