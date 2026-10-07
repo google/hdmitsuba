@@ -25,6 +25,7 @@
 #include <pxr/imaging/hd/basisCurvesTopology.h>
 #include <pxr/imaging/hd/material.h>
 #include <pxr/imaging/hd/materialNetwork2Interface.h>
+#include <pxr/imaging/hd/tokens.h>
 #include <pxr/imaging/hd/types.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
@@ -65,6 +66,14 @@ struct LightSpec : public BaseSpec {
   float shaping_cone_beam_width = 0.0f;
   bool treat_as_point = false;
   std::string texture_file_path;
+
+  // Area lights are represented as Mitsuba shapes with an attached area
+  // emitter, rather than standalone emitter objects.
+  bool IsAreaLight() const {
+    return prim_type == HdPrimTypeTokens->rectLight ||
+           prim_type == HdPrimTypeTokens->diskLight ||
+           (prim_type == HdPrimTypeTokens->sphereLight && !treat_as_point);
+  }
 };
 
 struct MeshSpec : public BaseSpec {

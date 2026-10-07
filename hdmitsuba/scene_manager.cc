@@ -1337,11 +1337,7 @@ class SceneModel final : public SceneManager {
           if (spec->needs_rebuild) {
             res = PrimTranslator::BuildLight(*spec);
           } else if (spec->dirty_bits != 0) {
-            bool is_shape = spec->prim_type == HdPrimTypeTokens->rectLight ||
-                            spec->prim_type == HdPrimTypeTokens->diskLight ||
-                            (spec->prim_type == HdPrimTypeTokens->sphereLight &&
-                             !spec->treat_as_point);
-            if (is_shape) {
+            if (spec->IsAreaLight()) {
               auto it = shapes_.find(id_str);
               if (TF_VERIFY(it != shapes_.end(), "Light shape not found: %s",
                             id_str.c_str())) {

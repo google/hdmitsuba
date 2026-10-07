@@ -516,11 +516,8 @@ MI_VARIANT typename PrimTranslator<Float, Spectrum>::TranslatedLight
 PrimTranslator<Float, Spectrum>::BuildLight(const LightSpec& spec) {
   mitsuba::Properties props = BuildLightProperties(spec);
   std::string id_str = spec.id.GetAsString();
-  std::string_view plugin_name = props.plugin_name();
-  bool is_shape = plugin_name == "rectangle" || plugin_name == "disk" ||
-                  plugin_name == "sphere";
   TranslatedLight res;
-  if (is_shape) {
+  if (spec.IsAreaLight()) {
     res.shape = mitsuba::PluginManager::instance()
                     ->create_object<mitsuba::Shape<Float, Spectrum>>(props);
     res.shape->set_id(id_str);
