@@ -45,7 +45,7 @@ def _convert_dome_light(
     time: Usd.TimeCode,
 ) -> dict[str, Any]:
   dome_light = UsdLux.DomeLight(prim)
-  texture_file_attr = dome_light.CreateTextureFileAttr().Get(time)
+  texture_file_attr = dome_light.GetTextureFileAttr().Get(time)
   if texture_file_attr:
     filename = texture_file_attr.resolvedPath
     return {
