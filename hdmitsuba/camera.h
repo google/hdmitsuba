@@ -51,6 +51,7 @@ class HdMitsubaCamera final : public HdCamera {
   std::string sensor_type_ = "";
   std::string film_pixel_filter_type_ = "";
   bool is_instantiated_ = false;
+  bool has_animated_pose_ = false;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

@@ -16,6 +16,8 @@
 
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/quatf.h>
@@ -138,6 +140,12 @@ struct CameraSpec : public BaseSpec {
   float far_clip = 1000.0f;
   std::string pixel_filter_type = "";
   std::optional<SdfPath> target_shape_id = std::nullopt;
+
+  // Shutter interval in time codes relative to the rendered frame.
+  float shutter_open = 0.0f;
+  float shutter_close = 0.0f;
+  // Poses sampled over the shutter interval, in Mitsuba sensor convention.
+  std::vector<std::pair<float, ScalarAffineTransform4f>> pose_keyframes;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

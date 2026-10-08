@@ -26,6 +26,7 @@
 #include <pxr/imaging/hd/camera.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
+#include <pxr/imaging/hd/timeSampleArray.h>
 #include <pxr/imaging/hd/types.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
@@ -117,12 +118,33 @@ void HdMitsubaCamera::Sync(HdSceneDelegate* sceneDelegate,
   spec.dirty_bits = dirty_bits_copy;
   spec.target_shape_id = GetTargetShapeId(sceneDelegate, GetId());
 
+  spec.shutter_open = GetShutterOpen();
+  spec.shutter_close = GetShutterClose();
+
+  // Sample the pose over the shutter interval, as time code offsets. The
+  // capacity is only an initial allocation; Hydra resizes to fit all authored
+  // samples in the interval.
+  constexpr int kCameraMotionSampleCapacity = 4;
+  if (spec.shutter_close > spec.shutter_open) {
+    HdTimeSampleArray<GfMatrix4d, kCameraMotionSampleCapacity> samples;
+    sceneDelegate->SampleTransform(GetId(), spec.shutter_open,
+                                   spec.shutter_close, &samples);
+    for (size_t i = 0; i < samples.count; ++i) {
+      spec.pose_keyframes.emplace_back(
+          samples.times[i], UsdToMitsubaSensorTransform(samples.values[i]));
+    }
+  }
+
+  // Keyframes are only installed when the sensor is built.
+  const bool has_animated_pose = spec.pose_keyframes.size() >= 2;
   spec.needs_rebuild = !is_instantiated_;
   spec.needs_rebuild |= sensor_type != sensor_type_;
+  spec.needs_rebuild |= has_animated_pose || has_animated_pose_;
   spec.needs_rebuild |= (sensor_type != "perspective" &&
                          (dirty_bits_copy & HdCamera::DirtyParams));
   is_instantiated_ = true;
   sensor_type_ = sensor_type;
+  has_animated_pose_ = has_animated_pose;
 
   static_cast<HdMitsubaRenderParam*>(renderParam)
       ->GetScene()

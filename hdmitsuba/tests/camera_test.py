@@ -310,3 +310,74 @@ def test_irradiancemeter_target_mesh_rebuild():
   test_helpers.robust_assert_close(
       image_initial[..., :3], image_rebuilt[..., :3], atol=0.05
   )
+
+
+def _render_translated_camera(
+    translations: list[tuple[float | None, tuple[float, float, float]]],
+    shutter: tuple[float, float] | None = None,
+) -> np.ndarray:
+  """Renders the test scene with a camera translate op at time code 0.
+
+  Args:
+    translations: (time, value) pairs for the translate op. A time of None
+      authors the default value instead of a time sample.
+    shutter: Optional (shutterOpen, shutterClose) interval of the camera.
+
+  Returns:
+    The RGB channels of the rendered color output.
+  """
+  stage = Usd.Stage.CreateInMemory()
+  _setup_stage(stage, define_camera=False)
+  camera = UsdGeom.Camera.Define(stage, '/camera')
+  if shutter is not None:
+    camera.CreateShutterOpenAttr().Set(shutter[0])
+    camera.CreateShutterCloseAttr().Set(shutter[1])
+  translate_op = UsdGeom.Xformable(camera.GetPrim()).AddTranslateOp()
+  for time, value in translations:
+    translate_op.Set(
+        value, time=Usd.TimeCode.Default() if time is None else time
+    )
+  camera.AddRotateXOp().Set(-40)
+  camera.AddRotateYOp().Set(30)
+  test_helpers.create_render_settings(stage)
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      camera_path='/camera',
+  )
+  # Time-sampled attributes have no value at the default time code, so the
+  # frame must be rendered at an explicit time for the keyframes to resolve.
+  return engine.render(time_code=0)['color'][..., :3]
+
+
+def test_animated_camera():
+  shutter = (-0.5, 0.5)
+  start, end = (4.0, 5.0, 6.0), (4.5, 5.0, 6.0)
+  mid = (4.25, 5.0, 6.0)
+
+  def dark_fraction(image: np.ndarray) -> float:
+    # Pixels covered by the black plane, as opposed to the dome light.
+    return float((image.max(axis=-1) < 0.5).mean())
+
+  image_static = _render_translated_camera([(None, start)])
+  assert dark_fraction(image_static) > 0.1
+
+  # Identical keyframes must reproduce the static camera.
+  image_same = _render_translated_camera(
+      [(shutter[0], start), (shutter[1], start)], shutter
+  )
+  test_helpers.robust_assert_close(image_same, image_static, atol=0.02)
+
+  # A moving camera keeps the plane in view.
+  image_moving = _render_translated_camera(
+      [(shutter[0], start), (shutter[1], end)], shutter
+  )
+  test_helpers.write_image(image_moving, 'test_animated_camera.png')
+  assert dark_fraction(image_moving) > 0.75 * dark_fraction(image_static)
+
+  # Time sampling over the shutter interval changes the pixels along the plane
+  # edges, but not the rest of the image, relative to the static mid-shutter
+  # pose.
+  image_mid = _render_translated_camera([(None, mid)])
+  blurred = (np.abs(image_moving - image_mid).max(axis=-1) > 0.05).mean()
+  assert 0.02 < blurred < 0.3, blurred

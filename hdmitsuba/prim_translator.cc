@@ -31,6 +31,7 @@
 #include <drjit/matrix.h>
 #include <drjit/tensor.h>
 #include <drjit/transform.h>
+#include <mitsuba/core/animated_transform.h>
 #include <mitsuba/core/bitmap.h>
 #include <mitsuba/core/config.h>
 #include <mitsuba/core/filesystem.h>
@@ -676,12 +677,28 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateLightInPlace(
 MI_VARIANT mitsuba::ref<mitsuba::Sensor<Float, Spectrum>>
 PrimTranslator<Float, Spectrum>::BuildSensor(const CameraSpec& spec,
                                              bool is_interactive) {
+  using AnimatedTransform4f = mitsuba::AnimatedTransform<Float, Spectrum>;
+
+  // Poses sampled over the shutter interval, or the static transform.
+  mitsuba::ref<AnimatedTransform4f> animated_to_world;
+  if (spec.pose_keyframes.size() >= 2) {
+    animated_to_world = new AnimatedTransform4f(spec.pose_keyframes);
+  }
+  auto set_to_world = [&](mitsuba::Properties& props) {
+    if (animated_to_world) {
+      props.set("to_world",
+                static_cast<mitsuba::Object*>(animated_to_world.get()));
+    } else {
+      props.set("to_world", spec.transform);
+    }
+  };
+
   mitsuba::Properties props;
   if (spec.sensor_type == "irradiancemeter") {
     props = mitsuba::Properties("irradiancemeter");
   } else {
     props = mitsuba::Properties("perspective");
-    props.set("to_world", spec.transform);
+    set_to_world(props);
     props.set("fov", spec.fov);
     props.set("fov_axis", "x");
     props.set("principal_point_offset_x", spec.horizontal_aperture_offset);
@@ -689,6 +706,8 @@ PrimTranslator<Float, Spectrum>::BuildSensor(const CameraSpec& spec,
   }
   props.set("near_clip", spec.near_clip);
   props.set("far_clip", spec.far_clip);
+  props.set("shutter_open", spec.shutter_open);
+  props.set("shutter_close", spec.shutter_close);
 
   std::string filter_type = is_interactive ? "box" : spec.pixel_filter_type;
   if (!filter_type.empty()) {
