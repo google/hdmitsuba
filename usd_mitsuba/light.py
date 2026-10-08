@@ -20,9 +20,12 @@ from typing import Any
 
 import drjit as dr
 import mitsuba as mi
+from pxr import Gf
+from pxr import Tf
 from pxr import Usd
 from pxr import UsdLux
 
+from usd_mitsuba import motion
 from usd_mitsuba import util
 
 
@@ -39,7 +42,7 @@ def _check_ies_profile(
 
 def _convert_dome_light(
     prim: Usd.Prim,
-    world_transform: mi.ScalarTransform4f,
+    world_transform: mi.ScalarTransform4f | mi.AnimatedTransform4f,
     color: mi.ScalarColor3f,
     intensity: float,
     time: Usd.TimeCode,
@@ -91,7 +94,7 @@ def _is_area_light(prim: Usd.Prim, time: Usd.TimeCode) -> bool:
 
 def _convert_sphere_light(
     prim: Usd.Prim,
-    world_transform: mi.ScalarTransform4f,
+    world_transform: mi.ScalarTransform4f | mi.AnimatedTransform4f,
     color: mi.ScalarColor3f,
     intensity: float,
     time: Usd.TimeCode,
@@ -103,42 +106,39 @@ def _convert_sphere_light(
   if _is_point_light(sphere_light, time):
     if normalize:
       color *= 0.25
-    emitter_dict = {
+    emitter_dict: dict[str, Any] = {
         'type': 'point',
         'to_world': world_transform,
         'intensity': {'type': 'rgb', 'value': color},
     }
     if prim.HasAPI(UsdLux.ShapingAPI):
-      shaping_api = UsdLux.ShapingAPI(prim)
-      shaping_cone_angle = shaping_api.GetShapingConeAngleAttr().Get(time)
-      shaping_softness = shaping_api.GetShapingConeSoftnessAttr().Get(time)
-      if shaping_cone_angle != 0:
-        emitter_dict = {
+      shaping = UsdLux.ShapingAPI(prim)
+      if cone_angle := shaping.GetShapingConeAngleAttr().Get(time):
+        softness = shaping.GetShapingConeSoftnessAttr().Get(time)
+        emitter_dict |= {
             'type': 'spot',
-            'to_world': world_transform.rotate([1, 0, 0], 180),
-            'intensity': {'type': 'rgb', 'value': color},
-            'beam_width': shaping_cone_angle * (1.0 - shaping_softness),
-            'cutoff_angle': shaping_cone_angle,
+            'beam_width': cone_angle * (1.0 - softness),
+            'cutoff_angle': cone_angle,
         }
     return emitter_dict
-  else:
-    world_transform = world_transform.scale(radius)
-    if normalize:
-      radius2 = dr.squared_norm(world_transform @ mi.ScalarVector3f(1, 0, 0))
-      color /= 4 * dr.pi * radius2
-    return {
-        'type': 'sphere',
-        'to_world': world_transform,
-        'emitter': {
-            'type': 'area',
-            'radiance': {'type': 'rgb', 'value': color},
-        },
-    }
+
+  world_transform = world_transform.scale(radius)
+  if normalize:
+    radius2 = dr.squared_norm(world_transform @ mi.ScalarVector3f(1, 0, 0))
+    color /= 4 * dr.pi * radius2
+  return {
+      'type': 'sphere',
+      'to_world': world_transform,
+      'emitter': {
+          'type': 'area',
+          'radiance': {'type': 'rgb', 'value': color},
+      },
+  }
 
 
 def _convert_distant_light(
     prim: Usd.Prim,
-    world_transform: mi.ScalarTransform4f,
+    world_transform: mi.ScalarTransform4f | mi.AnimatedTransform4f,
     color: mi.ScalarColor3f,
     intensity: float,
     time: Usd.TimeCode,
@@ -147,7 +147,7 @@ def _convert_distant_light(
   angle = distant_light.GetAngleAttr().Get(time)
   return {
       'type': 'directional',
-      'to_world': world_transform.rotate([1, 0, 0], 180),
+      'to_world': world_transform,
       'irradiance': {'type': 'rgb', 'value': color * intensity},
       'angle': float(angle) if angle is not None else 0.0,
   }
@@ -222,25 +222,55 @@ _LIGHT_CONVERTERS = [
 ]
 
 
+def _sample_light_transform(
+    prim: Usd.Prim,
+    time: Usd.TimeCode,
+    motion_interval: tuple[float, float],
+) -> mi.ScalarTransform4f | mi.AnimatedTransform4f:
+  """Samples the light's world transform, falling back to static for area lights."""
+  if _is_area_light(prim, time):
+    transform = motion.sample_world_transform(prim, time, motion_interval)
+    if isinstance(transform, mi.AnimatedTransform4f):
+      Tf.Warn(f'Motion blur is not supported for light {prim.GetPath()}.')
+      return util.get_world_transform(prim, time)
+    return transform
+
+  # USD distant and spot lights emit along -Z, while Mitsuba's directional and
+  # spot emitters point along +Z.
+  flip_z = prim.IsA(UsdLux.DistantLight) or (
+      prim.HasAPI(UsdLux.ShapingAPI)
+      and UsdLux.ShapingAPI(prim).GetShapingConeAngleAttr().Get(time) != 0
+  )
+
+  # Non-area emitters do not support scale or shear, and AnimatedTransform
+  # rejects keyframe matrices with shear.
+  def to_emitter_transform(m: Gf.Matrix4d) -> mi.ScalarTransform4f:
+    t = util.remove_scale_from_transform(util.to_mitsuba_transform(m))
+    return t.rotate([1, 0, 0], 180) if flip_z else t
+
+  return motion.sample_world_transform(
+      prim, time, motion_interval, to_emitter_transform
+  )
+
+
 def convert_light(
     prim: Usd.Prim,
     time: Usd.TimeCode = Usd.TimeCode.Default(),
+    motion_interval: tuple[float, float] = (0.0, 0.0),
 ) -> dict[str, Any]:
   """Handles a light prim and returns the Mitsuba emitter dictionary.
 
   Args:
     prim: The USD light prim.
     time: The time code to evaluate at.
+    motion_interval: The (open, close) shutter offsets to sample the light
+      transform over. Motion is only supported for lights that are not shapes.
 
   Returns:
     The Mitsuba emitter dictionary.
   """
   _check_ies_profile(prim, time)
-  world_transform = util.get_world_transform(prim, time)
-  # Non-area emitters (point, spot, directional, envmap) do not support scale
-  # or shear.
-  if not _is_area_light(prim, time):
-    world_transform = util.remove_scale_from_transform(world_transform)
+  world_transform = _sample_light_transform(prim, time, motion_interval)
 
   usd_light = (
       UsdLux.BoundableLightBase(prim)
@@ -253,13 +283,7 @@ def convert_light(
   intensity = intensity * (2.0 ** exposure)
   color = mi.ScalarColor3f(color[0], color[1], color[2])
 
-  emitter_dict = None
   for light_class, converter in _LIGHT_CONVERTERS:
     if prim.IsA(light_class):
-      emitter_dict = converter(prim, world_transform, color, intensity, time)
-      break
-
-  if emitter_dict is None:
-    raise ValueError(f'Unsupported light prim: {prim.GetPath()}.')
-
-  return emitter_dict
+      return converter(prim, world_transform, color, intensity, time)
+  raise ValueError(f'Unsupported light prim: {prim.GetPath()}.')

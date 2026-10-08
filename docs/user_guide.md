@@ -32,6 +32,7 @@ This document provides an overview of the USD features supported by `hdMitsuba`,
     *   **Custom Sensor Type**: Customize the Mitsuba sensor backend by setting `mitsuba:sensor:type` (string, e.g., `perspective`, `irradiancemeter`, `radmeter`) on the Camera prim.
     *   **Pixel Filter**: Customize the film's pixel filter by setting `mitsuba:sensor:film:pixel_filter:type` (string) on the Camera prim.
     *   **Surface Sensors**: Attach a surface sensor (e.g., `irradiancemeter`) to a Mesh geometry prim by setting `mitsuba:sensor:shape` (string) on the Camera prim. This allows measuring light hitting that specific surface (e.g., for irradiance mapping). An example is provided in `test_assets/shapes`.
+*   **Motion Blur**: Transformation motion blur is supported for cameras and non-area lights (point, spot, distant, and dome lights) via standard USD time-sampled transforms and camera `shutter:open` / `shutter:close` attributes. Area lights and geometry do not yet support motion blur.
 
 ### Hydra AOVs (Arbitrary Output Variables)
 When requested by the Hydra host, `hdMitsuba` automatically routes and maps standard AOVs to Mitsuba's AOV integrator. It supports the following standard USD AOVs:

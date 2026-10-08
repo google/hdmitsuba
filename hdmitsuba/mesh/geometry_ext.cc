@@ -49,6 +49,7 @@
 
 #include "hdmitsuba/mesh/geometry_processor.h"
 #include "hdmitsuba/mesh/subdivision.h"
+#include "hdmitsuba/motion.h"
 #include "nanobind/usd.h"
 
 NANOBIND_BOOST_CASTER(pxr::VtIntArray, "Vt.IntArray");
@@ -364,5 +365,12 @@ NB_MODULE(geometry_ext, m) {
         [](PrimvarMap& primvars, const GfMatrix4d& transform) {
           GeometryProcessor::TransformPrimvars(primvars, transform);
           return primvars;
+        });
+  m.def("sample_world_transform",
+        [](const UsdPrim& prim, UsdTimeCode time,
+           std::pair<float, float> interval) {
+          return SampleTransform(
+                     prim, time, GfVec2f(interval.first, interval.second))
+              .samples;
         });
 }

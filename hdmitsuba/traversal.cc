@@ -63,9 +63,11 @@ void TraversalCallback::put_object(std::string_view name, Object* value,
   TraversalCallback cb(absl::StrCat(prefix_, name, "."), value, hierarchy_,
                        recurse_objects_);
   value->traverse(&cb);
+  objects.insert({absl::StrCat(prefix_, name), value});
   for (auto& [name, value] : cb.data) {
     data.insert({std::move(name), std::move(value)});
   }
+  objects.insert(cb.objects.begin(), cb.objects.end());
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

@@ -10,13 +10,13 @@
                         "displayName": "Mitsuba",
                         "priority": 99
                     },
-                    "HdMitsuba_ImplicitSurfaceSceneIndexPlugin": {
+                    "HdMitsuba_SceneIndexPlugin": {
                         "bases": [
                             "HdSceneIndexPlugin"
                         ],
                         "loadWithRenderer": "Mitsuba",
                         "priority": 0,
-                        "displayName": "Scene Index to turn implicit surfaces into prims suitable for HdMitsuba"
+                        "displayName": "Scene indices converting implicit surfaces to meshes and publishing the motion interval for HdMitsuba"
                     },
                     "HdMitsuba_APISchemaAdapter": {
                         "bases": [

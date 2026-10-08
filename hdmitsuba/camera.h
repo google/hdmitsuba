@@ -17,12 +17,15 @@
 #include <string>
 #include <string_view>
 
+#include <pxr/base/gf/vec2f.h>
 #include <pxr/base/tf/staticTokens.h>
 #include <pxr/imaging/hd/camera.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/imaging/hd/types.h>
 #include <pxr/pxr.h>
+
+#include "hdmitsuba/motion.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -51,6 +54,8 @@ class HdMitsubaCamera final : public HdCamera {
   std::string sensor_type_ = "";
   std::string film_pixel_filter_type_ = "";
   bool is_instantiated_ = false;
+  MotionTransform transform_;
+  GfVec2f shutter_{0.0f};
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

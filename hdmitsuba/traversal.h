@@ -66,6 +66,8 @@ class TraversalCallback : public mitsuba::TraversalCallback {
 
   absl::flat_hash_map<std::string, std::pair<void*, const std::type_info&>>
       data;
+  // Traversed child objects, e.g. "to_world" for an animated transform.
+  absl::flat_hash_map<std::string, mitsuba::Object*> objects;
 
  protected:
   void put_value(std::string_view name, void* value, uint32_t flags,

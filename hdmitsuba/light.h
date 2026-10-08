@@ -46,23 +46,11 @@ class HdMitsubaLight final : public HdLight {
 
   // Properties that determine the Mitsuba plugin type, whose changes require
   // rebuilding the light object rather than updating it in place.
-  struct RebuildKey {
-    bool treat_as_point = false;
-    bool has_positive_angle = false;
-    bool is_spot = false;
-    std::string texture_file_path;
-
-    bool operator==(const RebuildKey& o) const {
-      return std::tie(treat_as_point, has_positive_angle, is_spot,
-                      texture_file_path) ==
-             std::tie(o.treat_as_point, o.has_positive_angle, o.is_spot,
-                      o.texture_file_path);
-    }
-    bool operator!=(const RebuildKey& o) const { return !(*this == o); }
-  };
+  using RebuildKey = std::tuple<bool, bool, bool, std::string, bool>;
 
   TfToken type_id_;
   std::optional<RebuildKey> rebuild_key_;
+  bool warned_unsupported_motion_ = false;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

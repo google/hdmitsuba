@@ -34,6 +34,7 @@
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/assetPath.h>
 
+#include "hdmitsuba/motion.h"
 #include "hdmitsuba/render_param.h"
 #include "hdmitsuba/spec_types.h"
 #include "hdmitsuba/utils.h"
@@ -108,7 +109,7 @@ ScalarAffineTransform4f ComputeLightTransform(const TfToken& type_id,
     return UsdToMitsubaTransform(scale * transform);
   }
   // Non-area emitters (point, spot, directional, envmap) do not support scale
-  // or shear.
+  // or shear, and AnimatedTransform rejects keyframe matrices with shear.
   ScalarAffineTransform4f to_world =
       RemoveScaleFromTransform(UsdToMitsubaTransform(transform));
   if ((type_id == HdPrimTypeTokens->sphereLight &&
@@ -182,27 +183,42 @@ void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
     return;
   }
 
-  const GfMatrix4d transform = GetPrimTransform(data_source);
   const LightParams params = ReadLightParams(light_container);
 
   LightSpec spec;
   spec.id = id;
   spec.prim_type = type_id_;
-  spec.transform = ComputeLightTransform(type_id_, transform, params);
-  spec.emission = ComputeLightEmission(type_id_, transform, params);
   spec.angle = params.angle;
   spec.shaping_cone_angle = params.shaping_cone_angle;
   spec.shaping_cone_beam_width = params.ShapingConeBeamWidth();
   spec.treat_as_point = params.treat_as_point;
   spec.texture_file_path = params.texture_file_path;
+  spec.dirty_bits = *dirtyBits;
+
+  MotionSamples<GfMatrix4d> world_transform = SampleTransform(
+      data_source, spec.IsAreaLight() && warned_unsupported_motion_
+                       ? GfVec2f(0.0f)
+                       : GetMotionInterval(sceneDelegate));
+  if (spec.IsAreaLight() && world_transform.IsAnimated()) {
+    TF_WARN("Motion blur is not supported for light %s of type %s.",
+            id.GetText(), type_id_.GetText());
+    warned_unsupported_motion_ = true;
+    world_transform =
+        MotionSamples<GfMatrix4d>::Static(GetPrimTransform(data_source));
+  }
+  spec.transform = world_transform.Map([&](const GfMatrix4d& m) {
+    return ComputeLightTransform(type_id_, m, params);
+  });
+  // Area lights cannot be animated, so using First() is exact.
+  spec.emission =
+      ComputeLightEmission(type_id_, world_transform.First(), params);
 
   const RebuildKey rebuild_key{
       params.treat_as_point, params.angle > 0.0f,
-      params.shaping_cone_angle != 0.0f, params.texture_file_path};
+      params.shaping_cone_angle != 0.0f, params.texture_file_path,
+      spec.transform.IsAnimated()};
   spec.needs_rebuild = rebuild_key_ != rebuild_key;
   rebuild_key_ = rebuild_key;
-
-  spec.dirty_bits = *dirtyBits;
 
   scene->SyncLight(std::move(spec));
   *dirtyBits = HdChangeTracker::Clean;

@@ -21,6 +21,7 @@
 #include <pxr/external/boost/python.hpp>
 #include <pxr/usd/sdf/path.h>
 #include <pxr/usd/usd/common.h>
+#include <pxr/usd/usd/prim.h>
 #include <pxr/usd/usd/timeCode.h>
 
 namespace bp = PXR_BOOST_PYTHON_NAMESPACE;
@@ -89,6 +90,7 @@ struct type_caster<T, enable_if_t<boost_caster_traits<T>::value>> {
 
 NANOBIND_BOOST_CASTER(pxr::SdfPath, "Sdf.Path");
 NANOBIND_BOOST_CASTER(pxr::VtValue, "Vt.VtValue");
+NANOBIND_BOOST_CASTER(pxr::UsdPrim, "Usd.Prim");
 NANOBIND_BOOST_CASTER(pxr::UsdStagePtr, "Usd.Stage");
 NANOBIND_BOOST_CASTER(pxr::UsdTimeCode, "Usd.TimeCode");
 NANOBIND_BOOST_CASTER(pxr::TfToken, "Tf.Token");

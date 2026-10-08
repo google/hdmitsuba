@@ -34,6 +34,7 @@ from usd_mitsuba import instancing
 from usd_mitsuba import light
 from usd_mitsuba import material
 from usd_mitsuba import mesh
+from usd_mitsuba import motion
 from usd_mitsuba import render_settings as render_settings_lib
 from usd_mitsuba import util
 
@@ -265,6 +266,8 @@ def convert_to_mitsuba(
 
   prototype_paths = instancing.get_prototype_paths(stage)
   sensor_bindings = camera.get_surface_sensor_bindings(stage)
+  # Lights are sampled over the union of all camera shutters.
+  motion_interval = motion.get_motion_interval(stage, time)
   # Traverse the stage using TraverseInstanceProxies. This flattens native USD
   # instances (instanceable=true), which means they will be duplicated in Mitsuba.
   # This is since Mitsuba's instancing does not support BSDF or emitter changes
@@ -300,7 +303,7 @@ def convert_to_mitsuba(
     elif prim.IsA(UsdLux.NonboundableLightBase) or prim.IsA(
         UsdLux.BoundableLightBase
     ):
-      mi_scene_dict[mi_id] = light.convert_light(prim, time)
+      mi_scene_dict[mi_id] = light.convert_light(prim, time, motion_interval)
     elif prim.IsA(UsdGeom.Curves):
       mi_scene_dict[mi_id] = _convert_curves(prim, time)
     elif prim.IsA(UsdVol.ParticleField3DGaussianSplat):

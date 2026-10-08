@@ -26,6 +26,7 @@ add_library(hdMitsuba SHARED
   mesh.cc
   mesh/geometry_processor.cc
   mesh/subdivision.cc
+  motion.cc
   sdr_discovery.cc
   sdr_parser.cc
   render_buffer.cc

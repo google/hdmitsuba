@@ -14,12 +14,14 @@
 
 #include "hdmitsuba/camera.h"
 
+#include <algorithm>
 #include <optional>
 #include <string>
 #include <utility>
 
 #include <drjit/math.h>
 #include <drjit/sphere.h>
+#include <pxr/base/gf/vec2f.h>
 #include <pxr/base/tf/token.h>
 #include <pxr/base/vt/types.h>
 #include <pxr/base/tf/staticTokens.h>
@@ -31,6 +33,7 @@
 #include <pxr/usd/sdf/path.h>
 
 #include "hdmitsuba/debug_codes.h"
+#include "hdmitsuba/motion.h"
 #include "hdmitsuba/render_param.h"
 #include "hdmitsuba/spec_types.h"
 #include "hdmitsuba/utils.h"
@@ -94,9 +97,21 @@ void HdMitsubaCamera::Sync(HdSceneDelegate* sceneDelegate,
             .GetWithDefault<std::string>("");
   }
 
+  const GfVec2f shutter = GetShutterClose() > GetShutterOpen()
+                              ? GfVec2f(GetShutterOpen(), GetShutterClose())
+                              : GfVec2f(0.0f);
+  const bool was_animated = transform_.IsAnimated();
+  if (!is_instantiated_ || (dirty_bits_copy & HdCamera::DirtyTransform) ||
+      shutter != shutter_) {
+    transform_ =
+        SampleTransform(GetPrimDataSource(sceneDelegate, GetId()), shutter)
+            .Map(UsdToMitsubaSensorTransform);
+  }
+
   CameraSpec spec;
   spec.id = GetId();
-  spec.transform = UsdToMitsubaSensorTransform(GetTransform());
+  spec.transform = transform_;
+  spec.shutter = shutter;
   spec.sensor_type = sensor_type;
   spec.fov = GetHorizontalFieldOfView();
   spec.horizontal_aperture_offset = GetHorizontalPrincipalPointOffset();
@@ -111,8 +126,11 @@ void HdMitsubaCamera::Sync(HdSceneDelegate* sceneDelegate,
   spec.needs_rebuild |= sensor_type != sensor_type_;
   spec.needs_rebuild |= (sensor_type != "perspective" &&
                          (dirty_bits_copy & HdCamera::DirtyParams));
+  spec.needs_rebuild |= transform_.IsAnimated() != was_animated;
+  spec.needs_rebuild |= shutter != shutter_;
   is_instantiated_ = true;
   sensor_type_ = sensor_type;
+  shutter_ = shutter;
 
   static_cast<HdMitsubaRenderParam*>(renderParam)
       ->GetScene()

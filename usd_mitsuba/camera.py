@@ -20,19 +20,21 @@ from typing import Any
 
 import drjit as dr
 import mitsuba as mi
+from pxr import Gf
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
 
+from usd_mitsuba import motion
 from usd_mitsuba import util
 from usd_mitsuba.render_settings import get_render_settings
 
 
-def _get_camera_transform(camera: UsdGeom.Camera, time: Usd.TimeCode) -> mi.ScalarTransform4f:
-  """Returns the Mitsuba sensor transform for a given USD camera and time code."""
+def _to_sensor_transform(world_transform: Gf.Matrix4d) -> mi.ScalarTransform4f:
+  """Returns the Mitsuba sensor transform for a USD camera world transform."""
   # Mitsuba sensors generally do not support scaling.
   return util.remove_scale_from_transform(
-      util.get_world_transform(camera.GetPrim(), time)
+      util.to_mitsuba_transform(world_transform)
   ).rotate([0, 1, 0], 180)
 
 
@@ -85,11 +87,14 @@ def usd_to_mitsuba(
   Returns:
     A dictionary representing the Mitsuba sensor.
   """
-
-  world_transform = _get_camera_transform(camera, time)
+  prim = camera.GetPrim()
+  shutter = motion.get_shutter_interval(camera, time)
+  world_transform = motion.sample_world_transform(
+      prim, time, shutter, _to_sensor_transform
+  )
   aperture_x = camera.GetHorizontalApertureAttr().Get(time)
   aperture_y = camera.GetVerticalApertureAttr().Get(time)
-  render_settings = get_render_settings(camera.GetPrim().GetStage())
+  render_settings = get_render_settings(prim.GetStage())
   if image_size is None and render_settings:
     resolution_attr = render_settings.GetResolutionAttr()
     if resolution_attr.HasAuthoredValue():
@@ -97,8 +102,6 @@ def usd_to_mitsuba(
       image_size = (resolution[0], resolution[1])
   if image_size is None:
     image_size = (512, int(dr.round(512 * aperture_y / aperture_x)))
-
-  prim = camera.GetPrim()
 
   if prim.GetAttribute('mitsuba:sensor:type').Get():
     sensor_dict = util.extract_nested_dict(prim, 'mitsuba:sensor:')
@@ -181,4 +184,5 @@ def usd_to_mitsuba(
 
   if reconstruction_filter is not None:
     film_dict['reconstruction_filter'] = reconstruction_filter
+  sensor_dict['shutter_open'], sensor_dict['shutter_close'] = shutter
   return sensor_dict

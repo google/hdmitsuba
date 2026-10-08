@@ -15,14 +15,16 @@
 
 // Scene-index plugins for HdMitsuba.
 //
-// Nothing here contributes data sources -- every value hdMitsuba reads is a
-// schema property or a primvar UsdImaging already surfaces. This file only
-// fixes *invalidation*: UsdImagingStageSceneIndex drops a property change
-// unless some adapter claims it (_ComputeDirtiedEntries has no resync
-// fallback), and a few properties hdMitsuba cares about are claimed by nobody.
-//
-// Contents: a scene index converting implicit surfaces to meshes, and a
-// keyless API-schema adapter covering those unclaimed properties.
+// Contents:
+// - A scene index converting implicit surfaces to meshes.
+// - A scene index publishing the motion interval (the union of all camera
+//   shutter intervals) on the absolute root prim, and invalidating light
+//   transforms when it changes. This is the only data source contributed here.
+// - A keyless API-schema adapter fixing *invalidation*: every other value
+//   hdMitsuba reads is a schema property or a primvar UsdImaging already
+//   surfaces, but UsdImagingStageSceneIndex drops a property change unless
+//   some adapter claims it (_ComputeDirtiedEntries has no resync fallback), and
+//   a few properties hdMitsuba cares about are claimed by nobody.
 //
 // TODO: keyless adapters cannot be scoped to a renderer. Constructing them
 // loads this library -- and with it Mitsuba and Dr.Jit -- into every
@@ -30,20 +32,25 @@
 // UsdImagingStageSceneIndex. A separate plugin library without the Mitsuba
 // dependency would avoid both.
 
-#include <string_view>
+#include <algorithm>
 
+#include <absl/container/flat_hash_map.h>
+#include <absl/strings/match.h>
+#include <pxr/base/gf/vec2f.h>
 #include <pxr/base/tf/registryManager.h>
-#include <pxr/base/tf/staticTokens.h>
 #include <pxr/base/tf/type.h>
 #include <pxr/imaging/hd/cameraSchema.h>
-#include <pxr/imaging/hd/changeTracker.h>
 #include <pxr/imaging/hd/dirtyBitsTranslator.h>
+#include <pxr/imaging/hd/filteringSceneIndex.h>
 #include <pxr/imaging/hd/lightSchema.h>
 #include <pxr/imaging/hd/materialSchema.h>
+#include <pxr/imaging/hd/overlayContainerDataSource.h>
 #include <pxr/imaging/hd/retainedDataSource.h>
 #include <pxr/imaging/hd/sceneIndexPlugin.h>
 #include <pxr/imaging/hd/sceneIndexPluginRegistry.h>
+#include <pxr/imaging/hd/sceneIndexPrimView.h>
 #include <pxr/imaging/hd/tokens.h>
+#include <pxr/imaging/hd/xformSchema.h>
 #include <pxr/imaging/hdsi/implicitSurfaceSceneIndex.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/usdGeom/camera.h>
@@ -56,6 +63,7 @@
 
 #include "hdmitsuba/camera.h"
 #include "hdmitsuba/mesh.h"
+#include "hdmitsuba/motion.h"
 
 #if PXR_VERSION < 2605
 #error "hdmitsuba requires OpenUSD 26.05 or newer."
@@ -63,12 +71,134 @@
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-TF_DEFINE_PRIVATE_TOKENS(
-    HdMitsubaPluginTokens,
-    ((sceneIndexPluginName, "HdMitsuba_ImplicitSurfaceSceneIndexPlugin"))
-    ((rendererDisplayName, "Mitsuba")));
+// Publishes the motion interval, i.e., the union of the shutter intervals of
+// all cameras, on the absolute root prim (see motion.h), and dirties light
+// transforms whenever it changes. This never happens for scenes without motion
+// blur, where all shutter intervals are empty.
+class HdMitsuba_MotionIntervalSceneIndex final
+    : public HdSingleInputFilteringSceneIndexBase {
+ public:
+  static HdSceneIndexBaseRefPtr New(const HdSceneIndexBaseRefPtr& input_scene) {
+    return TfCreateRefPtr(new HdMitsuba_MotionIntervalSceneIndex(input_scene));
+  }
 
-class HdMitsuba_ImplicitSurfaceSceneIndexPlugin : public HdSceneIndexPlugin {
+  HdSceneIndexPrim GetPrim(const SdfPath& prim_path) const override {
+    HdSceneIndexPrim prim = _GetInputSceneIndex()->GetPrim(prim_path);
+    if (prim_path.IsAbsoluteRootPath()) {
+      prim.dataSource =
+          HdOverlayContainerDataSource::OverlayedContainerDataSources(
+              HdRetainedContainerDataSource::New(
+                  HdMitsubaMotionTokens->motion_interval,
+                  HdRetainedTypedSampledDataSource<GfVec2f>::New(
+                      motion_interval_)),
+              prim.dataSource);
+    }
+    return prim;
+  }
+
+  SdfPathVector GetChildPrimPaths(const SdfPath& prim_path) const override {
+    return _GetInputSceneIndex()->GetChildPrimPaths(prim_path);
+  }
+
+ protected:
+  explicit HdMitsuba_MotionIntervalSceneIndex(
+      const HdSceneIndexBaseRefPtr& input_scene)
+      : HdSingleInputFilteringSceneIndexBase(input_scene) {
+    for (const SdfPath& path : HdSceneIndexPrimView(input_scene)) {
+      TrackPrim(path, input_scene->GetPrim(path).primType);
+    }
+    UpdateMotionInterval(/*notify=*/false);
+  }
+
+  void _PrimsAdded(
+      const HdSceneIndexBase& /*sender*/,
+      const HdSceneIndexObserver::AddedPrimEntries& entries) override {
+    for (const auto& entry : entries) {
+      TrackPrim(entry.primPath, entry.primType);
+    }
+    _SendPrimsAdded(entries);
+    UpdateMotionInterval();
+  }
+
+  void _PrimsRemoved(
+      const HdSceneIndexBase& /*sender*/,
+      const HdSceneIndexObserver::RemovedPrimEntries& entries) override {
+    for (const auto& entry : entries) {
+      absl::erase_if(shutters_, [&](const auto& kv) {
+        return kv.first.HasPrefix(entry.primPath);
+      });
+    }
+    _SendPrimsRemoved(entries);
+    UpdateMotionInterval();
+  }
+
+  void _PrimsDirtied(
+      const HdSceneIndexBase& /*sender*/,
+      const HdSceneIndexObserver::DirtiedPrimEntries& entries) override {
+    static const HdDataSourceLocatorSet shutter_locators{
+        HdCameraSchema::GetShutterOpenLocator(),
+        HdCameraSchema::GetShutterCloseLocator()};
+    for (const auto& entry : entries) {
+      if (auto it = shutters_.find(entry.primPath);
+          it != shutters_.end() &&
+          entry.dirtyLocators.Intersects(shutter_locators)) {
+        it->second = GetShutter(entry.primPath);
+      }
+    }
+    _SendPrimsDirtied(entries);
+    UpdateMotionInterval();
+  }
+
+ private:
+  void TrackPrim(const SdfPath& path, const TfToken& prim_type) {
+    if (prim_type == HdPrimTypeTokens->camera) {
+      shutters_[path] = GetShutter(path);
+    } else {
+      shutters_.erase(path);
+    }
+  }
+
+  GfVec2f GetShutter(const SdfPath& camera_path) const {
+    HdCameraSchema camera = HdCameraSchema::GetFromParent(
+        _GetInputSceneIndex()->GetPrim(camera_path).dataSource);
+    HdDoubleDataSourceHandle open = camera.GetShutterOpen();
+    HdDoubleDataSourceHandle close = camera.GetShutterClose();
+    return GfVec2f(open ? open->GetTypedValue(0.0f) : 0.0,
+                   close ? close->GetTypedValue(0.0f) : 0.0);
+  }
+
+  void UpdateMotionInterval(bool notify = true) {
+    GfVec2f interval(0.0f);
+    for (const auto& [_, s] : shutters_) {
+      if (s[1] > s[0]) {
+        interval = interval[1] > interval[0]
+                       ? GfVec2f(std::min(interval[0], s[0]),
+                                 std::max(interval[1], s[1]))
+                       : s;
+      }
+    }
+    if (interval == motion_interval_) return;
+    motion_interval_ = interval;
+    if (!notify) return;
+
+    HdSceneIndexObserver::DirtiedPrimEntries dirtied = {
+        {SdfPath::AbsoluteRootPath(),
+        HdDataSourceLocator(HdMitsubaMotionTokens->motion_interval)}};
+    const HdSceneIndexBaseRefPtr& input = _GetInputSceneIndex();
+    for (const SdfPath& path : HdSceneIndexPrimView(input)) {
+      if (HdPrimTypeIsLight(input->GetPrim(path).primType)) {
+        dirtied.emplace_back(path, HdXformSchema::GetDefaultLocator());
+      }
+    }
+    _SendPrimsDirtied(dirtied);
+  }
+
+  absl::flat_hash_map<SdfPath, GfVec2f, SdfPath::Hash> shutters_;
+  GfVec2f motion_interval_{0.0f};
+};
+
+// Converts implicit surfaces to meshes and publishes the motion interval.
+class HdMitsuba_SceneIndexPlugin : public HdSceneIndexPlugin {
  protected:
   HdSceneIndexBaseRefPtr _AppendSceneIndex(
       const HdSceneIndexBaseRefPtr& input_scene,
@@ -76,25 +206,16 @@ class HdMitsuba_ImplicitSurfaceSceneIndexPlugin : public HdSceneIndexPlugin {
     const HdDataSourceBaseHandle to_mesh =
         HdRetainedTypedSampledDataSource<TfToken>::New(
             HdsiImplicitSurfaceSceneIndexTokens->toMesh);
-    return HdsiImplicitSurfaceSceneIndex::New(
-        input_scene,
-        HdRetainedContainerDataSource::New(
-            HdPrimTypeTokens->sphere, to_mesh, HdPrimTypeTokens->cube, to_mesh,
-            HdPrimTypeTokens->cone, to_mesh, HdPrimTypeTokens->cylinder,
-            to_mesh, HdPrimTypeTokens->capsule, to_mesh,
-            HdPrimTypeTokens->plane, to_mesh));
+    return HdMitsuba_MotionIntervalSceneIndex::New(
+        HdsiImplicitSurfaceSceneIndex::New(
+            input_scene,
+            HdRetainedContainerDataSource::New(
+                HdPrimTypeTokens->sphere, to_mesh, HdPrimTypeTokens->cube,
+                to_mesh, HdPrimTypeTokens->cone, to_mesh,
+                HdPrimTypeTokens->cylinder, to_mesh, HdPrimTypeTokens->capsule,
+                to_mesh, HdPrimTypeTokens->plane, to_mesh)));
   }
 };
-
-// Helpers only: the registered classes must stay at namespace scope so their
-// demangled type names match the plugInfo.json keys.
-namespace {
-
-bool StartsWith(std::string_view s, std::string_view prefix) {
-  return s.substr(0, prefix.size()) == prefix;
-}
-
-}  // namespace
 
 // Covers invalidation gaps for `mitsuba:sensor:*`, treatAsPoint/treatAsLine,
 // and material outputs. Being keyless, this runs for every prim of every stage
@@ -113,8 +234,7 @@ class HdMitsuba_APISchemaAdapter : public UsdImagingAPISchemaAdapter {
     for (const TfToken& prop : properties) {
       // Name test first: cheap, and keeps the schema lookups off the path
       // taken by the vast majority of prims, which match nothing here.
-      const std::string_view prop_name = prop.GetString();
-      if (StartsWith(prop_name, kMitsubaSensorNamespace) &&
+      if (absl::StartsWith(prop.GetString(), kMitsubaSensorNamespace) &&
           prim.IsA<UsdGeomCamera>()) {
         // The camera adapter only maps UsdGeomCamera schema attributes.
         result.insert(HdCameraSchema::GetDefaultLocator());
@@ -123,7 +243,8 @@ class HdMitsuba_APISchemaAdapter : public UsdImagingAPISchemaAdapter {
                  prim.HasAPI<UsdLuxLightAPI>()) {
         // The LightAPI adapter only claims `inputs:*` and `light:*`.
         result.insert(HdLightSchema::GetDefaultLocator());
-      } else if (StartsWith(prop_name, UsdShadeTokens->outputs.GetString()) &&
+      } else if (absl::StartsWith(prop.GetString(),
+                                  UsdShadeTokens->outputs.GetString()) &&
                  prim.IsA<UsdShadeMaterial>()) {
         // The material adapter claims any output it can still see via
         // GetOutputs(); this only adds the case of one being *removed*.
@@ -135,8 +256,7 @@ class HdMitsuba_APISchemaAdapter : public UsdImagingAPISchemaAdapter {
 };
 
 TF_REGISTRY_FUNCTION(TfType) {
-  HdSceneIndexPluginRegistry::Define<
-      HdMitsuba_ImplicitSurfaceSceneIndexPlugin>();
+  HdSceneIndexPluginRegistry::Define<HdMitsuba_SceneIndexPlugin>();
   TfType::Define<HdMitsuba_APISchemaAdapter,
                  TfType::Bases<UsdImagingAPISchemaAdapter>>()
       .SetFactory<
@@ -157,8 +277,7 @@ TF_REGISTRY_FUNCTION(TfType) {
 
 TF_REGISTRY_FUNCTION(HdSceneIndexPlugin) {
   HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(
-      HdMitsubaPluginTokens->rendererDisplayName.GetString(),
-      HdMitsubaPluginTokens->sceneIndexPluginName,
+      "Mitsuba", TfToken("HdMitsuba_SceneIndexPlugin"),
       /* inputArgs = */ nullptr, /* insertionPhase = */ 0,
       HdSceneIndexPluginRegistry::InsertionOrderAtStart);
 }

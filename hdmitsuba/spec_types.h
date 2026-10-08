@@ -19,6 +19,7 @@
 
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/quatf.h>
+#include <pxr/base/gf/vec2f.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/tf/token.h>
 #include <pxr/base/vt/types.h>
@@ -31,6 +32,7 @@
 #include <pxr/usd/sdf/path.h>
 
 #include "hdmitsuba/mesh/geometry_processor.h"
+#include "hdmitsuba/motion.h"
 #include "hdmitsuba/utils.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -59,7 +61,7 @@ struct MaterialSpec : public BaseSpec {
 
 struct LightSpec : public BaseSpec {
   TfToken prim_type;
-  ScalarAffineTransform4f transform;
+  MotionTransform transform;
   GfVec3f emission;
   float angle = 0.0f;
   float shaping_cone_angle = 0.0f;
@@ -141,7 +143,8 @@ struct ParticleFieldSpec : public BaseSpec {
 
 struct CameraSpec : public BaseSpec {
   std::string sensor_type = "perspective";
-  ScalarAffineTransform4f transform;
+  MotionTransform transform;
+  GfVec2f shutter{0.0f};
   float fov = 90.0f;
   float horizontal_aperture_offset = 0.0f;
   float vertical_aperture_offset = 0.0f;

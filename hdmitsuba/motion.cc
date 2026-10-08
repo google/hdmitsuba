@@ -1,0 +1,217 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "hdmitsuba/motion.h"
+
+#include <algorithm>
+#include <cmath>
+#include <functional>
+#include <utility>
+#include <vector>
+
+#include <pxr/base/gf/interval.h>
+#include <pxr/base/gf/math.h>
+#include <pxr/base/gf/matrix4d.h>
+#include <pxr/base/gf/quatd.h>
+#include <pxr/base/gf/vec2f.h>
+#include <pxr/base/gf/vec3d.h>
+#include <pxr/base/tf/diagnostic.h>
+#include <pxr/imaging/hd/dataSource.h>
+#include <pxr/imaging/hd/sceneDelegate.h>
+#include <pxr/imaging/hd/xformSchema.h>
+#include <pxr/pxr.h>
+#include <pxr/usd/sdf/path.h>
+#include <pxr/usd/usd/prim.h>
+#include <pxr/usd/usd/timeCode.h>
+#include <pxr/usd/usdGeom/imageable.h>
+#include <pxr/usd/usdGeom/xformOp.h>
+#include <pxr/usd/usdGeom/xformable.h>
+
+#include "hdmitsuba/utils.h"
+
+PXR_NAMESPACE_OPEN_SCOPE
+
+TF_DEFINE_PUBLIC_TOKENS(HdMitsubaMotionTokens, HDMITSUBA_MOTION_TOKENS);
+
+namespace {
+
+// Tolerances of the keyframe refinement in `SampleTransform`.
+constexpr int kMaxRefinementDepth = 5;
+constexpr double kMaxRotationErrorDegrees = 1.0;
+// Keeps segments well below 180 degrees, where the shortest arc is ambiguous.
+constexpr double kMaxSegmentRotationDegrees = 90.0;
+// Relative to the scale, resp. the extent of the translation over a segment.
+constexpr double kMaxRelativeError = 1e-2;
+
+// Evaluates a world-transform matrix at a frame-relative shutter offset.
+using MatrixEvalFn = std::function<GfMatrix4d(float)>;
+
+// A transform sample at a given shutter offset, paired with its TRS
+// decomposition (matching the keyframes of Mitsuba's AnimatedTransform) so
+// recursive subdivision does not re-decompose segment endpoints.
+struct EvaluatedSample {
+  float time;
+  GfMatrix4d matrix;
+  GfVec3d scale;
+  GfQuatd rotation;
+  GfVec3d translation;
+
+  EvaluatedSample(const MatrixEvalFn& eval_matrix, float t)
+      : time(t),
+        matrix(eval_matrix(t)),
+        scale(matrix.GetRow3(0).GetLength(), matrix.GetRow3(1).GetLength(),
+              matrix.GetRow3(2).GetLength()),
+        rotation(matrix.RemoveScaleShear().ExtractRotationQuat()),
+        translation(matrix.ExtractTranslation()) {}
+};
+
+// Returns whether the angle between the rotations `a` and `b` is at most
+// `degrees`. The angle between unit quaternions is 2 * acos(|a . b|).
+bool RotationAngleAtMost(const GfQuatd& a, const GfQuatd& b, double degrees) {
+  return std::abs(GfDot(a, b)) >= std::cos(0.5 * GfDegreesToRadians(degrees));
+}
+
+// Returns whether interpolating between `a` and `b` at `alpha` (linearly for
+// scale and translation, along the shortest arc for rotation, like Mitsuba's
+// AnimatedTransform) approximates `actual`.
+bool IsInterpolatedAccurately(const EvaluatedSample& a,
+                              const EvaluatedSample& b, double alpha,
+                              const EvaluatedSample& actual) {
+  const double extent = (b.translation - a.translation).GetLength() +
+                        (actual.translation - a.translation).GetLength();
+  return (GfLerp(alpha, a.translation, b.translation) - actual.translation)
+                 .GetLength() <= kMaxRelativeError * extent + 1e-6 &&
+         (GfLerp(alpha, a.scale, b.scale) - actual.scale).GetLength() <=
+             kMaxRelativeError * actual.scale.GetLength() + 1e-6 &&
+         RotationAngleAtMost(GfSlerp(alpha, a.rotation, b.rotation),
+                             actual.rotation, kMaxRotationErrorDegrees);
+}
+
+// Appends samples of `eval_matrix` in (s0.time, s1.time] to `samples`.
+// Because USD interpolates xformOps before composing matrices while Mitsuba's
+// AnimatedTransform decomposes keyframe matrices into (scale, quat,
+// translation) and slerps along the shortest arc, segments with large (>= 90
+// deg) rotations or curved/orbiting trajectories are adaptively subdivided.
+void AppendRefinedSamples(
+    const MatrixEvalFn& eval_matrix, const EvaluatedSample& s0,
+    const EvaluatedSample& s1, int depth,
+    std::vector<std::pair<float, GfMatrix4d>>& samples) {
+  if (depth < kMaxRefinementDepth) {
+    const auto eval_at = [&](double alpha) {
+      return EvaluatedSample(eval_matrix, GfLerp(alpha, s0.time, s1.time));
+    };
+    const EvaluatedSample s_mid = eval_at(0.5);
+    if (!RotationAngleAtMost(s0.rotation, s1.rotation,
+                             kMaxSegmentRotationDegrees) ||
+        !IsInterpolatedAccurately(s0, s1, 0.5, s_mid) ||
+        !IsInterpolatedAccurately(s0, s1, 0.25, eval_at(0.25))) {
+      AppendRefinedSamples(eval_matrix, s0, s_mid, depth + 1, samples);
+      AppendRefinedSamples(eval_matrix, s_mid, s1, depth + 1, samples);
+      return;
+    }
+  }
+  samples.emplace_back(s1.time, s1.matrix);
+}
+
+// Samples `eval_matrix` over `interval` (including any `times` strictly inside
+// `interval`), refining each segment and collapsing to a static sample if all
+// resulting matrices match.
+MotionSamples<GfMatrix4d> SampleTransformOverInterval(
+    const MatrixEvalFn& eval_matrix, const GfVec2f& interval,
+    std::vector<float> times) {
+  std::sort(times.begin(), times.end());
+  times.push_back(interval[1]);
+
+  MotionSamples<GfMatrix4d> result;
+  EvaluatedSample prev(eval_matrix, interval[0]);
+  result.samples.emplace_back(prev.time, prev.matrix);
+  for (float t : times) {
+    if (t > prev.time && t <= interval[1]) {
+      EvaluatedSample next(eval_matrix, t);
+      AppendRefinedSamples(eval_matrix, prev, next, 0, result.samples);
+      prev = std::move(next);
+    }
+  }
+  if (std::all_of(result.samples.begin() + 1, result.samples.end(),
+                  [&](const auto& s) { return s.second == result.First(); })) {
+    return MotionSamples<GfMatrix4d>::Static(result.First());
+  }
+  return result;
+}
+
+}  // namespace
+
+MotionSamples<GfMatrix4d> SampleTransform(
+    const HdContainerDataSourceHandle& prim_source, const GfVec2f& interval) {
+  const HdMatrixDataSourceHandle matrix =
+      HdXformSchema::GetFromParent(prim_source).GetMatrix();
+  if (!matrix) {
+    return MotionSamples<GfMatrix4d>::Static(GfMatrix4d(1.0));
+  }
+  std::vector<float> times;
+  if (interval[1] <= interval[0] ||
+      !matrix->GetContributingSampleTimesForInterval(interval[0], interval[1],
+                                                     &times)) {
+    return MotionSamples<GfMatrix4d>::Static(matrix->GetTypedValue(0.0f));
+  }
+  return SampleTransformOverInterval(
+      [&](float t) { return matrix->GetTypedValue(t); }, interval,
+      std::move(times));
+}
+
+MotionSamples<GfMatrix4d> SampleTransform(const UsdPrim& prim, UsdTimeCode time,
+                                          const GfVec2f& interval) {
+  UsdGeomImageable imageable(prim);
+  if (!imageable) {
+    return MotionSamples<GfMatrix4d>::Static(GfMatrix4d(1.0));
+  }
+  std::vector<UsdGeomXformOp> ops;
+  if (interval[1] > interval[0] && time.IsNumeric()) {
+    for (UsdPrim p = prim; p; p = p.GetParent()) {
+      if (UsdGeomXformable xformable{p}) {
+        bool resets_xform_stack = false;
+        for (const UsdGeomXformOp& op :
+             xformable.GetOrderedXformOps(&resets_xform_stack)) {
+          if (op.MightBeTimeVarying()) ops.push_back(op);
+        }
+        if (resets_xform_stack) break;
+      }
+    }
+  }
+  if (ops.empty()) {
+    return MotionSamples<GfMatrix4d>::Static(
+        imageable.ComputeLocalToWorldTransform(time));
+  }
+  const double t0 = time.GetValue();
+  std::vector<double> usd_samples;
+  UsdGeomXformable::GetTimeSamplesInInterval(
+      ops, GfInterval(t0 + interval[0], t0 + interval[1], false, false),
+      &usd_samples);
+  std::vector<float> offsets;
+  offsets.reserve(usd_samples.size());
+  for (double s : usd_samples) offsets.push_back(static_cast<float>(s - t0));
+  return SampleTransformOverInterval(
+      [&](float offset) {
+        return imageable.ComputeLocalToWorldTransform(t0 + offset);
+      },
+      interval, std::move(offsets));
+}
+
+GfVec2f GetMotionInterval(HdSceneDelegate* scene_delegate) {
+  return GetParam<GfVec2f>(
+      GetPrimDataSource(scene_delegate, SdfPath::AbsoluteRootPath()),
+      HdMitsubaMotionTokens->motion_interval, GfVec2f(0.0f));
+}
+
+PXR_NAMESPACE_CLOSE_SCOPE
