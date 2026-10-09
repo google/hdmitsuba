@@ -284,6 +284,12 @@ TfToken HdMitsubaRenderDelegate::GetMaterialBindingPurpose() const {
   return HdTokens->full;
 }
 
+bool HdMitsubaRenderDelegate::IsParallelSyncEnabled(
+    const TfToken& primType) const {
+  return primType == HdPrimTypeTokens->material ||
+         HdRenderDelegate::IsParallelSyncEnabled(primType);
+}
+
 const MitsubaAovSpec* FindMitsubaAovSpec(const TfToken& name) {
   static const absl::NoDestructor<
       absl::flat_hash_map<TfToken, MitsubaAovSpec, TfToken::HashFunctor>>
