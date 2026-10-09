@@ -257,7 +257,7 @@ class SceneModel final : public SceneManager {
 
   ref<BSDF> ResolveBsdf(const SdfPath& material_id,
                         const PrimvarMap& primvars) {
-    auto bsdf_it = bsdfs_.find(material_id.GetAsString());
+    auto bsdf_it = bsdfs_.find(material_id);
     if (bsdf_it != bsdfs_.end()) {
       return bsdf_it->second;
     }
@@ -266,12 +266,12 @@ class SceneModel final : public SceneManager {
     if (color_it != primvars.end() && !color_it->second.value.IsEmpty()) {
       GfVec3f color(0.5f, 0.5f, 0.5f);
       if (color_it->second.value.IsHolding<VtVec3fArray>()) {
-        const auto& colors = color_it->second.value.Get<VtVec3fArray>();
+        const auto& colors = color_it->second.value.UncheckedGet<VtVec3fArray>();
         if (!colors.empty()) {
           color = colors[0];
         }
       } else if (color_it->second.value.IsHolding<GfVec3f>()) {
-        color = color_it->second.value.Get<GfVec3f>();
+        color = color_it->second.value.UncheckedGet<GfVec3f>();
       }
       auto color_key = std::make_tuple(color[0], color[1], color[2]);
 
@@ -301,7 +301,7 @@ class SceneModel final : public SceneManager {
   const MeshAttributeRequests& ResolveMeshAttributes(
       const SdfPath& material_id) const {
     static const absl::NoDestructor<MeshAttributeRequests> kNone;
-    auto it = mesh_attributes_.find(material_id.GetAsString());
+    auto it = mesh_attributes_.find(material_id);
     return it != mesh_attributes_.end() ? it->second : *kNone;
   }
 
@@ -336,6 +336,7 @@ class SceneModel final : public SceneManager {
       }
       shape_sensors_dirty_ = true;
     }
+    has_pending_commits_ = true;
     reset_progressive_ = true;
   }
 
@@ -348,6 +349,7 @@ class SceneModel final : public SceneManager {
                                        : spec.material_ids[0].GetText());
     absl::MutexLock lock(state_mutex_);
     UpsertSpec(mesh_specs_, std::move(spec));
+    has_pending_commits_ = true;
     reset_progressive_ = true;
   }
 
@@ -355,6 +357,7 @@ class SceneModel final : public SceneManager {
     TF_DEBUG(HDMITSUBA_SYNC).Msg("SyncCurves: %s\n", spec.id.GetText());
     absl::MutexLock lock(state_mutex_);
     curve_specs_[spec.id] = std::move(spec);
+    has_pending_commits_ = true;
     reset_progressive_ = true;
   }
 
@@ -362,6 +365,7 @@ class SceneModel final : public SceneManager {
     TF_DEBUG(HDMITSUBA_SYNC).Msg("SyncParticleField: %s\n", spec.id.GetText());
     absl::MutexLock lock(state_mutex_);
     UpsertSpec(particle_field_specs_, std::move(spec));
+    has_pending_commits_ = true;
     reset_progressive_ = true;
   }
 
@@ -369,6 +373,7 @@ class SceneModel final : public SceneManager {
     TF_DEBUG(HDMITSUBA_SYNC).Msg("SyncLight: %s\n", spec.id.GetText());
     absl::MutexLock lock(state_mutex_);
     UpsertSpec(light_specs_, std::move(spec));
+    has_pending_commits_ = true;
     reset_progressive_ = true;
   }
 
@@ -378,6 +383,7 @@ class SceneModel final : public SceneManager {
     absl::MutexLock lock(state_mutex_);
     material_specs_[spec.id] = std::move(spec);
     texture_cache_.MarkDirty();
+    has_pending_commits_ = true;
     reset_progressive_ = true;
   }
 
@@ -405,39 +411,40 @@ class SceneModel final : public SceneManager {
       TF_RUNTIME_ERROR("Could not remove shape: %s", id_str.c_str());
     }
     scene_dirty_ = true;
+    has_pending_commits_ = true;
     reset_progressive_ = true;
   }
 
   void RemoveLight(const SdfPath& id) override {
     TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("RemoveLight: %s\n", id.GetText());
-    std::string id_str = id.GetAsString();
     absl::MutexLock lock(state_mutex_);
     light_specs_.erase(id);
-    shapes_.erase(id_str);
-    emitters_.erase(id_str);
+    shapes_.erase(id.GetAsString());
+    emitters_.erase(id);
     scene_dirty_ = true;
+    has_pending_commits_ = true;
     reset_progressive_ = true;
   }
 
   void RemoveMaterial(const SdfPath& id) override {
     TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("RemoveMaterial: %s\n", id.GetText());
-    std::string id_str = id.GetAsString();
     absl::MutexLock lock(state_mutex_);
     material_specs_.erase(id);
-    bsdfs_.erase(id_str);
+    bsdfs_.erase(id);
     uint32_t dirty_flags = DirtyFlags::kMaterialUpdated;
-    if (displacements_.erase(id_str) > 0) {
+    if (displacements_.erase(id) > 0) {
       dirty_flags |= DirtyFlags::kNeedsStructureRebuild;
     }
-    if (material_emitters_.erase(id_str) > 0) {
+    if (material_emitters_.erase(id) > 0) {
       dirty_flags |= DirtyFlags::kNeedsStructureRebuild;
     }
-    if (mesh_attributes_.erase(id_str) > 0) {
+    if (mesh_attributes_.erase(id) > 0) {
       dirty_flags |= DirtyFlags::kNeedsStructureRebuild;
     }
     material_dirty_flags_[id] |= dirty_flags;
     texture_cache_.MarkDirty();
     scene_dirty_ = true;
+    has_pending_commits_ = true;
     reset_progressive_ = true;
   }
 
@@ -776,6 +783,7 @@ class SceneModel final : public SceneManager {
               shape_sensors_dirty_ = true;
             }
           }
+          has_pending_commits_ = true;
           reset_progressive_ = true;
         }
       }
@@ -805,17 +813,17 @@ class SceneModel final : public SceneManager {
     kMaterialUpdated = 1 << 1
   };
 
-  uint32_t UpdateMaterialStructure(absl::string_view id_str,
+  uint32_t UpdateMaterialStructure(const SdfPath& id,
                                    TranslatedMaterial& trans) {
     uint32_t dirty_flags = 0;
     auto update = [&](auto& map, auto* val) {
       if (val) {
-        auto it = map.find(id_str);
+        auto it = map.find(id);
         if (it == map.end() || it->second != *val) {
-          map[id_str] = std::move(*val);
+          map[id] = std::move(*val);
           dirty_flags |= DirtyFlags::kNeedsStructureRebuild;
         }
-      } else if (map.erase(id_str) > 0) {
+      } else if (map.erase(id) > 0) {
         dirty_flags |= DirtyFlags::kNeedsStructureRebuild;
       }
     };
@@ -915,12 +923,11 @@ class SceneModel final : public SceneManager {
           res = PrimTranslator::BuildMaterial(*spec, texture_cache_);
         },
         [&](MaterialSpec* spec, TranslatedMaterial& trans) {
-          std::string id_str = spec->id.GetAsString();
           if (trans.bsdf) {
-            bsdfs_[id_str] = dynamic_cast<BSDF*>(trans.bsdf.get());
+            bsdfs_[spec->id] = dynamic_cast<BSDF*>(trans.bsdf.get());
           }
           material_dirty_flags_[spec->id] |=
-              UpdateMaterialStructure(id_str, trans) |
+              UpdateMaterialStructure(spec->id, trans) |
               DirtyFlags::kMaterialUpdated;
           return false;
         });
@@ -940,8 +947,7 @@ class SceneModel final : public SceneManager {
       if (!target.has_value()) {
         continue;
       }
-      if (!shape_sensors_.try_emplace(target->GetAsString(), camera_id)
-               .second) {
+      if (!shape_sensors_.try_emplace(*target, camera_id).second) {
         TF_WARN(
             "Shape %s is already measured by another sensor; ignoring sensor "
             "%s.",
@@ -961,7 +967,7 @@ class SceneModel final : public SceneManager {
           if (spec->needs_rebuild) {
             res = PrimTranslator::BuildSensor(*spec, progressive_rendering_);
           } else if (spec->dirty_bits != 0) {
-            auto it = sensors_.find(spec->id.GetAsString());
+            auto it = sensors_.find(spec->id);
             if (!TF_VERIFY(it != sensors_.end(), "Camera sensor not found: %s",
                            spec->id.GetText())) {
               return;
@@ -973,7 +979,7 @@ class SceneModel final : public SceneManager {
           if (spec->sensor_type == "irradiancemeter") {
             return false;
           }
-          sensors_[spec->id.GetAsString()] = res;
+          sensors_[spec->id] = res;
           return true;
         });
     if (shape_sensors_dirty_) {
@@ -996,11 +1002,11 @@ class SceneModel final : public SceneManager {
     EmitterSensorPair pair;
     if (emitter_spec.has_value()) {
       pair.mesh_emitter =
-          PrimTranslator::CreateAreaEmitter(emitter_spec->emission);
+           PrimTranslator::CreateAreaEmitter(emitter_spec->emission);
       pair.emitter_ptr = pair.mesh_emitter.get();
     }
     if (pair.emitter_ptr == nullptr) {
-      auto emitter_it = material_emitters_.find(material_id.GetAsString());
+      auto emitter_it = material_emitters_.find(material_id);
       if (emitter_it != material_emitters_.end()) {
         mitsuba::Properties emitter_props = emitter_it->second;
         if (double_sided) {
@@ -1014,7 +1020,7 @@ class SceneModel final : public SceneManager {
     }
     // A Mitsuba sensor can only be attached to one shape, so like the area
     // emitter above, every (re)built mesh gets a fresh one.
-    auto sens_it = shape_sensors_.find(shape_id.GetAsString());
+    auto sens_it = shape_sensors_.find(shape_id);
     if (sens_it != shape_sensors_.end()) {
       pair.mesh_sensor = PrimTranslator::BuildSensor(
           camera_specs_.at(sens_it->second), progressive_rendering_);
@@ -1023,13 +1029,35 @@ class SceneModel final : public SceneManager {
     return pair;
   }
 
+  static constexpr HdDirtyBits kMeshGeometryDirty =
+      HdChangeTracker::DirtyPoints | HdChangeTracker::DirtyTransform |
+      HdChangeTracker::DirtyNormals | HdChangeTracker::DirtyPrimvar |
+      HdChangeTracker::DirtyTopology;
+
+  void UpdateSubMeshEmitterAndBsdf(Shape* shape, const MeshSpec& spec,
+                                   const SdfPath& material_id,
+                                   const PrimvarMap& primvars,
+                                   std::string_view key_prefix) {
+    ref<BSDF> bsdf = ResolveBsdf(material_id, primvars);
+    if (key_prefix.empty() && spec.dirty_bits != 0 && shape->is_emitter() &&
+        spec.emitter_spec.has_value()) {
+      // Update emissive mesh radiance in-place
+      auto* emitter = shape->emitter();
+      TraversalCallback cb_emitter;
+      emitter->traverse(&cb_emitter);
+      using Color3f = mitsuba::Color<Float, 3>;
+      cb_emitter.set<Color3f>("radiance.value",
+                              Color3f(spec.emitter_spec->emission[0],
+                                      spec.emitter_spec->emission[1],
+                                      spec.emitter_spec->emission[2]));
+      emitter->parameters_changed();
+    }
+    shape->set_bsdf(bsdf.get());
+  }
+
   void UpdateSubMeshesInPlace(const MeshSpec& spec,
                               const std::vector<SubMeshOutput>& sub_meshes,
                               std::string_view key_prefix) {
-    constexpr HdDirtyBits kMeshGeometryDirty =
-        HdChangeTracker::DirtyPoints | HdChangeTracker::DirtyTransform |
-        HdChangeTracker::DirtyNormals | HdChangeTracker::DirtyPrimvar |
-        HdChangeTracker::DirtyTopology;
     const bool geometry_dirty = (spec.dirty_bits & kMeshGeometryDirty) != 0;
     for (const auto& sub_mesh : sub_meshes) {
       std::string key = absl::StrCat(key_prefix, sub_mesh.id.GetAsString());
@@ -1038,34 +1066,50 @@ class SceneModel final : public SceneManager {
                      key.c_str())) {
         continue;
       }
-      ref<BSDF> bsdf = ResolveBsdf(sub_mesh.material_id, sub_mesh.primvars);
       if (geometry_dirty) {
         PrimTranslator::UpdateMeshInPlace(
             it->second.get(), sub_mesh.triangles, sub_mesh.primvars,
             ResolveMeshAttributes(sub_mesh.material_id), spec.dirty_bits);
       }
-      if (key_prefix.empty() && spec.dirty_bits != 0 &&
-          it->second->is_emitter() && spec.emitter_spec.has_value()) {
-        // Update emissive mesh radiance in-place
-        auto* emitter = it->second->emitter();
-        TraversalCallback cb_emitter;
-        emitter->traverse(&cb_emitter);
-        using Color3f = mitsuba::Color<Float, 3>;
-        cb_emitter.set<Color3f>("radiance.value",
-                                Color3f(spec.emitter_spec->emission[0],
-                                        spec.emitter_spec->emission[1],
-                                        spec.emitter_spec->emission[2]));
-        emitter->parameters_changed();
+      UpdateSubMeshEmitterAndBsdf(it->second.get(), spec, sub_mesh.material_id,
+                                  sub_mesh.primvars, key_prefix);
+    }
+  }
+
+  void UpdateSubMeshesMetadataOnly(const MeshSpec& spec,
+                                   std::string_view key_prefix) {
+    if (spec.material_ids.size() <= 1) {
+      std::string key = absl::StrCat(key_prefix, spec.id.GetAsString());
+      auto it = shapes_.find(key);
+      if (!TF_VERIFY(it != shapes_.end(), "Sub-mesh not found: %s",
+                     key.c_str())) {
+        return;
       }
-      it->second->set_bsdf(bsdf.get());
+      const SdfPath& mat_id =
+          spec.material_ids.empty() ? SdfPath() : spec.material_ids[0];
+      UpdateSubMeshEmitterAndBsdf(it->second.get(), spec, mat_id, spec.primvars,
+                                  key_prefix);
+      return;
+    }
+    for (size_t i = 0; i < spec.material_ids.size(); ++i) {
+      SdfPath sub_id =
+          GeometryProcessor::MakeSubMeshId(spec.id, spec.material_ids[i], i);
+      std::string key = absl::StrCat(key_prefix, sub_id.GetAsString());
+      auto it = shapes_.find(key);
+      if (it == shapes_.end()) {
+        // Empty material subset was not emitted by SplitAndCompactMeshes.
+        continue;
+      }
+      UpdateSubMeshEmitterAndBsdf(it->second.get(), spec, spec.material_ids[i],
+                                  spec.primvars, key_prefix);
     }
   }
 
   void CommitNonInstancedMeshWork(MeshCommitWork* work, CommittedMesh& res) {
     const auto& spec = *(work->spec);
-    auto sub_meshes =
-        RunGeometryPipeline<Float, Spectrum>(spec, work->displacements);
     if (spec.needs_rebuild) {
+      auto sub_meshes =
+          RunGeometryPipeline<Float, Spectrum>(spec, work->displacements);
       res.meshes.reserve(sub_meshes.size());
       for (const auto& sub_mesh : sub_meshes) {
         auto env = ResolveEmitterAndSensor(spec.emitter_spec,
@@ -1080,14 +1124,17 @@ class SceneModel final : public SceneManager {
           res.meshes.push_back(mesh);
         }
       }
-    } else {
+    } else if ((spec.dirty_bits & kMeshGeometryDirty) != 0) {
+      auto sub_meshes =
+          RunGeometryPipeline<Float, Spectrum>(spec, work->displacements);
       UpdateSubMeshesInPlace(spec, sub_meshes, "");
+    } else {
+      UpdateSubMeshesMetadataOnly(spec, "");
     }
   }
 
   void CommitInstancedMeshWork(MeshCommitWork* work, CommittedMesh& res) {
     const auto& spec = *(work->spec);
-    std::string id_str = spec.id.GetAsString();
     if (spec.needs_rebuild) {
       if (HasEmitter(spec)) {
         TF_WARN(
@@ -1095,7 +1142,7 @@ class SceneModel final : public SceneManager {
             "does not support emitters on instances. Ignoring emitter.",
             spec.id.GetText());
       }
-      if (shape_sensors_.contains(id_str)) {
+      if (shape_sensors_.contains(spec.id)) {
         TF_WARN(
             "Mesh %s is instanced but has a sensor attached. Mitsuba does "
             "not support sensors on instances. Ignoring sensor.",
@@ -1135,11 +1182,10 @@ class SceneModel final : public SceneManager {
 
       // 3. Create Instances
       res.instances.reserve(spec.instance_transforms.size());
-      for (size_t i = 0; i < spec.instance_transforms.size(); ++i) {
+      for (const GfMatrix4d& xform : spec.instance_transforms) {
         mitsuba::Properties inst_props("instance");
         inst_props.set("shapegroup", res.shapegroup.get());
-        inst_props.set("to_world",
-                       UsdToMitsubaTransform(spec.instance_transforms[i]));
+        inst_props.set("to_world", UsdToMitsubaTransform(xform));
         mitsuba::ref<Shape> inst =
             mitsuba::PluginManager::instance()->create_object<Shape>(
                 inst_props);
@@ -1147,19 +1193,23 @@ class SceneModel final : public SceneManager {
       }
     } else {
       // Update in place
-      auto sub_meshes =
-          RunGeometryPipeline<Float, Spectrum>(spec, work->displacements);
-      UpdateSubMeshesInPlace(spec, sub_meshes, kProtoPrefix);
+      if ((spec.dirty_bits & kMeshGeometryDirty) != 0) {
+        auto sub_meshes =
+            RunGeometryPipeline<Float, Spectrum>(spec, work->displacements);
+        UpdateSubMeshesInPlace(spec, sub_meshes, kProtoPrefix);
+      } else {
+        UpdateSubMeshesMetadataOnly(spec, kProtoPrefix);
+      }
       if (spec.dirty_bits & (HdChangeTracker::DirtyInstancer |
                              HdChangeTracker::DirtyInstanceIndex)) {
+        std::string id_str = spec.id.GetAsString();
         for (size_t i = 0; i < spec.instance_transforms.size(); ++i) {
           auto inst_it =
               shapes_.find(absl::StrCat(kInstancePrefix, id_str, "_", i));
           if (TF_VERIFY(inst_it != shapes_.end())) {
-            SetTransform(
-                inst_it->second.get(),
-                AffineTransform4f(
-                    UsdToMitsubaTransform(spec.instance_transforms[i]).matrix));
+            SetTransform(inst_it->second.get(),
+                         AffineTransform4f(
+                             UsdToMitsubaTransform(spec.instance_transforms[i])));
           }
         }
       }
@@ -1189,8 +1239,7 @@ class SceneModel final : public SceneManager {
     return spec.emitter_spec.has_value() ||
            std::any_of(spec.material_ids.begin(), spec.material_ids.end(),
                        [&](const SdfPath& material_id) {
-                         return material_emitters_.contains(
-                             material_id.GetAsString());
+                         return material_emitters_.contains(material_id);
                        });
   }
 
@@ -1216,7 +1265,7 @@ class SceneModel final : public SceneManager {
       work_items[i].spec = spec;
       work_items[i].displacements.reserve(spec->material_ids.size());
       for (const auto& material_id : spec->material_ids) {
-        auto disp_it = displacements_.find(material_id.GetAsString());
+        auto disp_it = displacements_.find(material_id);
         if (disp_it != displacements_.end()) {
           work_items[i].displacements.push_back(disp_it->second);
         } else {
@@ -1237,7 +1286,7 @@ class SceneModel final : public SceneManager {
           for (size_t i = r.begin(); i != r.end(); ++i) {
             const MeshSpec& spec = *work_items[i].spec;
             if (!spec.needs_rebuild || HasEmitter(spec) ||
-                shape_sensors_.contains(spec.id.GetAsString()) ||
+                shape_sensors_.contains(spec.id) ||
                 std::any_of(work_items[i].displacements.begin(),
                             work_items[i].displacements.end(),
                             [](const MaterialDisplacement& d) {
@@ -1270,9 +1319,9 @@ class SceneModel final : public SceneManager {
     // 4. Merge results on the main thread.
     for (size_t i = 0; i < pending_specs.size(); ++i) {
       const MeshSpec* spec = pending_specs[i];
-      std::string id_str = spec->id.GetAsString();
 
       if (spec->needs_rebuild) {
+        std::string id_str = spec->id.GetAsString();
         // Clean up old shapes
         CleanUpInstancing(spec->id);
         shapes_.erase(id_str);
@@ -1292,7 +1341,7 @@ class SceneModel final : public SceneManager {
     return ParallelCommit<decltype(curve_specs_), mitsuba::ref<Shape>>(
         curve_specs_,
         [&](CurveSpec* spec, mitsuba::ref<Shape>& res) {
-          auto bsdf_it = bsdfs_.find(spec->material_id.GetAsString());
+          auto bsdf_it = bsdfs_.find(spec->material_id);
           ref<BSDF> bsdf =
               bsdf_it != bsdfs_.end() ? bsdf_it->second : DefaultBsdf();
 
@@ -1359,20 +1408,21 @@ class SceneModel final : public SceneManager {
                           typename PrimTranslator::TranslatedLight>(
         light_specs_,
         [&](LightSpec* spec, typename PrimTranslator::TranslatedLight& res) {
-          std::string id_str = spec->id.GetAsString();
           if (spec->needs_rebuild) {
             res = PrimTranslator::BuildLight(*spec);
           } else if (spec->dirty_bits != 0) {
             if (spec->IsAreaLight()) {
+              std::string id_str = spec->id.GetAsString();
               auto it = shapes_.find(id_str);
               if (TF_VERIFY(it != shapes_.end(), "Light shape not found: %s",
                             id_str.c_str())) {
                 PrimTranslator::UpdateLightInPlace(it->second.get(), *spec);
               }
             } else {
-              auto it = emitters_.find(id_str);
+              auto it = emitters_.find(spec->id);
               if (TF_VERIFY(it != emitters_.end(),
-                            "Light emitter not found: %s", id_str.c_str())) {
+                            "Light emitter not found: %s",
+                            spec->id.GetText())) {
                 PrimTranslator::UpdateLightInPlace(it->second.get(), *spec);
               }
             }
@@ -1382,9 +1432,9 @@ class SceneModel final : public SceneManager {
           std::string id_str = spec->id.GetAsString();
           if (trans.shape) {
             shapes_[id_str] = trans.shape;
-            emitters_.erase(id_str);
+            emitters_.erase(spec->id);
           } else if (trans.emitter) {
-            emitters_[id_str] = trans.emitter;
+            emitters_[spec->id] = trans.emitter;
             shapes_.erase(id_str);
           }
           return true;
@@ -1393,6 +1443,9 @@ class SceneModel final : public SceneManager {
 
   void CommitResources() override {
     absl::MutexLock lock(state_mutex_);
+    if (!scene_dirty_ && !has_pending_commits_) {
+      return;
+    }
     JitScopeGuard<Float> jit_guard;
 
     bool rebuild_scene = scene_dirty_;
@@ -1432,11 +1485,15 @@ class SceneModel final : public SceneManager {
         }
         props.set(id, shape.get());
       }
-      for (auto& [id, sensor] : sensors_) props.set(id, sensor.get());
-      for (auto& [id, emitter] : emitters_) props.set(id, emitter.get());
+      for (auto& [id, sensor] : sensors_) {
+        props.set(id.GetAsString(), sensor.get());
+      }
+      for (auto& [id, emitter] : emitters_) {
+        props.set(id.GetAsString(), emitter.get());
+      }
       scene_ = new Scene(props);
       scene_dirty_ = false;
-    } else {
+    } else if (scene_) {
       scene_->parameters_changed();
     }
 
@@ -1446,6 +1503,7 @@ class SceneModel final : public SceneManager {
 
     material_dirty_flags_.clear();
     sensor_binding_dirty_.clear();
+    has_pending_commits_ = false;
   }
 
   mitsuba::Object* GetScene() override { return scene_.get(); }
@@ -1486,14 +1544,18 @@ class SceneModel final : public SceneManager {
   absl::flat_hash_map<SdfPath, uint32_t, SdfPath::Hash> material_dirty_flags_;
   absl::flat_hash_set<SdfPath, SdfPath::Hash> sensor_binding_dirty_;
 
-  absl::flat_hash_map<std::string, ref<Sensor>> sensors_;
-  absl::flat_hash_map<std::string, SdfPath> shape_sensors_;  // Shape -> camera
+  absl::flat_hash_map<SdfPath, ref<Sensor>, SdfPath::Hash> sensors_;
+  absl::flat_hash_map<SdfPath, SdfPath, SdfPath::Hash>
+      shape_sensors_;  // Shape -> camera
   absl::flat_hash_map<std::string, ref<Shape>> shapes_;
-  absl::flat_hash_map<std::string, ref<Emitter>> emitters_;
-  absl::flat_hash_map<std::string, ref<BSDF>> bsdfs_;
-  absl::flat_hash_map<std::string, MaterialDisplacement> displacements_;
-  absl::flat_hash_map<std::string, mitsuba::Properties> material_emitters_;
-  absl::flat_hash_map<std::string, MeshAttributeRequests> mesh_attributes_;
+  absl::flat_hash_map<SdfPath, ref<Emitter>, SdfPath::Hash> emitters_;
+  absl::flat_hash_map<SdfPath, ref<BSDF>, SdfPath::Hash> bsdfs_;
+  absl::flat_hash_map<SdfPath, MaterialDisplacement, SdfPath::Hash>
+      displacements_;
+  absl::flat_hash_map<SdfPath, mitsuba::Properties, SdfPath::Hash>
+      material_emitters_;
+  absl::flat_hash_map<SdfPath, MeshAttributeRequests, SdfPath::Hash>
+      mesh_attributes_;
   ref<BSDF> default_bsdf_ = nullptr;
   absl::flat_hash_map<std::tuple<float, float, float>, ref<BSDF>> color_bsdfs_;
   absl::Mutex color_bsdfs_mutex_;

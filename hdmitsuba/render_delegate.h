@@ -106,6 +106,7 @@ class HdMitsubaRenderDelegate final : public HdRenderDelegate {
   std::unique_ptr<SceneManager> scene_impl_;
   std::unique_ptr<HdMitsubaRenderParam> render_param_;
   std::string current_variant_;
+  unsigned int last_settings_version_ = 0;
 
   HdRenderSettingDescriptorList setting_descriptors_;
 };

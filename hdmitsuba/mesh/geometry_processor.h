@@ -120,6 +120,11 @@ class GeometryProcessor {
       const VtIntArray& face_vertex_indices,
       const VtIntArray& face_vertex_counts, const PrimvarMap& primvars);
 
+  // Constructs the sub-mesh SdfPath for a multi-material mesh subset.
+  static SdfPath MakeSubMeshId(const SdfPath& mesh_id,
+                               const SdfPath& material_id,
+                               size_t material_index);
+
   // Splits a triangulated mesh into multiple sub-meshes by material index and
   // compacts unused vertices from the primvar buffers.
   static std::vector<SubMeshOutput> SplitAndCompactMeshes(

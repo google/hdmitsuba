@@ -570,13 +570,8 @@ std::vector<SubMeshOutput> GeometryProcessor::SplitAndCompactMeshes(
       }
     }
 
-    std::string mat_name =
-        material_ids[i].IsEmpty()
-            ? "mat_" + std::to_string(i)
-            : absl::StrReplaceAll(material_ids[i].GetAsString(),
-                                  {{"/", "_"}, {":", "_"}});
     SubMeshOutput out;
-    out.id = id.AppendChild(TfToken(mat_name));
+    out.id = MakeSubMeshId(id, material_ids[i], i);
     out.material_id = material_ids[i];
     out.triangles = std::move(submesh_triangles);
     out.primvars = std::move(primvars);
@@ -584,6 +579,17 @@ std::vector<SubMeshOutput> GeometryProcessor::SplitAndCompactMeshes(
   }
 
   return sub_meshes;
+}
+
+SdfPath GeometryProcessor::MakeSubMeshId(const SdfPath& mesh_id,
+                                         const SdfPath& material_id,
+                                         size_t material_index) {
+  std::string mat_name =
+      material_id.IsEmpty()
+          ? "mat_" + std::to_string(material_index)
+          : absl::StrReplaceAll(material_id.GetAsString(),
+                                {{"/", "_"}, {":", "_"}});
+  return mesh_id.AppendChild(TfToken(mat_name));
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

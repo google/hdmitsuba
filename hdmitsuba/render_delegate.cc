@@ -224,6 +224,12 @@ HdBprim* HdMitsubaRenderDelegate::CreateFallbackBprim(const TfToken& typeId) {
 }
 
 void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* /*tracker*/) {
+  const unsigned int settings_version = GetRenderSettingsVersion();
+  if (settings_version == last_settings_version_) {
+    scene_impl_->CommitResources();
+    return;
+  }
+
   std::string target_variant =
       GetRenderSetting(HdMitsubaRenderSettingsTokens->variant)
           .GetWithDefault<std::string>(HdMitsubaConfig::GetInstance().variant);
@@ -262,6 +268,7 @@ void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* /*tracker*/) {
       GetRenderSetting(HdMitsubaRenderSettingsTokens->use_kernel_freezing);
 
   scene_impl_->UpdateNamespacedSettings(namespaced_settings);
+  last_settings_version_ = settings_version;
 
   scene_impl_->CommitResources();
 }
@@ -287,6 +294,9 @@ TfToken HdMitsubaRenderDelegate::GetMaterialBindingPurpose() const {
 bool HdMitsubaRenderDelegate::IsParallelSyncEnabled(
     const TfToken& primType) const {
   return primType == HdPrimTypeTokens->material ||
+         primType == HdPrimTypeTokens->camera ||
+         primType == HdPrimTypeTokens->renderBuffer ||
+         HdPrimTypeIsLight(primType) ||
          HdRenderDelegate::IsParallelSyncEnabled(primType);
 }
 

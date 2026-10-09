@@ -91,6 +91,7 @@ class SceneManager {
     for (auto& [_, spec] : light_specs_) spec.needs_rebuild = true;
     for (auto& [_, spec] : camera_specs_) spec.needs_rebuild = true;
     shape_sensors_dirty_ = !camera_specs_.empty();
+    has_pending_commits_ = true;
   }
 
   static SceneManager* CreateSceneManager(const std::string& variant);
@@ -104,6 +105,7 @@ class SceneManager {
   absl::flat_hash_map<SdfPath, LightSpec, SdfPath::Hash> light_specs_;
   absl::flat_hash_map<SdfPath, CameraSpec, SdfPath::Hash> camera_specs_;
   bool shape_sensors_dirty_ = false;
+  bool has_pending_commits_ = true;
 
  private:
   inline static absl::Mutex lifecycle_mutex_{absl::kConstInit};
