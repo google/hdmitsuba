@@ -61,13 +61,19 @@ JITInputs<Float, Spectrum> GatherAllJitInputs(
   std::vector<uint32_t> indices;
   std::vector<uint32_t> owned_class_vars;
   absl::flat_hash_set<void*> visited_ptrs;
+  absl::flat_hash_set<uint32_t> seen_indices;
 
-  auto collect_cb = [](void* payload, uint64_t index_combined, const char*,
+  struct CollectPayload {
+    std::vector<uint32_t>* indices;
+    absl::flat_hash_set<uint32_t>* seen_indices;
+  } payload{&indices, &seen_indices};
+
+  auto collect_cb = [](void* p, uint64_t index_combined, const char*,
                        const char*, const char*) -> uint64_t {
-    auto* vec = static_cast<std::vector<uint32_t>*>(payload);
-    uint32_t index = (uint32_t)index_combined;
-    if (index != 0) {
-      vec->push_back(index);
+    auto* state = static_cast<CollectPayload*>(p);
+    uint32_t index = static_cast<uint32_t>(index_combined);
+    if (index != 0 && state->seen_indices->insert(index).second) {
+      state->indices->push_back(index);
     }
     return index_combined;
   };
@@ -76,26 +82,26 @@ JITInputs<Float, Spectrum> GatherAllJitInputs(
 
   if constexpr (dr::is_jit_v<Float>) {
     ::JitBackend backend = dr::backend_v<Float>;
-    auto collect_class_var = [&](void* ptr) {
-      if (!ptr || !visited_ptrs.insert(ptr).second) return;
+    auto collect_class_var = [&](void* ptr) -> bool {
+      if (!ptr || !visited_ptrs.insert(ptr).second) return false;
       uint32_t class_var = ::jit_var_class(backend, ptr);
       if (class_var != 0) {
-        indices.push_back(class_var);
+        if (seen_indices.insert(class_var).second) {
+          indices.push_back(class_var);
+        }
         owned_class_vars.push_back(class_var);
       }
+      return true;
     };
 
-    if (scene) {
-      collect_class_var(scene);
-      dr::traverse_fn(*scene, &indices, visitor);
+    if (scene && collect_class_var(scene)) {
+      dr::traverse_fn(*scene, &payload, visitor);
     }
-    if (sensor) {
-      collect_class_var(sensor);
-      dr::traverse_fn(*sensor, &indices, visitor);
+    if (sensor && collect_class_var(sensor)) {
+      dr::traverse_fn(*sensor, &payload, visitor);
     }
-    if (integrator) {
-      collect_class_var(integrator);
-      dr::traverse_fn(*integrator, &indices, visitor);
+    if (integrator && collect_class_var(integrator)) {
+      dr::traverse_fn(*integrator, &payload, visitor);
     }
 
     const char* variant_name = mitsuba::detail::variant<Float, Spectrum>::name;
@@ -115,31 +121,21 @@ JITInputs<Float, Spectrum> GatherAllJitInputs(
         "Integrator"
     };
 
+    std::vector<void*> registry_pointers;
     for (const auto& domain : domains) {
       uint32_t registry_bound = ::jit_registry_id_bound(variant_name, domain);
       if (registry_bound == 0) continue;
-      std::vector<void*> registry_pointers(registry_bound, nullptr);
+      registry_pointers.assign(registry_bound, nullptr);
       ::jit_registry_get_pointers(variant_name, domain, registry_pointers.data());
       for (void* ptr : registry_pointers) {
-        if (!ptr) continue;
-        collect_class_var(ptr);
+        if (!collect_class_var(ptr)) continue;
         auto* obj = static_cast<mitsuba::Object*>(ptr);
-        dr::traverse_fn(*obj, &indices, visitor);
+        dr::traverse_fn(*obj, &payload, visitor);
       }
     }
   }
 
-  // Deduplicate collected indices using an order-preserving set
-  std::vector<uint32_t> unique_indices;
-  absl::flat_hash_set<uint32_t> seen_indices;
-  unique_indices.reserve(indices.size());
-  for (uint32_t idx : indices) {
-    if (seen_indices.insert(idx).second) {
-      unique_indices.push_back(idx);
-    }
-  }
-  indices = std::move(unique_indices);
-  return { indices, owned_class_vars };
+  return {std::move(indices), std::move(owned_class_vars)};
 }
 
 // State manager for JIT recording state.

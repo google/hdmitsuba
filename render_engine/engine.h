@@ -116,6 +116,8 @@ class RenderEngine {
   pxr::HdRenderBuffer* GetRenderBuffer(size_t idx) const;
   void SetCamera(const pxr::SdfPath& camera);
 
+  pxr::UsdRenderSettings GetUsdRenderSettings(
+      const std::optional<pxr::SdfPath>& path) const;
   std::pair<pxr::HdRenderSettingsMap, pxr::UsdRenderSettings>
   ReadRenderSettings(const std::optional<pxr::SdfPath>& path) const;
 

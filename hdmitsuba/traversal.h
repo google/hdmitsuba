@@ -24,6 +24,7 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
+#include <absl/strings/str_cat.h>
 #include <mitsuba/core/object.h>
 #include <mitsuba/core/transform.h>
 #include <pxr/base/tf/diagnostic.h>
@@ -42,16 +43,18 @@ class TraversalCallback : public mitsuba::TraversalCallback {
 
   template <typename T>
   T* get(std::string_view name) {
-    auto it = data.find(prefix_ + std::string(name));
-    if (!TF_VERIFY(it != data.end(), "No value found for %s",
-                   std::string(name).c_str())) {
+    auto it = prefix_.empty() ? data.find(name)
+                              : data.find(absl::StrCat(prefix_, name));
+    if (!TF_VERIFY(it != data.end(), "No value found for %.*s",
+                   static_cast<int>(name.size()), name.data())) {
       return nullptr;
     }
     const std::type_info& type = it->second.second;
     if (!TF_VERIFY(type == typeid(T) ||
                        std::string_view(type.name()) == typeid(T).name(),
-                   "Value %s is of type %s, but requested %s",
-                   std::string(name).c_str(), type.name(), typeid(T).name())) {
+                   "Value %.*s is of type %s, but requested %s",
+                   static_cast<int>(name.size()), name.data(), type.name(),
+                   typeid(T).name())) {
       return nullptr;
     }
     return static_cast<T*>(it->second.first);

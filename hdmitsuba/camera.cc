@@ -85,16 +85,18 @@ void HdMitsubaCamera::Sync(HdSceneDelegate* sceneDelegate,
       .Msg("HdMitsubaCamera::Sync: %s\n", GetId().GetText());
   HdCamera::Sync(sceneDelegate, renderParam, dirtyBits);  // Clears dirty bits.
 
-  std::string sensor_type =
-      sceneDelegate
-          ->GetCameraParamValue(GetId(), HdMitsubaCameraTokens->sensorType)
-          .GetWithDefault<std::string>("perspective");
-  if (dirty_bits_copy & HdCamera::DirtyParams) {
+  std::string sensor_type = sensor_type_;
+  if (!is_instantiated_ || (dirty_bits_copy & HdCamera::DirtyParams)) {
+    sensor_type =
+        sceneDelegate
+            ->GetCameraParamValue(GetId(), HdMitsubaCameraTokens->sensorType)
+            .GetWithDefault<std::string>("perspective");
     film_pixel_filter_type_ =
         sceneDelegate
             ->GetCameraParamValue(
                 GetId(), HdMitsubaCameraTokens->sensorPixelFilterType)
             .GetWithDefault<std::string>("");
+    target_shape_id_ = GetTargetShapeId(sceneDelegate, GetId());
   }
 
   const GfVec2f shutter = GetShutterClose() > GetShutterOpen()
@@ -120,7 +122,7 @@ void HdMitsubaCamera::Sync(HdSceneDelegate* sceneDelegate,
   spec.near_clip = GetClippingRange().GetMin();
   spec.far_clip = GetClippingRange().GetMax();
   spec.dirty_bits = dirty_bits_copy;
-  spec.target_shape_id = GetTargetShapeId(sceneDelegate, GetId());
+  spec.target_shape_id = target_shape_id_;
 
   spec.needs_rebuild = !is_instantiated_;
   spec.needs_rebuild |= sensor_type != sensor_type_;
@@ -129,7 +131,7 @@ void HdMitsubaCamera::Sync(HdSceneDelegate* sceneDelegate,
   spec.needs_rebuild |= transform_.IsAnimated() != was_animated;
   spec.needs_rebuild |= shutter != shutter_;
   is_instantiated_ = true;
-  sensor_type_ = sensor_type;
+  sensor_type_ = std::move(sensor_type);
   shutter_ = shutter;
 
   static_cast<HdMitsubaRenderParam*>(renderParam)

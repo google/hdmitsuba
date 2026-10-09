@@ -57,17 +57,15 @@ void TraversalCallback::put_value(std::string_view name, void* value,
 void TraversalCallback::put_object(std::string_view name, Object* value,
                                    uint32_t /*flags*/) {
   if (!recurse_objects_ || value == nullptr ||
-      hierarchy_.find(value) != hierarchy_.end()) {
+      !hierarchy_.insert(value).second) {
     return;
   }
-  TraversalCallback cb(absl::StrCat(prefix_, name, "."), value, hierarchy_,
-                       recurse_objects_);
-  value->traverse(&cb);
-  objects.insert({absl::StrCat(prefix_, name), value});
-  for (auto& [name, value] : cb.data) {
-    data.insert({std::move(name), std::move(value)});
-  }
-  objects.insert(cb.objects.begin(), cb.objects.end());
+  std::string full_name = absl::StrCat(prefix_, name);
+  objects.try_emplace(full_name, value);
+  std::string saved_prefix = std::move(prefix_);
+  prefix_ = absl::StrCat(full_name, ".");
+  value->traverse(this);
+  prefix_ = std::move(saved_prefix);
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

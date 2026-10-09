@@ -78,8 +78,10 @@ void ConvertMaterialNetwork(const HdMaterialNetworkSchema& network_schema,
     if (auto connections_schema = node_schema.GetInputConnections()) {
       for (const TfToken& input_name : connections_schema.GetNames()) {
         if (auto vector_schema = connections_schema.Get(input_name)) {
+          const size_t num_elements = vector_schema.GetNumElements();
           std::vector<HdMaterialConnection2> connections;
-          for (size_t i = 0; i < vector_schema.GetNumElements(); ++i) {
+          connections.reserve(num_elements);
+          for (size_t i = 0; i < num_elements; ++i) {
             HdMaterialConnectionSchema conn_schema =
                 vector_schema.GetElement(i);
             if (conn_schema.IsDefined()) {
@@ -90,14 +92,14 @@ void ConvertMaterialNetwork(const HdMaterialNetworkSchema& network_schema,
               conn.upstreamOutputName = GetParam<TfToken>(
                   conn_schema.GetContainer(),
                   HdMaterialConnectionSchemaTokens->upstreamNodeOutputName);
-              connections.push_back(conn);
+              connections.push_back(std::move(conn));
             }
           }
-          node.inputConnections[input_name] = connections;
+          node.inputConnections[input_name] = std::move(connections);
         }
       }
     }
-    network.nodes[SdfPath(node_name)] = node;
+    network.nodes[SdfPath(node_name)] = std::move(node);
   }
 
   auto terminals_schema = network_schema.GetTerminals();

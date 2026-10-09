@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -24,6 +25,7 @@
 #include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/imaging/hd/types.h>
 #include <pxr/pxr.h>
+#include <pxr/usd/sdf/path.h>
 
 #include "hdmitsuba/motion.h"
 
@@ -51,8 +53,9 @@ class HdMitsubaCamera final : public HdCamera {
   float GetHorizontalPrincipalPointOffset() const;
   float GetVerticalPrincipalPointOffset() const;
 
-  std::string sensor_type_ = "";
+  std::string sensor_type_ = "perspective";
   std::string film_pixel_filter_type_ = "";
+  std::optional<SdfPath> target_shape_id_;
   bool is_instantiated_ = false;
   MotionTransform transform_;
   GfVec2f shutter_{0.0f};

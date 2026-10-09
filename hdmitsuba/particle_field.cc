@@ -187,8 +187,10 @@ void HdMitsubaParticleField::Finalize(HdRenderParam* renderParam) {
 }
 
 void HdMitsubaParticleField::RemoveFromScene(SceneManager* scene) {
-  scene->RemoveShape(GetId());
-  in_scene_ = false;
+  if (in_scene_) {
+    scene->RemoveShape(GetId());
+    in_scene_ = false;
+  }
 }
 
 HdDirtyBits HdMitsubaParticleField::_PropagateDirtyBits(

@@ -263,21 +263,25 @@ pxr::HdRenderPassAovBindingVector RenderEngine::CreateAovBindings() {
   return aov_bindings;
 }
 
-std::pair<HdRenderSettingsMap, UsdRenderSettings>
-RenderEngine::ReadRenderSettings(const std::optional<SdfPath>& path) const {
-  HdRenderSettingsMap settings_map;
-  UsdRenderSettings settings;
+UsdRenderSettings RenderEngine::GetUsdRenderSettings(
+    const std::optional<SdfPath>& path) const {
   if (path.has_value()) {
-    settings = UsdRenderSettings::Get(stage_, path.value());
+    UsdRenderSettings settings = UsdRenderSettings::Get(stage_, path.value());
     if (!settings) {
       throw std::invalid_argument(absl::StrCat(
           "Invalid render settings prim path: ", path.value().GetText()));
     }
-  } else {
-    settings = UsdRenderSettings::GetStageRenderSettings(stage_);
-    if (!settings) {
-      return std::make_pair(settings_map, settings);
-    }
+    return settings;
+  }
+  return UsdRenderSettings::GetStageRenderSettings(stage_);
+}
+
+std::pair<HdRenderSettingsMap, UsdRenderSettings>
+RenderEngine::ReadRenderSettings(const std::optional<SdfPath>& path) const {
+  HdRenderSettingsMap settings_map;
+  UsdRenderSettings settings = GetUsdRenderSettings(path);
+  if (!settings) {
+    return std::make_pair(settings_map, settings);
   }
 
   // Convert attributes to Render Settings Map.
@@ -286,7 +290,7 @@ RenderEngine::ReadRenderSettings(const std::optional<SdfPath>& path) const {
   for (const auto& a : attributes) {
     VtValue value;
     a.Get(&value);
-    settings_map[a.GetName()] = value;
+    settings_map[a.GetName()] = std::move(value);
   }
   UsdRelationship camera_rel = settings.GetCameraRel();
   if (camera_rel) {
@@ -296,7 +300,7 @@ RenderEngine::ReadRenderSettings(const std::optional<SdfPath>& path) const {
       settings_map[HdTokens->camera] = targets[0].GetString();
     }
   }
-  return std::make_pair(settings_map, settings);
+  return std::make_pair(std::move(settings_map), settings);
 }
 
 void RenderEngine::Configure(
@@ -512,8 +516,8 @@ void RenderEngine::SetCamera(const SdfPath& camera) {
 }
 
 void RenderEngine::UpdateAovsAndBuffers() {
-  auto read_res = ReadRenderSettings(render_settings_prim_path_);
-  UsdRenderSettings render_settings = read_res.second;
+  UsdRenderSettings render_settings =
+      GetUsdRenderSettings(render_settings_prim_path_);
   std::vector<UsdRenderSpec::RenderVar> aovs;
   if (render_settings) {
     UsdRenderSpec spec = UsdRenderComputeSpec(render_settings, {});
@@ -569,15 +573,10 @@ RenderEngine::Render(UsdTimeCode time_code) {
   }
 
   absl::flat_hash_map<pxr::TfToken, OutputBuffer, TfToken::HashFunctor> result;
-  for (const auto& aov : aov_ids_) {
-    SdfPath buffer_id =
-        SdfPath("/task_controller").AppendChild(TfToken(aov.channel_name));
-    HdRenderBuffer* buffer = dynamic_cast<HdRenderBuffer*>(
-        render_index_->GetBprim(HdPrimTypeTokens->renderBuffer, buffer_id));
-    if (!buffer) {
-      throw std::runtime_error(
-          absl::StrCat("Render buffer not found: ", buffer_id.GetText()));
-    }
+  result.reserve(aov_ids_.size());
+  for (size_t i = 0; i < aov_ids_.size(); ++i) {
+    const auto& aov = aov_ids_[i];
+    HdRenderBuffer* buffer = GetRenderBuffer(i);
     OutputBuffer output_buffer(buffer->GetWidth(), buffer->GetHeight(),
                                buffer->GetFormat(),
                                aov.render_var.dataType.GetString());
