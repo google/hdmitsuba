@@ -267,49 +267,46 @@ MI_VARIANT const CachedTexture* TextureCache<Float, Spectrum>::Find(
 MI_VARIANT void TextureCache<Float, Spectrum>::Preload(
     const absl::flat_hash_set<TextureKey>& keys) {
   std::vector<TextureKey> texture_list;
-  absl::flat_hash_set<std::string> files_to_load;
+  std::vector<std::string> file_list;
+  std::vector<std::vector<size_t>> file_to_textures;
+  absl::flat_hash_map<std::string, size_t> file_indices;
+
   for (const TextureKey& key : keys) {
     if (!textures_.contains(key)) {
+      const size_t tex_idx = texture_list.size();
       texture_list.push_back(key);
-      files_to_load.insert(key.filename);
+      auto [it, inserted] =
+          file_indices.try_emplace(key.filename, file_list.size());
+      if (inserted) {
+        file_list.push_back(key.filename);
+        file_to_textures.emplace_back();
+      }
+      file_to_textures[it->second].push_back(tex_idx);
     }
   }
   if (texture_list.empty()) return;
 
-  // 1. Decode each unique image file from disk once in parallel.
-  std::vector<std::string> file_list(files_to_load.begin(),
-                                     files_to_load.end());
-  std::vector<mitsuba::ref<mitsuba::Bitmap>> loaded_bitmaps(file_list.size());
+  // Decode each unique image file once in parallel, immediately instantiate all
+  // TextureKey plugins referencing it while the decoded Bitmap is hot in cache,
+  // and release the uncompressed Bitmap on the worker thread to bound peak RAM.
+  std::vector<CachedTexture> loaded_textures(texture_list.size());
   dr::parallel_for(dr::blocked_range<size_t>(0, file_list.size()),
                    [&](dr::blocked_range<size_t> r) {
                      for (size_t i = r.begin(); i != r.end(); ++i) {
-                       loaded_bitmaps[i] = LoadBitmap(file_list[i]);
-                     }
-                   });
-  absl::flat_hash_map<std::string, mitsuba::ref<mitsuba::Bitmap>> bitmaps;
-  bitmaps.reserve(file_list.size());
-  for (size_t i = 0; i < file_list.size(); ++i) {
-    if (loaded_bitmaps[i]) {
-      bitmaps[file_list[i]] = std::move(loaded_bitmaps[i]);
-    }
-  }
-
-  // 2. Instantiate each unique TextureKey plugin in parallel from the shared
-  // in-memory Bitmaps.
-  std::vector<CachedTexture> loaded_textures(texture_list.size());
-  dr::parallel_for(dr::blocked_range<size_t>(0, texture_list.size()),
-                   [&](dr::blocked_range<size_t> r) {
-                     for (size_t i = r.begin(); i != r.end(); ++i) {
-                       auto bmp_it = bitmaps.find(texture_list[i].filename);
-                       if (bmp_it == bitmaps.end()) continue;
-                       JitScopeGuard<Float> jit_guard;
-                       loaded_textures[i] =
-                           LoadTexture(texture_list[i], *bmp_it->second);
+                       mitsuba::ref<mitsuba::Bitmap> bmp =
+                           LoadBitmap(file_list[i]);
+                       if (!bmp) continue;
+                       for (size_t tex_idx : file_to_textures[i]) {
+                         JitScopeGuard<Float> jit_guard;
+                         loaded_textures[tex_idx] =
+                             LoadTexture(texture_list[tex_idx], *bmp);
+                       }
                      }
                      if constexpr (dr::is_metal_v<Float>) {
                        jit_flush_thread();
                      }
                    });
+
   for (size_t i = 0; i < texture_list.size(); ++i) {
     textures_[texture_list[i]] = std::move(loaded_textures[i]);
   }
