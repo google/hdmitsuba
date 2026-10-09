@@ -109,7 +109,6 @@ struct ExpandChannel {
   TfToken name;
   HdPrimvarDescriptor descriptor;
   PrimvarArrayVariant src;
-  PrimvarArrayVariant dst;
 };
 
 void AppendChannelToKey(const ExpandChannel& channel, VertexDataKey& key,
@@ -138,18 +137,6 @@ void AppendChannelToKey(const ExpandChannel& channel, VertexDataKey& key,
   }
 }
 
-void AppendChannelValue(ExpandChannel& channel, int face, int corner,
-                        const VtIntArray& face_indices) {
-  const HdInterpolation interp = channel.descriptor.interpolation;
-  std::visit(
-      [&](const auto& src) {
-        using ArrayType = std::decay_t<decltype(src)>;
-        std::get<ArrayType>(channel.dst)
-            .push_back(SamplePrimvar(src, interp, face, corner, face_indices));
-      },
-      channel.src);
-}
-
 std::optional<PrimvarArrayVariant> ExtractPrimvarArray(const VtValue& value) {
   if (value.IsHolding<VtVec3fArray>()) {
     return value.UncheckedGet<VtVec3fArray>();
@@ -166,10 +153,10 @@ std::optional<PrimvarArrayVariant> ExtractPrimvarArray(const VtValue& value) {
 template <typename T>
 VtValue GatherVertices(const VtArray<T>& src,
                        absl::Span<const int> unique_old_vertices) {
-  VtArray<T> out;
-  out.reserve(unique_old_vertices.size());
-  for (int old_v : unique_old_vertices) {
-    out.push_back(src[old_v]);
+  VtArray<T> out(unique_old_vertices.size());
+  T* dst_ptr = out.data();
+  for (size_t i = 0; i < unique_old_vertices.size(); ++i) {
+    dst_ptr[i] = src[unique_old_vertices[i]];
   }
   return VtValue(std::move(out));
 }
@@ -183,39 +170,43 @@ template <>
 VtValue TransformArray<GfVec3f>(const VtVec3fArray& initial_values,
                                 const HdPrimvarDescriptor& descriptor,
                                 const GfMatrix4d& transform) {
-  VtVec3fArray values;
+  const size_t n = initial_values.size();
   if (descriptor.role == HdPrimvarRoleTokens->point) {
-    values.reserve(initial_values.size());
-    for (const auto& v : initial_values) {
-      values.push_back(GfVec3f(transform.TransformAffine(v)));
+    VtVec3fArray values(n);
+    GfVec3f* dst = values.data();
+    for (size_t i = 0; i < n; ++i) {
+      dst[i] = GfVec3f(transform.TransformAffine(initial_values[i]));
     }
+    return VtValue(std::move(values));
   } else if (descriptor.role == HdPrimvarRoleTokens->normal) {
-    values.reserve(initial_values.size());
+    VtVec3fArray values(n);
+    GfVec3f* dst = values.data();
     const GfMatrix4d normal_transform = transform.GetInverse().GetTranspose();
-    for (const auto& v : initial_values) {
-      values.push_back(
-          GfVec3f(normal_transform.TransformDir(v).GetNormalized()));
+    for (size_t i = 0; i < n; ++i) {
+      dst[i] = GfVec3f(
+          normal_transform.TransformDir(initial_values[i]).GetNormalized());
     }
+    return VtValue(std::move(values));
   } else {
     return VtValue(initial_values);
   }
-  return VtValue(values);
 }
 
 template <>
 VtValue TransformArray<GfVec2f>(const VtVec2fArray& initial_values,
                                 const HdPrimvarDescriptor& descriptor,
                                 const GfMatrix4d& /*transform*/) {
-  VtVec2fArray values;
   if (descriptor.role == HdPrimvarRoleTokens->textureCoordinate) {
-    values.reserve(initial_values.size());
-    for (const auto& v : initial_values) {
-      values.push_back(GfVec2f(v[0], 1.0f - v[1]));
+    const size_t n = initial_values.size();
+    VtVec2fArray values(n);
+    GfVec2f* dst = values.data();
+    for (size_t i = 0; i < n; ++i) {
+      dst[i] = GfVec2f(initial_values[i][0], 1.0f - initial_values[i][1]);
     }
+    return VtValue(std::move(values));
   } else {
     return VtValue(initial_values);
   }
-  return VtValue(values);
 }
 
 }  // namespace
@@ -224,8 +215,6 @@ std::pair<VtIntArray, VtIntArray> GeometryProcessor::TriangulateWithFaceMapping(
     const VtIntArray& face_vertex_counts,
     const VtIntArray& face_vertex_indices) {
   TRACE_FUNCTION();
-  VtIntArray triangles;
-  VtIntArray primitive_params;
 
   int total_triangles = 0;
   for (int count : face_vertex_counts) {
@@ -233,24 +222,29 @@ std::pair<VtIntArray, VtIntArray> GeometryProcessor::TriangulateWithFaceMapping(
       total_triangles += count - 2;
     }
   }
-  triangles.reserve(total_triangles * 3);
-  primitive_params.reserve(total_triangles);
+  VtIntArray triangles(total_triangles * 3);
+  VtIntArray primitive_params(total_triangles);
+  int* tri_ptr = triangles.data();
+  int* param_ptr = primitive_params.data();
 
   int index = 0;
-  for (int face_idx = 0; face_idx < static_cast<int>(face_vertex_counts.size());
-       ++face_idx) {
+  int tri_idx = 0;
+  const int num_faces = static_cast<int>(face_vertex_counts.size());
+  for (int face_idx = 0; face_idx < num_faces; ++face_idx) {
     const int count = face_vertex_counts[face_idx];
     if (count >= 3) {
+      const int v0 = face_vertex_indices[index];
       for (int i = 0; i < count - 2; ++i) {
-        triangles.push_back(face_vertex_indices[index]);
-        triangles.push_back(face_vertex_indices[index + i + 1]);
-        triangles.push_back(face_vertex_indices[index + i + 2]);
-        primitive_params.push_back(face_idx);
+        tri_ptr[tri_idx * 3 + 0] = v0;
+        tri_ptr[tri_idx * 3 + 1] = face_vertex_indices[index + i + 1];
+        tri_ptr[tri_idx * 3 + 2] = face_vertex_indices[index + i + 2];
+        param_ptr[tri_idx] = face_idx;
+        ++tri_idx;
       }
     }
     index += count;
   }
-  return {triangles, primitive_params};
+  return {std::move(triangles), std::move(primitive_params)};
 }
 
 void GeometryProcessor::ComputeNormals(PrimvarMap& primvars,
@@ -275,11 +269,10 @@ void GeometryProcessor::ComputeNormals(PrimvarMap& primvars,
       primvars[HdTokens->points].value.Get<VtVec3fArray>();
 
   VtVec3fArray normals(points.size(), GfVec3f(0.0f, 0.0f, 0.0f));
+  GfVec3f* normals_ptr = normals.data();
 
   int index = 0;
-  for (int face_idx = 0; face_idx < static_cast<int>(face_vertex_counts.size());
-       ++face_idx) {
-    int count = face_vertex_counts[face_idx];
+  for (int count : face_vertex_counts) {
     if (count >= 3) {
       for (int i = 0; i < count - 2; ++i) {
         GfVec3i face(face_vertex_indices[index],
@@ -291,16 +284,16 @@ void GeometryProcessor::ComputeNormals(PrimvarMap& primvars,
           GfVec3f d0 = (p[(j + 1) % 3] - p[j]).GetNormalized();
           GfVec3f d1 = (p[(j + 2) % 3] - p[j]).GetNormalized();
           float face_angle = drjit::safe_acos(GfDot(d0, d1));
-          normals[face[j]] += face_normal * face_angle;
+          normals_ptr[face[j]] += face_normal * face_angle;
         }
       }
     }
     index += count;
   }
-  for (size_t i = 0; i < normals.size(); ++i) {
-    normals[i].Normalize();
+  for (GfVec3f& n : normals) {
+    n.Normalize();
   }
-  primvars[HdTokens->normals] = {VtValue(normals), descriptor};
+  primvars[HdTokens->normals] = {VtValue(std::move(normals)), descriptor};
 }
 
 void GeometryProcessor::TransformPrimvars(PrimvarMap& primvars,
@@ -332,56 +325,135 @@ std::pair<VtIntArray, PrimvarMap> GeometryProcessor::ExpandPrimData(
 
   std::vector<ExpandChannel> channels;
   channels.reserve(primvars.size());
-  size_t total_primvar_dim = 0;
   for (const auto& [token, state] : primvars) {
     auto src_opt = ExtractPrimvarArray(state.value);
     if (!src_opt) continue;
-    PrimvarArrayVariant dst = std::visit(
-        [&](const auto& arr) -> PrimvarArrayVariant {
-          using ArrayType = std::decay_t<decltype(arr)>;
-          total_primvar_dim +=
-              PrimvarDimension<typename ArrayType::value_type>();
-          return ArrayType();
-        },
-        *src_opt);
-    channels.push_back(
-        {token, state.descriptor, std::move(*src_opt), std::move(dst)});
+    channels.push_back({token, state.descriptor, std::move(*src_opt)});
   }
+
+  const int num_faces = static_cast<int>(face_vertex_counts.size());
 
   size_t num_face_varyings = 0;
   for (int count : face_vertex_counts) {
     num_face_varyings += count;
   }
-  absl::flat_hash_map<VertexDataKey, int> unique_vertex_map;
+
+  struct SourceLoc {
+    int face;
+    int corner;
+  };
+  std::vector<SourceLoc> unique_locs;
+  unique_locs.reserve(num_face_varyings);
+
   VtIntArray final_face_indices(num_face_varyings);
-  int corner_index = 0;
-  for (int face_idx = 0; face_idx < static_cast<int>(face_vertex_counts.size());
-       ++face_idx) {
-    for (int i = 0; i < face_vertex_counts[face_idx]; ++i) {
-      size_t vertex_index;
-      bool is_new_vertex = true;
-      if constexpr (kUseMeshCompression) {
-        VertexDataKey key;
-        key.reserve(total_primvar_dim);
-        for (const auto& channel : channels) {
-          AppendChannelToKey(channel, key, face_idx, corner_index,
-                             face_vertex_indices);
+  int* final_face_indices_ptr = final_face_indices.data();
+
+  if constexpr (kUseMeshCompression) {
+    // Channels with Vertex/Varying/Constant interpolation are determined solely
+    // by the source point index `face_vertex_indices[corner]`. Grouping corners
+    // by source point index means we only need to compare FaceVarying and
+    // Uniform channels within each point's valence list (typically 1-2 entries).
+    bool has_vertex_channel = false;
+    size_t num_points = 0;
+    std::vector<const ExpandChannel*> varying_channels;
+    size_t key_stride = 0;
+    for (const auto& channel : channels) {
+      const HdInterpolation interp = channel.descriptor.interpolation;
+      if (interp == HdInterpolationVertex || interp == HdInterpolationVarying) {
+        has_vertex_channel = true;
+        std::visit(
+            [&](const auto& arr) {
+              num_points = std::max(num_points, arr.size());
+            },
+            channel.src);
+      } else if (interp == HdInterpolationFaceVarying ||
+                 interp == HdInterpolationUniform) {
+        varying_channels.push_back(&channel);
+        if (interp == HdInterpolationUniform) {
+          key_stride += 1;
+        } else {
+          std::visit(
+              [&](const auto& arr) {
+                using ArrayType = std::decay_t<decltype(arr)>;
+                key_stride +=
+                    PrimvarDimension<typename ArrayType::value_type>();
+              },
+              channel.src);
         }
-        vertex_index = unique_vertex_map.size();
-        auto [it, inserted] = unique_vertex_map.try_emplace(key, vertex_index);
-        vertex_index = it->second;
-        is_new_vertex = inserted;
-      } else {
-        vertex_index = corner_index;
       }
-      final_face_indices[corner_index] = vertex_index;
-      if (is_new_vertex) {
-        for (auto& channel : channels) {
-          AppendChannelValue(channel, face_idx, corner_index,
-                             face_vertex_indices);
+    }
+    if (!has_vertex_channel) {
+      num_points = 1;
+    }
+
+    std::vector<int> first_vertex_for_point(std::max<size_t>(num_points, 1),
+                                            -1);
+    if (varying_channels.empty()) {
+      int corner_index = 0;
+      for (int face_idx = 0; face_idx < num_faces; ++face_idx) {
+        const int count = face_vertex_counts[face_idx];
+        for (int i = 0; i < count; ++i) {
+          const int p =
+              has_vertex_channel ? face_vertex_indices[corner_index] : 0;
+          int v = first_vertex_for_point[p];
+          if (v < 0) {
+            v = static_cast<int>(unique_locs.size());
+            first_vertex_for_point[p] = v;
+            unique_locs.push_back({face_idx, corner_index});
+          }
+          final_face_indices_ptr[corner_index] = v;
+          corner_index++;
         }
       }
-      corner_index++;
+    } else {
+      std::vector<int> next_vertex;
+      next_vertex.reserve(num_face_varyings);
+      std::vector<int> vertex_keys;
+      vertex_keys.reserve(num_face_varyings * key_stride);
+      VertexDataKey key;
+      key.reserve(key_stride);
+
+      int corner_index = 0;
+      for (int face_idx = 0; face_idx < num_faces; ++face_idx) {
+        const int count = face_vertex_counts[face_idx];
+        for (int i = 0; i < count; ++i) {
+          const int p =
+              has_vertex_channel ? face_vertex_indices[corner_index] : 0;
+          key.clear();
+          for (const ExpandChannel* channel : varying_channels) {
+            AppendChannelToKey(*channel, key, face_idx, corner_index,
+                               face_vertex_indices);
+          }
+          int v = first_vertex_for_point[p];
+          while (v >= 0) {
+            if (std::memcmp(
+                    vertex_keys.data() + static_cast<size_t>(v) * key_stride,
+                    key.data(), key_stride * sizeof(int)) == 0) {
+              break;
+            }
+            v = next_vertex[v];
+          }
+          if (v < 0) {
+            v = static_cast<int>(unique_locs.size());
+            unique_locs.push_back({face_idx, corner_index});
+            next_vertex.push_back(first_vertex_for_point[p]);
+            first_vertex_for_point[p] = v;
+            vertex_keys.insert(vertex_keys.end(), key.begin(), key.end());
+          }
+          final_face_indices_ptr[corner_index] = v;
+          corner_index++;
+        }
+      }
+    }
+  } else {
+    int corner_index = 0;
+    for (int face_idx = 0; face_idx < num_faces; ++face_idx) {
+      const int count = face_vertex_counts[face_idx];
+      for (int i = 0; i < count; ++i) {
+        final_face_indices_ptr[corner_index] = corner_index;
+        unique_locs.push_back({face_idx, corner_index});
+        corner_index++;
+      }
     }
   }
   absl::Time end = absl::Now();
@@ -389,23 +461,32 @@ std::pair<VtIntArray, PrimvarMap> GeometryProcessor::ExpandPrimData(
   if constexpr (kUseMeshCompression) {
     TF_DEBUG(HDMITSUBA_GEOMETRY)
         .Msg("Compressed to %zu / %zu vertices. Time: %f ms\n",
-             unique_vertex_map.size(), num_face_varyings,
+             unique_locs.size(), num_face_varyings,
              absl::ToDoubleMilliseconds(duration));
   }
 
   PrimvarMap final_primvars;
+  const size_t num_unique = unique_locs.size();
   for (auto& channel : channels) {
+    const HdInterpolation interp = channel.descriptor.interpolation;
     std::visit(
-        [&](auto& specific_array) {
-          if (!specific_array.empty()) {
-            final_primvars[channel.name] = {VtValue(std::move(specific_array)),
-                                            channel.descriptor};
+        [&](const auto& src) {
+          using ArrayType = std::decay_t<decltype(src)>;
+          if (src.empty() || num_unique == 0) return;
+          ArrayType dst_array(num_unique);
+          auto* dst_ptr = dst_array.data();
+          for (size_t i = 0; i < num_unique; ++i) {
+            dst_ptr[i] = SamplePrimvar(src, interp, unique_locs[i].face,
+                                       unique_locs[i].corner,
+                                       face_vertex_indices);
           }
+          final_primvars[channel.name] = {VtValue(std::move(dst_array)),
+                                          channel.descriptor};
         },
-        channel.dst);
+        channel.src);
   }
 
-  return {final_face_indices, final_primvars};
+  return {std::move(final_face_indices), std::move(final_primvars)};
 }
 
 std::vector<SubMeshOutput> GeometryProcessor::SplitAndCompactMeshes(
@@ -432,23 +513,23 @@ std::vector<SubMeshOutput> GeometryProcessor::SplitAndCompactMeshes(
   for (size_t i = 0; i < triangles.size() / 3; ++i) {
     const int face_index = primitive_params[i];
     const int material_index = face_material_indices[face_index];
-    material_indices[material_index].push_back(triangles[i * 3]);
-    material_indices[material_index].push_back(triangles[i * 3 + 1]);
-    material_indices[material_index].push_back(triangles[i * 3 + 2]);
+    auto& mat_tris = material_indices[material_index];
+    mat_tris.push_back(triangles[i * 3]);
+    mat_tris.push_back(triangles[i * 3 + 1]);
+    mat_tris.push_back(triangles[i * 3 + 2]);
   }
 
-  size_t total_source_vertices =
-      (final_primvars.find(HdTokens->points) != final_primvars.end())
-          ? final_primvars.at(HdTokens->points).value.Get<VtVec3fArray>().size()
+  auto points_it = final_primvars.find(HdTokens->points);
+  const size_t total_source_vertices =
+      points_it != final_primvars.end()
+          ? points_it->second.value.Get<VtVec3fArray>().size()
           : 0;
 
-  absl::flat_hash_map<int, int> old_to_new_vertex_map;
-  old_to_new_vertex_map.reserve(total_source_vertices);
+  std::vector<int> old_to_new_vertex_map(total_source_vertices, -1);
   std::vector<int> unique_old_vertices;
 
   for (size_t i = 0; i < material_ids.size(); ++i) {
     if (material_indices[i].empty()) continue;
-    old_to_new_vertex_map.clear();
     unique_old_vertices.clear();
 
     size_t max_vertices =
@@ -457,17 +538,24 @@ std::vector<SubMeshOutput> GeometryProcessor::SplitAndCompactMeshes(
                                                  : material_indices[i].size());
     unique_old_vertices.reserve(max_vertices);
 
-    VtIntArray submesh_triangles;
-    submesh_triangles.reserve(material_indices[i].size());
+    const auto& src_indices = material_indices[i];
+    VtIntArray submesh_triangles(src_indices.size());
+    int* sub_tri_ptr = submesh_triangles.data();
 
     // Compact the triangles and record unique source vertex indices.
-    for (const int vertex_index : material_indices[i]) {
-      auto [it, inserted] = old_to_new_vertex_map.try_emplace(
-          vertex_index, static_cast<int>(unique_old_vertices.size()));
-      submesh_triangles.push_back(it->second);
-      if (inserted) {
+    for (size_t k = 0; k < src_indices.size(); ++k) {
+      const int vertex_index = src_indices[k];
+      int mapped = old_to_new_vertex_map[vertex_index];
+      if (mapped < 0) {
+        mapped = static_cast<int>(unique_old_vertices.size());
+        old_to_new_vertex_map[vertex_index] = mapped;
         unique_old_vertices.push_back(vertex_index);
       }
+      sub_tri_ptr[k] = mapped;
+    }
+
+    for (int old_v : unique_old_vertices) {
+      old_to_new_vertex_map[old_v] = -1;
     }
 
     PrimvarMap primvars;
