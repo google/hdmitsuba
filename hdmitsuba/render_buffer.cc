@@ -56,14 +56,13 @@ bool HdMitsubaRenderBuffer::Allocate(const GfVec3i& dimensions, HdFormat format,
     TF_WARN("Multisampled render buffers are not supported.");
   }
 
-  _Deallocate();
-
   width_ = dimensions[0];
   height_ = dimensions[1];
   format_ = format;
+  mapped_ = false;
   converged_ = false;
   size_t byte_size = width_ * height_ * format_size;
-  buffer_.resize(byte_size);
+  buffer_.assign(byte_size, 0);
   return true;
 }
 

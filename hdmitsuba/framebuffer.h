@@ -36,11 +36,12 @@
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-// Copies data from a Mitsuba Tensor to a Hydra Render Buffer (Scalar/CPU path).
+// Copies data from a host float buffer (backed by a Mitsuba Tensor) to a Hydra
+// Render Buffer.
 template <typename TensorT>
-void ScalarCopyToRenderBuffer(
-    HdMitsubaRenderBuffer* render_buffer, const TensorT& tensor, int src_offset,
-    int channels, bool is_int,
+void CopyFromHostToRenderBuffer(
+    HdMitsubaRenderBuffer* render_buffer, const float* src_data,
+    const TensorT& tensor, int src_offset, int channels, bool is_int,
     const std::optional<GfRect2i>& crop_window = std::nullopt) {
   if (!TF_VERIFY(render_buffer, "Render buffer is null.")) {
     return;
@@ -75,38 +76,89 @@ void ScalarCopyToRenderBuffer(
         crop_w, crop_h, tensor.shape()[1], tensor.shape()[0]);
   }
 
-  const float* src_data = tensor.array().data();
+  if (crop_x != 0 || crop_y != 0 || crop_w != dst_width ||
+      crop_h != dst_height) {
+    size_t elem_size = is_int ? sizeof(int32_t) : sizeof(float);
+    std::memset(dst_ptr, 0, dst_width * dst_height * dst_channels * elem_size);
+  }
+
   if (is_int) {
     int32_t* dst_int = static_cast<int32_t*>(dst_ptr);
+    const int copy_channels =
+        channels < dst_channels ? channels : dst_channels;
     for (size_t src_y = 0; src_y < crop_h; ++src_y) {
       size_t dst_y = (dst_height - 1) - (crop_y + src_y);
-      for (size_t src_x = 0; src_x < crop_w; ++src_x) {
-        size_t src_idx = (src_y * crop_w + src_x) * src_channels + src_offset;
-        size_t dst_idx = (dst_y * dst_width + (crop_x + src_x)) * dst_channels;
-        for (int c = 0; c < channels && c < dst_channels; ++c) {
-          dst_int[dst_idx + c] = static_cast<int32_t>(src_data[src_idx + c]);
+      const float* src_row =
+          src_data + src_y * crop_w * src_channels + src_offset;
+      int32_t* dst_row = dst_int + (dst_y * dst_width + crop_x) * dst_channels;
+      if (copy_channels == 1 && dst_channels == 1) {
+        for (size_t src_x = 0; src_x < crop_w; ++src_x) {
+          dst_row[src_x] = static_cast<int32_t>(src_row[src_x * src_channels]);
+        }
+      } else {
+        for (size_t src_x = 0; src_x < crop_w; ++src_x) {
+          for (int c = 0; c < copy_channels; ++c) {
+            dst_row[src_x * dst_channels + c] =
+                static_cast<int32_t>(src_row[src_x * src_channels + c]);
+          }
         }
       }
     }
   } else {
     float* dst_float = static_cast<float*>(dst_ptr);
-    for (size_t src_y = 0; src_y < crop_h; ++src_y) {
-      size_t dst_y = (dst_height - 1) - (crop_y + src_y);
-      for (size_t src_x = 0; src_x < crop_w; ++src_x) {
-        size_t src_idx = (src_y * crop_w + src_x) * src_channels + src_offset;
-        size_t dst_idx = (dst_y * dst_width + (crop_x + src_x)) * dst_channels;
-        for (int c = 0; c < channels && c < dst_channels; ++c) {
-          dst_float[dst_idx + c] = src_data[src_idx + c];
+    if (src_channels == static_cast<size_t>(dst_channels) &&
+        dst_channels == channels && src_offset == 0) {
+      const size_t row_bytes = crop_w * dst_channels * sizeof(float);
+      for (size_t src_y = 0; src_y < crop_h; ++src_y) {
+        size_t dst_y = (dst_height - 1) - (crop_y + src_y);
+        std::memcpy(dst_float + (dst_y * dst_width + crop_x) * dst_channels,
+                    src_data + src_y * crop_w * src_channels, row_bytes);
+      }
+    } else if (dst_channels == 4 && channels == 3) {
+      for (size_t src_y = 0; src_y < crop_h; ++src_y) {
+        size_t dst_y = (dst_height - 1) - (crop_y + src_y);
+        const float* src_row =
+            src_data + src_y * crop_w * src_channels + src_offset;
+        float* dst_row = dst_float + (dst_y * dst_width + crop_x) * 4;
+        for (size_t src_x = 0; src_x < crop_w; ++src_x) {
+          const float* sp = src_row + src_x * src_channels;
+          float* dp = dst_row + src_x * 4;
+          dp[0] = sp[0];
+          dp[1] = sp[1];
+          dp[2] = sp[2];
+          dp[3] = 1.0f;
         }
-        // Fill alpha if needed.
-        if (dst_channels == 4 && channels == 3) {
-          dst_float[dst_idx + 3] = 1.0f;
+      }
+    } else {
+      const int copy_channels =
+          channels < dst_channels ? channels : dst_channels;
+      for (size_t src_y = 0; src_y < crop_h; ++src_y) {
+        size_t dst_y = (dst_height - 1) - (crop_y + src_y);
+        const float* src_row =
+            src_data + src_y * crop_w * src_channels + src_offset;
+        float* dst_row =
+            dst_float + (dst_y * dst_width + crop_x) * dst_channels;
+        for (size_t src_x = 0; src_x < crop_w; ++src_x) {
+          for (int c = 0; c < copy_channels; ++c) {
+            dst_row[src_x * dst_channels + c] =
+                src_row[src_x * src_channels + c];
+          }
         }
       }
     }
   }
   render_buffer->SetConverged(true);
   render_buffer->Unmap();
+}
+
+// Copies data from a Mitsuba Tensor to a Hydra Render Buffer (Scalar/CPU path).
+template <typename TensorT>
+void ScalarCopyToRenderBuffer(
+    HdMitsubaRenderBuffer* render_buffer, const TensorT& tensor, int src_offset,
+    int channels, bool is_int,
+    const std::optional<GfRect2i>& crop_window = std::nullopt) {
+  CopyFromHostToRenderBuffer(render_buffer, tensor.array().data(), tensor,
+                             src_offset, channels, is_int, crop_window);
 }
 
 struct CopyDestination {
@@ -123,8 +175,12 @@ void PerformBatchedCopy(
     const TensorT& tensor, const std::vector<CopyDestination>& destinations,
     const std::optional<GfRect2i>& crop_window = std::nullopt) {
   namespace dr = drjit;
-  if constexpr (dr::is_jit_v<Float>) {
+  if (destinations.empty()) {
+    return;
+  }
+  if constexpr (dr::is_cuda_v<Float> || dr::is_metal_v<Float>) {
     using Int32 = dr::int32_array_t<Float>;
+    using UInt32 = dr::uint32_array_t<Float>;
     using MigratedFloat = std::decay_t<decltype(dr::migrate(
         std::declval<Float>(), JitBackend::None))>;
     using MigratedInt = std::decay_t<decltype(dr::migrate(std::declval<Int32>(),
@@ -134,7 +190,6 @@ void PerformBatchedCopy(
     gathered_vars.reserve(destinations.size());
     for (const auto& dest : destinations) {
       int dst_channels = HdGetComponentCount(dest.buffer->GetFormat());
-      using UInt32 = dr::uint32_array_t<Float>;
       size_t dst_width = dest.buffer->GetWidth();
       size_t dst_height = dest.buffer->GetHeight();
       size_t dst_pixel_count = dst_width * dst_height;
@@ -176,7 +231,7 @@ void PerformBatchedCopy(
         Int32 gathered_int =
             Int32(dr::gather<Float>(tensor.array(), final_idx, valid_channel));
         dr::schedule(gathered_int);
-        gathered_vars.push_back(gathered_int);
+        gathered_vars.push_back(std::move(gathered_int));
       } else {
         Float gathered_float =
             dr::gather<Float>(tensor.array(), final_idx, valid_channel);
@@ -185,7 +240,7 @@ void PerformBatchedCopy(
               in_crop_channel && (channel_offsets == 3), 1.0f, gathered_float);
         }
         dr::schedule(gathered_float);
-        gathered_vars.push_back(gathered_float);
+        gathered_vars.push_back(std::move(gathered_float));
       }
     }
     dr::eval();
@@ -220,9 +275,14 @@ void PerformBatchedCopy(
       dest.buffer->Unmap();
     }
   } else {
+    if constexpr (dr::is_jit_v<Float>) {
+      dr::eval(tensor.array());
+      dr::sync_thread();
+    }
+    const float* src_data = tensor.array().data();
     for (const auto& dest : destinations) {
-      ScalarCopyToRenderBuffer(dest.buffer, tensor, dest.src_offset,
-                               dest.channels, dest.is_int, crop_window);
+      CopyFromHostToRenderBuffer(dest.buffer, src_data, tensor, dest.src_offset,
+                                 dest.channels, dest.is_int, crop_window);
     }
   }
 }
