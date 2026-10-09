@@ -66,22 +66,25 @@ class GeometryProcessor {
     if (data.empty()) {
       return [](int, int, int, const VtIntArray&) { return T(0.f); };
     }
+    const T* raw_data = data.cdata();
     switch (interpolation) {
-      case HdInterpolationConstant:
-        return [&data](int, int, int, const VtIntArray&) { return data[0]; };
+      case HdInterpolationConstant: {
+        const T val = raw_data[0];
+        return [val](int, int, int, const VtIntArray&) { return val; };
+      }
       case HdInterpolationUniform:
-        return [&data](int global_face, int, int, const VtIntArray&) {
-          return data[global_face];
+        return [raw_data](int global_face, int, int, const VtIntArray&) {
+          return raw_data[global_face];
         };
       case HdInterpolationVertex:
       case HdInterpolationVarying:
-        return [&data](int, int local_corner, int,
-                       const VtIntArray& vertex_indices) {
-          return data[vertex_indices[local_corner]];
+        return [raw_data](int, int local_corner, int,
+                          const VtIntArray& vertex_indices) {
+          return raw_data[vertex_indices[local_corner]];
         };
       case HdInterpolationFaceVarying:
-        return [&data](int, int, int global_corner, const VtIntArray&) {
-          return data[global_corner];
+        return [raw_data](int, int, int global_corner, const VtIntArray&) {
+          return raw_data[global_corner];
         };
       default:
         return [](int, int, int, const VtIntArray&) { return T(0.f); };

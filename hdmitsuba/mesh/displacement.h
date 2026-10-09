@@ -114,29 +114,48 @@ void ApplyDisplacement(const SdfPath& mesh_id,
       has_uv ? uv_it->second.descriptor.interpolation
              : HdInterpolationVertex);
 
-  VtVec2fArray uv_coords;
-  VtVec3fArray positions, normals;
-  VtIntArray target_vertex_indices, local_vertex_indices;
+  const size_t max_unique_vertices =
+      std::min(points.size(), vertex_indices.size());
+
+  std::vector<GfVec2f> uv_coords;
+  std::vector<GfVec3f> positions, normals;
+  std::vector<int> target_vertex_indices;
+  uv_coords.reserve(max_unique_vertices);
+  positions.reserve(max_unique_vertices);
+  normals.reserve(max_unique_vertices);
+  target_vertex_indices.reserve(max_unique_vertices);
+
+  VtIntArray local_vertex_indices;
+  int* local_vi_ptr = nullptr;
+  if (displacement.is_vector) {
+    local_vertex_indices.resize(vertex_indices.size());
+    local_vi_ptr = local_vertex_indices.data();
+  }
+
   std::vector<int> vertex_remap(points.size(), -1);
   size_t corner = 0;
   for (size_t face = 0; face < face_counts.size(); ++face) {
-    for (int v = 0; v < face_counts[face]; ++v, ++corner) {
+    const int face_count = face_counts[face];
+    const int global_face = global_face_indices[face];
+    for (int v = 0; v < face_count; ++v, ++corner) {
       const int vertex_index = vertex_indices[corner];
       // Each vertex should only be displaced once, even if it is part of
       // multiple faces.
       if (vertex_remap[vertex_index] < 0) {
-        vertex_remap[vertex_index] = target_vertex_indices.size();
-        uv_coords.push_back(uv_interpolator(global_face_indices[face], corner,
-                                            global_corner_indices[corner],
+        vertex_remap[vertex_index] =
+            static_cast<int>(target_vertex_indices.size());
+        const int global_corner = global_corner_indices[corner];
+        uv_coords.push_back(uv_interpolator(global_face, corner, global_corner,
                                             vertex_indices));
-        positions.push_back(points[vertex_index]);
-        normals.push_back(
-            normal_interpolator(global_face_indices[face], corner,
-                                global_corner_indices[corner], vertex_indices)
-                .GetNormalized());
+        positions.push_back(points.AsConst()[vertex_index]);
+        normals.push_back(normal_interpolator(global_face, corner,
+                                              global_corner, vertex_indices)
+                              .GetNormalized());
         target_vertex_indices.push_back(vertex_index);
       }
-      local_vertex_indices.push_back(vertex_remap[vertex_index]);
+      if (local_vi_ptr) {
+        local_vi_ptr[corner] = vertex_remap[vertex_index];
+      }
     }
   }
 
@@ -187,10 +206,11 @@ void ApplyDisplacement(const SdfPath& mesh_id,
 
   const FloatBuffer& host_offset = dr::migrate(offsets, JitBackend::None);
   if constexpr (dr::is_jit_v<Float>) dr::sync_thread();
+  const float* offset_ptr = host_offset.data();
+  GfVec3f* points_ptr = points.data();
   for (size_t i = 0; i < n_vertices; ++i) {
-    points[target_vertex_indices[i]] +=
-        GfVec3f(host_offset[3 * i + 0], host_offset[3 * i + 1],
-                host_offset[3 * i + 2]);
+    points_ptr[target_vertex_indices[i]] += GfVec3f(
+        offset_ptr[3 * i + 0], offset_ptr[3 * i + 1], offset_ptr[3 * i + 2]);
   }
   primvars[HdTokens->points].value = VtValue(std::move(points));
 }
