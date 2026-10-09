@@ -543,8 +543,7 @@ void SetTransformParameter(TraversalCallback& cb,
   using AnimatedTransform = mitsuba::AnimatedTransform<Float, Spectrum>;
   using TensorXf = typename AnimatedTransform::TensorXf;
   if (!transform.IsAnimated()) {
-    cb.set<AffineTransform4f>("to_world",
-                              AffineTransform4f(transform.First().matrix));
+    cb.set<AffineTransform4f>("to_world", AffineTransform4f(transform.First()));
     return;
   }
   // Copy the keyframe tensors of a new animation into the existing one.
@@ -798,6 +797,92 @@ typename Mesh::TensorXu32 LoadFaceTensor(const void* data, size_t rows) {
                                    {rows, size_t(3)});
 }
 
+// Populates `dst` (sized `vertex_count * channels`) from `state`. Returns false
+// if `state` does not hold a supported array type of size `vertex_count`.
+// If the source array layout already matches `channels` without needing a V
+// flip, sets `*direct_ptr` to the contiguous source float buffer instead of
+// copying into `dst`.
+bool ExtractAttributeBuffer(const std::string& name, size_t channels,
+                            size_t vertex_count, const PrimvarState& state,
+                            std::vector<float>* dst,
+                            const float** direct_ptr) {
+  *direct_ptr = nullptr;
+  const VtValue& value = state.value;
+  if (value.GetArraySize() != vertex_count) {
+    TF_WARN("Primvar '%s' has %zu values, but the mesh has %zu vertices.",
+            name.c_str(), value.GetArraySize(), vertex_count);
+    return false;
+  }
+  if (value.IsHolding<VtFloatArray>()) {
+    const float* src = value.UncheckedGet<VtFloatArray>().cdata();
+    if (channels == 1) {
+      *direct_ptr = src;
+      return true;
+    }
+    dst->assign(vertex_count * channels, 0.f);
+    float* out = dst->data();
+    for (size_t i = 0; i < vertex_count; ++i) {
+      std::fill_n(out + i * channels, channels, src[i]);
+    }
+    return true;
+  }
+  if (value.IsHolding<VtVec2fArray>()) {
+    const GfVec2f* src = value.UncheckedGet<VtVec2fArray>().cdata();
+    const bool flip =
+        state.descriptor.role == HdPrimvarRoleTokens->textureCoordinate;
+    if (channels == 2 && !flip) {
+      *direct_ptr = src[0].data();
+      return true;
+    }
+    dst->assign(vertex_count * channels, 0.f);
+    float* out = dst->data();
+    for (size_t i = 0; i < vertex_count; ++i) {
+      out[i * channels] = src[i][0];
+      if (channels > 1) {
+        out[i * channels + 1] = flip ? 1.f - src[i][1] : src[i][1];
+      }
+    }
+    return true;
+  }
+  if (value.IsHolding<VtVec3fArray>()) {
+    const GfVec3f* src = value.UncheckedGet<VtVec3fArray>().cdata();
+    if (channels == 3) {
+      *direct_ptr = src[0].data();
+      return true;
+    }
+    dst->assign(vertex_count * channels, 0.f);
+    float* out = dst->data();
+    const size_t copy_ch = std::min<size_t>(channels, 3);
+    for (size_t i = 0; i < vertex_count; ++i) {
+      std::copy_n(src[i].data(), copy_ch, out + i * channels);
+    }
+    return true;
+  }
+  return false;
+}
+
+// Adds the primvars in `mesh_attributes` that exist in `primvars` to `packed`
+// as vertex attributes with the requested channel count.
+void AddPackedMeshAttributes(mitsuba::PackedMesh& packed, size_t vertex_count,
+                             const PrimvarMap& primvars,
+                             const MeshAttributeRequests& mesh_attributes) {
+  if (mesh_attributes.empty()) return;
+  std::vector<float> scratch;
+  for (const auto& [name, channels] : mesh_attributes) {
+    auto it = primvars.find(TfToken(name));
+    if (it == primvars.end()) continue;
+    const float* direct_ptr = nullptr;
+    if (!ExtractAttributeBuffer(name, channels, vertex_count, it->second,
+                                &scratch, &direct_ptr)) {
+      continue;
+    }
+    float* dst =
+        packed.add_attribute(MeshAttributeName(name, channels), channels);
+    const float* src = direct_ptr ? direct_ptr : scratch.data();
+    std::memcpy(dst, src, vertex_count * channels * sizeof(float));
+  }
+}
+
 // Adds the primvars in `mesh_attributes` that exist in `primvars` to `mesh` as
 // vertex attributes with the requested channel count. Float primvars are
 // broadcast, and vec2 primvars are padded with zeros. Texture coordinates were
@@ -806,44 +891,20 @@ typename Mesh::TensorXu32 LoadFaceTensor(const void* data, size_t rows) {
 template <typename Mesh>
 void AddMeshAttributes(Mesh* mesh, const PrimvarMap& primvars,
                        const MeshAttributeRequests& mesh_attributes) {
+  if (mesh_attributes.empty()) return;
   const size_t vertex_count = mesh->vertex_count();
   std::vector<float> data;
   for (const auto& [name, channels] : mesh_attributes) {
     auto it = primvars.find(TfToken(name));
     if (it == primvars.end()) continue;
-    const VtValue& value = it->second.value;
-    if (value.GetArraySize() != vertex_count) {
-      TF_WARN("Primvar '%s' has %zu values, but the mesh has %zu vertices.",
-              name.c_str(), value.GetArraySize(), vertex_count);
+    const float* direct_ptr = nullptr;
+    if (!ExtractAttributeBuffer(name, channels, vertex_count, it->second, &data,
+                                &direct_ptr)) {
       continue;
     }
-    data.assign(vertex_count * channels, 0.f);
-    if (value.IsHolding<VtFloatArray>()) {
-      const auto& a = value.UncheckedGet<VtFloatArray>();
-      for (size_t i = 0; i < vertex_count; ++i) {
-        std::fill_n(&data[i * channels], channels, a[i]);
-      }
-    } else if (value.IsHolding<VtVec2fArray>()) {
-      const auto& a = value.UncheckedGet<VtVec2fArray>();
-      const bool flip =
-          it->second.descriptor.role == HdPrimvarRoleTokens->textureCoordinate;
-      for (size_t i = 0; i < vertex_count; ++i) {
-        data[i * channels] = a[i][0];
-        if (channels > 1) {
-          data[i * channels + 1] = flip ? 1.f - a[i][1] : a[i][1];
-        }
-      }
-    } else if (value.IsHolding<VtVec3fArray>()) {
-      const auto& a = value.UncheckedGet<VtVec3fArray>();
-      for (size_t i = 0; i < vertex_count; ++i) {
-        std::copy_n(a[i].data(), channels, &data[i * channels]);
-      }
-    } else {
-      continue;
-    }
-    mesh->add_attribute(
-        MeshAttributeName(name, channels),
-        LoadFloatTensor<Mesh>(data.data(), vertex_count, channels));
+    const float* src = direct_ptr ? direct_ptr : data.data();
+    mesh->add_attribute(MeshAttributeName(name, channels),
+                        LoadFloatTensor<Mesh>(src, vertex_count, channels));
   }
 }
 
@@ -864,7 +925,8 @@ PrimTranslator<Float, Spectrum>::BuildMesh(
     return nullptr;
   }
 
-  const auto& points_array = points_it->second.value.Get<VtVec3fArray>();
+  const auto& points_array =
+      points_it->second.value.UncheckedGet<VtVec3fArray>();
   size_t vertex_count = points_array.size();
   if (vertex_count == 0) return nullptr;
 
@@ -875,19 +937,21 @@ PrimTranslator<Float, Spectrum>::BuildMesh(
   const GfVec3f* normals_ptr = nullptr;
   if (normals_it != primvars.end() &&
       normals_it->second.value.IsHolding<VtVec3fArray>()) {
-    const auto& normals_array = normals_it->second.value.Get<VtVec3fArray>();
+    const auto& normals_array =
+        normals_it->second.value.UncheckedGet<VtVec3fArray>();
     if (normals_array.size() == vertex_count) {
       normals_ptr = normals_array.cdata();
     }
   }
   const bool has_normals = normals_ptr != nullptr;
 
+  static const TfToken kStToken("st");
   const GfVec2f* texcoords_ptr = nullptr;
-  auto texcoords_it = primvars.find(TfToken("st"));
+  auto texcoords_it = primvars.find(kStToken);
   if (texcoords_it != primvars.end() &&
       texcoords_it->second.value.IsHolding<VtVec2fArray>()) {
     const auto& texcoords_array =
-        texcoords_it->second.value.Get<VtVec2fArray>();
+        texcoords_it->second.value.UncheckedGet<VtVec2fArray>();
     if (texcoords_array.size() == vertex_count) {
       texcoords_ptr = texcoords_array.cdata();
     }
@@ -952,8 +1016,8 @@ PrimTranslator<Float, Spectrum>::BuildMesh(
     frec[3] = 0u;
   }
 
+  AddPackedMeshAttributes(packed, vertex_count, primvars, mesh_attributes);
   mesh->from_packed(std::move(packed));
-  AddMeshAttributes(mesh.get(), primvars, mesh_attributes);
   return mitsuba::ref<mitsuba::Shape<Float, Spectrum>>(mesh.get());
 }
 
@@ -969,7 +1033,8 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateMeshInPlace(
 
   auto points_it = primvars.find(HdTokens->points);
   if (points_it == primvars.end()) return;
-  const auto& points_array = points_it->second.value.Get<VtVec3fArray>();
+  const auto& points_array =
+      points_it->second.value.UncheckedGet<VtVec3fArray>();
   size_t vertex_count = points_array.size();
   size_t face_count = face_indices.size() / 3;
   if (vertex_count == 0 || face_count == 0) return;
@@ -986,18 +1051,20 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateMeshInPlace(
 
   std::vector<std::string> keys = {"positions"};
   cb.set<TensorXf32>(
-      "positions", LoadFloatTensor<Mesh>(points_array.data(), vertex_count, 3));
+      "positions",
+      LoadFloatTensor<Mesh>(points_array.cdata(), vertex_count, 3));
   if (update_topology_and_uvs) {
     cb.set<TensorXu32>("faces",
-                       LoadFaceTensor<Mesh>(face_indices.data(), face_count));
+                       LoadFaceTensor<Mesh>(face_indices.cdata(), face_count));
     keys.push_back("faces");
   }
 
   auto normals_it = primvars.find(HdTokens->normals);
   if (normals_it != primvars.end() && mesh->has_normals()) {
-    const auto& normals_array = normals_it->second.value.Get<VtVec3fArray>();
+    const auto& normals_array =
+        normals_it->second.value.UncheckedGet<VtVec3fArray>();
     cb.set<TensorXf32>("normals",
-                       LoadFloatTensor<Mesh>(normals_array.data(),
+                       LoadFloatTensor<Mesh>(normals_array.cdata(),
                                              normals_array.size(), 3));
   }
   // Always add "normals" to the keys: This prevents Mitsuba from recomputing
@@ -1006,35 +1073,46 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateMeshInPlace(
   keys.push_back("normals");
 
   if (update_topology_and_uvs) {
-    auto texcoords_it = primvars.find(TfToken("st"));
+    static const TfToken kStToken("st");
+    auto texcoords_it = primvars.find(kStToken);
     if (texcoords_it != primvars.end() && mesh->has_texcoords()) {
       const auto& texcoords_array =
-          texcoords_it->second.value.Get<VtVec2fArray>();
+          texcoords_it->second.value.UncheckedGet<VtVec2fArray>();
       cb.set<TensorXf32>("texcoords",
-                         LoadFloatTensor<Mesh>(texcoords_array.data(),
+                         LoadFloatTensor<Mesh>(texcoords_array.cdata(),
                                                texcoords_array.size(), 2));
       keys.push_back("texcoords");
     }
-  }
-
-  // The vertex count may change, so the attributes are removed and re-added.
-  for (const auto& [key, value] : cb.data) {
-    if (absl::StartsWith(key, kVertexAttributePrefix)) {
-      mesh->remove_attribute(key);
+    // The vertex count or user primvars may have changed, so remove and re-add
+    // custom attributes.
+    for (const auto& [key, value] : cb.data) {
+      if (absl::StartsWith(key, kVertexAttributePrefix)) {
+        mesh->remove_attribute(key);
+      }
     }
   }
+
   mesh->parameters_changed(keys);
-  AddMeshAttributes(mesh, primvars, mesh_attributes);
+  if (update_topology_and_uvs) {
+    AddMeshAttributes(mesh, primvars, mesh_attributes);
+  }
 }
 
 MI_VARIANT mitsuba::ref<mitsuba::Shape<Float, Spectrum>>
 PrimTranslator<Float, Spectrum>::BuildCurves(const CurveSpec& spec,
                                              mitsuba::Object* bsdf) {
+  static const absl::NoDestructor<std::string> kCurveResourcePath([]() {
+    if (auto plugin =
+            PlugRegistry::GetInstance().GetPluginWithName("hdMitsuba")) {
+      return plugin->GetResourcePath() + "/curve.txt";
+    }
+    return std::string();
+  }());
+
   const std::string id_str = spec.id.GetAsString();
   mitsuba::Properties props(spec.plugin_name);
-  if (auto plugin =
-          PlugRegistry::GetInstance().GetPluginWithName("hdMitsuba")) {
-    props.set("filename", plugin->GetResourcePath() + "/curve.txt");
+  if (!kCurveResourcePath->empty()) {
+    props.set("filename", *kCurveResourcePath);
   } else {
     TF_RUNTIME_ERROR("Failed to find plugin 'hdMitsuba' to locate resources.");
   }
@@ -1056,26 +1134,33 @@ PrimTranslator<Float, Spectrum>::BuildCurves(const CurveSpec& spec,
 
   using Point3f = mitsuba::Point<float, 3>;
   using Vector3f = mitsuba::Vector<float, 3>;
-  const float world_scale =
-      (dr::norm(spec.transform * Vector3f(1.f, 0.f, 0.f)) +
-       dr::norm(spec.transform * Vector3f(0.f, 1.f, 0.f)) +
-       dr::norm(spec.transform * Vector3f(0.f, 0.f, 1.f))) /
-      3.f;
-  std::vector<float> world_control_points = spec.control_points;
-  for (size_t i = 0; i < world_control_points.size(); i += 4) {
-    Point3f p(world_control_points[i], world_control_points[i + 1],
-              world_control_points[i + 2]);
-    p = spec.transform * p;
-    world_control_points[i + 0] = p[0];
-    world_control_points[i + 1] = p[1];
-    world_control_points[i + 2] = p[2];
-    world_control_points[i + 3] *= world_scale;
-  }
+  const size_t num_floats = spec.control_points.size();
+  cb.set<ScalarSize>("control_point_count", num_floats / 4);
 
-  cb.set<ScalarSize>("control_point_count", world_control_points.size() / 4);
-  cb.set<FloatStorage>("control_points",
-                       dr::load<FloatStorage>(world_control_points.data(),
-                                              world_control_points.size()));
+  if (spec.transform == ScalarAffineTransform4f()) {
+    cb.set<FloatStorage>(
+        "control_points",
+        dr::load<FloatStorage>(spec.control_points.data(), num_floats));
+  } else {
+    const float world_scale =
+        (dr::norm(spec.transform * Vector3f(1.f, 0.f, 0.f)) +
+         dr::norm(spec.transform * Vector3f(0.f, 1.f, 0.f)) +
+         dr::norm(spec.transform * Vector3f(0.f, 0.f, 1.f))) /
+        3.f;
+    std::vector<float> world_control_points(num_floats);
+    const float* src = spec.control_points.data();
+    float* dst = world_control_points.data();
+    for (size_t i = 0; i < num_floats; i += 4) {
+      Point3f p = spec.transform * Point3f(src[i], src[i + 1], src[i + 2]);
+      dst[i + 0] = p[0];
+      dst[i + 1] = p[1];
+      dst[i + 2] = p[2];
+      dst[i + 3] = src[i + 3] * world_scale;
+    }
+    cb.set<FloatStorage>(
+        "control_points",
+        dr::load<FloatStorage>(world_control_points.data(), num_floats));
+  }
   cb.set<IntStorage>("segment_indices",
                      dr::load<IntStorage>(spec.segment_indices.data(),
                                           spec.segment_indices.size()));

@@ -49,18 +49,17 @@ namespace {
 float CalculateMeanWidth(const VtFloatArray& widths,
                          float default_radius = 0.01f) {
   if (widths.empty()) return default_radius;
-  double mean = 0.0;
-  for (size_t i = 0; i < widths.size(); ++i) {
-    mean += (widths[i] - mean) / (i + 1);
+  double sum = 0.0;
+  for (float w : widths) {
+    sum += w;
   }
-  return static_cast<float>(mean);
+  return static_cast<float>(sum / static_cast<double>(widths.size()));
 }
 
 template <typename WidthFn>
 std::vector<float> PackControlPoints(const VtVec3fArray& points,
                                      WidthFn&& width_fn) {
-  std::vector<float> control_points;
-  control_points.resize(points.size() * 4);
+  std::vector<float> control_points(points.size() * 4);
   for (size_t i = 0; i < points.size(); ++i) {
     const GfVec3f& point = points[i];
     control_points[4 * i + 0] = point[0];
@@ -146,10 +145,10 @@ void HdMitsubaCurves::Sync(HdSceneDelegate* sceneDelegate,
   std::string plugin_name = "linearcurve";
   TfToken basis = GetParam<TfToken>(data_source, basis_locator);
   TfToken type = GetParam<TfToken>(data_source, type_locator);
-  if (basis == TfToken("bspline") && type == TfToken("cubic")) {
+  if (basis == HdTokens->bspline && type == HdTokens->cubic) {
     plugin_name = "bsplinecurve";
   }
-  VtIntArray vertex_counts =
+  const VtIntArray vertex_counts =
       GetParam<VtIntArray>(data_source, vertex_counts_locator);
 
   if (points_.empty() || widths_.empty()) {
@@ -168,16 +167,16 @@ void HdMitsubaCurves::Sync(HdSceneDelegate* sceneDelegate,
   CurveSpec spec;
   spec.id = id;
   spec.transform = UsdToMitsubaTransform(transform);
-  spec.material_id = material_id;
+  spec.material_id = std::move(material_id);
   spec.needs_rebuild = true;
-  spec.plugin_name = plugin_name;
+  spec.plugin_name = std::move(plugin_name);
 
   // Pack control points [x, y, z, r] (lazy-evaluating widths based on layout)
   if (widths_.size() == points_.size()) {
-    spec.control_points =
-        PackControlPoints(points_, [&](size_t i) { return widths_[i] * 0.5f; });
+    spec.control_points = PackControlPoints(
+        points_, [&](size_t i) { return widths_.AsConst()[i] * 0.5f; });
   } else if (widths_.size() == 1) {
-    float r = widths_[0] * 0.5f;
+    float r = widths_.AsConst()[0] * 0.5f;
     spec.control_points =
         PackControlPoints(points_, [&](size_t /*i*/) { return r; });
   } else {
@@ -187,7 +186,7 @@ void HdMitsubaCurves::Sync(HdSceneDelegate* sceneDelegate,
   }
 
   // Generate segment indices
-  int degree = (plugin_name == "bsplinecurve") ? 3 : 1;
+  int degree = (spec.plugin_name == "bsplinecurve") ? 3 : 1;
   int n_indices = 0;
   for (int count : vertex_counts) {
     n_indices += std::max(0, count - degree);
