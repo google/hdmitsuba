@@ -14,14 +14,14 @@
 
 #pragma once
 
-#include <map>
-
+#include <absl/container/flat_hash_map.h>
 #include <absl/synchronization/mutex.h>
 
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/vt/array.h>
 #include <pxr/imaging/hd/instancer.h>
 #include <pxr/pxr.h>
+#include <pxr/usd/sdf/path.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -36,7 +36,8 @@ class HdMitsubaInstancer final : public HdInstancer {
   VtMatrix4dArray ComputeInstanceTransforms(const SdfPath& prototype_id);
 
  private:
-  std::map<SdfPath, VtMatrix4dArray> cached_transforms_;
+  absl::flat_hash_map<SdfPath, VtMatrix4dArray, SdfPath::Hash>
+      cached_transforms_;
   absl::Mutex cache_mutex_;
 };
 

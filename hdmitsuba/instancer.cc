@@ -141,57 +141,58 @@ VtMatrix4dArray HdMitsubaInstancer::ComputeInstanceTransforms(
   GfMatrix4d instancer_transform =
       GetParam<GfMatrix4d>(prim.dataSource, transform_locator, GfMatrix4d(1.0));
 
-  const bool has_scales = !instancer_scales.empty();
-  const bool has_rotations = !instancer_rotations.empty();
-  const bool has_rotations_q = !instancer_rotations_q.empty();
-  const bool has_rotations_qf = !instancer_rotations_qf.empty();
-  const bool has_translations = !instancer_translations.empty();
-  const bool has_transforms = !instancer_transforms.empty();
+  const size_t num_scales = instancer_scales.size();
+  const size_t num_rotations = instancer_rotations.size();
+  const size_t num_rotations_q = instancer_rotations_q.size();
+  const size_t num_rotations_qf = instancer_rotations_qf.size();
+  const size_t num_translations = instancer_translations.size();
+  const size_t num_xforms = instancer_transforms.size();
+
+  const bool has_instancer_xform = (instancer_transform != GfMatrix4d(1.0));
   const size_t num_instances = instance_indices.size();
   transforms.resize(num_instances);
+  GfMatrix4d* out_ptr = transforms.data();
 
   for (size_t i = 0; i < num_instances; ++i) {
-    const int index = instance_indices[i];
+    const int index = instance_indices.AsConst()[i];
     if (index < 0) {
-      transforms[i] = instancer_transform;
+      out_ptr[i] = instancer_transform;
       continue;
     }
 
     const size_t uindex = static_cast<size_t>(index);
     GfMatrix4d transform(1.0);
-    if (has_scales) {
-      const size_t clamped_index =
-          std::min(uindex, instancer_scales.size() - 1);
-      transform.SetScale(GfVec3d(instancer_scales[clamped_index]));
+    if (num_rotations > 0) {
+      const GfVec4f& r =
+          instancer_rotations.AsConst()[std::min(uindex, num_rotations - 1)];
+      transform.SetRotate(GfQuatd(r[0], r[1], r[2], r[3]));
+    } else if (num_rotations_q > 0) {
+      transform.SetRotate(GfQuatd(instancer_rotations_q.AsConst()[std::min(
+          uindex, num_rotations_q - 1)]));
+    } else if (num_rotations_qf > 0) {
+      transform.SetRotate(GfQuatd(instancer_rotations_qf.AsConst()[std::min(
+          uindex, num_rotations_qf - 1)]));
     }
-    if (has_rotations) {
-      const size_t clamped_index =
-          std::min(uindex, instancer_rotations.size() - 1);
-      const GfVec4f& r = instancer_rotations[clamped_index];
-      transform *= GfMatrix4d().SetRotate(GfQuatd(r[0], r[1], r[2], r[3]));
-    } else if (has_rotations_q) {
-      const size_t clamped_index =
-          std::min(uindex, instancer_rotations_q.size() - 1);
+    if (num_scales > 0) {
+      const GfVec3f& s =
+          instancer_scales.AsConst()[std::min(uindex, num_scales - 1)];
+      for (int row = 0; row < 3; ++row) {
+        transform[row][0] *= s[row];
+        transform[row][1] *= s[row];
+        transform[row][2] *= s[row];
+      }
+    }
+    if (num_translations > 0) {
+      transform.SetTranslateOnly(
+          GfVec3d(instancer_translations
+                      .AsConst()[std::min(uindex, num_translations - 1)]));
+    }
+    if (num_xforms > 0) {
       transform *=
-          GfMatrix4d().SetRotate(GfQuatd(instancer_rotations_q[clamped_index]));
-    } else if (has_rotations_qf) {
-      const size_t clamped_index =
-          std::min(uindex, instancer_rotations_qf.size() - 1);
-      transform *= GfMatrix4d().SetRotate(
-          GfQuatd(instancer_rotations_qf[clamped_index]));
+          instancer_transforms.AsConst()[std::min(uindex, num_xforms - 1)];
     }
-    if (has_translations) {
-      const size_t clamped_index =
-          std::min(uindex, instancer_translations.size() - 1);
-      transform *= GfMatrix4d().SetTranslate(
-          GfVec3d(instancer_translations[clamped_index]));
-    }
-    if (has_transforms) {
-      const size_t clamped_index =
-          std::min(uindex, instancer_transforms.size() - 1);
-      transform *= instancer_transforms[clamped_index];
-    }
-    transforms[i] = transform * instancer_transform;
+    out_ptr[i] =
+        has_instancer_xform ? (transform * instancer_transform) : transform;
   }
 
   // Flatten nested instancing transforms.
@@ -202,11 +203,13 @@ VtMatrix4dArray HdMitsubaInstancer::ComputeInstanceTransforms(
       const VtMatrix4dArray parent_transforms =
           parent_instancer->ComputeInstanceTransforms(GetId());
       if (!parent_transforms.empty()) {
-        VtMatrix4dArray new_transforms;
-        new_transforms.reserve(transforms.size() * parent_transforms.size());
-        for (const auto& pt : parent_transforms) {
-          for (const auto& t : transforms) {
-            new_transforms.push_back(t * pt);
+        const size_t num_parent = parent_transforms.size();
+        VtMatrix4dArray new_transforms(num_instances * num_parent);
+        GfMatrix4d* dst_ptr = new_transforms.data();
+        for (size_t p = 0; p < num_parent; ++p) {
+          const GfMatrix4d& pt = parent_transforms[p];
+          for (size_t c = 0; c < num_instances; ++c) {
+            dst_ptr[p * num_instances + c] = transforms.AsConst()[c] * pt;
           }
         }
         transforms = std::move(new_transforms);
