@@ -154,8 +154,10 @@ std::pair<VtVec3fArray, VtVec3fArray> GetMeshPointsAndNormals(
         skel_local_to_world * prim_local_to_world.GetInverse();
 
     if (skinned_points) {
-      for (auto& point : points) {
-        point = GfVec3f(skel_to_prim_local.Transform(point));
+      GfVec3f* pts_ptr = points.data();
+      const size_t n = points.size();
+      for (size_t i = 0; i < n; ++i) {
+        pts_ptr[i] = GfVec3f(skel_to_prim_local.Transform(pts_ptr[i]));
       }
     }
     if (skinned_normals) {
@@ -163,12 +165,14 @@ std::pair<VtVec3fArray, VtVec3fArray> GetMeshPointsAndNormals(
           skel_to_prim_local.ExtractRotationMatrix()
               .GetInverse()
               .GetTranspose();
-      for (auto& normal : normals) {
-        normal = GfVec3f(normal * skel_to_prim_local_inv_transpose);
+      GfVec3f* nrm_ptr = normals.data();
+      const size_t n = normals.size();
+      for (size_t i = 0; i < n; ++i) {
+        nrm_ptr[i] = GfVec3f(nrm_ptr[i] * skel_to_prim_local_inv_transpose);
       }
     }
   }
-  return {points, normals};
+  return {std::move(points), std::move(normals)};
 }
 
 }  // namespace
@@ -213,7 +217,7 @@ MeshExtractionData ExtractMeshData(UsdStagePtr stage, const SdfPath& path,
     desc.name = HdTokens->points;
     desc.interpolation = HdInterpolationVertex;
     desc.role = HdPrimvarRoleTokens->point;
-    data.primvars[desc.name] = {VtValue(points), desc};
+    data.primvars[desc.name] = {VtValue(std::move(points)), desc};
   }
 
   if (!normals.empty()) {
@@ -222,7 +226,7 @@ MeshExtractionData ExtractMeshData(UsdStagePtr stage, const SdfPath& path,
     desc.interpolation =
         UsdInterpolationToHdInterpolation(mesh.GetNormalsInterpolation());
     desc.role = HdPrimvarRoleTokens->normal;
-    data.primvars[desc.name] = {VtValue(normals), desc};
+    data.primvars[desc.name] = {VtValue(std::move(normals)), desc};
   }
 
   int num_faces = data.face_vertex_counts.size();
@@ -234,6 +238,7 @@ MeshExtractionData ExtractMeshData(UsdStagePtr stage, const SdfPath& path,
     TfToken family_type;
     subset_family_attr.Get(&family_type);
     if (family_type == TfToken("nonOverlapping")) {
+      int* face_mat_ptr = data.face_material_indices.data();
       for (const UsdPrim& child : prim.GetChildren()) {
         if (child.IsA<UsdGeomSubset>()) {
           UsdGeomSubset subset(child);
@@ -247,9 +252,12 @@ MeshExtractionData ExtractMeshData(UsdStagePtr stage, const SdfPath& path,
             subset.GetIndicesAttr().Get(&indices, time);
             int material_index = data.material_ids.size();
             data.material_ids.push_back(child.GetPath());
-            for (int face_idx : indices) {
+            const int* idx_ptr = indices.cdata();
+            const size_t idx_count = indices.size();
+            for (size_t i = 0; i < idx_count; ++i) {
+              int face_idx = idx_ptr[i];
               if (face_idx >= 0 && face_idx < num_faces) {
-                data.face_material_indices[face_idx] = material_index;
+                face_mat_ptr[face_idx] = material_index;
               }
             }
           }
@@ -296,22 +304,21 @@ NB_MODULE(geometry_ext, m) {
     if (fvar_interp_rule != PxOsdOpenSubdivTokens->all && refine_level > 0 &&
         (mesh_data.scheme == PxOsdOpenSubdivTokens->catmullClark ||
          mesh_data.scheme == PxOsdOpenSubdivTokens->loop)) {
+      int unindexed_channel = -1;
       for (const auto& [token, state] : mesh_data.primvars) {
         if (state.descriptor.interpolation == HdInterpolationFaceVarying) {
-          VtIntArray indices;
-          const int num_face_varyings = topology.GetNumFaceVaryings();
-          indices.resize(num_face_varyings);
-          std::iota(indices.begin(), indices.end(), 0);
-          auto it = std::find(fvar_topologies.begin(), fvar_topologies.end(),
-                              indices);
-          int channel = 0;
-          if (it == fvar_topologies.end()) {
-            channel = fvar_topologies.size();
-            fvar_topologies.push_back(indices);
-          } else {
-            channel = std::distance(fvar_topologies.begin(), it);
+          if (unindexed_channel < 0) {
+            const int num_face_varyings = topology.GetNumFaceVaryings();
+            if (num_face_varyings > 0) {
+              VtIntArray indices(num_face_varyings);
+              std::iota(indices.data(), indices.data() + num_face_varyings, 0);
+              unindexed_channel = fvar_topologies.size();
+              fvar_topologies.push_back(std::move(indices));
+            }
           }
-          fvar_map[token] = channel;
+          if (unindexed_channel >= 0) {
+            fvar_map[token] = unindexed_channel;
+          }
         }
       }
     }

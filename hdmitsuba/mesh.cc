@@ -261,29 +261,45 @@ void HdMitsubaMesh::SyncTopology(HdSceneDelegate* sceneDelegate,
        scheme == PxOsdOpenSubdivTokens->loop)) {
     auto fv_primvars =
         GetPrimvarDescriptors(sceneDelegate, HdInterpolationFaceVarying);
+    int unindexed_channel = -1;
     for (const auto& primvar : fv_primvars) {
-      VtIntArray indices;
       if (primvar.indexed) {
+        VtIntArray indices;
         GetIndexedPrimvar(sceneDelegate, primvar.name, &indices);
+        if (!indices.empty()) {
+          auto it = std::find(fvar_topologies.begin(), fvar_topologies.end(),
+                              indices);
+          int channel;
+          if (it == fvar_topologies.end()) {
+            channel = fvar_topologies.size();
+            fvar_topologies.push_back(std::move(indices));
+          } else {
+            channel = std::distance(fvar_topologies.begin(), it);
+          }
+          fvar_primvar_to_channel[primvar.name] = channel;
+        }
       } else {
         VtValue value = GetPrimvar(sceneDelegate, primvar.name);
         if (!value.IsEmpty()) {
-          const int num_face_varyings = topology.GetNumFaceVaryings();
-          indices.resize(num_face_varyings);
-          std::iota(indices.begin(), indices.end(), 0);
+          if (unindexed_channel < 0) {
+            const int num_face_varyings = topology.GetNumFaceVaryings();
+            if (num_face_varyings > 0) {
+              VtIntArray indices(num_face_varyings);
+              std::iota(indices.data(), indices.data() + num_face_varyings, 0);
+              auto it = std::find(fvar_topologies.begin(),
+                                  fvar_topologies.end(), indices);
+              if (it == fvar_topologies.end()) {
+                unindexed_channel = fvar_topologies.size();
+                fvar_topologies.push_back(std::move(indices));
+              } else {
+                unindexed_channel = std::distance(fvar_topologies.begin(), it);
+              }
+            }
+          }
+          if (unindexed_channel >= 0) {
+            fvar_primvar_to_channel[primvar.name] = unindexed_channel;
+          }
         }
-      }
-      if (!indices.empty()) {
-        auto it =
-            std::find(fvar_topologies.begin(), fvar_topologies.end(), indices);
-        int channel;
-        if (it == fvar_topologies.end()) {
-          channel = fvar_topologies.size();
-          fvar_topologies.push_back(indices);
-        } else {
-          channel = std::distance(fvar_topologies.begin(), it);
-        }
-        fvar_primvar_to_channel[primvar.name] = channel;
       }
     }
   }
@@ -295,6 +311,8 @@ void HdMitsubaMesh::SyncTopology(HdSceneDelegate* sceneDelegate,
                                TfToken(GetId().GetText()));
 
   if (subdiv_evaluator_.IsSubdivided()) {
+    face_material_indices_ =
+        subdiv_evaluator_.MapRefinedMaterialIndices(face_material_indices_);
     topology_ = HdMeshTopology(scheme, topology.GetOrientation(),
                                subdiv_evaluator_.GetRefinedFaceVertexCounts(),
                                subdiv_evaluator_.GetRefinedFaceVertexIndices());
@@ -313,7 +331,7 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
   auto id = GetId();
   auto points_it = primvars.find(HdTokens->points);
   if (points_it == primvars.end() || points_it->second.value.IsEmpty() ||
-      points_it->second.value.Get<VtVec3fArray>().empty()) {
+      points_it->second.value.UncheckedGet<VtVec3fArray>().empty()) {
     TF_DEBUG(HDMITSUBA_LIFECYCLE)
         .Msg("Mesh %s has no points. Removing from scene.\n", id.GetText());
     RemoveFromScene(scene);
@@ -344,15 +362,14 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
   spec.material_ids = material_ids_;
   spec.primvars = primvars;
   spec.transform = sceneDelegate->GetTransform(id);
-  spec.emitter_spec = emitter_spec;
-  spec.instance_transforms = instance_transforms;
+  spec.emitter_spec = std::move(emitter_spec);
+  spec.instance_transforms = std::move(instance_transforms);
   spec.needs_rebuild = needs_rebuild;
   spec.dirty_bits = dirtyBits ? *dirtyBits : HdChangeTracker::Clean;
   spec.is_subdivided = subdiv_evaluator_.IsSubdivided();
   spec.double_sided = IsDoubleSided(sceneDelegate);
 
-  spec.face_material_indices =
-      subdiv_evaluator_.MapRefinedMaterialIndices(face_material_indices_);
+  spec.face_material_indices = face_material_indices_;
   if (subdiv_evaluator_.IsSubdivided()) {
     spec.face_vertex_counts = subdiv_evaluator_.GetRefinedFaceVertexCounts();
     spec.face_vertex_indices = subdiv_evaluator_.GetRefinedFaceVertexIndices();
@@ -394,7 +411,14 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
   TF_DEBUG(HDMITSUBA_SYNC)
       .Msg("SyncPrimvars for %s dirtyBits: %d subdivided: %d\n",
            GetId().GetText(), *dirtyBits, subdiv_evaluator_.IsSubdivided());
-  auto primvar_descriptors = GetAllPrimvarDescriptors(sceneDelegate);
+  const bool need_descriptors =
+      (*dirtyBits &
+       (HdChangeTracker::DirtyPrimvar | HdChangeTracker::DirtyNormals)) != 0;
+  absl::flat_hash_map<TfToken, HdPrimvarDescriptor, TfToken::HashFunctor>
+      primvar_descriptors;
+  if (need_descriptors) {
+    primvar_descriptors = GetAllPrimvarDescriptors(sceneDelegate);
+  }
 
   // Remove primvars that no longer exist from the primvar map.
   // Protect built-in geometric attributes (points, normals) from removal.
@@ -477,7 +501,7 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
       auto points_it = primvars_.find(HdTokens->points);
       if (points_it != primvars_.end() &&
           points_it->second.value.IsHolding<VtVec3fArray>()) {
-        vertex_count = points_it->second.value.Get<VtVec3fArray>().size();
+        vertex_count = points_it->second.value.UncheckedGet<VtVec3fArray>().size();
       }
       size_t face_count = topology_.GetNumFaces();
       size_t corner_count = topology_.GetNumFaceVaryings();
@@ -486,8 +510,9 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
         primvars_[HdTokens->normals] = {std::move(value), desc};
       } else {
         size_t actual_size =
-            value.IsHolding<VtVec3fArray>() ? value.Get<VtVec3fArray>().size()
-                                            : 0;
+            value.IsHolding<VtVec3fArray>()
+                ? value.UncheckedGet<VtVec3fArray>().size()
+                : 0;
         // Only warn if the user explicitly authored a non-empty array with incorrect length (>1)
         if (actual_size > 1) {
           TF_WARN(
@@ -502,15 +527,17 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
   }
 
   // 3. Sync user primvars
-  for (auto const& [token, descriptor] : primvar_descriptors) {
-    // Skip explicitly handled attributes
-    if (token == HdTokens->points || token == HdTokens->normals ||
-        token == HdMitsubaMeshTokens->subdivision_level) {
-      continue;
-    }
-    TF_DEBUG(HDMITSUBA_SYNC).Msg("SyncPrimvar: %s\n", token.GetText());
-    if (HdChangeTracker::IsPrimvarDirty(*dirtyBits, id, token)) {
-      sync_primvar(token, descriptor);
+  if (*dirtyBits & HdChangeTracker::DirtyPrimvar) {
+    for (auto const& [token, descriptor] : primvar_descriptors) {
+      // Skip explicitly handled attributes
+      if (token == HdTokens->points || token == HdTokens->normals ||
+          token == HdMitsubaMeshTokens->subdivision_level) {
+        continue;
+      }
+      TF_DEBUG(HDMITSUBA_SYNC).Msg("SyncPrimvar: %s\n", token.GetText());
+      if (HdChangeTracker::IsPrimvarDirty(*dirtyBits, id, token)) {
+        sync_primvar(token, descriptor);
+      }
     }
   }
 }

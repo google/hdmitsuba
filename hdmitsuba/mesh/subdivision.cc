@@ -49,19 +49,28 @@ namespace {
 template <typename T>
 VtArray<T> EvalSubdivisionStencil(
     const VtArray<T>& coarsePrimvar,
-    const OpenSubdiv::Far::StencilTable* stencil) {
+    const OpenSubdiv::Far::StencilTable* stencil,
+    bool include_coarse = true) {
   if (!TF_VERIFY(stencil, "OSD stencil must not be null")) {
     return {};
   }
-  const int num_coarse = stencil->GetNumControlVertices();
+  const int num_coarse =
+      include_coarse ? stencil->GetNumControlVertices() : 0;
   const int num_refined = stencil->GetNumStencils();
-  VtArray<T> refined_primvar;
-  refined_primvar.resize(num_coarse + num_refined);
+  VtArray<T> refined_primvar(num_coarse + num_refined);
+  T* dst_ptr = refined_primvar.data();
+  const size_t src_size = coarsePrimvar.size();
 
   // 1. Copy coarse primvars.
-  size_t num_src_to_copy = std::min((size_t)num_coarse, coarsePrimvar.size());
-  for (size_t i = 0; i < num_src_to_copy; ++i) {
-    refined_primvar[i] = coarsePrimvar[i];
+  if (include_coarse) {
+    const size_t num_src_to_copy =
+        std::min(static_cast<size_t>(num_coarse), src_size);
+    for (size_t i = 0; i < num_src_to_copy; ++i) {
+      dst_ptr[i] = coarsePrimvar[i];
+    }
+    for (size_t i = num_src_to_copy; i < static_cast<size_t>(num_coarse); ++i) {
+      dst_ptr[i] = T(0);
+    }
   }
 
   if (num_refined == 0) {
@@ -69,10 +78,10 @@ VtArray<T> EvalSubdivisionStencil(
   }
 
   // 2. Compute refined primvars.
-  const std::vector<int>& sizes = stencil->GetSizes();
-  const std::vector<int>& offsets = stencil->GetOffsets();
-  const std::vector<int>& indices = stencil->GetControlIndices();
-  const std::vector<float>& weights = stencil->GetWeights();
+  const int* sizes = stencil->GetSizes().data();
+  const int* offsets = stencil->GetOffsets().data();
+  const int* indices = stencil->GetControlIndices().data();
+  const float* weights = stencil->GetWeights().data();
 
   for (int i = 0; i < num_refined; ++i) {
     T refined_value(0);
@@ -81,11 +90,11 @@ VtArray<T> EvalSubdivisionStencil(
     for (int j = 0; j < stencil_size; ++j) {
       const int index = indices[stencil_offset + j];
       const float weight = weights[stencil_offset + j];
-      if (index >= 0 && static_cast<size_t>(index) < coarsePrimvar.size()) {
+      if (index >= 0 && static_cast<size_t>(index) < src_size) {
         refined_value += coarsePrimvar[index] * weight;
       }
     }
-    refined_primvar[num_coarse + i] = refined_value;
+    dst_ptr[num_coarse + i] = refined_value;
   }
   return refined_primvar;
 }
@@ -189,9 +198,11 @@ void SubdivisionEvaluator::Clear() {
 VtIntArray SubdivisionEvaluator::MapRefinedMaterialIndices(
     const VtIntArray& coarse_material_indices) const {
   if (!IsSubdivided()) return coarse_material_indices;
-  VtIntArray mapped(refined_to_coarse_map_.size());
-  for (size_t i = 0; i < refined_to_coarse_map_.size(); ++i) {
-    mapped[i] = coarse_material_indices[refined_to_coarse_map_[i]];
+  const size_t num_refined = refined_to_coarse_map_.size();
+  VtIntArray mapped(num_refined);
+  int* dst_ptr = mapped.data();
+  for (size_t i = 0; i < num_refined; ++i) {
+    dst_ptr[i] = coarse_material_indices[refined_to_coarse_map_[i]];
   }
   return mapped;
 }
@@ -200,25 +211,32 @@ template <typename T>
 VtValue SubdivisionEvaluator::RefinePrimvarImpl(
     const VtValue& value, const OpenSubdiv::Far::StencilTable* stencil,
     int fvar_channel) const {
-  if (!value.IsHolding<T>() || value.Get<T>().empty()) {
+  if (!value.IsHolding<T>()) {
     return value;
   }
-  const T& initial_values = value.Get<T>();
-  T refined_values = EvalSubdivisionStencil(initial_values, stencil);
+  const T& initial_values = value.UncheckedGet<T>();
+  if (initial_values.empty()) {
+    return value;
+  }
 
   if (fvar_channel < 0) {
-    return VtValue(refined_values);
+    T refined_values = EvalSubdivisionStencil(initial_values, stencil,
+                                              /*include_coarse=*/true);
+    return VtValue(std::move(refined_values));
   }
 
-  // If the primvar is face-varying, we need to flatten the values.
-  const int num_coarse = stencil->GetNumControlVertices();
+  // If the primvar is face-varying, we only need the refined values and flatten
+  // them via the patch table's face-varying value indices.
+  const T refined_values = EvalSubdivisionStencil(initial_values, stencil,
+                                                  /*include_coarse=*/false);
   const auto& fvar_indices = patch_table_->GetFVarValues(fvar_channel);
-  T flattened_values;
-  flattened_values.reserve(fvar_indices.size());
-  for (const int index : fvar_indices) {
-    flattened_values.push_back(refined_values[index + num_coarse]);
+  const size_t num_fvar = fvar_indices.size();
+  T flattened_values(num_fvar);
+  auto* dst_ptr = flattened_values.data();
+  for (size_t i = 0; i < num_fvar; ++i) {
+    dst_ptr[i] = refined_values[fvar_indices[i]];
   }
-  return VtValue(flattened_values);
+  return VtValue(std::move(flattened_values));
 }
 
 VtValue SubdivisionEvaluator::RefinePrimvar(const VtValue& value,
