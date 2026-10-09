@@ -856,7 +856,6 @@ PrimTranslator<Float, Spectrum>::BuildMesh(
     mitsuba::Object* bsdf, mitsuba::Object* emitter_ptr,
     mitsuba::Object* sensor_ptr) {
   using Mesh = mitsuba::Mesh<Float, Spectrum>;
-  using TensorXf32 = typename Mesh::TensorXf32;
 
   const std::string id_str = id.GetAsString();
   auto points_it = primvars.find(HdTokens->points);
@@ -873,7 +872,27 @@ PrimTranslator<Float, Spectrum>::BuildMesh(
   if (face_count == 0) return nullptr;
 
   auto normals_it = primvars.find(HdTokens->normals);
-  const bool has_normals = normals_it != primvars.end();
+  const GfVec3f* normals_ptr = nullptr;
+  if (normals_it != primvars.end() &&
+      normals_it->second.value.IsHolding<VtVec3fArray>()) {
+    const auto& normals_array = normals_it->second.value.Get<VtVec3fArray>();
+    if (normals_array.size() == vertex_count) {
+      normals_ptr = normals_array.cdata();
+    }
+  }
+  const bool has_normals = normals_ptr != nullptr;
+
+  const GfVec2f* texcoords_ptr = nullptr;
+  auto texcoords_it = primvars.find(TfToken("st"));
+  if (texcoords_it != primvars.end() &&
+      texcoords_it->second.value.IsHolding<VtVec2fArray>()) {
+    const auto& texcoords_array =
+        texcoords_it->second.value.Get<VtVec2fArray>();
+    if (texcoords_array.size() == vertex_count) {
+      texcoords_ptr = texcoords_array.cdata();
+    }
+  }
+
   mitsuba::Properties props;
   props.set_id(id_str);
   // Without authored normals the mesh is flat shaded. Requesting face normals
@@ -891,23 +910,49 @@ PrimTranslator<Float, Spectrum>::BuildMesh(
   if (bsdf != nullptr) {
     mesh->set_bsdf(dynamic_cast<mitsuba::BSDF<Float, Spectrum>*>(bsdf));
   }
-  TensorXf32 normals;
-  if (has_normals) {
-    const auto& normals_array = normals_it->second.value.Get<VtVec3fArray>();
-    normals = LoadFloatTensor<Mesh>(normals_array.data(), normals_array.size(),
-                                    3);
+
+  mitsuba::PackedMesh packed(
+      dr::backend_v<Float>, vertex_count, face_count,
+      mitsuba::make_layout(has_normals, texcoords_ptr != nullptr));
+
+  const GfVec3f* points_ptr = points_array.cdata();
+  float* vrec = packed.vertices.data();
+  for (size_t i = 0; i < vertex_count; ++i, vrec += mitsuba::MeshVertexStride) {
+    const GfVec3f& p = points_ptr[i];
+    vrec[mitsuba::PackedPositionOffset + 0] = p[0];
+    vrec[mitsuba::PackedPositionOffset + 1] = p[1];
+    vrec[mitsuba::PackedPositionOffset + 2] = p[2];
+    packed.bbox.expand(mitsuba::PackedMesh::ScalarPoint3f(p[0], p[1], p[2]));
+    if (normals_ptr) {
+      const GfVec3f& n = normals_ptr[i];
+      vrec[mitsuba::PackedFrameOffset + 0] = n[0];
+      vrec[mitsuba::PackedFrameOffset + 1] = n[1];
+      vrec[mitsuba::PackedFrameOffset + 2] = n[2];
+    } else {
+      vrec[mitsuba::PackedFrameOffset + 0] = 0.f;
+      vrec[mitsuba::PackedFrameOffset + 1] = 0.f;
+      vrec[mitsuba::PackedFrameOffset + 2] = 0.f;
+    }
+    if (texcoords_ptr) {
+      const GfVec2f& uv = texcoords_ptr[i];
+      vrec[mitsuba::PackedTexcoordOffset + 0] = uv[0];
+      vrec[mitsuba::PackedTexcoordOffset + 1] = uv[1];
+    } else {
+      vrec[mitsuba::PackedTexcoordOffset + 0] = 0.f;
+      vrec[mitsuba::PackedTexcoordOffset + 1] = 0.f;
+    }
   }
-  TensorXf32 texcoords;
-  auto texcoords_it = primvars.find(TfToken("st"));
-  if (texcoords_it != primvars.end()) {
-    const auto& texcoords_array =
-        texcoords_it->second.value.Get<VtVec2fArray>();
-    texcoords = LoadFloatTensor<Mesh>(texcoords_array.data(),
-                                      texcoords_array.size(), 2);
+
+  const int* faces_in = face_indices.cdata();
+  uint32_t* frec = packed.faces.data();
+  for (size_t i = 0; i < face_count; ++i, frec += mitsuba::MeshFaceStride) {
+    frec[0] = static_cast<uint32_t>(faces_in[i * 3 + 0]);
+    frec[1] = static_cast<uint32_t>(faces_in[i * 3 + 1]);
+    frec[2] = static_cast<uint32_t>(faces_in[i * 3 + 2]);
+    frec[3] = 0u;
   }
-  mesh->from_fields(LoadFaceTensor<Mesh>(face_indices.data(), face_count),
-                    LoadFloatTensor<Mesh>(points_array.data(), vertex_count, 3),
-                    normals, texcoords);
+
+  mesh->from_packed(std::move(packed));
   AddMeshAttributes(mesh.get(), primvars, mesh_attributes);
   return mitsuba::ref<mitsuba::Shape<Float, Spectrum>>(mesh.get());
 }
