@@ -124,12 +124,11 @@ void AppendRefinedSamples(
   samples.emplace_back(s1.time, s1.matrix);
 }
 
-// Samples `eval_matrix` over `interval` (including any `times` strictly inside
-// `interval`), refining each segment and collapsing to a static sample if all
-// resulting matrices match.
+}  // namespace
+
 MotionSamples<GfMatrix4d> SampleTransformOverInterval(
     const MatrixEvalFn& eval_matrix, const GfVec2f& interval,
-    std::vector<float> times) {
+    std::vector<float> times, bool uniform) {
   std::sort(times.begin(), times.end());
   times.push_back(interval[1]);
 
@@ -147,13 +146,47 @@ MotionSamples<GfMatrix4d> SampleTransformOverInterval(
                   [&](const auto& s) { return s.second == result.First(); })) {
     return MotionSamples<GfMatrix4d>::Static(result.First());
   }
+  if (uniform && result.samples.size() > 2) {
+    const float start = interval[0];
+    const float end = interval[1];
+    const float span = end - start;
+    constexpr int kMaxUniformSegments = 1 << kMaxRefinementDepth;
+    int num_segments = kMaxUniformSegments;
+    for (int n = static_cast<int>(result.samples.size()) - 1;
+         n <= kMaxUniformSegments; ++n) {
+      if (std::all_of(result.samples.begin(), result.samples.end(),
+                      [&](const auto& s) {
+                        const double pos = (s.first - start) / span * n;
+                        return std::abs(pos - std::round(pos)) <= 1e-4;
+                      })) {
+        num_segments = n;
+        break;
+      }
+    }
+    const float step = span / num_segments;
+    if (static_cast<int>(result.samples.size()) != num_segments + 1 ||
+        !std::all_of(result.samples.begin(), result.samples.end(),
+                     [&](const auto& s) {
+                       const size_t i = &s - result.samples.data();
+                       return std::abs(s.first - (start + i * step)) <=
+                              1e-5f * span;
+                     })) {
+      std::vector<std::pair<float, GfMatrix4d>> uniform_samples;
+      uniform_samples.reserve(num_segments + 1);
+      for (int i = 0; i <= num_segments; ++i) {
+        const float t = static_cast<float>(
+            GfLerp(static_cast<double>(i) / num_segments, start, end));
+        uniform_samples.emplace_back(t, eval_matrix(t));
+      }
+      result.samples = std::move(uniform_samples);
+    }
+  }
   return result;
 }
 
-}  // namespace
-
 MotionSamples<GfMatrix4d> SampleTransform(
-    const HdContainerDataSourceHandle& prim_source, const GfVec2f& interval) {
+    const HdContainerDataSourceHandle& prim_source, const GfVec2f& interval,
+    bool uniform) {
   const HdMatrixDataSourceHandle matrix =
       HdXformSchema::GetFromParent(prim_source).GetMatrix();
   if (!matrix) {
@@ -167,11 +200,12 @@ MotionSamples<GfMatrix4d> SampleTransform(
   }
   return SampleTransformOverInterval(
       [&](float t) { return matrix->GetTypedValue(t); }, interval,
-      std::move(times));
+      std::move(times), uniform);
 }
 
 MotionSamples<GfMatrix4d> SampleTransform(const UsdPrim& prim, UsdTimeCode time,
-                                          const GfVec2f& interval) {
+                                          const GfVec2f& interval,
+                                          bool uniform) {
   UsdGeomImageable imageable(prim);
   if (!imageable) {
     return MotionSamples<GfMatrix4d>::Static(GfMatrix4d(1.0));
@@ -205,7 +239,7 @@ MotionSamples<GfMatrix4d> SampleTransform(const UsdPrim& prim, UsdTimeCode time,
       [&](float offset) {
         return imageable.ComputeLocalToWorldTransform(t0 + offset);
       },
-      interval, std::move(offsets));
+      interval, std::move(offsets), uniform);
 }
 
 GfVec2f GetMotionInterval(HdSceneDelegate* scene_delegate) {

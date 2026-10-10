@@ -17,6 +17,7 @@
 #pragma once
 
 #include <algorithm>
+#include <functional>
 #include <utility>
 #include <vector>
 
@@ -30,7 +31,7 @@
 PXR_NAMESPACE_OPEN_SCOPE
 
 // Root-prim data-source key publishing the union of all camera shutter
-// intervals from HdMitsuba_MotionIntervalSceneIndex to HdMitsubaLight::Sync.
+// intervals from HdMitsuba_MotionIntervalSceneIndex.
 #define HDMITSUBA_MOTION_TOKENS ((motion_interval, "mitsuba:motion_interval"))
 
 TF_DECLARE_PUBLIC_TOKENS(HdMitsubaMotionTokens, HDMITSUBA_MOTION_TOKENS);
@@ -67,13 +68,26 @@ struct MotionSamples {
 
 using MotionTransform = MotionSamples<ScalarAffineTransform4f>;
 
+// Evaluates a world-transform matrix at a frame-relative shutter offset.
+using MatrixEvalFn = std::function<GfMatrix4d(float)>;
+
+// Samples `eval_matrix` over `interval` (including any `times` strictly inside
+// `interval`), refining each segment and collapsing to a static sample if all
+// resulting matrices match. When `uniform` is true, resamples onto uniformly
+// spaced keyframes over `interval` as required by Mitsuba's `instance` plugin.
+MotionSamples<GfMatrix4d> SampleTransformOverInterval(
+    const MatrixEvalFn& eval_matrix, const GfVec2f& interval,
+    std::vector<float> times, bool uniform = false);
+
 // Samples the world transform of `prim_source` (or `prim` at `time`) over
 // `interval`, adaptively subdividing segments where TRS interpolation deviates
 // from the actual trajectory (e.g. rotations >= 90 deg or orbits).
 MotionSamples<GfMatrix4d> SampleTransform(
-    const HdContainerDataSourceHandle& prim_source, const GfVec2f& interval);
+    const HdContainerDataSourceHandle& prim_source, const GfVec2f& interval,
+    bool uniform = false);
 MotionSamples<GfMatrix4d> SampleTransform(const UsdPrim& prim, UsdTimeCode time,
-                                          const GfVec2f& interval);
+                                          const GfVec2f& interval,
+                                          bool uniform = false);
 
 // Returns the union of the shutter intervals of all cameras in the scene.
 GfVec2f GetMotionInterval(HdSceneDelegate* scene_delegate);

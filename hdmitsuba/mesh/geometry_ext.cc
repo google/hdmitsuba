@@ -373,11 +373,14 @@ NB_MODULE(geometry_ext, m) {
           GeometryProcessor::TransformPrimvars(primvars, transform);
           return primvars;
         });
-  m.def("sample_world_transform",
-        [](const UsdPrim& prim, UsdTimeCode time,
-           std::pair<float, float> interval) {
-          return SampleTransform(
-                     prim, time, GfVec2f(interval.first, interval.second))
-              .samples;
-        });
+  m.def(
+      "sample_world_transform",
+      [](const UsdPrim& prim, UsdTimeCode time,
+         std::pair<float, float> interval, bool uniform) {
+        return SampleTransform(
+                   prim, time, GfVec2f(interval.first, interval.second), uniform)
+            .samples;
+      },
+      nb::arg("prim"), nb::arg("time"), nb::arg("interval"),
+      nb::arg("uniform") = false);
 }
