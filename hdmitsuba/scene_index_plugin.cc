@@ -72,9 +72,9 @@
 PXR_NAMESPACE_OPEN_SCOPE
 
 // Publishes the motion interval, i.e., the union of the shutter intervals of
-// all cameras, on the absolute root prim (see motion.h), and dirties light
-// transforms whenever it changes. This never happens for scenes without motion
-// blur, where all shutter intervals are empty.
+// all cameras, on the absolute root prim (see motion.h), and dirties shape,
+// instancer, and light transforms whenever it changes. This never happens for
+// scenes without motion blur, where all shutter intervals are empty.
 class HdMitsuba_MotionIntervalSceneIndex final
     : public HdSingleInputFilteringSceneIndexBase {
  public:
@@ -186,7 +186,9 @@ class HdMitsuba_MotionIntervalSceneIndex final
         HdDataSourceLocator(HdMitsubaMotionTokens->motion_interval)}};
     const HdSceneIndexBaseRefPtr& input = _GetInputSceneIndex();
     for (const SdfPath& path : HdSceneIndexPrimView(input)) {
-      if (HdPrimTypeIsLight(input->GetPrim(path).primType)) {
+      const TfToken& type = input->GetPrim(path).primType;
+      if (HdPrimTypeIsLight(type) || HdPrimTypeIsGprim(type) ||
+          type == HdPrimTypeTokens->instancer) {
         dirtied.emplace_back(path, HdXformSchema::GetDefaultLocator());
       }
     }

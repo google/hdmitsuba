@@ -51,6 +51,7 @@
 #include "hdmitsuba/instancer.h"
 #include "hdmitsuba/mesh/geometry_processor.h"
 #include "hdmitsuba/mesh/subdivision.h"
+#include "hdmitsuba/motion.h"
 #include "hdmitsuba/render_param.h"
 #include "hdmitsuba/scene_manager.h"
 #include "hdmitsuba/spec_types.h"
@@ -340,32 +341,61 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
 
   std::optional<LightSpec> emitter_spec = GetMeshEmitterSpec(sceneDelegate, id);
 
-  VtMatrix4dArray instance_transforms;
+  GfMatrix4d transform(1.0);
+  std::vector<MotionTransform> instance_transforms;
   const SdfPath& instancer_id = GetInstancerId();
   if (!instancer_id.IsEmpty()) {
+    transform = sceneDelegate->GetTransform(id);
     HdMitsubaInstancer* instancer = static_cast<HdMitsubaInstancer*>(
         sceneDelegate->GetRenderIndex().GetInstancer(instancer_id));
     if (instancer) {
       instance_transforms = instancer->ComputeInstanceTransforms(id);
     }
+  } else {
+    MotionSamples<GfMatrix4d> world_transform =
+        SampleTransform(GetPrimDataSource(sceneDelegate, id),
+                        GetMotionInterval(sceneDelegate), /*uniform=*/true);
+    MotionTransform motion_transform = world_transform.Map(
+        [](const GfMatrix4d& m) { return UsdToMitsubaTransform(m); });
+    if (motion_transform.IsAnimated()) {
+      instance_transforms.push_back(std::move(motion_transform));
+    } else {
+      transform = world_transform.First();
+    }
   }
 
-  bool instance_count_changed = instance_transforms.size() != instance_count_;
-  instance_count_ = instance_transforms.size();
+  std::vector<bool> instance_animated;
+  instance_animated.reserve(instance_transforms.size());
+  for (const MotionTransform& xform : instance_transforms) {
+    instance_animated.push_back(xform.IsAnimated());
+  }
+  const bool instances_changed =
+      !in_scene_ || instance_animated != instance_animated_;
+  instance_animated_ = std::move(instance_animated);
+
+  HdDirtyBits spec_dirty_bits =
+      dirtyBits ? *dirtyBits : HdChangeTracker::Clean;
+  if (instancer_id.IsEmpty() && !instance_transforms.empty() &&
+      (spec_dirty_bits & HdChangeTracker::DirtyTransform)) {
+    // The prototype of a non-instanced animated mesh stays in object space;
+    // transform updates apply to its wrapping instance.
+    spec_dirty_bits = (spec_dirty_bits & ~HdChangeTracker::DirtyTransform) |
+                      HdChangeTracker::DirtyInstancer;
+  }
 
   bool topology_dirty =
-      dirtyBits && (*dirtyBits & HdChangeTracker::DirtyTopology);
-  bool needs_rebuild = topology_dirty || instance_count_changed;
+      (spec_dirty_bits & HdChangeTracker::DirtyTopology) != 0;
+  bool needs_rebuild = topology_dirty || instances_changed;
 
   MeshSpec spec;
   spec.id = id;
   spec.material_ids = material_ids_;
   spec.primvars = primvars;
-  spec.transform = sceneDelegate->GetTransform(id);
+  spec.transform = transform;
   spec.emitter_spec = std::move(emitter_spec);
   spec.instance_transforms = std::move(instance_transforms);
   spec.needs_rebuild = needs_rebuild;
-  spec.dirty_bits = dirtyBits ? *dirtyBits : HdChangeTracker::Clean;
+  spec.dirty_bits = spec_dirty_bits;
   spec.is_subdivided = subdiv_evaluator_.IsSubdivided();
   spec.double_sided = IsDoubleSided(sceneDelegate);
 
@@ -385,6 +415,7 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
 void HdMitsubaMesh::RemoveFromScene(SceneManager* scene) {
   if (in_scene_) {
     scene->RemoveShape(GetId());
+    instance_animated_.clear();
     in_scene_ = false;
   }
 }

@@ -60,11 +60,12 @@ def sample_world_transform(
     transform_fn: Callable[
         [Gf.Matrix4d], mi.ScalarTransform4f
     ] = util.to_mitsuba_transform,
+    uniform: bool = False,
 ) -> mi.ScalarTransform4f | mi.AnimatedTransform4f:
   """Samples `prim`'s world transform over `interval` as a static or animated transform."""
   keyframes = [
       (t, transform_fn(m))
-      for t, m in geom_lib.sample_world_transform(prim, time, interval)
+      for t, m in geom_lib.sample_world_transform(prim, time, interval, uniform)
   ]
   if all(m == keyframes[0][1] for _, m in keyframes[1:]):
     return keyframes[0][1]

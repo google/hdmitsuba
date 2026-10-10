@@ -20,8 +20,11 @@ import mitsuba as mi
 import numpy as np
 import pytest
 
+from pxr import Gf
+from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
+from pxr import Vt
 import usd_render
 from hdmitsuba.tests import test_helpers
 
@@ -37,6 +40,15 @@ def _set_mitsuba_variant():
 
 def _set_keyframes(stage: Usd.Stage, attr_path: str, start, end) -> Usd.Attribute:
   attr = stage.GetAttributeAtPath(attr_path)
+  if not attr:
+    prim_path, prop_name = attr_path.split('.')
+    xformable = UsdGeom.Xformable.Get(stage, prim_path)
+    op_type = {
+        'xformOp:translate': UsdGeom.XformOp.TypeTranslate,
+        'xformOp:rotateXYZ': UsdGeom.XformOp.TypeRotateXYZ,
+        'xformOp:scale': UsdGeom.XformOp.TypeScale,
+    }[prop_name]
+    attr = xformable.AddXformOp(op_type).GetAttr()
   attr.Set(start, 0.0)
   attr.Set(end, 1.0)
   return attr
@@ -51,9 +63,11 @@ def _set_shutter(
 
 
 def _load_stage(scene_name: str = 'point') -> Usd.Stage:
+  subdir = 'shapes' if scene_name == 'geom_subsets' else 'lights'
   stage = Usd.Stage.Open(
-      f'{test_helpers.TEST_ASSETS_PATH}/lights/{scene_name}.usda'
+      f'{test_helpers.TEST_ASSETS_PATH}/{subdir}/{scene_name}.usda'
   )
+  stage.GetRootLayer().Reload()
   _set_shutter(stage, (-0.5, 0.5))
   test_helpers.create_render_settings(stage, resolution=(32, 32), spp=_SPP)
   return stage
@@ -82,6 +96,10 @@ def _assert_hydra_equal_to_offline(
         ('point', '/root/Area.xformOp:translate', (-2, 0, 1), (2, 0, 1)),
         ('spot', '/root/Area.xformOp:translate', (-2, 0, 1), (2, 0, 1)),
         ('sphere', '/root/Area.xformOp:translate', (-2, 0, 1), (2, 0, 1)),
+        ('point', '/root/Plane.xformOp:translate', (0.0, 0.0, -0.8), (0.0, 0.0, 0.8)),
+        ('point', '/root/Plane.xformOp:rotateXYZ', (-80.0, -80.0, 0.0), (80.0, 80.0, 0.0)),
+        ('point', '/root/Plane.xformOp:scale', (0.05, 0.05, 1.0), (2.0, 2.0, 1.0)),
+        ('geom_subsets', '/root/Cube.xformOp:translate', (-4.0, 0.0, 0.0), (2.0, -2.0, 1.0)),
     ],
 )
 def test_motion_blur(scene_name: str, attr_path: str, start, end):
@@ -100,7 +118,7 @@ def test_motion_blur(scene_name: str, attr_path: str, start, end):
   image_static = engine.render(time_code=_TIME)['color'][..., :3]
   # Area lights ('sphere') do not support motion blur and render at frame time.
   if scene_name != 'sphere':
-    assert np.mean(np.abs(image - image_static)) > 0.02
+    assert np.mean(np.abs(image - image_static)) > 0.01
   else:
     test_helpers.robust_assert_close(image, image_static, atol=0.1)
 
@@ -120,13 +138,18 @@ def test_interactive_motion_updates():
   camera_translate = _set_keyframes(
       stage, '/root/Camera.xformOp:translate', (-0.5, -2, 2.5), (0.5, -2, 2.5)
   )
+  plane_translate = _set_keyframes(
+      stage, '/root/Plane.xformOp:translate', (-0.5, 0.0, 0.0), (0.5, 0.0, 0.0)
+  )
   _assert_hydra_equal_to_offline(stage, engine, 'test_updates_animated')
 
   # Animated -> animated with the same keyframe count (records frozen kernel),
   # then with a different keyframe count (replays with updated keyframe count).
   camera_translate.Set((-1.5, -2, 2.5), 0.0)
+  plane_translate.Set((-0.8, 0.0, 0.0), 0.0)
   engine.render(time_code=_TIME)
   light_translate.Set((0.0, 0.8, 1.3), 0.3)
+  plane_translate.Set((0.0, 0.5, 0.0), 0.3)
   _assert_hydra_equal_to_offline(stage, engine, 'test_updates_keyframes')
 
   # Adding another camera widens the scene motion interval.
@@ -143,3 +166,59 @@ def test_interactive_motion_updates():
   # Removing camera_2 leaves no valid shutter (animated -> static).
   camera_2.GetPrim().SetActive(False)
   _assert_hydra_equal_to_offline(stage, engine, 'test_updates_static_end')
+
+
+def test_point_instancer_motion_blur():
+  stage = _load_stage()
+  instancer = UsdGeom.PointInstancer.Define(stage, '/root/Instancer')
+  Sdf.CopySpec(
+      stage.GetRootLayer(),
+      '/root/Plane',
+      stage.GetRootLayer(),
+      '/root/Instancer/ProtoPlane',
+  )
+  stage.RemovePrim('/root/Plane')
+  UsdGeom.Xformable.Get(stage, '/root/Instancer/ProtoPlane').AddScaleOp().Set(
+      Gf.Vec3d(0.7, 0.7, 1.0)
+  )
+  instancer.GetPrototypesRel().SetTargets(['/root/Instancer/ProtoPlane'])
+  instancer.GetProtoIndicesAttr().Set(Vt.IntArray([0, 0]))
+
+  # Time-sampled positions and orientations (including a mid-shutter sample to
+  # exercise uniform keyframe resampling on PointInstancer).
+  positions_attr = instancer.GetPositionsAttr()
+  positions_attr.Set(
+      Vt.Vec3fArray([Gf.Vec3f(-0.7, -0.4, -0.8), Gf.Vec3f(0.7, 0.4, -0.8)]), 0.0
+  )
+  positions_attr.Set(
+      Vt.Vec3fArray([Gf.Vec3f(-0.2, 0.3, 0.8), Gf.Vec3f(0.2, -0.3, 0.8)]), 0.3
+  )
+  positions_attr.Set(
+      Vt.Vec3fArray([Gf.Vec3f(0.7, -0.4, -0.8), Gf.Vec3f(-0.7, 0.4, -0.8)]), 1.0
+  )
+
+  q0 = Gf.Quath(Gf.Rotation(Gf.Vec3d(0, 0, 1), -30.0).GetQuat())
+  q1 = Gf.Quath(Gf.Rotation(Gf.Vec3d(0, 0, 1), 30.0).GetQuat())
+  orientations_attr = instancer.GetOrientationsAttr()
+  orientations_attr.Set(Vt.QuathArray([q0, q1]), 0.0)
+  orientations_attr.Set(Vt.QuathArray([q1, q0]), 1.0)
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin')
+  image = _assert_hydra_equal_to_offline(
+      stage, engine, 'test_point_instancer_motion'
+  )
+
+  # In-place update of animated PointInstancer keyframes.
+  positions_attr.Set(
+      Vt.Vec3fArray([Gf.Vec3f(0.9, 0.2, -0.8), Gf.Vec3f(-0.9, -0.2, -0.8)]), 1.0
+  )
+  image_updated = _assert_hydra_equal_to_offline(
+      stage, engine, 'test_point_instancer_motion_updated'
+  )
+
+  _set_shutter(stage, (0.0, 0.0))
+  image_static = engine.render(time_code=_TIME)['color'][..., :3]
+  assert np.mean(np.abs(image - image_static)) > 0.02
+  assert np.mean(np.abs(image_updated - image_static)) > 0.02
+

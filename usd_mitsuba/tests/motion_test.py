@@ -50,6 +50,19 @@ def test_sample_world_transform():
   assert list(transform.eval(-0.5).translation()) == [0, 1, 0]
   assert list(transform.eval(0.5).translation()) == [1, 1, 0]
 
+  # With `uniform=True`, interior keyframes are resampled onto a uniform grid
+  # accepted by Mitsuba's `instance` plugin.
+  uniform_transform = motion.sample_world_transform(
+      prim, Usd.TimeCode(0.5), (-0.5, 0.5), uniform=True
+  )
+  assert isinstance(uniform_transform, mi.AnimatedTransform4f)
+  np.testing.assert_allclose(
+      mi.traverse(uniform_transform)["times"], np.linspace(-0.5, 0.5, 11)
+  )
+  np.testing.assert_allclose(
+      uniform_transform.eval(-0.4).translation(), [1, 1, 0]
+  )
+
   # Static cases: constant transform_fn, empty interval, default time, or
   # interval over which the value is constant.
   assert isinstance(
