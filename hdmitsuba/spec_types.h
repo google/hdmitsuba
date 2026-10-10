@@ -86,7 +86,7 @@ struct MeshSpec : public BaseSpec {
   PrimvarMap primvars;
   GfMatrix4d transform;
   std::optional<LightSpec> emitter_spec = std::nullopt;
-  VtMatrix4dArray instance_transforms;
+  std::vector<MotionTransform> instance_transforms;
   bool is_subdivided = false;
   bool double_sided = false;
 

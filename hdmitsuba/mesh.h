@@ -84,7 +84,7 @@ class HdMitsubaMesh final : public HdMesh {
   absl::flat_hash_map<TfToken, HdPrimvarDescriptor, TfToken::HashFunctor>
   GetAllPrimvarDescriptors(HdSceneDelegate* sceneDelegate);
 
-  size_t instance_count_ = 0;
+  std::vector<bool> instance_animated_;
   bool in_scene_ = false;
   int refine_level_ = -1; // -1 means "not yet synced"
 };

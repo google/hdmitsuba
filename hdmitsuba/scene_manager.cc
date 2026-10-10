@@ -133,13 +133,11 @@ constexpr std::string_view kProtoGroupPrefix = "proto_group_";
 constexpr std::string_view kInstancePrefix = "instance_";
 
 template <typename Float, typename Spectrum>
-void SetTransform(
-    mitsuba::Shape<Float, Spectrum>* instance,
-    const mitsuba::Transform<mitsuba::Point<Float, 4>, true>& transform) {
+void SetTransform(mitsuba::Shape<Float, Spectrum>* instance,
+                  const MotionTransform& transform) {
   TraversalCallback cb;
   instance->traverse(&cb);
-  using Transform4f = mitsuba::Transform<mitsuba::Point<Float, 4>, true>;
-  cb.set<Transform4f>("to_world", transform);
+  PrimTranslator<Float, Spectrum>::SetTransformParameter(cb, transform);
   instance->parameters_changed({"to_world"});
 }
 
@@ -1182,10 +1180,10 @@ class SceneModel final : public SceneManager {
 
       // 3. Create Instances
       res.instances.reserve(spec.instance_transforms.size());
-      for (const GfMatrix4d& xform : spec.instance_transforms) {
+      for (const MotionTransform& xform : spec.instance_transforms) {
         mitsuba::Properties inst_props("instance");
         inst_props.set("shapegroup", res.shapegroup.get());
-        inst_props.set("to_world", UsdToMitsubaTransform(xform));
+        PrimTranslator::SetTransformProperty(inst_props, xform);
         mitsuba::ref<Shape> inst =
             mitsuba::PluginManager::instance()->create_object<Shape>(
                 inst_props);
@@ -1197,19 +1195,24 @@ class SceneModel final : public SceneManager {
         auto sub_meshes =
             RunGeometryPipeline<Float, Spectrum>(spec, work->displacements);
         UpdateSubMeshesInPlace(spec, sub_meshes, kProtoPrefix);
+        auto group_it = shapes_.find(
+            absl::StrCat(kProtoGroupPrefix, spec.id.GetAsString()));
+        if (TF_VERIFY(group_it != shapes_.end())) {
+          group_it->second->parameters_changed();
+        }
       } else {
         UpdateSubMeshesMetadataOnly(spec, kProtoPrefix);
       }
-      if (spec.dirty_bits & (HdChangeTracker::DirtyInstancer |
+      if (spec.dirty_bits & (HdChangeTracker::DirtyTransform |
+                             HdChangeTracker::DirtyInstancer |
                              HdChangeTracker::DirtyInstanceIndex)) {
         std::string id_str = spec.id.GetAsString();
         for (size_t i = 0; i < spec.instance_transforms.size(); ++i) {
           auto inst_it =
               shapes_.find(absl::StrCat(kInstancePrefix, id_str, "_", i));
           if (TF_VERIFY(inst_it != shapes_.end())) {
-            SetTransform(inst_it->second.get(),
-                         AffineTransform4f(
-                             UsdToMitsubaTransform(spec.instance_transforms[i])));
+            SetTransform<Float, Spectrum>(inst_it->second.get(),
+                                          spec.instance_transforms[i]);
           }
         }
       }
@@ -1285,8 +1288,8 @@ class SceneModel final : public SceneManager {
 
           for (size_t i = r.begin(); i != r.end(); ++i) {
             const MeshSpec& spec = *work_items[i].spec;
-            if (!spec.needs_rebuild || HasEmitter(spec) ||
-                shape_sensors_.contains(spec.id) ||
+            if (!spec.needs_rebuild || !spec.instance_transforms.empty() ||
+                HasEmitter(spec) || shape_sensors_.contains(spec.id) ||
                 std::any_of(work_items[i].displacements.begin(),
                             work_items[i].displacements.end(),
                             [](const MaterialDisplacement& d) {
@@ -1482,6 +1485,9 @@ class SceneModel final : public SceneManager {
                              !absl::StartsWith(id, kProtoGroupPrefix);
         if (is_proto_mesh) {
           continue;
+        }
+        if (shape->is_shape_group()) {
+          shape->mark_dirty();
         }
         props.set(id, shape.get());
       }
