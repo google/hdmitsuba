@@ -383,4 +383,14 @@ NB_MODULE(geometry_ext, m) {
       },
       nb::arg("prim"), nb::arg("time"), nb::arg("interval"),
       nb::arg("uniform") = false);
+  m.def("sample_point_instancer_transforms",
+        [](const UsdPrim& prim, UsdTimeCode time,
+           std::pair<float, float> interval) {
+          auto samples = SamplePointInstancerTransforms(
+              prim, time, GfVec2f(interval.first, interval.second));
+          std::vector<std::vector<std::pair<float, GfMatrix4d>>> out;
+          out.reserve(samples.size());
+          for (auto& s : samples) out.push_back(std::move(s.samples));
+          return out;
+        });
 }

@@ -39,9 +39,38 @@ from usd_mitsuba import render_settings as render_settings_lib
 from usd_mitsuba import util
 
 
+def _wrap_shape_if_animated(
+    prim: Usd.Prim,
+    shape_dict: dict[str, Any],
+    local_scale: mi.ScalarTransform4f,
+    time: Usd.TimeCode,
+    motion_interval: tuple[float, float],
+) -> dict[str, Any]:
+  """Applies `prim`'s world transform, wrapping in an instance if animated."""
+  prim_id = util.get_mitsuba_id(prim)
+  to_world = motion.sample_world_transform(
+      prim, time, motion_interval, uniform=True
+  )
+  if isinstance(to_world, mi.AnimatedTransform4f):
+    shape_dict.pop('emitter', None)
+    shape_dict['to_world'] = local_scale
+    group_id = f'proto_group_{prim_id}'
+    return {
+        group_id: {'type': 'shapegroup', 'shape_0': shape_dict},
+        prim_id: {
+            'type': 'instance',
+            'shapegroup': {'type': 'ref', 'id': group_id},
+            'to_world': to_world,
+        },
+    }
+  shape_dict['to_world'] = to_world @ local_scale
+  return {prim_id: shape_dict}
+
+
 def _convert_cube(
     prim: Usd.Prim,
     time: Usd.TimeCode = Usd.TimeCode.Default(),
+    motion_interval: tuple[float, float] = (0.0, 0.0),
 ) -> dict[str, Any]:
   """Handles a cube prim and returns the Mitsuba shape dictionary."""
   bsdf, emitter, displacement = material.convert_material(prim)
@@ -52,21 +81,25 @@ def _convert_cube(
     )
 
   size = UsdGeom.Cube(prim).GetSizeAttr().Get(time)
-  mi_cube: dict[str, Any] = {
-      'type': 'cube',
-      'to_world': util.get_world_transform(prim, time).scale(0.5 * size),
-  }
+  mi_cube: dict[str, Any] = {'type': 'cube'}
   if bsdf is not None:
     mi_cube['bsdf'] = bsdf
   if emitter is not None:
     mi_cube['emitter'] = emitter
 
-  return mi_cube
+  return _wrap_shape_if_animated(
+      prim,
+      mi_cube,
+      mi.ScalarTransform4f().scale(0.5 * size),
+      time,
+      motion_interval,
+  )
 
 
 def _convert_plane(
     prim: Usd.Prim,
     time: Usd.TimeCode = Usd.TimeCode.Default(),
+    motion_interval: tuple[float, float] = (0.0, 0.0),
 ) -> dict[str, Any]:
   """Handles a plane prim and returns the Mitsuba shape dictionary."""
   bsdf, emitter, displacement = material.convert_material(prim)
@@ -78,19 +111,20 @@ def _convert_plane(
   plane_prim = UsdGeom.Plane(prim)
   width = plane_prim.GetWidthAttr().Get(time)
   height = plane_prim.GetLengthAttr().Get(time)
-  mi_plane = {
-      'type': 'rectangle',
-      'to_world': (
-          util.get_world_transform(prim, time).scale(
-              mi.ScalarVector3f(width * 0.5, height * 0.5, 1)
-          )
-      ),
-  }
+  mi_plane: dict[str, Any] = {'type': 'rectangle'}
   if bsdf is not None:
     mi_plane['bsdf'] = bsdf
   if emitter is not None:
     mi_plane['emitter'] = emitter
-  return mi_plane
+  return _wrap_shape_if_animated(
+      prim,
+      mi_plane,
+      mi.ScalarTransform4f().scale(
+          mi.ScalarVector3f(width * 0.5, height * 0.5, 1)
+      ),
+      time,
+      motion_interval,
+  )
 
 
 def _create_empty_mitsuba_curve(curve_type: str, bsdf: Any) -> mi.Object:
@@ -266,7 +300,7 @@ def convert_to_mitsuba(
 
   prototype_paths = instancing.get_prototype_paths(stage)
   sensor_bindings = camera.get_surface_sensor_bindings(stage)
-  # Lights are sampled over the union of all camera shutters.
+  # Shapes and lights are sampled over the union of all camera shutters.
   motion_interval = motion.get_motion_interval(stage, time)
   # Traverse the stage using TraverseInstanceProxies. This flattens native USD
   # instances (instanceable=true), which means they will be duplicated in Mitsuba.
@@ -286,15 +320,27 @@ def convert_to_mitsuba(
     mi_id = util.get_mitsuba_id(prim)
     if prim.IsA(UsdGeom.PointInstancer):
       instancing.convert_point_instancer(
-          prim, subdivision_level, time, mi_scene_dict, sensor_bindings)
+          prim,
+          subdivision_level,
+          time,
+          mi_scene_dict,
+          sensor_bindings,
+          motion_interval,
+      )
     elif prim.IsA(UsdGeom.Mesh):
       mi_scene_dict.update(
-          mesh.convert_mesh(prim, subdivision_level, time, sensor_bindings)
+          mesh.convert_mesh(
+              prim,
+              subdivision_level,
+              time,
+              sensor_bindings,
+              motion_interval=motion_interval,
+          )
       )
     elif prim.IsA(UsdGeom.Cube):
-      mi_scene_dict[mi_id] = _convert_cube(prim, time)
+      mi_scene_dict.update(_convert_cube(prim, time, motion_interval))
     elif prim.IsA(UsdGeom.Plane):
-      mi_scene_dict[mi_id] = _convert_plane(prim, time)
+      mi_scene_dict.update(_convert_plane(prim, time, motion_interval))
     elif prim.IsA(UsdGeom.Camera):
       # A sensor bound to a shape is emitted as part of that shape.
       if camera.get_target_shape_path(prim) is None:

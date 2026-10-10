@@ -89,6 +89,11 @@ MotionSamples<GfMatrix4d> SampleTransform(const UsdPrim& prim, UsdTimeCode time,
                                           const GfVec2f& interval,
                                           bool uniform = false);
 
+// Samples the instance-to-world transforms of a `UsdGeomPointInstancer` `prim`
+// at `time` over `interval` with uniform keyframe spacing.
+std::vector<MotionSamples<GfMatrix4d>> SamplePointInstancerTransforms(
+    const UsdPrim& prim, UsdTimeCode time, const GfVec2f& interval);
+
 // Returns the union of the shutter intervals of all cameras in the scene.
 GfVec2f GetMotionInterval(HdSceneDelegate* scene_delegate);
 

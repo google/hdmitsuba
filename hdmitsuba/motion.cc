@@ -20,6 +20,7 @@
 #include <utility>
 #include <vector>
 
+#include <absl/container/flat_hash_map.h>
 #include <pxr/base/gf/interval.h>
 #include <pxr/base/gf/math.h>
 #include <pxr/base/gf/matrix4d.h>
@@ -35,6 +36,7 @@
 #include <pxr/usd/usd/prim.h>
 #include <pxr/usd/usd/timeCode.h>
 #include <pxr/usd/usdGeom/imageable.h>
+#include <pxr/usd/usdGeom/pointInstancer.h>
 #include <pxr/usd/usdGeom/xformOp.h>
 #include <pxr/usd/usdGeom/xformable.h>
 
@@ -240,6 +242,91 @@ MotionSamples<GfMatrix4d> SampleTransform(const UsdPrim& prim, UsdTimeCode time,
         return imageable.ComputeLocalToWorldTransform(t0 + offset);
       },
       interval, std::move(offsets), uniform);
+}
+
+std::vector<MotionSamples<GfMatrix4d>> SamplePointInstancerTransforms(
+    const UsdPrim& prim, UsdTimeCode time, const GfVec2f& interval) {
+  UsdGeomPointInstancer instancer(prim);
+  if (!instancer) return {};
+
+  auto eval_at = [&](UsdTimeCode t) {
+    VtMatrix4dArray xforms;
+    instancer.ComputeInstanceTransformsAtTime(&xforms, t, t);
+    const GfMatrix4d instancer_xform =
+        instancer.ComputeLocalToWorldTransform(t);
+    for (GfMatrix4d& m : xforms) {
+      m *= instancer_xform;
+    }
+    return xforms;
+  };
+
+  std::vector<UsdGeomXformOp> ops;
+  std::vector<UsdAttribute> inst_attrs;
+  bool has_velocities = false;
+  if (interval[1] > interval[0] && time.IsNumeric()) {
+    for (UsdPrim p = prim; p; p = p.GetParent()) {
+      if (UsdGeomXformable xformable{p}) {
+        bool resets_xform_stack = false;
+        for (const UsdGeomXformOp& op :
+             xformable.GetOrderedXformOps(&resets_xform_stack)) {
+          if (op.MightBeTimeVarying()) ops.push_back(op);
+        }
+        if (resets_xform_stack) break;
+      }
+    }
+    for (const UsdAttribute& attr :
+         {instancer.GetPositionsAttr(), instancer.GetOrientationsAttr(),
+          instancer.GetOrientationsfAttr(), instancer.GetScalesAttr(),
+          instancer.GetVelocitiesAttr(),
+          instancer.GetAngularVelocitiesAttr()}) {
+      if (attr.ValueMightBeTimeVarying()) inst_attrs.push_back(attr);
+    }
+    has_velocities = instancer.GetVelocitiesAttr().HasAuthoredValue() ||
+                     instancer.GetAngularVelocitiesAttr().HasAuthoredValue();
+  }
+
+  const VtMatrix4dArray t0_xforms = eval_at(time);
+  std::vector<MotionSamples<GfMatrix4d>> result;
+  result.reserve(t0_xforms.size());
+  if (ops.empty() && inst_attrs.empty() && !has_velocities) {
+    for (const GfMatrix4d& m : t0_xforms) {
+      result.push_back(MotionSamples<GfMatrix4d>::Static(m));
+    }
+    return result;
+  }
+
+  const double t0 = time.GetValue();
+  const GfInterval usd_interval(t0 + interval[0], t0 + interval[1], false,
+                                false);
+  std::vector<double> usd_samples;
+  if (!ops.empty()) {
+    UsdGeomXformable::GetTimeSamplesInInterval(ops, usd_interval, &usd_samples);
+  }
+  for (const UsdAttribute& attr : inst_attrs) {
+    std::vector<double> attr_samples;
+    if (attr.GetTimeSamplesInInterval(usd_interval, &attr_samples)) {
+      usd_samples.insert(usd_samples.end(), attr_samples.begin(),
+                         attr_samples.end());
+    }
+  }
+  std::vector<float> offsets;
+  offsets.reserve(usd_samples.size());
+  for (double s : usd_samples) offsets.push_back(static_cast<float>(s - t0));
+
+  absl::flat_hash_map<float, VtMatrix4dArray> cache;
+  cache.emplace(0.0f, t0_xforms);
+  for (size_t i = 0; i < t0_xforms.size(); ++i) {
+    result.push_back(SampleTransformOverInterval(
+        [&](float offset) {
+          auto it = cache.find(offset);
+          if (it == cache.end()) {
+            it = cache.emplace(offset, eval_at(t0 + offset)).first;
+          }
+          return it->second.AsConst()[i];
+        },
+        interval, offsets, /*uniform=*/true));
+  }
+  return result;
 }
 
 GfVec2f GetMotionInterval(HdSceneDelegate* scene_delegate) {

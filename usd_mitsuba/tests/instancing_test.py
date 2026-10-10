@@ -155,3 +155,47 @@ def test_translate_native_instancing():
 
   scene = mi.load_dict(scene_dict)
   assert scene is not None
+
+
+def test_translate_animated_mesh_and_point_instancer():
+  stage = Usd.Stage.CreateInMemory()
+
+  camera = UsdGeom.Camera.Define(stage, "/root/Camera")
+  camera.GetShutterOpenAttr().Set(-0.5)
+  camera.GetShutterCloseAttr().Set(0.5)
+
+  _create_quad_mesh(stage, "/root/StaticQuad")
+  anim_mesh = _create_quad_mesh(stage, "/root/AnimatedQuad")
+  translate_op = UsdGeom.Xformable(anim_mesh).AddTranslateOp()
+  translate_op.Set(Gf.Vec3d(-1.0, 0.0, 0.0), 0.0)
+  translate_op.Set(Gf.Vec3d(1.0, 0.0, 0.0), 1.0)
+
+  _create_quad_mesh(stage, "/root/Prototypes/ProtoQuad")
+  instancer = UsdGeom.PointInstancer.Define(stage, "/root/Instancer")
+  instancer.GetPrototypesRel().SetTargets(
+      [Sdf.Path("/root/Prototypes/ProtoQuad")]
+  )
+  instancer.GetProtoIndicesAttr().Set(Vt.IntArray([0, 0]))
+  instancer.GetPositionsAttr().Set(
+      Vt.Vec3fArray([Gf.Vec3f(-2.0, 0.0, 0.0), Gf.Vec3f(2.0, 0.0, 0.0)]), 0.0
+  )
+  instancer.GetPositionsAttr().Set(
+      Vt.Vec3fArray([Gf.Vec3f(-2.0, 1.0, 0.0), Gf.Vec3f(2.0, -1.0, 0.0)]), 1.0
+  )
+
+  scene_dict = translator.convert_to_mitsuba(stage, time=Usd.TimeCode(0.5))
+
+  assert isinstance(scene_dict["_root_StaticQuad"], mi.Mesh)
+  assert scene_dict["proto_group__root_AnimatedQuad"]["type"] == "shapegroup"
+  anim_inst = scene_dict["_root_AnimatedQuad"]
+  assert anim_inst["type"] == "instance"
+  assert isinstance(anim_inst["to_world"], mi.AnimatedTransform4f)
+
+  inst0 = scene_dict["instance__root_Instancer_0_0"]
+  inst1 = scene_dict["instance__root_Instancer_0_1"]
+  assert isinstance(inst0["to_world"], mi.AnimatedTransform4f)
+  assert isinstance(inst1["to_world"], mi.AnimatedTransform4f)
+
+  scene = mi.load_dict(scene_dict)
+  assert scene is not None
+

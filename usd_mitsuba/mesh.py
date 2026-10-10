@@ -33,6 +33,7 @@ from pxr import Vt
 from hdmitsuba import geometry_ext as geom_lib
 from usd_mitsuba import camera
 from usd_mitsuba import material
+from usd_mitsuba import motion
 from usd_mitsuba import util
 
 
@@ -119,8 +120,9 @@ def convert_mesh(
     time: Usd.TimeCode,
     sensor_bindings: Mapping[Sdf.Path, Usd.Prim],
     custom_transform: Gf.Matrix4d | None = None,
-) -> dict[str, mi.Mesh]:
-  """Converts a mesh prim and returns a dictionary of Mitsuba meshes.
+    motion_interval: tuple[float, float] = (0.0, 0.0),
+) -> dict[str, Any]:
+  """Converts a mesh prim and returns a dictionary of Mitsuba scene shapes.
 
   Args:
     prim: The USD prim.
@@ -128,9 +130,11 @@ def convert_mesh(
     time: The time code.
     sensor_bindings: Precomputed shape path -> sensor prim map.
     custom_transform: Optional transform to use instead of local-to-world.
+    motion_interval: Frame-relative shutter interval `(open, close)`.
 
   Returns:
-    A dictionary mapping Mitsuba scene object IDs to mi.Mesh objects.
+    A dictionary mapping Mitsuba scene object IDs to Mitsuba shape objects or
+    dictionaries.
   """
   stage = prim.GetStage()
   path = prim.GetPath()
@@ -145,10 +149,18 @@ def convert_mesh(
   mesh_data, sub_meshes = geom_lib.extract_and_process_meshes(
       stage, path, time, subdivision_level, has_displacement
   )
+  motion_transform = None
   if custom_transform is not None:
     world_transform = custom_transform
   else:
-    world_transform = mesh_prim.ComputeLocalToWorldTransform(time)
+    sampled_transform = motion.sample_world_transform(
+        prim, time, motion_interval, uniform=True
+    )
+    if isinstance(sampled_transform, mi.AnimatedTransform4f):
+      world_transform = Gf.Matrix4d(1.0)
+      motion_transform = sampled_transform
+    else:
+      world_transform = mesh_prim.ComputeLocalToWorldTransform(time)
 
   converted_meshes = {}
   for sub in sub_meshes:
@@ -166,16 +178,28 @@ def convert_mesh(
     if bsdf is not None:
       props['bsdf'] = bsdf
 
-    # MeshLightAPI takes precedence over material-driven emission.
-    if mesh_light_emitter is not None:
-      props['emitter'] = mesh_light_emitter
-    elif material_emitter is not None:
-      props['emitter'] = material_emitter
+    if motion_transform is not None:
+      if mesh_light_emitter is not None or material_emitter is not None:
+        Tf.Warn(
+            f'Mesh {path} is animated but has an emitter attached. Mitsuba '
+            'does not support emitters on instances. Ignoring emitter.'
+        )
+      if path in sensor_bindings:
+        Tf.Warn(
+            f'Mesh {path} is animated but has a sensor attached. Mitsuba '
+            'does not support sensors on instances. Ignoring sensor.'
+        )
+    else:
+      # MeshLightAPI takes precedence over material-driven emission.
+      if mesh_light_emitter is not None:
+        props['emitter'] = mesh_light_emitter
+      elif material_emitter is not None:
+        props['emitter'] = material_emitter
 
-    if (sensor_prim := sensor_bindings.get(path)) is not None:
-      props['sensor'] = mi.load_dict(
-          camera.usd_to_mitsuba(UsdGeom.Camera(sensor_prim), time=time)
-      )
+      if (sensor_prim := sensor_bindings.get(path)) is not None:
+        props['sensor'] = mi.load_dict(
+            camera.usd_to_mitsuba(UsdGeom.Camera(sensor_prim), time=time)
+        )
 
     if displacement is not None:
       _apply_displacement(sub, displacement, mesh_data)
@@ -183,4 +207,19 @@ def convert_mesh(
     sub.primvars = geom_lib.transform_primvars(sub.primvars, world_transform)
     converted_meshes[util.get_mitsuba_id(
         subprim)] = _to_mitsuba_mesh(sub, props)
+
+  if motion_transform is not None and converted_meshes:
+    prim_id = util.get_mitsuba_id(prim)
+    group_id = f'proto_group_{prim_id}'
+    group_dict: dict[str, Any] = {'type': 'shapegroup'}
+    for i, mesh_obj in enumerate(converted_meshes.values()):
+      group_dict[f'shape_{i}'] = mesh_obj
+    return {
+        group_id: group_dict,
+        prim_id: {
+            'type': 'instance',
+            'shapegroup': {'type': 'ref', 'id': group_id},
+            'to_world': motion_transform,
+        },
+    }
   return converted_meshes
