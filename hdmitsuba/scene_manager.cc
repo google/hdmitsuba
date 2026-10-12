@@ -238,6 +238,9 @@ class SceneModel final : public SceneManager {
 
   struct MeshCommitWork {
     const MeshSpec* spec;
+    // Backing storage of `spec` for motion-wrapped meshes, see
+    // `ResolveMotionWrapped`.
+    std::optional<MeshSpec> resolved_spec;
     std::vector<MaterialDisplacement> displacements;
   };
 
@@ -1244,25 +1247,52 @@ class SceneModel final : public SceneManager {
                        });
   }
 
+  // Whether `spec` is rendered through Mitsuba instances. A mesh wrapped in an
+  // instance only for transform motion blur (`motion_wrapped`) is rendered as
+  // a regular shape with its static transform at frame time if it carries an
+  // emitter or a surface sensor, which Mitsuba does not support on instances
+  // (the same policy as for area lights).
+  bool IsInstanced(const MeshSpec& spec) const {
+    return !spec.instance_transforms.empty() &&
+           !(spec.motion_wrapped &&
+             (HasEmitter(spec) || shape_sensors_.contains(spec.id)));
+  }
+
+  // Returns the spec to commit for `spec`: `motion_wrapped` meshes are resolved
+  // into either an instanced prototype in object space (transform updates then
+  // apply to the wrapping instance) or a plain static mesh.
+  const MeshSpec& ResolveMotionWrapped(const MeshSpec& spec,
+                                       std::optional<MeshSpec>& storage) const {
+    if (!spec.motion_wrapped) return spec;
+    MeshSpec& resolved = storage.emplace(spec);
+    if (IsInstanced(spec)) {
+      resolved.transform = GfMatrix4d(1.0);
+      if (resolved.dirty_bits & HdChangeTracker::DirtyTransform) {
+        resolved.dirty_bits =
+            (resolved.dirty_bits & ~HdChangeTracker::DirtyTransform) |
+            HdChangeTracker::DirtyInstancer;
+      }
+    } else {
+      resolved.instance_transforms.clear();
+    }
+    return resolved;
+  }
+
   bool CommitMeshes() {
     // Dynamically determine if the scene contains any instanced meshes
-    bool has_instancing = false;
-    for (const auto& [id, spec] : mesh_specs_) {
-      if (!spec.instance_transforms.empty()) {
-        has_instancing = true;
-        break;
-      }
-    }
-    has_instancing_ = has_instancing;
+    has_instancing_ = std::any_of(
+        mesh_specs_.begin(), mesh_specs_.end(),
+        [&](const auto& entry) { return IsInstanced(entry.second); });
     // 1. Get pending specs.
     auto pending_specs = GetPendingSpecs(mesh_specs_);
     if (pending_specs.empty()) return false;
 
-    // 2. Prepare work on the main thread (resolve displacement textures
-    // lock-free).
+    // 2. Prepare work on the main thread (resolve motion-wrapped specs and
+    // displacement textures lock-free).
     std::vector<MeshCommitWork> work_items(pending_specs.size());
     for (size_t i = 0; i < pending_specs.size(); ++i) {
-      const MeshSpec* spec = pending_specs[i];
+      const MeshSpec* spec = &ResolveMotionWrapped(*pending_specs[i],
+                                                   work_items[i].resolved_spec);
       work_items[i].spec = spec;
       work_items[i].displacements.reserve(spec->material_ids.size());
       for (const auto& material_id : spec->material_ids) {
@@ -1325,7 +1355,7 @@ class SceneModel final : public SceneManager {
     bool rebuild = false;
     // 4. Merge results on the main thread.
     for (size_t i = 0; i < pending_specs.size(); ++i) {
-      const MeshSpec* spec = pending_specs[i];
+      const MeshSpec* spec = work_items[i].spec;
 
       if (spec->needs_rebuild) {
         std::string id_str = spec->id.GetAsString();
@@ -1339,7 +1369,7 @@ class SceneModel final : public SceneManager {
           rebuild |= MergeNonInstancedMesh(results[i], id_str);
         }
       }
-      const_cast<MeshSpec*>(spec)->MarkClean();
+      pending_specs[i]->MarkClean();
     }
     return rebuild;
   }

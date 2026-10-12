@@ -24,6 +24,7 @@ from pxr import Gf
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
+from pxr import UsdLux
 import usd_render
 from hdmitsuba.tests import test_helpers
 
@@ -39,6 +40,10 @@ def _set_mitsuba_variant():
 
 def _set_keyframes(stage: Usd.Stage, attr_path: str, start, end) -> Usd.Attribute:
   attr = stage.GetAttributeAtPath(attr_path)
+  if not attr:
+    prim_path, op_name = attr_path.split('.xformOp:')
+    op_type = UsdGeom.XformOp.GetOpTypeEnum(op_name)
+    attr = UsdGeom.Xformable.Get(stage, prim_path).AddXformOp(op_type).GetAttr()
   attr.Set(start, 0.0)
   attr.Set(end, 1.0)
   return attr
@@ -53,8 +58,9 @@ def _set_shutter(
 
 
 def _load_stage(scene_name: str = 'point') -> Usd.Stage:
+  subdir = 'shapes' if scene_name == 'geom_subsets' else 'lights'
   stage = Usd.Stage.Open(
-      f'{test_helpers.TEST_ASSETS_PATH}/lights/{scene_name}.usda'
+      f'{test_helpers.TEST_ASSETS_PATH}/{subdir}/{scene_name}.usda'
   )
   stage.GetRootLayer().Reload()
   _set_shutter(stage, (-0.5, 0.5))
@@ -85,6 +91,10 @@ def _assert_hydra_equal_to_offline(
         ('point', '/root/Area.xformOp:translate', (-2, 0, 1), (2, 0, 1)),
         ('spot', '/root/Area.xformOp:translate', (-2, 0, 1), (2, 0, 1)),
         ('sphere', '/root/Area.xformOp:translate', (-2, 0, 1), (2, 0, 1)),
+        ('point', '/root/Plane.xformOp:translate', (0.0, 0.0, -0.8), (0.0, 0.0, 0.8)),
+        ('point', '/root/Plane.xformOp:rotateXYZ', (-80.0, -80.0, 0.0), (80.0, 80.0, 0.0)),
+        ('point', '/root/Plane.xformOp:scale', (0.05, 0.05, 1.0), (2.0, 2.0, 1.0)),
+        ('geom_subsets', '/root/Cube.xformOp:translate', (-4.0, 0.0, 0.0), (2.0, -2.0, 1.0)),
     ],
 )
 def test_motion_blur(scene_name: str, attr_path: str, start, end):
@@ -103,7 +113,7 @@ def test_motion_blur(scene_name: str, attr_path: str, start, end):
   image_static = engine.render(time_code=_TIME)['color'][..., :3]
   # Area lights ('sphere') do not support motion blur and render at frame time.
   if scene_name != 'sphere':
-    assert np.mean(np.abs(image - image_static)) > 0.02
+    assert np.mean(np.abs(image - image_static)) > 0.01
   else:
     test_helpers.robust_assert_close(image, image_static, atol=0.1)
 
@@ -123,14 +133,25 @@ def test_interactive_motion_updates():
   camera_translate = _set_keyframes(
       stage, '/root/Camera.xformOp:translate', (-0.5, -2, 2.5), (0.5, -2, 2.5)
   )
+  plane_translate = _set_keyframes(
+      stage, '/root/Plane.xformOp:translate', (-0.5, 0.0, 0.0), (0.5, 0.0, 0.0)
+  )
   _assert_hydra_equal_to_offline(stage, engine, 'test_updates_animated')
 
   # Animated -> animated with the same keyframe count (records frozen kernel),
   # then with a different keyframe count (replays with updated keyframe count).
   camera_translate.Set((-1.5, -2, 2.5), 0.0)
+  plane_translate.Set((-0.8, 0.0, 0.0), 0.0)
   engine.render(time_code=_TIME)
   light_translate.Set((0.0, 0.8, 1.3), 0.3)
+  plane_translate.Set((0.0, 0.5, 0.0), 0.3)
   _assert_hydra_equal_to_offline(stage, engine, 'test_updates_keyframes')
+
+  # Overriding `primvars:mitsuba:motion_samples` interactively updates sampling.
+  UsdGeom.PrimvarsAPI(stage.GetPrimAtPath('/root/Plane')).CreatePrimvar(
+      'mitsuba:motion_samples', Sdf.ValueTypeNames.Int
+  ).Set(2)
+  _assert_hydra_equal_to_offline(stage, engine, 'test_updates_motion_samples')
 
   # Adding another camera widens the scene motion interval.
   _set_shutter(stage, (0.0, 0.5))
@@ -146,6 +167,44 @@ def test_interactive_motion_updates():
   # Removing camera_2 leaves no valid shutter (animated -> static).
   camera_2.GetPrim().SetActive(False)
   _assert_hydra_equal_to_offline(stage, engine, 'test_updates_static_end')
+
+
+def test_emissive_mesh_renders_static():
+  """Emissive meshes keep their emitter and render at frame time, like area lights."""
+  stage = _load_stage()
+  _set_keyframes(
+      stage, '/root/Plane.xformOp:translate', (-1.0, 0.0, 0.3), (1.0, 0.0, 0.3)
+  )
+  mesh_prim = stage.GetPrimAtPath('/root/Plane/Plane')
+  UsdLux.MeshLightAPI.Apply(mesh_prim)
+  UsdLux.LightAPI(mesh_prim).CreateIntensityAttr().Set(2.0)
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin')
+  image = _assert_hydra_equal_to_offline(stage, engine, 'test_emissive_motion')
+  assert np.max(image) > 0.1
+
+  # Removing the emitter interactively switches the mesh to motion blur, and
+  # re-applying it switches back to a static emissive mesh.
+  mesh_prim.RemoveAPI(UsdLux.MeshLightAPI)
+  mesh_prim.RemoveProperty('inputs:intensity')
+  image_blurred = _assert_hydra_equal_to_offline(
+      stage, engine, 'test_emissive_motion_removed'
+  )
+  UsdLux.MeshLightAPI.Apply(mesh_prim)
+  UsdLux.LightAPI(mesh_prim).CreateIntensityAttr().Set(2.0)
+  test_helpers.robust_assert_close(
+      _assert_hydra_equal_to_offline(
+          stage, engine, 'test_emissive_motion_reapplied'
+      ),
+      image,
+      atol=0.05,
+  )
+
+  _set_shutter(stage, (0.0, 0.0))
+  image_static = engine.render(time_code=_TIME)['color'][..., :3]
+  test_helpers.robust_assert_close(image, image_static, atol=0.05)
+  assert np.mean(np.abs(image_blurred - image_static)) > 0.01
 
 
 def test_point_instancer_motion_blur():

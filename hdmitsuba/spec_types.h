@@ -87,7 +87,12 @@ struct MeshSpec : public BaseSpec {
   PrimvarMap primvars;
   GfMatrix4d transform;
   std::optional<LightSpec> emitter_spec = std::nullopt;
+  // Instance-to-world transforms when rendered through Mitsuba instances. For a
+  // non-instanced mesh with an animated transform this holds a single entry and
+  // `motion_wrapped` is set; `transform` then still holds the static transform
+  // at frame time so the SceneManager can fall back to it.
   std::vector<MotionTransform> instance_transforms;
+  bool motion_wrapped = false;
   bool is_subdivided = false;
   bool double_sided = false;
 

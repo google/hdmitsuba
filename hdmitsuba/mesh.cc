@@ -341,7 +341,9 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
 
   std::optional<LightSpec> emitter_spec = GetMeshEmitterSpec(sceneDelegate, id);
 
+  GfMatrix4d transform = sceneDelegate->GetTransform(id);
   std::vector<MotionTransform> instance_transforms;
+  bool motion_wrapped = false;
   const SdfPath& instancer_id = GetInstancerId();
   if (!instancer_id.IsEmpty()) {
     HdMitsubaInstancer* instancer = static_cast<HdMitsubaInstancer*>(
@@ -349,15 +351,28 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
     if (instancer) {
       instance_transforms = instancer->ComputeInstanceTransforms(id);
     }
+  } else {
+    MotionTransform motion_transform =
+        SampleTransform(GetPrimDataSource(sceneDelegate, id),
+                        GetMotionInterval(sceneDelegate), /*uniform=*/true)
+            .Map([](const GfMatrix4d& m) { return UsdToMitsubaTransform(m); });
+    if (motion_transform.IsAnimated()) {
+      // Transform motion blur requires wrapping the mesh in a Mitsuba instance.
+      // The static `transform` is kept for the SceneManager, which falls back
+      // to it if the mesh carries an emitter or sensor.
+      motion_wrapped = true;
+      instance_transforms.push_back(std::move(motion_transform));
+    }
   }
 
   MeshSpec spec;
   spec.id = id;
   spec.material_ids = material_ids_;
   spec.primvars = primvars;
-  spec.transform = sceneDelegate->GetTransform(id);
+  spec.transform = transform;
   spec.emitter_spec = std::move(emitter_spec);
   spec.instance_transforms = std::move(instance_transforms);
+  spec.motion_wrapped = motion_wrapped;
   spec.needs_rebuild =
       dirtyBits && (*dirtyBits & HdChangeTracker::DirtyTopology);
   spec.dirty_bits = dirtyBits ? *dirtyBits : HdChangeTracker::Clean;

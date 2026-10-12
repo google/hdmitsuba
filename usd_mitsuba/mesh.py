@@ -33,6 +33,7 @@ from pxr import Vt
 from hdmitsuba import geometry_ext as geom_lib
 from usd_mitsuba import camera
 from usd_mitsuba import material
+from usd_mitsuba import motion
 from usd_mitsuba import util
 
 
@@ -119,8 +120,9 @@ def convert_mesh(
     time: Usd.TimeCode,
     sensor_bindings: Mapping[Sdf.Path, Usd.Prim],
     custom_transform: Gf.Matrix4d | None = None,
-) -> dict[str, mi.Mesh]:
-  """Converts a mesh prim and returns a dictionary of Mitsuba meshes.
+    motion_interval: tuple[float, float] = (0.0, 0.0),
+) -> dict[str, Any]:
+  """Converts a mesh prim and returns a dictionary of Mitsuba scene shapes.
 
   Args:
     prim: The USD prim.
@@ -128,54 +130,84 @@ def convert_mesh(
     time: The time code.
     sensor_bindings: Precomputed shape path -> sensor prim map.
     custom_transform: Optional transform to use instead of local-to-world.
+    motion_interval: Frame-relative shutter interval `(open, close)`.
 
   Returns:
-    A dictionary mapping Mitsuba scene object IDs to mi.Mesh objects.
+    A dictionary mapping Mitsuba scene object IDs to Mitsuba shape objects or
+    dictionaries.
   """
   stage = prim.GetStage()
   path = prim.GetPath()
   has_displacement = material.has_displacement(prim)
-  mesh_prim = UsdGeom.Mesh(prim)
   level_primvar = UsdGeom.PrimvarsAPI(prim).GetPrimvar(
       'mitsuba:subdivision_level'
   )
   if level_primvar and (level := level_primvar.Get()) is not None:
     subdivision_level = level
 
-  mesh_data, sub_meshes = geom_lib.extract_and_process_meshes(
+  mesh_data, all_sub_meshes = geom_lib.extract_and_process_meshes(
       stage, path, time, subdivision_level, has_displacement
   )
+  sub_meshes = [
+      sub
+      for sub in all_sub_meshes
+      if 'points' in sub.primvars and len(sub.primvars['points'].value) > 0
+  ]
+  if len(sub_meshes) < len(all_sub_meshes):
+    Tf.Warn(f"Mesh {prim.GetPath()} has no points. Skipping translation.")
+  subprims = [
+      stage.GetPrimAtPath(sub.material_id) if not sub.material_id.isEmpty
+      else prim
+      for sub in sub_meshes
+  ]
+  materials = [material.convert_material(subprim) for subprim in subprims]
+
+  # Emitters and sensors are only attached to top-level shapes: Mitsuba does
+  # not support them on instances, so prototypes do without, and shapes
+  # carrying them are not wrapped in an instance for motion blur below (they
+  # render with their static transform at frame time, like area lights).
+  mesh_light_emitter = _get_mesh_light_emitter(prim, time)
+  sensor_prim = sensor_bindings.get(path)
+  has_emitter_or_sensor = (
+      mesh_light_emitter is not None
+      or sensor_prim is not None
+      or any(emitter is not None for _, emitter, _ in materials)
+  )
+
+  motion_transform = None
   if custom_transform is not None:
     world_transform = custom_transform
+  elif has_emitter_or_sensor:
+    world_transform = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
   else:
-    world_transform = mesh_prim.ComputeLocalToWorldTransform(time)
+    samples = geom_lib.sample_world_transform(
+        prim, time, motion_interval, uniform=True
+    )
+    if len(samples) == 1:
+      world_transform = samples[0][1]
+    else:
+      world_transform = Gf.Matrix4d(1.0)
+      motion_transform = motion.to_mitsuba_transform(samples)
 
   converted_meshes = {}
-  for sub in sub_meshes:
-    if 'points' not in sub.primvars or len(sub.primvars['points'].value) == 0:
-      Tf.Warn(f"Mesh {prim.GetPath()} has no points. Skipping translation.")
-      continue
-    subprim = (
-        stage.GetPrimAtPath(sub.material_id)
-        if not sub.material_id.isEmpty
-        else prim
-    )
-    bsdf, material_emitter, displacement = material.convert_material(subprim)
-    mesh_light_emitter = _get_mesh_light_emitter(prim, time)
+  for sub, subprim, (bsdf, material_emitter, displacement) in zip(
+      sub_meshes, subprims, materials
+  ):
     props = mi.Properties()
     if bsdf is not None:
       props['bsdf'] = bsdf
 
-    # MeshLightAPI takes precedence over material-driven emission.
-    if mesh_light_emitter is not None:
-      props['emitter'] = mesh_light_emitter
-    elif material_emitter is not None:
-      props['emitter'] = material_emitter
+    if custom_transform is None:
+      # MeshLightAPI takes precedence over material-driven emission.
+      if mesh_light_emitter is not None:
+        props['emitter'] = mesh_light_emitter
+      elif material_emitter is not None:
+        props['emitter'] = material_emitter
 
-    if (sensor_prim := sensor_bindings.get(path)) is not None:
-      props['sensor'] = mi.load_dict(
-          camera.usd_to_mitsuba(UsdGeom.Camera(sensor_prim), time=time)
-      )
+      if sensor_prim is not None:
+        props['sensor'] = mi.load_dict(
+            camera.usd_to_mitsuba(UsdGeom.Camera(sensor_prim), time=time)
+        )
 
     if displacement is not None:
       _apply_displacement(sub, displacement, mesh_data)
@@ -183,4 +215,9 @@ def convert_mesh(
     sub.primvars = geom_lib.transform_primvars(sub.primvars, world_transform)
     converted_meshes[util.get_mitsuba_id(
         subprim)] = _to_mitsuba_mesh(sub, props)
+
+  if motion_transform is not None and converted_meshes:
+    return motion.wrap_in_instance(
+        util.get_mitsuba_id(prim), converted_meshes.values(), motion_transform
+    )
   return converted_meshes

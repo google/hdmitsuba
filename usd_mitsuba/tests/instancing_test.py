@@ -157,12 +157,21 @@ def test_translate_native_instancing():
   assert scene is not None
 
 
-def test_translate_animated_point_instancer():
+def test_translate_animated_mesh_and_point_instancer():
   stage = Usd.Stage.CreateInMemory()
 
   camera = UsdGeom.Camera.Define(stage, "/root/Camera")
   camera.GetShutterOpenAttr().Set(-0.5)
   camera.GetShutterCloseAttr().Set(0.5)
+
+  _create_quad_mesh(stage, "/root/StaticQuad")
+  for shape in (
+      _create_quad_mesh(stage, "/root/AnimatedQuad"),
+      UsdGeom.Cube.Define(stage, "/root/AnimatedCube"),
+  ):
+    op = shape.AddTranslateOp()
+    op.Set((-1.0, 0.0, 0.0), 0.0)
+    op.Set((1.0, 0.0, 0.0), 1.0)
 
   _create_quad_mesh(stage, "/root/Prototypes/ProtoQuad")
   instancer = UsdGeom.PointInstancer.Define(stage, "/root/Instancer")
@@ -173,6 +182,10 @@ def test_translate_animated_point_instancer():
 
   scene_dict = translator.convert_to_mitsuba(stage, time=Usd.TimeCode(0.5))
 
+  assert isinstance(scene_dict["_root_StaticQuad"], mi.Mesh)
+  for prim_id in ("_root_AnimatedQuad", "_root_AnimatedCube"):
+    assert scene_dict[f"proto_group_{prim_id}"]["type"] == "shapegroup"
+    assert isinstance(scene_dict[prim_id]["to_world"], mi.AnimatedTransform4f)
   for i in (0, 1):
     assert isinstance(
         scene_dict[f"instance__root_Instancer_0_{i}"]["to_world"],

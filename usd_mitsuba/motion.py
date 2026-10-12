@@ -16,7 +16,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
+from typing import Any
 
 import mitsuba as mi
 
@@ -103,3 +104,31 @@ def to_mitsuba_transform(
     return keyframes[0][1]
   return mi.AnimatedTransform4f(keyframes)
 
+
+def wrap_in_instance(
+    prim_id: str,
+    shapes: Iterable[Any],
+    to_world: mi.AnimatedTransform4f,
+) -> dict[str, Any]:
+  """Wraps `shapes` in a Mitsuba `shapegroup` and animated `instance`.
+
+  Args:
+    prim_id: The Mitsuba ID for the instance.
+    shapes: The prototype shapes or dictionaries to group.
+    to_world: The animated instance-to-world transform.
+
+  Returns:
+    A dictionary containing the `shapegroup` and `instance` entries.
+  """
+  group_id = f'proto_group_{prim_id}'
+  return {
+      group_id: {
+          'type': 'shapegroup',
+          **{f'shape_{i}': s for i, s in enumerate(shapes)},
+      },
+      prim_id: {
+          'type': 'instance',
+          'shapegroup': {'type': 'ref', 'id': group_id},
+          'to_world': to_world,
+      },
+  }
