@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <optional>
 #include <vector>
 
 #include <absl/container/flat_hash_map.h>
@@ -43,6 +44,11 @@ class HdMitsubaInstancer final : public HdInstancer {
  private:
   VtMatrix4dArray ComputeInstanceTransformsAtTime(const SdfPath& prototype_id,
                                                   float time);
+
+  // Returns the merged sample times in `interval` of the transform inputs of
+  // this instancer and its parents, or `nullopt` if none vary.
+  std::optional<std::vector<float>> GetInstanceSampleTimes(
+      const GfVec2f& interval);
 
   absl::flat_hash_map<SdfPath, std::vector<MotionTransform>, SdfPath::Hash>
       cached_transforms_;

@@ -17,6 +17,8 @@
 #pragma once
 
 #include <algorithm>
+#include <functional>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -74,24 +76,44 @@ struct MotionSamples {
 
 using MotionTransform = MotionSamples<ScalarAffineTransform4f>;
 
+// --- Hydra render delegate ---
+
+// Returns the union of the shutter intervals of all cameras in the scene.
+GfVec2f GetMotionInterval(HdSceneDelegate* scene_delegate);
+
 // Returns `primvars:mitsuba:motion_samples` on `prim_source`, or the default
 // of 32 if unauthored.
 int GetMotionSamples(const HdContainerDataSourceHandle& prim_source);
 
-// Samples the world transform of `prim_source` (or `prim` at `time`) over
-// `interval` with at most `primvars:mitsuba:motion_samples` samples, adaptively
-// subdividing segments where TRS interpolation deviates from the actual
-// trajectory (e.g. rotations >= 90 deg or orbits). When `uniform` is true,
-// produces uniformly spaced keyframes over `interval` as required by Mitsuba's
-// `instance` plugin.
+// Samples the world transform of `prim_source` over `interval` with at most
+// `primvars:mitsuba:motion_samples` samples, adaptively subdividing segments
+// where TRS interpolation deviates from the actual trajectory (e.g. rotations
+// >= 90 deg or orbits). When `uniform` is true, produces uniformly spaced
+// keyframes over `interval` as required by Mitsuba's `instance` plugin.
 MotionSamples<GfMatrix4d> SampleTransform(
     const HdContainerDataSourceHandle& prim_source, const GfVec2f& interval,
     bool uniform = false);
+
+// Samples an array of instance world-transform matrices over `interval` with
+// uniform keyframe spacing and at most `max_samples` samples. `times` holds the
+// authored frame-relative sample offsets of the varying inputs, or `nullopt`
+// if nothing varies over `interval` (static sampling at `0.0f`).
+std::vector<MotionSamples<GfMatrix4d>> SampleInstanceTransforms(
+    const std::function<VtMatrix4dArray(float)>& eval_matrices,
+    const GfVec2f& interval, const std::optional<std::vector<float>>& times,
+    int max_samples);
+
+// --- Offline translation (usd_mitsuba, via geometry_ext) ---
+
+// Like the Hydra `SampleTransform` above, for `prim` at `time`. The motion
+// sample primvar is inherited from ancestors.
 MotionSamples<GfMatrix4d> SampleTransform(const UsdPrim& prim, UsdTimeCode time,
                                           const GfVec2f& interval,
                                           bool uniform = false);
 
-// Returns the union of the shutter intervals of all cameras in the scene.
-GfVec2f GetMotionInterval(HdSceneDelegate* scene_delegate);
+// Samples the instance-to-world transforms of a `UsdGeomPointInstancer` `prim`
+// at `time` over `interval` with uniform keyframe spacing.
+std::vector<MotionSamples<GfMatrix4d>> SamplePointInstancerTransforms(
+    const UsdPrim& prim, UsdTimeCode time, const GfVec2f& interval);
 
 PXR_NAMESPACE_CLOSE_SCOPE

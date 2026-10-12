@@ -14,6 +14,7 @@
 
 #include "hdmitsuba/instancer.h"
 
+#include <optional>
 #include <vector>
 
 #include <absl/synchronization/mutex.h>
@@ -48,7 +49,9 @@ void HdMitsubaInstancer::Sync(HdSceneDelegate* scene_delegate,
   _UpdateInstancer(scene_delegate, dirty_bits);
 
   if (HdChangeTracker::IsAnyPrimvarDirty(*dirty_bits, GetId()) ||
-      HdChangeTracker::IsTransformDirty(*dirty_bits, GetId())) {
+      HdChangeTracker::IsTransformDirty(*dirty_bits, GetId()) ||
+      HdChangeTracker::IsInstanceIndexDirty(*dirty_bits, GetId()) ||
+      HdChangeTracker::IsInstancerDirty(*dirty_bits, GetId())) {
     absl::MutexLock lock(cache_mutex_);
     cached_transforms_.clear();
   }
@@ -209,6 +212,33 @@ VtMatrix4dArray HdMitsubaInstancer::ComputeInstanceTransformsAtTime(
   return transforms;
 }
 
+std::optional<std::vector<float>> HdMitsubaInstancer::GetInstanceSampleTimes(
+    const GfVec2f& interval) {
+  if (interval[1] <= interval[0]) return std::nullopt;
+  std::vector<HdSampledDataSourceHandle> sources;
+  for (HdInstancer* inst = this; inst;
+       inst = GetDelegate()->GetRenderIndex().GetInstancer(
+           inst->GetParentId())) {
+    HdContainerDataSourceHandle prim =
+        GetPrimDataSource(GetDelegate(), inst->GetId());
+    sources.push_back(HdXformSchema::GetFromParent(prim).GetMatrix());
+    HdPrimvarsSchema primvars = HdPrimvarsSchema::GetFromParent(prim);
+    for (const TfToken& name :
+         {HdInstancerTokens->instanceTransforms,
+          HdInstancerTokens->instanceTranslations,
+          HdInstancerTokens->instanceScales,
+          HdInstancerTokens->instanceRotations}) {
+      sources.push_back(primvars.GetPrimvar(name).GetPrimvarValue());
+    }
+  }
+  std::vector<float> times;
+  if (!HdGetMergedContributingSampleTimesForInterval(
+          sources.size(), sources.data(), interval[0], interval[1], &times)) {
+    return std::nullopt;
+  }
+  return times;
+}
+
 std::vector<MotionTransform> HdMitsubaInstancer::ComputeInstanceTransforms(
     const SdfPath& prototype_id) {
   {
@@ -219,10 +249,16 @@ std::vector<MotionTransform> HdMitsubaInstancer::ComputeInstanceTransforms(
     }
   }
 
+  const GfVec2f interval = GetMotionInterval(GetDelegate());
   std::vector<MotionTransform> transforms;
-  for (const GfMatrix4d& m :
-       ComputeInstanceTransformsAtTime(prototype_id, 0.0f)) {
-    transforms.push_back(MotionTransform::Static(UsdToMitsubaTransform(m)));
+  for (const auto& s : SampleInstanceTransforms(
+           [&](float t) {
+             return ComputeInstanceTransformsAtTime(prototype_id, t);
+           },
+           interval, GetInstanceSampleTimes(interval),
+           GetMotionSamples(GetPrimDataSource(GetDelegate(), GetId())))) {
+    transforms.push_back(
+        s.Map([](const GfMatrix4d& m) { return UsdToMitsubaTransform(m); }));
   }
   {
     absl::MutexLock lock(cache_mutex_);

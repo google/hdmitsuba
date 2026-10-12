@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import mitsuba as mi
 
@@ -74,10 +74,32 @@ def sample_world_transform(
   Returns:
     A static `mi.ScalarTransform4f` or an `mi.AnimatedTransform4f`.
   """
-  keyframes = [
-      (t, transform_fn(m))
-      for t, m in geom_lib.sample_world_transform(prim, time, interval, uniform)
-  ]
+  return to_mitsuba_transform(
+      geom_lib.sample_world_transform(prim, time, interval, uniform),
+      transform_fn,
+  )
+
+
+def to_mitsuba_transform(
+    samples: Sequence[tuple[float, Gf.Matrix4d]],
+    transform_fn: Callable[
+        [Gf.Matrix4d], mi.ScalarTransform4f
+    ] = util.to_mitsuba_transform,
+) -> mi.ScalarTransform4f | mi.AnimatedTransform4f:
+  """Converts sampled `(time, matrix)` pairs to a static or animated transform.
+
+  Args:
+    samples: Frame-relative shutter offsets and world matrices, as returned by
+      `geom_lib.sample_world_transform` or
+      `geom_lib.sample_point_instancer_transforms`.
+    transform_fn: Function converting each sampled `Gf.Matrix4d` to Mitsuba.
+
+  Returns:
+    An `mi.ScalarTransform4f` if all converted samples match, else an
+    `mi.AnimatedTransform4f`.
+  """
+  keyframes = [(t, transform_fn(m)) for t, m in samples]
   if all(m == keyframes[0][1] for _, m in keyframes[1:]):
     return keyframes[0][1]
   return mi.AnimatedTransform4f(keyframes)
+

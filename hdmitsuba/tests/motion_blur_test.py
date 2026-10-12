@@ -20,6 +20,8 @@ import mitsuba as mi
 import numpy as np
 import pytest
 
+from pxr import Gf
+from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
 import usd_render
@@ -54,6 +56,7 @@ def _load_stage(scene_name: str = 'point') -> Usd.Stage:
   stage = Usd.Stage.Open(
       f'{test_helpers.TEST_ASSETS_PATH}/lights/{scene_name}.usda'
   )
+  stage.GetRootLayer().Reload()
   _set_shutter(stage, (-0.5, 0.5))
   test_helpers.create_render_settings(stage, resolution=(32, 32), spp=_SPP)
   return stage
@@ -143,3 +146,51 @@ def test_interactive_motion_updates():
   # Removing camera_2 leaves no valid shutter (animated -> static).
   camera_2.GetPrim().SetActive(False)
   _assert_hydra_equal_to_offline(stage, engine, 'test_updates_static_end')
+
+
+def test_point_instancer_motion_blur():
+  stage = _load_stage()
+  instancer = UsdGeom.PointInstancer.Define(stage, '/root/Instancer')
+  Sdf.CopySpec(
+      stage.GetRootLayer(),
+      '/root/Plane',
+      stage.GetRootLayer(),
+      '/root/Instancer/ProtoPlane',
+  )
+  stage.RemovePrim('/root/Plane')
+  UsdGeom.Xformable.Get(stage, '/root/Instancer/ProtoPlane').AddScaleOp().Set(
+      (0.7, 0.7, 1.0)
+  )
+  instancer.GetPrototypesRel().SetTargets(['/root/Instancer/ProtoPlane'])
+  instancer.GetProtoIndicesAttr().Set([0, 0])
+
+  # Time-sampled positions and orientations (including a mid-shutter sample to
+  # exercise uniform keyframe resampling on PointInstancer).
+  positions_attr = _set_keyframes(
+      stage,
+      '/root/Instancer.positions',
+      [(-0.7, -0.4, -0.8), (0.7, 0.4, -0.8)],
+      [(0.7, -0.4, -0.8), (-0.7, 0.4, -0.8)],
+  )
+  positions_attr.Set([(-0.2, 0.3, 0.8), (0.2, -0.3, 0.8)], 0.3)
+
+  q0 = Gf.Quath(Gf.Rotation(Gf.Vec3d(0, 0, 1), -30.0).GetQuat())
+  q1 = Gf.Quath(Gf.Rotation(Gf.Vec3d(0, 0, 1), 30.0).GetQuat())
+  _set_keyframes(stage, '/root/Instancer.orientations', [q0, q1], [q1, q0])
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin')
+  image = _assert_hydra_equal_to_offline(
+      stage, engine, 'test_point_instancer_motion'
+  )
+
+  # In-place update of animated PointInstancer keyframes.
+  positions_attr.Set([(0.9, 0.2, -0.8), (-0.9, -0.2, -0.8)], 1.0)
+  image_updated = _assert_hydra_equal_to_offline(
+      stage, engine, 'test_point_instancer_motion_updated'
+  )
+
+  _set_shutter(stage, (0.0, 0.0))
+  image_static = engine.render(time_code=_TIME)['color'][..., :3]
+  assert np.mean(np.abs(image - image_static)) > 0.02
+  assert np.mean(np.abs(image_updated - image_static)) > 0.02

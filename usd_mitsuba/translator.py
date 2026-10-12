@@ -266,7 +266,7 @@ def convert_to_mitsuba(
 
   prototype_paths = instancing.get_prototype_paths(stage)
   sensor_bindings = camera.get_surface_sensor_bindings(stage)
-  # Lights are sampled over the union of all camera shutters.
+  # Shapes and lights are sampled over the union of all camera shutters.
   motion_interval = motion.get_motion_interval(stage, time)
   # Traverse the stage using TraverseInstanceProxies. This flattens native USD
   # instances (instanceable=true), which means they will be duplicated in Mitsuba.
@@ -286,7 +286,13 @@ def convert_to_mitsuba(
     mi_id = util.get_mitsuba_id(prim)
     if prim.IsA(UsdGeom.PointInstancer):
       instancing.convert_point_instancer(
-          prim, subdivision_level, time, mi_scene_dict, sensor_bindings)
+          prim,
+          subdivision_level,
+          time,
+          mi_scene_dict,
+          sensor_bindings,
+          motion_interval,
+      )
     elif prim.IsA(UsdGeom.Mesh):
       mi_scene_dict.update(
           mesh.convert_mesh(prim, subdivision_level, time, sensor_bindings)

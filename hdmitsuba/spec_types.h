@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <optional>
 #include <string>
 
@@ -94,7 +95,12 @@ struct MeshSpec : public BaseSpec {
     if (emitter_spec.has_value() != prev.emitter_spec.has_value() ||
         material_ids != prev.material_ids ||
         double_sided != prev.double_sided ||
-        instance_transforms.size() != prev.instance_transforms.size()) {
+        !std::equal(instance_transforms.begin(), instance_transforms.end(),
+                    prev.instance_transforms.begin(),
+                    prev.instance_transforms.end(),
+                    [](const MotionTransform& a, const MotionTransform& b) {
+                      return a.IsAnimated() == b.IsAnimated();
+                    })) {
       needs_rebuild = true;
     }
     BaseSpec::FoldPendingFrom(prev);

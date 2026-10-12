@@ -1286,8 +1286,14 @@ class SceneModel final : public SceneManager {
 
           for (size_t i = r.begin(); i != r.end(); ++i) {
             const MeshSpec& spec = *work_items[i].spec;
-            if (!spec.needs_rebuild || HasEmitter(spec) ||
-                shape_sensors_.contains(spec.id) ||
+            // Animated instances allocate AnimatedTransform keyframe tensors.
+            if (!spec.needs_rebuild ||
+                std::any_of(spec.instance_transforms.begin(),
+                            spec.instance_transforms.end(),
+                            [](const MotionTransform& t) {
+                              return t.IsAnimated();
+                            }) ||
+                HasEmitter(spec) || shape_sensors_.contains(spec.id) ||
                 std::any_of(work_items[i].displacements.begin(),
                             work_items[i].displacements.end(),
                             [](const MaterialDisplacement& d) {

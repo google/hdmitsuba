@@ -155,3 +155,27 @@ def test_translate_native_instancing():
 
   scene = mi.load_dict(scene_dict)
   assert scene is not None
+
+
+def test_translate_animated_point_instancer():
+  stage = Usd.Stage.CreateInMemory()
+
+  camera = UsdGeom.Camera.Define(stage, "/root/Camera")
+  camera.GetShutterOpenAttr().Set(-0.5)
+  camera.GetShutterCloseAttr().Set(0.5)
+
+  _create_quad_mesh(stage, "/root/Prototypes/ProtoQuad")
+  instancer = UsdGeom.PointInstancer.Define(stage, "/root/Instancer")
+  instancer.GetPrototypesRel().SetTargets(["/root/Prototypes/ProtoQuad"])
+  instancer.GetProtoIndicesAttr().Set([0, 0])
+  instancer.GetPositionsAttr().Set([(-2.0, 0.0, 0.0), (2.0, 0.0, 0.0)], 0.0)
+  instancer.GetPositionsAttr().Set([(-2.0, 1.0, 0.0), (2.0, -1.0, 0.0)], 1.0)
+
+  scene_dict = translator.convert_to_mitsuba(stage, time=Usd.TimeCode(0.5))
+
+  for i in (0, 1):
+    assert isinstance(
+        scene_dict[f"instance__root_Instancer_0_{i}"]["to_world"],
+        mi.AnimatedTransform4f,
+    )
+  mi.load_dict(scene_dict)

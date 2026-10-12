@@ -19,14 +19,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-import mitsuba as mi
-import numpy as np
-
-from pxr import Gf
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
+from hdmitsuba import geometry_ext as geom_lib
 from usd_mitsuba import mesh
+from usd_mitsuba import motion
 from usd_mitsuba import util
 
 
@@ -51,23 +49,13 @@ def get_prototype_paths(stage: Usd.Stage) -> set[Sdf.Path]:
   return prototype_paths
 
 
-def _compute_instance_transforms(
-    instancer: UsdGeom.PointInstancer, time: Usd.TimeCode
-) -> list[Gf.Matrix4d]:
-  """Returns the instance-to-world transforms of a PointInstancer."""
-  instancer_transform = instancer.ComputeLocalToWorldTransform(time)
-  return [
-      transform * instancer_transform
-      for transform in instancer.ComputeInstanceTransformsAtTime(time, time)
-  ]
-
-
 def convert_point_instancer(
     instancer_prim: Usd.Prim,
     subdivision_level: int,
     time: Usd.TimeCode,
     mi_scene_dict: dict[str, Any],
     sensor_bindings: Mapping[Sdf.Path, Usd.Prim],
+    motion_interval: tuple[float, float] = (0.0, 0.0),
 ) -> None:
   """Converts a PointInstancer prim to Mitsuba ShapeGroups and Instances.
 
@@ -77,10 +65,16 @@ def convert_point_instancer(
     time: The time code to evaluate at.
     mi_scene_dict: The top-level Mitsuba scene dictionary to populate.
     sensor_bindings: Precomputed shape path -> sensor prim map.
+    motion_interval: Frame-relative shutter interval `(open, close)`.
   """
   instancer = UsdGeom.PointInstancer(instancer_prim)
   instancer_id = util.get_mitsuba_id(instancer_prim)
-  transforms = _compute_instance_transforms(instancer, time)
+  transforms = [
+      motion.to_mitsuba_transform(s)
+      for s in geom_lib.sample_point_instancer_transforms(
+          instancer_prim, time, motion_interval
+      )
+  ]
   if not transforms:
     return
   proto_indices = instancer.GetProtoIndicesAttr().Get(time)
@@ -137,5 +131,5 @@ def convert_point_instancer(
             'type': 'ref',
             'id': shape_groups[proto_idx],
         },
-        'to_world': mi.ScalarTransform4f(np.array(transforms[inst_idx], dtype=np.float32).T),
+        'to_world': transforms[inst_idx],
     }

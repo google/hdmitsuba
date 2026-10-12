@@ -17,9 +17,12 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <initializer_list>
+#include <optional>
 #include <utility>
 #include <vector>
 
+#include <absl/container/flat_hash_map.h>
 #include <pxr/base/gf/interval.h>
 #include <pxr/base/gf/math.h>
 #include <pxr/base/gf/matrix4d.h>
@@ -36,6 +39,7 @@
 #include <pxr/usd/usd/prim.h>
 #include <pxr/usd/usd/timeCode.h>
 #include <pxr/usd/usdGeom/imageable.h>
+#include <pxr/usd/usdGeom/pointInstancer.h>
 #include <pxr/usd/usdGeom/primvar.h>
 #include <pxr/usd/usdGeom/primvarsAPI.h>
 #include <pxr/usd/usdGeom/xformOp.h>
@@ -265,7 +269,45 @@ int GetUsdMotionSamples(const UsdPrim& prim) {
   return samples;
 }
 
+// Returns the frame-relative shutter offsets in `interval` around `time` of all
+// time-varying ancestor xformOps of `prim` and any `extra_attrs`, or `nullopt`
+// if none of them might vary over the shutter.
+std::optional<std::vector<float>> GetSampleOffsetsInInterval(
+    const UsdPrim& prim, UsdTimeCode time, const GfVec2f& interval,
+    std::initializer_list<UsdAttribute> extra_attrs) {
+  if (interval[1] <= interval[0] || !time.IsNumeric()) return std::nullopt;
+  std::vector<UsdAttribute> attrs;
+  for (UsdPrim p = prim; p; p = p.GetParent()) {
+    if (UsdGeomXformable xformable{p}) {
+      bool resets = false;
+      for (const UsdGeomXformOp& op : xformable.GetOrderedXformOps(&resets)) {
+        if (op.MightBeTimeVarying()) attrs.push_back(op.GetAttr());
+      }
+      if (resets) break;
+    }
+  }
+  for (const UsdAttribute& attr : extra_attrs) {
+    if (attr.ValueMightBeTimeVarying()) attrs.push_back(attr);
+  }
+  if (attrs.empty()) return std::nullopt;
+  const double t0 = time.GetValue();
+  std::vector<double> usd_samples;
+  UsdAttribute::GetUnionedTimeSamplesInInterval(
+      attrs, GfInterval(t0 + interval[0], t0 + interval[1], false, false),
+      &usd_samples);
+  std::vector<float> offsets;
+  offsets.reserve(usd_samples.size());
+  for (double s : usd_samples) offsets.push_back(static_cast<float>(s - t0));
+  return offsets;
+}
+
 }  // namespace
+
+GfVec2f GetMotionInterval(HdSceneDelegate* scene_delegate) {
+  return GetParam<GfVec2f>(
+      GetPrimDataSource(scene_delegate, SdfPath::AbsoluteRootPath()),
+      HdMitsubaMotionTokens->motion_interval, GfVec2f(0.0f));
+}
 
 int GetMotionSamples(const HdContainerDataSourceHandle& prim_source) {
   return GetParam<int>(
@@ -295,6 +337,38 @@ MotionSamples<GfMatrix4d> SampleTransform(
       std::move(times), uniform, max_samples);
 }
 
+std::vector<MotionSamples<GfMatrix4d>> SampleInstanceTransforms(
+    const std::function<VtMatrix4dArray(float)>& eval_matrices,
+    const GfVec2f& interval, const std::optional<std::vector<float>>& times,
+    int max_samples) {
+  VtMatrix4dArray t0_xforms = eval_matrices(0.0f);
+  std::vector<MotionSamples<GfMatrix4d>> result;
+  result.reserve(t0_xforms.size());
+  if (!times.has_value() || max_samples <= 1) {
+    for (const GfMatrix4d& m : t0_xforms) {
+      result.push_back(MotionSamples<GfMatrix4d>::Static(m));
+    }
+    return result;
+  }
+  // Each instance is refined independently, which costs up to
+  // O(instances * max_samples) TRS decompositions and caches one full matrix
+  // array per distinct sample time. This is fine for moderate instance counts;
+  // very large animated point clouds would benefit from deciding the grid once
+  // for the whole array instead.
+  absl::flat_hash_map<float, VtMatrix4dArray> cache = {
+      {0.0f, std::move(t0_xforms)}};
+  for (size_t i = 0, n = cache[0.0f].size(); i < n; ++i) {
+    result.push_back(SampleTransformOverInterval(
+        [&](float t) {
+          auto [it, inserted] = cache.try_emplace(t);
+          if (inserted) it->second = eval_matrices(t);
+          return it->second.AsConst()[i];
+        },
+        interval, *times, /*uniform=*/true, max_samples));
+  }
+  return result;
+}
+
 MotionSamples<GfMatrix4d> SampleTransform(const UsdPrim& prim, UsdTimeCode time,
                                           const GfVec2f& interval,
                                           bool uniform) {
@@ -303,42 +377,69 @@ MotionSamples<GfMatrix4d> SampleTransform(const UsdPrim& prim, UsdTimeCode time,
     return MotionSamples<GfMatrix4d>::Static(GfMatrix4d(1.0));
   }
   const int max_samples = GetUsdMotionSamples(prim);
-  std::vector<UsdGeomXformOp> ops;
-  if (max_samples > 1 && interval[1] > interval[0] && time.IsNumeric()) {
-    for (UsdPrim p = prim; p; p = p.GetParent()) {
-      if (UsdGeomXformable xformable{p}) {
-        bool resets_xform_stack = false;
-        for (const UsdGeomXformOp& op :
-             xformable.GetOrderedXformOps(&resets_xform_stack)) {
-          if (op.MightBeTimeVarying()) ops.push_back(op);
-        }
-        if (resets_xform_stack) break;
-      }
-    }
-  }
-  if (ops.empty()) {
+  std::optional<std::vector<float>> offsets =
+      GetSampleOffsetsInInterval(prim, time, interval, {});
+  if (max_samples <= 1 || !offsets) {
     return MotionSamples<GfMatrix4d>::Static(
         imageable.ComputeLocalToWorldTransform(time));
   }
-  const double t0 = time.GetValue();
-  std::vector<double> usd_samples;
-  UsdGeomXformable::GetTimeSamplesInInterval(
-      ops, GfInterval(t0 + interval[0], t0 + interval[1], false, false),
-      &usd_samples);
-  std::vector<float> offsets;
-  offsets.reserve(usd_samples.size());
-  for (double s : usd_samples) offsets.push_back(static_cast<float>(s - t0));
   return SampleTransformOverInterval(
       [&](float offset) {
-        return imageable.ComputeLocalToWorldTransform(t0 + offset);
+        return imageable.ComputeLocalToWorldTransform(time.GetValue() + offset);
       },
-      interval, std::move(offsets), uniform, max_samples);
+      interval, std::move(*offsets), uniform, max_samples);
 }
 
-GfVec2f GetMotionInterval(HdSceneDelegate* scene_delegate) {
-  return GetParam<GfVec2f>(
-      GetPrimDataSource(scene_delegate, SdfPath::AbsoluteRootPath()),
-      HdMitsubaMotionTokens->motion_interval, GfVec2f(0.0f));
+std::vector<MotionSamples<GfMatrix4d>> SamplePointInstancerTransforms(
+    const UsdPrim& prim, UsdTimeCode time, const GfVec2f& interval) {
+  UsdGeomPointInstancer instancer(prim);
+  // Like in the Hydra path, where the prototype's own xform is baked into the
+  // prototype geometry at frame time, only the instancer's attributes and
+  // ancestors contribute to the motion: the prototype xforms are evaluated at
+  // `time` and re-applied to the (masked) instances below.
+  VtIntArray proto_indices;
+  instancer.GetProtoIndicesAttr().Get(&proto_indices, time);
+  SdfPathVector proto_paths;
+  instancer.GetPrototypesRel().GetTargets(&proto_paths);
+  std::vector<GfMatrix4d> proto_xforms(proto_paths.size(), GfMatrix4d(1.0));
+  for (size_t i = 0; i < proto_paths.size(); ++i) {
+    bool resets = false;
+    if (UsdGeomXformable proto{prim.GetStage()->GetPrimAtPath(proto_paths[i])}) {
+      proto.GetLocalTransformation(&proto_xforms[i], &resets, time);
+    }
+  }
+  // The prototype xform of each unmasked instance, in the order of
+  // `ComputeInstanceTransformsAtTime`.
+  const std::vector<bool> mask = instancer.ComputeMaskAtTime(time);
+  std::vector<GfMatrix4d> instance_proto_xforms;
+  for (size_t i = 0; i < proto_indices.size(); ++i) {
+    if (!mask.empty() && !mask[i]) continue;
+    const int proto = proto_indices[i];
+    instance_proto_xforms.push_back(
+        proto >= 0 && proto < static_cast<int>(proto_xforms.size())
+            ? proto_xforms[proto]
+            : GfMatrix4d(1.0));
+  }
+  return SampleInstanceTransforms(
+      [&](float offset) {
+        const UsdTimeCode t =
+            offset == 0.0f ? time : UsdTimeCode(time.GetValue() + offset);
+        VtMatrix4dArray xforms;
+        instancer.ComputeInstanceTransformsAtTime(
+            &xforms, t, time, UsdGeomPointInstancer::ExcludeProtoXform);
+        const GfMatrix4d to_world = instancer.ComputeLocalToWorldTransform(t);
+        for (size_t j = 0;
+             j < std::min(xforms.size(), instance_proto_xforms.size()); ++j) {
+          xforms[j] = instance_proto_xforms[j] * xforms[j] * to_world;
+        }
+        return xforms;
+      },
+      interval,
+      GetSampleOffsetsInInterval(
+          prim, time, interval,
+          {instancer.GetPositionsAttr(), instancer.GetOrientationsAttr(),
+           instancer.GetOrientationsfAttr(), instancer.GetScalesAttr()}),
+      GetUsdMotionSamples(prim));
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE
