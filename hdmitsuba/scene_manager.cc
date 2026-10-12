@@ -133,13 +133,11 @@ constexpr std::string_view kProtoGroupPrefix = "proto_group_";
 constexpr std::string_view kInstancePrefix = "instance_";
 
 template <typename Float, typename Spectrum>
-void SetTransform(
-    mitsuba::Shape<Float, Spectrum>* instance,
-    const mitsuba::Transform<mitsuba::Point<Float, 4>, true>& transform) {
+void SetTransform(mitsuba::Shape<Float, Spectrum>* instance,
+                  const MotionTransform& transform) {
   TraversalCallback cb;
   instance->traverse(&cb);
-  using Transform4f = mitsuba::Transform<mitsuba::Point<Float, 4>, true>;
-  cb.set<Transform4f>("to_world", transform);
+  PrimTranslator<Float, Spectrum>::SetTransformParameter(cb, transform);
   instance->parameters_changed({"to_world"});
 }
 
@@ -1182,10 +1180,10 @@ class SceneModel final : public SceneManager {
 
       // 3. Create Instances
       res.instances.reserve(spec.instance_transforms.size());
-      for (const GfMatrix4d& xform : spec.instance_transforms) {
+      for (const MotionTransform& xform : spec.instance_transforms) {
         mitsuba::Properties inst_props("instance");
         inst_props.set("shapegroup", res.shapegroup.get());
-        inst_props.set("to_world", UsdToMitsubaTransform(xform));
+        PrimTranslator::SetTransformProperty(inst_props, xform);
         mitsuba::ref<Shape> inst =
             mitsuba::PluginManager::instance()->create_object<Shape>(
                 inst_props);
@@ -1212,9 +1210,7 @@ class SceneModel final : public SceneManager {
           auto inst_it =
               shapes_.find(absl::StrCat(kInstancePrefix, id_str, "_", i));
           if (TF_VERIFY(inst_it != shapes_.end())) {
-            SetTransform(inst_it->second.get(),
-                         AffineTransform4f(
-                             UsdToMitsubaTransform(spec.instance_transforms[i])));
+            SetTransform(inst_it->second.get(), spec.instance_transforms[i]);
           }
         }
       }

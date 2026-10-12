@@ -30,6 +30,7 @@
 
 #include "hdmitsuba/spec_types.h"
 #include "hdmitsuba/texture_cache.h"
+#include "hdmitsuba/traversal.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -93,6 +94,16 @@ struct TranslatedMaterial {
 MI_VARIANT
 class PrimTranslator {
  public:
+  // Sets the "to_world" property to a static or animated transform.
+  static void SetTransformProperty(mitsuba::Properties& props,
+                                   const MotionTransform& transform);
+
+  // Updates the "to_world" parameter of the object traversed by `cb`, which
+  // must already hold a transform of the same kind (static or animated). The
+  // caller is responsible for notifying the object of the change.
+  static void SetTransformParameter(TraversalCallback& cb,
+                                    const MotionTransform& transform);
+
   static TranslatedMaterial BuildMaterial(
       const MaterialSpec& spec,
       const TextureCache<Float, Spectrum>& texture_cache);

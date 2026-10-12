@@ -54,8 +54,8 @@ void HdMitsubaInstancer::Sync(HdSceneDelegate* scene_delegate,
   }
 }
 
-VtMatrix4dArray HdMitsubaInstancer::ComputeInstanceTransforms(
-    const SdfPath& prototype_id) {
+VtMatrix4dArray HdMitsubaInstancer::ComputeInstanceTransformsAtTime(
+    const SdfPath& prototype_id, float time) {
   static const HdDataSourceLocator transforms_locator(
       HdInstancerTokens->instanceTransforms,
       HdPrimvarSchemaTokens->primvarValue);
@@ -69,14 +69,6 @@ VtMatrix4dArray HdMitsubaInstancer::ComputeInstanceTransforms(
       HdPrimvarSchemaTokens->primvarValue);
   static const HdDataSourceLocator transform_locator(
       HdXformSchema::GetSchemaToken(), HdXformSchemaTokens->matrix);
-
-  {
-    absl::MutexLock lock(cache_mutex_);
-    auto it = cached_transforms_.find(prototype_id);
-    if (it != cached_transforms_.end()) {
-      return it->second;
-    }
-  }
 
   const SdfPath& instancer_id = GetId();
   HdRenderIndex& render_index = GetDelegate()->GetRenderIndex();
@@ -95,8 +87,6 @@ VtMatrix4dArray HdMitsubaInstancer::ComputeInstanceTransforms(
 
   VtMatrix4dArray transforms;
   if (instance_indices.empty()) {
-    absl::MutexLock lock(cache_mutex_);
-    cached_transforms_[prototype_id] = transforms;
     return transforms;
   }
 
@@ -114,17 +104,17 @@ VtMatrix4dArray HdMitsubaInstancer::ComputeInstanceTransforms(
     HdContainerDataSourceHandle primvars_container =
         primvars_schema.GetContainer();
 
-    instancer_transforms =
-        GetParam(primvars_container, transforms_locator, instancer_transforms);
+    instancer_transforms = GetParam(primvars_container, transforms_locator,
+                                    instancer_transforms, time);
     instancer_translations = GetParam(primvars_container, translations_locator,
-                                      instancer_translations);
+                                      instancer_translations, time);
     instancer_scales =
-        GetParam(primvars_container, scales_locator, instancer_scales);
+        GetParam(primvars_container, scales_locator, instancer_scales, time);
 
     // Rotations can have different types, try them one by one.
     if (auto data_source = HdSampledDataSource::Cast(HdContainerDataSource::Get(
             primvars_container, rotations_locator))) {
-      VtValue value = data_source->GetValue(0.0f);
+      VtValue value = data_source->GetValue(time);
       if (value.IsHolding<VtVec4fArray>()) {
         instancer_rotations = value.UncheckedGet<VtVec4fArray>();
       } else if (value.IsHolding<VtQuathArray>()) {
@@ -138,8 +128,8 @@ VtMatrix4dArray HdMitsubaInstancer::ComputeInstanceTransforms(
     }
   }
 
-  GfMatrix4d instancer_transform =
-      GetParam<GfMatrix4d>(prim.dataSource, transform_locator, GfMatrix4d(1.0));
+  GfMatrix4d instancer_transform = GetParam<GfMatrix4d>(
+      prim.dataSource, transform_locator, GfMatrix4d(1.0), time);
 
   const size_t num_scales = instancer_scales.size();
   const size_t num_rotations = instancer_rotations.size();
@@ -201,7 +191,7 @@ VtMatrix4dArray HdMitsubaInstancer::ComputeInstanceTransforms(
     if (HdMitsubaInstancer* parent_instancer = static_cast<HdMitsubaInstancer*>(
             render_index.GetInstancer(parent_instancer_id))) {
       const VtMatrix4dArray parent_transforms =
-          parent_instancer->ComputeInstanceTransforms(GetId());
+          parent_instancer->ComputeInstanceTransformsAtTime(GetId(), time);
       if (!parent_transforms.empty()) {
         const size_t num_parent = parent_transforms.size();
         VtMatrix4dArray new_transforms(num_instances * num_parent);
@@ -215,6 +205,24 @@ VtMatrix4dArray HdMitsubaInstancer::ComputeInstanceTransforms(
         transforms = std::move(new_transforms);
       }
     }
+  }
+  return transforms;
+}
+
+std::vector<MotionTransform> HdMitsubaInstancer::ComputeInstanceTransforms(
+    const SdfPath& prototype_id) {
+  {
+    absl::MutexLock lock(cache_mutex_);
+    auto it = cached_transforms_.find(prototype_id);
+    if (it != cached_transforms_.end()) {
+      return it->second;
+    }
+  }
+
+  std::vector<MotionTransform> transforms;
+  for (const GfMatrix4d& m :
+       ComputeInstanceTransformsAtTime(prototype_id, 0.0f)) {
+    transforms.push_back(MotionTransform::Static(UsdToMitsubaTransform(m)));
   }
   {
     absl::MutexLock lock(cache_mutex_);

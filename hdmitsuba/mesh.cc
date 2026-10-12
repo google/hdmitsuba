@@ -340,7 +340,7 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
 
   std::optional<LightSpec> emitter_spec = GetMeshEmitterSpec(sceneDelegate, id);
 
-  VtMatrix4dArray instance_transforms;
+  std::vector<MotionTransform> instance_transforms;
   const SdfPath& instancer_id = GetInstancerId();
   if (!instancer_id.IsEmpty()) {
     HdMitsubaInstancer* instancer = static_cast<HdMitsubaInstancer*>(
@@ -350,13 +350,6 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
     }
   }
 
-  bool instance_count_changed = instance_transforms.size() != instance_count_;
-  instance_count_ = instance_transforms.size();
-
-  bool topology_dirty =
-      dirtyBits && (*dirtyBits & HdChangeTracker::DirtyTopology);
-  bool needs_rebuild = topology_dirty || instance_count_changed;
-
   MeshSpec spec;
   spec.id = id;
   spec.material_ids = material_ids_;
@@ -364,7 +357,8 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
   spec.transform = sceneDelegate->GetTransform(id);
   spec.emitter_spec = std::move(emitter_spec);
   spec.instance_transforms = std::move(instance_transforms);
-  spec.needs_rebuild = needs_rebuild;
+  spec.needs_rebuild =
+      dirtyBits && (*dirtyBits & HdChangeTracker::DirtyTopology);
   spec.dirty_bits = dirtyBits ? *dirtyBits : HdChangeTracker::Clean;
   spec.is_subdivided = subdiv_evaluator_.IsSubdivided();
   spec.double_sided = IsDoubleSided(sceneDelegate);

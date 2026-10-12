@@ -86,14 +86,15 @@ struct MeshSpec : public BaseSpec {
   PrimvarMap primvars;
   GfMatrix4d transform;
   std::optional<LightSpec> emitter_spec = std::nullopt;
-  VtMatrix4dArray instance_transforms;
+  std::vector<MotionTransform> instance_transforms;
   bool is_subdivided = false;
   bool double_sided = false;
 
   void FoldPendingFrom(const MeshSpec& prev) {
     if (emitter_spec.has_value() != prev.emitter_spec.has_value() ||
         material_ids != prev.material_ids ||
-        double_sided != prev.double_sided) {
+        double_sided != prev.double_sided ||
+        instance_transforms.size() != prev.instance_transforms.size()) {
       needs_rebuild = true;
     }
     BaseSpec::FoldPendingFrom(prev);

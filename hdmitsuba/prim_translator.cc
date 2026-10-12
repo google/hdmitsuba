@@ -519,12 +519,8 @@ PrimTranslator<Float, Spectrum>::BuildMaterial(
   return res;
 }
 
-namespace {
-
-// Sets the "to_world" property to a static or animated transform.
-template <typename Float, typename Spectrum>
-void SetTransformProperty(mitsuba::Properties& props,
-                          const MotionTransform& transform) {
+MI_VARIANT void PrimTranslator<Float, Spectrum>::SetTransformProperty(
+    mitsuba::Properties& props, const MotionTransform& transform) {
   if (transform.IsAnimated()) {
     props.set("to_world", new mitsuba::AnimatedTransform<Float, Spectrum>(
                               transform.samples));
@@ -533,12 +529,8 @@ void SetTransformProperty(mitsuba::Properties& props,
   }
 }
 
-// Updates the "to_world" parameter of the object traversed by `cb`, which
-// must already hold a transform of the same kind (static or animated). The
-// caller is responsible for notifying the object of the change.
-template <typename Float, typename Spectrum>
-void SetTransformParameter(TraversalCallback& cb,
-                           const MotionTransform& transform) {
+MI_VARIANT void PrimTranslator<Float, Spectrum>::SetTransformParameter(
+    TraversalCallback& cb, const MotionTransform& transform) {
   using AffineTransform4f = mitsuba::Transform<mitsuba::Point<Float, 4>, true>;
   using AnimatedTransform = mitsuba::AnimatedTransform<Float, Spectrum>;
   using TensorXf = typename AnimatedTransform::TensorXf;
@@ -560,8 +552,6 @@ void SetTransformParameter(TraversalCallback& cb,
     to_world->parameters_changed();
   }
 }
-
-}  // namespace
 
 MI_VARIANT typename PrimTranslator<Float, Spectrum>::TranslatedLight
 PrimTranslator<Float, Spectrum>::BuildLight(const LightSpec& spec) {
@@ -597,7 +587,7 @@ PrimTranslator<Float, Spectrum>::BuildLightProperties(const LightSpec& spec) {
                                  spec.emission[2]);
   auto make_props = [&](std::string_view plugin) {
     mitsuba::Properties props(plugin);
-    SetTransformProperty<Float, Spectrum>(props, spec.transform);
+    SetTransformProperty(props, spec.transform);
     return props;
   };
   auto make_area_shape_props = [&](std::string_view shape_plugin) {
@@ -664,7 +654,7 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateLightInPlace(
   if (auto* shape = dynamic_cast<mitsuba::Shape<Float, Spectrum>*>(light_obj)) {
     TraversalCallback cb_shape;
     shape->traverse(&cb_shape);
-    SetTransformParameter<Float, Spectrum>(cb_shape, spec.transform);
+    SetTransformParameter(cb_shape, spec.transform);
     shape->parameters_changed();
     if (shape->is_emitter()) {
       auto* area_emitter = shape->emitter();
@@ -681,7 +671,7 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateLightInPlace(
 
     if (spec.prim_type == HdPrimTypeTokens->sphereLight &&
         spec.treat_as_point) {
-      SetTransformParameter<Float, Spectrum>(cb, spec.transform);
+      SetTransformParameter(cb, spec.transform);
       cb.set<Color3f>("intensity.value", Color3f(color[0], color[1], color[2]));
       if (spec.shaping_cone_angle != 0.0f) {
         cb.set<Float>("beam_width", spec.shaping_cone_beam_width);
@@ -692,7 +682,7 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateLightInPlace(
       // emitter in BuildLightProperties, which has "radiance.value" rather than
       // "scale" and "to_world".
       if (cb.data.contains("scale")) {
-        SetTransformParameter<Float, Spectrum>(cb, spec.transform);
+        SetTransformParameter(cb, spec.transform);
         cb.set<Float>("scale", (color[0] + color[1] + color[2]) / 3.f);
         emitter->parameters_changed({"scale", "to_world"});
         return;
@@ -701,7 +691,7 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateLightInPlace(
                         Color3f(color[0], color[1], color[2]));
       }
     } else if (spec.prim_type == HdPrimTypeTokens->distantLight) {
-      SetTransformParameter<Float, Spectrum>(cb, spec.transform);
+      SetTransformParameter(cb, spec.transform);
       cb.set<Color3f>("irradiance.value",
                       Color3f(color[0], color[1], color[2]));
       cb.set<Float>("angle", spec.angle);
@@ -718,7 +708,7 @@ PrimTranslator<Float, Spectrum>::BuildSensor(const CameraSpec& spec,
     props = mitsuba::Properties("irradiancemeter");
   } else {
     props = mitsuba::Properties("perspective");
-    SetTransformProperty<Float, Spectrum>(props, spec.transform);
+    SetTransformProperty(props, spec.transform);
     props.set("fov", spec.fov);
     props.set("fov_axis", "x");
     props.set("principal_point_offset_x", spec.horizontal_aperture_offset);
@@ -763,7 +753,7 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateSensorInPlace(
   sensor->traverse(&cb);
 
   if (spec.dirty_bits & HdCamera::DirtyBits::DirtyTransform) {
-    SetTransformParameter<Float, Spectrum>(cb, spec.transform);
+    SetTransformParameter(cb, spec.transform);
   }
   if (spec.dirty_bits & HdCamera::DirtyBits::DirtyParams) {
     cb.set<ScalarFloat>("near_clip", spec.near_clip);

@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include <vector>
+
 #include <absl/container/flat_hash_map.h>
 #include <absl/synchronization/mutex.h>
 
@@ -22,6 +24,8 @@
 #include <pxr/imaging/hd/instancer.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
+
+#include "hdmitsuba/motion.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -33,10 +37,14 @@ class HdMitsubaInstancer final : public HdInstancer {
   void Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderParam,
             HdDirtyBits* dirtyBits) override;
 
-  VtMatrix4dArray ComputeInstanceTransforms(const SdfPath& prototype_id);
+  std::vector<MotionTransform> ComputeInstanceTransforms(
+      const SdfPath& prototype_id);
 
  private:
-  absl::flat_hash_map<SdfPath, VtMatrix4dArray, SdfPath::Hash>
+  VtMatrix4dArray ComputeInstanceTransformsAtTime(const SdfPath& prototype_id,
+                                                  float time);
+
+  absl::flat_hash_map<SdfPath, std::vector<MotionTransform>, SdfPath::Hash>
       cached_transforms_;
   absl::Mutex cache_mutex_;
 };

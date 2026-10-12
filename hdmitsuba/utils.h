@@ -62,11 +62,12 @@ T GetParam(const HdContainerDataSourceHandle& container, const TfToken& name,
 
 template <typename T>
 T GetParam(const HdContainerDataSourceHandle& container,
-           const HdDataSourceLocator& locator, const T& default_value = T()) {
+           const HdDataSourceLocator& locator, const T& default_value = T(),
+           HdSampledDataSource::Time shutter_offset = 0.0f) {
   if (!container) return default_value;
   if (auto data_source = HdSampledDataSource::Cast(
           HdContainerDataSource::Get(container, locator))) {
-    VtValue value = data_source->GetValue(0.0f);
+    VtValue value = data_source->GetValue(shutter_offset);
     if (value.IsHolding<T>()) {
       return value.UncheckedGet<T>();
     } else {
