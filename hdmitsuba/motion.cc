@@ -123,6 +123,20 @@ float GridTime(const GfVec2f& interval, int i, int n) {
       GfLerp(static_cast<double>(i) / n, interval[0], interval[1]));
 }
 
+// Returns whether `times` (ending with the interval end) lie on the uniform
+// grid with `times.size()` segments over `interval`.
+bool IsUniformlySpaced(const GfVec2f& interval,
+                       const std::vector<float>& times) {
+  const int n = static_cast<int>(times.size());
+  for (int i = 0; i < n; ++i) {
+    if (std::abs(times[i] - GridTime(interval, i + 1, n)) >
+        1e-4 * (interval[1] - interval[0])) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // Appends at most `max_segments` samples of `eval_matrix` in (s0.time, s1.time]
 // to `samples`. Because USD interpolates xformOps before composing matrices
 // while Mitsuba's AnimatedTransform decomposes keyframe matrices into (scale,
@@ -146,12 +160,63 @@ void AppendRefinedSamples(
   samples.emplace_back(s1.time, s1.matrix);
 }
 
+// Evaluates `eval_matrix` at the `n + 1` uniformly spaced grid points over
+// `interval`.
+std::vector<EvaluatedSample> EvaluateGrid(const MatrixEvalFn& eval_matrix,
+                                          const GfVec2f& interval, int n) {
+  std::vector<EvaluatedSample> grid;
+  grid.reserve(n + 1);
+  for (int i = 0; i <= n; ++i) {
+    grid.emplace_back(eval_matrix, GridTime(interval, i, n));
+  }
+  return grid;
+}
+
+// Samples `eval_matrix` on a uniform grid over `interval` with at most
+// `max_samples` points, as required by Mitsuba's `instance` plugin. The grid
+// is seeded with `seed_segments` segments and doubled in lockstep until all
+// segments interpolate accurately, falling back to the finest grid with
+// `max_samples` points if the budget is exhausted before that. Grid times are
+// always snapped to the exact uniform positions: Mitsuba verifies uniformity
+// with a 1e-5 relative tolerance.
+std::vector<EvaluatedSample> SampleUniformGrid(const MatrixEvalFn& eval_matrix,
+                                               const GfVec2f& interval,
+                                               int seed_segments,
+                                               int max_samples) {
+  std::vector<EvaluatedSample> grid =
+      EvaluateGrid(eval_matrix, interval, seed_segments);
+  while (grid.size() < static_cast<size_t>(max_samples)) {
+    const int m = static_cast<int>(grid.size()) - 1;
+    std::vector<EvaluatedSample> next_grid;
+    next_grid.reserve(2 * m + 1);
+    bool accurate = true;
+    for (int i = 0; i < m; ++i) {
+      EvaluatedSample mid(eval_matrix, GridTime(interval, 2 * i + 1, 2 * m));
+      accurate =
+          accurate && !NeedsRefinement(eval_matrix, grid[i], grid[i + 1], mid);
+      next_grid.push_back(grid[i]);
+      next_grid.push_back(std::move(mid));
+    }
+    if (accurate) break;
+    if (2 * m + 1 > max_samples) {
+      return EvaluateGrid(eval_matrix, interval, max_samples - 1);
+    }
+    next_grid.push_back(grid.back());
+    grid = std::move(next_grid);
+  }
+  return grid;
+}
+
 // Samples `eval_matrix` over `interval` (including any `times` strictly inside
-// `interval`) with at most `max_samples` samples, refining segments as needed
-// and collapsing to a static sample if all resulting matrices match.
+// `interval`) with at most `max_samples >= 2` samples, refining segments as
+// needed and collapsing to a static sample if all resulting matrices match.
+// When `uniform` is true, or there are too many `times` to refine adaptively,
+// samples a uniform grid that `times` only seed if they lie on it; otherwise
+// the grid starts from the interval endpoints and refinement discovers the
+// kinks at the authored samples.
 MotionSamples<GfMatrix4d> SampleTransformOverInterval(
     const MatrixEvalFn& eval_matrix, const GfVec2f& interval,
-    std::vector<float> times, int max_samples) {
+    std::vector<float> times, bool uniform, int max_samples) {
   std::sort(times.begin(), times.end());
   times.erase(
       std::remove_if(
@@ -163,7 +228,7 @@ MotionSamples<GfMatrix4d> SampleTransformOverInterval(
 
   MotionSamples<GfMatrix4d> result;
   const int init_segments = static_cast<int>(times.size());
-  if (max_samples > 2 && init_segments < max_samples) {
+  if (!uniform && init_segments < max_samples) {
     EvaluatedSample prev(eval_matrix, interval[0]);
     result.samples.emplace_back(prev.time, prev.matrix);
     const int total_segments = max_samples - 1;
@@ -175,12 +240,13 @@ MotionSamples<GfMatrix4d> SampleTransformOverInterval(
       AppendRefinedSamples(eval_matrix, prev, next, budget, result.samples);
       prev = std::move(next);
     }
-  }
-  if (result.samples.empty()) {
-    result.samples.reserve(max_samples);
-    for (int i = 0; i < max_samples; ++i) {
-      const float t = GridTime(interval, i, max_samples - 1);
-      result.samples.emplace_back(t, eval_matrix(t));
+  } else {
+    const bool seed_with_times =
+        init_segments < max_samples && IsUniformlySpaced(interval, times);
+    for (auto& s : SampleUniformGrid(eval_matrix, interval,
+                                     seed_with_times ? init_segments : 1,
+                                     max_samples)) {
+      result.samples.emplace_back(s.time, std::move(s.matrix));
     }
   }
   return std::move(result).Collapsed();
@@ -210,7 +276,8 @@ int GetMotionSamples(const HdContainerDataSourceHandle& prim_source) {
 }
 
 MotionSamples<GfMatrix4d> SampleTransform(
-    const HdContainerDataSourceHandle& prim_source, const GfVec2f& interval) {
+    const HdContainerDataSourceHandle& prim_source, const GfVec2f& interval,
+    bool uniform) {
   const HdMatrixDataSourceHandle matrix =
       HdXformSchema::GetFromParent(prim_source).GetMatrix();
   if (!matrix) {
@@ -225,11 +292,12 @@ MotionSamples<GfMatrix4d> SampleTransform(
   }
   return SampleTransformOverInterval(
       [&](float t) { return matrix->GetTypedValue(t); }, interval,
-      std::move(times), max_samples);
+      std::move(times), uniform, max_samples);
 }
 
 MotionSamples<GfMatrix4d> SampleTransform(const UsdPrim& prim, UsdTimeCode time,
-                                          const GfVec2f& interval) {
+                                          const GfVec2f& interval,
+                                          bool uniform) {
   UsdGeomImageable imageable(prim);
   if (!imageable) {
     return MotionSamples<GfMatrix4d>::Static(GfMatrix4d(1.0));
@@ -264,7 +332,7 @@ MotionSamples<GfMatrix4d> SampleTransform(const UsdPrim& prim, UsdTimeCode time,
       [&](float offset) {
         return imageable.ComputeLocalToWorldTransform(t0 + offset);
       },
-      interval, std::move(offsets), max_samples);
+      interval, std::move(offsets), uniform, max_samples);
 }
 
 GfVec2f GetMotionInterval(HdSceneDelegate* scene_delegate) {

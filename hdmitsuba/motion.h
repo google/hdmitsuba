@@ -81,11 +81,15 @@ int GetMotionSamples(const HdContainerDataSourceHandle& prim_source);
 // Samples the world transform of `prim_source` (or `prim` at `time`) over
 // `interval` with at most `primvars:mitsuba:motion_samples` samples, adaptively
 // subdividing segments where TRS interpolation deviates from the actual
-// trajectory (e.g. rotations >= 90 deg or orbits).
+// trajectory (e.g. rotations >= 90 deg or orbits). When `uniform` is true,
+// produces uniformly spaced keyframes over `interval` as required by Mitsuba's
+// `instance` plugin.
 MotionSamples<GfMatrix4d> SampleTransform(
-    const HdContainerDataSourceHandle& prim_source, const GfVec2f& interval);
+    const HdContainerDataSourceHandle& prim_source, const GfVec2f& interval,
+    bool uniform = false);
 MotionSamples<GfMatrix4d> SampleTransform(const UsdPrim& prim, UsdTimeCode time,
-                                          const GfVec2f& interval);
+                                          const GfVec2f& interval,
+                                          bool uniform = false);
 
 // Returns the union of the shutter intervals of all cameras in the scene.
 GfVec2f GetMotionInterval(HdSceneDelegate* scene_delegate);

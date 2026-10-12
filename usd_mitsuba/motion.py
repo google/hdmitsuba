@@ -60,11 +60,23 @@ def sample_world_transform(
     transform_fn: Callable[
         [Gf.Matrix4d], mi.ScalarTransform4f
     ] = util.to_mitsuba_transform,
+    uniform: bool = False,
 ) -> mi.ScalarTransform4f | mi.AnimatedTransform4f:
-  """Samples `prim`'s world transform over `interval` as a static or animated transform."""
+  """Samples `prim`'s world transform over `interval` as a static or animated transform.
+
+  Args:
+    prim: The USD prim whose world transform to sample.
+    time: The frame time code.
+    interval: Frame-relative shutter interval `(open, close)`.
+    transform_fn: Function converting each sampled `Gf.Matrix4d` to Mitsuba.
+    uniform: Whether to resample onto uniformly spaced keyframes.
+
+  Returns:
+    A static `mi.ScalarTransform4f` or an `mi.AnimatedTransform4f`.
+  """
   keyframes = [
       (t, transform_fn(m))
-      for t, m in geom_lib.sample_world_transform(prim, time, interval)
+      for t, m in geom_lib.sample_world_transform(prim, time, interval, uniform)
   ]
   if all(m == keyframes[0][1] for _, m in keyframes[1:]):
     return keyframes[0][1]
