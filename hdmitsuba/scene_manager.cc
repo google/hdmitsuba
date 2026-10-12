@@ -1197,6 +1197,11 @@ class SceneModel final : public SceneManager {
         auto sub_meshes =
             RunGeometryPipeline<Float, Spectrum>(spec, work->displacements);
         UpdateSubMeshesInPlace(spec, sub_meshes, kProtoPrefix);
+        auto group_it = shapes_.find(
+            absl::StrCat(kProtoGroupPrefix, spec.id.GetAsString()));
+        if (TF_VERIFY(group_it != shapes_.end())) {
+          group_it->second->parameters_changed();
+        }
       } else {
         UpdateSubMeshesMetadataOnly(spec, kProtoPrefix);
       }
@@ -1482,6 +1487,12 @@ class SceneModel final : public SceneManager {
                              !absl::StartsWith(id, kProtoGroupPrefix);
         if (is_proto_mesh) {
           continue;
+        }
+        if (shape->is_shape_group()) {
+          // The ray tracing backends only (re)build the acceleration structure
+          // of a shape group while it is dirty. A group carried over from the
+          // previous scene has its flag cleared, so re-mark it for the new one.
+          shape->mark_dirty();
         }
         props.set(id, shape.get());
       }
