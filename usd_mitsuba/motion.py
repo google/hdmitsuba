@@ -108,14 +108,14 @@ def to_mitsuba_transform(
 def wrap_in_instance(
     prim_id: str,
     shapes: Iterable[Any],
-    to_world: mi.AnimatedTransform4f,
+    to_world: mi.AnimatedTransform4f | mi.ScalarTransform4f,
 ) -> dict[str, Any]:
-  """Wraps `shapes` in a Mitsuba `shapegroup` and animated `instance`.
+  """Wraps `shapes` in a Mitsuba `shapegroup` and `instance`.
 
   Args:
     prim_id: The Mitsuba ID for the instance.
     shapes: The prototype shapes or dictionaries to group.
-    to_world: The animated instance-to-world transform.
+    to_world: The (possibly animated) instance-to-world transform.
 
   Returns:
     A dictionary containing the `shapegroup` and `instance` entries.

@@ -135,10 +135,43 @@ constexpr std::string_view kInstancePrefix = "instance_";
 template <typename Float, typename Spectrum>
 void SetTransform(mitsuba::Shape<Float, Spectrum>* instance,
                   const MotionTransform& transform) {
-  TraversalCallback cb;
+  TraversalCallback cb("", nullptr, /*recurse_objects=*/transform.IsAnimated());
   instance->traverse(&cb);
   PrimTranslator<Float, Spectrum>::SetTransformParameter(cb, transform);
   instance->parameters_changed({"to_world"});
+}
+
+struct ImplicitSurfacePart {
+  const char* plugin;
+  std::string id;
+  ScalarAffineTransform4f to_world;
+  bool flip_normals = false;
+};
+
+std::vector<ImplicitSurfacePart> GetImplicitSurfaceParts(
+    const SdfPath& id, const ImplicitSurface& surface,
+    const ScalarAffineTransform4f& to_world) {
+  using Transform = ScalarAffineTransform4f;
+  using Vector3f = mitsuba::Vector<float, 3>;
+  const std::string& id_str = id.GetString();
+  const float r = surface.radius, h = surface.height;
+  if (surface.type == HdPrimTypeTokens->sphere) {
+    return {{"sphere", id_str, to_world * Transform::scale(Vector3f(r))}};
+  }
+  // Mitsuba's `cylinder` spans z in [0, 1] and has no caps, whereas USD's is
+  // centered and closed. Mitsuba's `disk` faces +z.
+  const Transform top =
+      to_world * Transform::translate(Vector3f(0.f, 0.f, 0.5f * h));
+  const Transform bottom =
+      to_world * Transform::translate(Vector3f(0.f, 0.f, -0.5f * h));
+  const Transform cap_scale = Transform::scale(Vector3f(r, r, 1.f));
+  return {
+      {"cylinder", absl::StrCat(id_str, "/body"),
+       bottom * Transform::scale(Vector3f(r, r, h))},
+      {"disk", absl::StrCat(id_str, "/cap_top"), top * cap_scale},
+      {"disk", absl::StrCat(id_str, "/cap_bottom"), bottom * cap_scale,
+       /*flip_normals=*/true},
+  };
 }
 
 // Runs the full post-subdivision mesh preparation pipeline on `spec` to produce
@@ -1106,16 +1139,93 @@ class SceneModel final : public SceneManager {
     }
   }
 
-  void CommitNonInstancedMeshWork(MeshCommitWork* work, CommittedMesh& res) {
+  // Builds the native shapes of the implicit surface of `spec` into
+  // `res.meshes`, or updates the existing ones in place. Instance prototypes
+  // are identified by a non-empty `key_prefix` and carry no emitter or sensor.
+  void CommitImplicitSurfaceWork(const MeshSpec& spec,
+                                 std::string_view key_prefix,
+                                 CommittedMesh& res) {
+    const ImplicitSurface& surface = *spec.implicit_surface;
+    const ScalarAffineTransform4f to_world =
+        UsdToMitsubaTransform(spec.transform);
+    const SdfPath& material_id = spec.material_ids[0];
+    ref<BSDF> bsdf = ResolveBsdf(material_id, spec.primvars);
+    const std::vector<ImplicitSurfacePart> parts =
+        GetImplicitSurfaceParts(spec.id, surface, to_world);
+    if (!spec.needs_rebuild) {
+      const bool geometry_dirty = (spec.dirty_bits & kMeshGeometryDirty) != 0;
+      for (const ImplicitSurfacePart& part : parts) {
+        std::string key = absl::StrCat(key_prefix, part.id);
+        auto it = shapes_.find(key);
+        if (!TF_VERIFY(it != shapes_.end(), "Implicit surface not found: %s",
+                       key.c_str())) {
+          continue;
+        }
+        if (geometry_dirty) {
+          SetTransform(it->second.get(),
+                       MotionTransform::Static(part.to_world));
+        }
+        it->second->set_bsdf(bsdf.get());
+      }
+      return;
+    }
+
+    const bool is_prototype = !key_prefix.empty();
+    if (displacements_.contains(material_id)) {
+      TF_WARN(
+          "Displacement on %s is not supported. Set "
+          "HDMITSUBA_TESSELLATE_IMPLICIT_SURFACES=1 to tessellate it instead.",
+          spec.id.GetText());
+    }
+    if (!is_prototype && !surface.SupportsTransform(to_world)) {
+      TF_WARN(
+          "%s has a transform with non-uniform scaling or shearing, which "
+          "requires a Mitsuba instance, but also an emitter or surface sensor, "
+          "which Mitsuba does not support on instances. It renders distorted.",
+          spec.id.GetText());
+    }
+    if (!is_prototype && parts.size() > 1 &&
+        shape_sensors_.contains(spec.id)) {
+      TF_WARN("The surface sensor of %s only measures its side, not its caps.",
+              spec.id.GetText());
+    }
+    for (size_t i = 0; i < parts.size(); ++i) {
+      Properties props(parts[i].plugin);
+      props.set("to_world", parts[i].to_world);
+      props.set("flip_normals", parts[i].flip_normals);
+      // Every part needs an emitter of its own, whereas the sensor can only be
+      // attached to the first one (the empty path matches no sensor).
+      if (!is_prototype) {
+        auto env = ResolveEmitterAndSensor(spec.emitter_spec, material_id,
+                                           i == 0 ? spec.id : SdfPath(),
+                                           spec.double_sided);
+        if (env.emitter_ptr) props.set("emitter", env.emitter_ptr);
+        if (env.sensor_ptr) props.set("sensor", env.sensor_ptr);
+      }
+      auto shape = PluginManager::instance()->create_object<Shape>(props);
+      shape->set_id(parts[i].id);
+      shape->set_bsdf(bsdf.get());
+      res.meshes.push_back(std::move(shape));
+    }
+  }
+
+  void CommitNonInstancedMeshWork(MeshCommitWork* work, CommittedMesh& res,
+                                  std::string_view key_prefix = "") {
     const auto& spec = *(work->spec);
+    if (spec.implicit_surface.has_value()) {
+      CommitImplicitSurfaceWork(spec, key_prefix, res);
+      return;
+    }
     if (spec.needs_rebuild) {
       auto sub_meshes =
           RunGeometryPipeline<Float, Spectrum>(spec, work->displacements);
       res.meshes.reserve(sub_meshes.size());
       for (const auto& sub_mesh : sub_meshes) {
-        auto env = ResolveEmitterAndSensor(spec.emitter_spec,
-                                           sub_mesh.material_id, spec.id,
-                                           spec.double_sided);
+        EmitterSensorPair env;
+        if (key_prefix.empty()) {
+          env = ResolveEmitterAndSensor(spec.emitter_spec, sub_mesh.material_id,
+                                        spec.id, spec.double_sided);
+        }
         ref<BSDF> bsdf = ResolveBsdf(sub_mesh.material_id, sub_mesh.primvars);
         auto mesh = PrimTranslator::BuildMesh(
             sub_mesh.id, sub_mesh.triangles, sub_mesh.primvars,
@@ -1128,14 +1238,15 @@ class SceneModel final : public SceneManager {
     } else if ((spec.dirty_bits & kMeshGeometryDirty) != 0) {
       auto sub_meshes =
           RunGeometryPipeline<Float, Spectrum>(spec, work->displacements);
-      UpdateSubMeshesInPlace(spec, sub_meshes, "");
+      UpdateSubMeshesInPlace(spec, sub_meshes, key_prefix);
     } else {
-      UpdateSubMeshesMetadataOnly(spec, "");
+      UpdateSubMeshesMetadataOnly(spec, key_prefix);
     }
   }
 
   void CommitInstancedMeshWork(MeshCommitWork* work, CommittedMesh& res) {
     const auto& spec = *(work->spec);
+    CommitNonInstancedMeshWork(work, res, kProtoPrefix);
     if (spec.needs_rebuild) {
       if (HasEmitter(spec)) {
         TF_WARN(
@@ -1149,62 +1260,33 @@ class SceneModel final : public SceneManager {
             "not support sensors on instances. Ignoring sensor.",
             spec.id.GetText());
       }
+      if (res.meshes.empty()) return;
 
-      // Run geometry pipeline
-      auto sub_meshes =
-          RunGeometryPipeline<Float, Spectrum>(spec, work->displacements);
-      if (sub_meshes.empty()) return;
-
-      // 1. Build prototype meshes
-      std::vector<mitsuba::ref<Shape>> prototype_shapes;
-      prototype_shapes.reserve(sub_meshes.size());
-      for (const auto& sub_mesh : sub_meshes) {
-        ref<BSDF> bsdf = ResolveBsdf(sub_mesh.material_id, sub_mesh.primvars);
-
-        auto mesh = PrimTranslator::BuildMesh(
-            sub_mesh.id, sub_mesh.triangles, sub_mesh.primvars,
-            ResolveMeshAttributes(sub_mesh.material_id), bsdf.get(), nullptr,
-            nullptr);
-        if (mesh) {
-          prototype_shapes.push_back(mesh);
-          res.meshes.push_back(mesh);
-        }
-      }
-      if (prototype_shapes.empty()) return;
-
-      // 2. Create ShapeGroup wrapping all prototype meshes
+      // Create ShapeGroup wrapping all prototype shapes.
       mitsuba::Properties group_props("shapegroup");
-      for (size_t i = 0; i < prototype_shapes.size(); ++i) {
-        group_props.set("shape_" + std::to_string(i),
-                        prototype_shapes[i].get());
+      for (size_t i = 0; i < res.meshes.size(); ++i) {
+        group_props.set("shape_" + std::to_string(i), res.meshes[i].get());
       }
       res.shapegroup =
           mitsuba::PluginManager::instance()->create_object<Shape>(group_props);
 
-      // 3. Create Instances
+      // Create Instances.
       res.instances.reserve(spec.instance_transforms.size());
       for (const MotionTransform& xform : spec.instance_transforms) {
         mitsuba::Properties inst_props("instance");
         inst_props.set("shapegroup", res.shapegroup.get());
         PrimTranslator::SetTransformProperty(inst_props, xform);
-        mitsuba::ref<Shape> inst =
+        res.instances.push_back(
             mitsuba::PluginManager::instance()->create_object<Shape>(
-                inst_props);
-        res.instances.push_back(inst);
+                inst_props));
       }
     } else {
-      // Update in place
       if ((spec.dirty_bits & kMeshGeometryDirty) != 0) {
-        auto sub_meshes =
-            RunGeometryPipeline<Float, Spectrum>(spec, work->displacements);
-        UpdateSubMeshesInPlace(spec, sub_meshes, kProtoPrefix);
         auto group_it = shapes_.find(
             absl::StrCat(kProtoGroupPrefix, spec.id.GetAsString()));
         if (TF_VERIFY(group_it != shapes_.end())) {
           group_it->second->parameters_changed();
         }
-      } else {
-        UpdateSubMeshesMetadataOnly(spec, kProtoPrefix);
       }
       if (spec.dirty_bits & (HdChangeTracker::DirtyInstancer |
                              HdChangeTracker::DirtyInstanceIndex)) {

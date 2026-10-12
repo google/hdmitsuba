@@ -84,6 +84,10 @@ TF_DEFINE_ENV_SETTING(
 TF_DEFINE_ENV_SETTING(
     HDMITSUBA_USE_KERNEL_FREEZING, -1,
     "Force kernel freezing on (1) or off (0), or use USD settings (-1)");
+TF_DEFINE_ENV_SETTING(
+    HDMITSUBA_TESSELLATE_IMPLICIT_SURFACES, false,
+    "Tessellate all implicit surfaces instead of rendering spheres and "
+    "cylinders as native Mitsuba shapes.");
 
 HdMitsubaConfig::HdMitsubaConfig() {
   variant = TfGetEnvSetting(HDMITSUBA_VARIANT);
@@ -98,9 +102,14 @@ HdMitsubaConfig::HdMitsubaConfig() {
     variant = fallback;
   }
   use_kernel_freezing = TfGetEnvSetting(HDMITSUBA_USE_KERNEL_FREEZING);
+  tessellate_implicit_surfaces =
+      TfGetEnvSetting(HDMITSUBA_TESSELLATE_IMPLICIT_SURFACES);
   if (TfGetEnvSetting(HDMITSUBA_PRINT_CONFIGURATION) > 0) {
-    TF_STATUS("HdMitsuba Configuration:\n  variant             = %s\n  use_kernel_freezing = %d",
-              variant.c_str(), use_kernel_freezing);
+    TF_STATUS(
+        "HdMitsuba Configuration:\n  variant                      = %s\n"
+        "  use_kernel_freezing          = %d\n"
+        "  tessellate_implicit_surfaces = %d",
+        variant.c_str(), use_kernel_freezing, tessellate_implicit_surfaces);
   }
 }
 

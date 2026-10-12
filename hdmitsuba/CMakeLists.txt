@@ -21,6 +21,7 @@ add_library(hdMitsuba SHARED
   config.cc
   debug_codes.cc
   curves.cc
+  implicit_surface.cc
   light.cc
   instancer.cc
   mesh.cc

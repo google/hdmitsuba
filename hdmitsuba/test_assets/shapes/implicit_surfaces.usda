@@ -1,0 +1,90 @@
+#usda 1.0
+(
+    defaultPrim = "root"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "root"
+{
+    def Xform "Camera"
+    {
+        float3 xformOp:rotateXYZ = (63.559296, 2.2983238e-7, 46.691944)
+        double3 xformOp:translate = (4.8382463455200195, -4.495369911193848, 3.1569976806640625)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+
+        def Camera "Camera"
+        {
+            float2 clippingRange = (0.1, 100)
+            float focalLength = 0.5
+            float horizontalAperture = 0.36
+            token projection = "perspective"
+            float verticalAperture = 0.36
+        }
+    }
+
+    def Sphere "Sphere" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.8
+        rel material:binding = </root/_materials/Red>
+        double3 xformOp:translate = (-0.6, 0.9, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cylinder "Cylinder"
+    {
+        uniform token axis = "X"
+        double height = 1.6
+        double radius = 0.4
+        color3f[] primvars:displayColor = [(0.1, 0.6, 0.2)]
+        double3 xformOp:scale = (1, 0.6, 1.2)
+        double3 xformOp:translate = (0.6, -0.9, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    def Cylinder "CylinderZ"
+    {
+        uniform token axis = "Z"
+        double height = 1.2
+        double radius = 0.3
+        color3f[] primvars:displayColor = [(0.2, 0.3, 0.8)]
+        double3 xformOp:translate = (1.3, 1.0, 0.2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Scope "_materials"
+    {
+        def Material "Red"
+        {
+            token outputs:surface.connect = </root/_materials/Red/Principled_BSDF.outputs:surface>
+
+            def Shader "Principled_BSDF"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.8, 0.06, 0.07)
+                float inputs:roughness = 0.4
+                token outputs:surface
+            }
+        }
+    }
+
+    def DomeLight "Environment"
+    {
+        float inputs:intensity = 0.3
+    }
+
+    def Xform "Light"
+    {
+        double3 xformOp:translate = (4.0, 1.0, 5.9)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def SphereLight "Light"
+        {
+            float inputs:intensity = 318.30988
+            bool inputs:normalize = 1
+            float inputs:radius = 0.1
+        }
+    }
+}

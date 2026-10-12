@@ -45,6 +45,7 @@ def _set_mitsuba_variant():
         ('empty_mesh', Usd.TimeCode.Default(), False),
         ('skinned_mesh', Usd.TimeCode(20), True),
         ('gaussian_splats', Usd.TimeCode.Default(), True),
+        ('implicit_surfaces', Usd.TimeCode.Default(), True),
     ],
 )
 def test_render(scene_name: str, time: Usd.TimeCode, expect_non_black: bool):
@@ -336,4 +337,30 @@ def test_subdivision_refinement():
 
   subdiv_primvar.Set(0)
   np.testing.assert_allclose(engine.render()['color'], img_coarse, atol=1e-4)
+
+
+def test_modify_implicit_surfaces():
+  stage = Usd.Stage.Open(
+      f'{test_helpers.TEST_ASSETS_PATH}/shapes/implicit_surfaces.usda'
+  )
+  test_helpers.create_render_settings(stage, resolution=(256, 256))
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin')
+  image_original = engine.render()['color']
+
+  UsdGeom.Sphere.Get(stage, '/root/Sphere').GetRadiusAttr().Set(0.5)
+  UsdGeom.Xformable.Get(stage, '/root/Sphere').AddScaleOp().Set((1.0, 0.5, 1.5))
+  cylinder = UsdGeom.Cylinder.Get(stage, '/root/Cylinder')
+  cylinder.GetHeightAttr().Set(0.8)
+  cylinder.GetAxisAttr().Set(UsdGeom.Tokens.y)
+
+  image_modified, _ = test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      output_prefix='test_modify_implicit_surfaces',
+      atol=0.05,
+      engine=engine,
+  )
+  assert (
+      np.max(np.abs(image_modified[..., :3] - image_original[..., :3])) > 0.2
+  )
 

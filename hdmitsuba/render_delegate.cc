@@ -46,6 +46,7 @@
 #include "hdmitsuba/config.h"
 #include "hdmitsuba/curves.h"
 #include "hdmitsuba/debug_codes.h"
+#include "hdmitsuba/implicit_surface.h"
 #include "hdmitsuba/instancer.h"
 #include "hdmitsuba/light.h"
 #include "hdmitsuba/material.h"
@@ -63,11 +64,15 @@ TF_DEFINE_PUBLIC_TOKENS(HdMitsubaRenderSettingsTokens,
                         HDMITSUBA_RENDER_SETTINGS_TOKENS);
 
 const TfTokenVector& HdMitsubaRenderDelegate::GetSupportedRprimTypes() const {
-  static const TfTokenVector* kSupportedRprimTypes = new TfTokenVector{
-      HdPrimTypeTokens->mesh,
-      HdPrimTypeTokens->basisCurves,
-      HdPrimTypeTokens->particleField,
-  };
+  static const TfTokenVector* kSupportedRprimTypes =
+      HdMitsubaConfig::GetInstance().tessellate_implicit_surfaces
+          ? new TfTokenVector{HdPrimTypeTokens->mesh,
+                              HdPrimTypeTokens->basisCurves,
+                              HdPrimTypeTokens->particleField}
+          : new TfTokenVector{
+                HdPrimTypeTokens->mesh, HdPrimTypeTokens->basisCurves,
+                HdPrimTypeTokens->particleField, HdPrimTypeTokens->sphere,
+                HdPrimTypeTokens->cylinder};
   return *kSupportedRprimTypes;
 }
 
@@ -145,6 +150,9 @@ HdRprim* HdMitsubaRenderDelegate::CreateRprim(const TfToken& typeId,
     return new HdMitsubaCurves(rprimId);
   } else if (typeId == HdPrimTypeTokens->particleField) {
     return new HdMitsubaParticleField(rprimId);
+  } else if (typeId == HdPrimTypeTokens->sphere ||
+             typeId == HdPrimTypeTokens->cylinder) {
+    return new HdMitsubaImplicitSurface(rprimId, typeId);
   }
   return nullptr;
 }

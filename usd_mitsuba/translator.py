@@ -16,12 +16,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import tempfile
 from typing import Any
 
 import mitsuba as mi
 import numpy as np
 
+from pxr import Sdf
+from pxr import Tf
 from pxr import Usd
 from pxr import UsdGeom
 from pxr import UsdLux
@@ -116,6 +119,126 @@ def _convert_plane(
   if emitter is not None:
     mi_plane['emitter'] = emitter
   return _wrap_shape_if_animated(prim, mi_plane, time, motion_interval)
+
+
+def _supports_transform(
+    part: dict[str, Any], to_world: mi.ScalarTransform4f, eps: float = 1e-4
+) -> bool:
+  """Returns whether `part` supports the object-to-world transform `to_world`."""
+  cols = np.array((to_world @ part['to_world']).matrix, dtype=np.float64)[
+      :3, :3
+  ].T
+  lengths = np.linalg.norm(cols, axis=1)
+  axes = lengths if part['type'] == 'sphere' else lengths[:2]
+  return bool(
+      np.all(np.abs(axes - lengths[0]) <= eps * lengths[0])
+      and all(
+          abs(np.dot(cols[i], cols[j])) <= eps * lengths[i] * lengths[j]
+          for i, j in ((0, 1), (0, 2), (1, 2))
+      )
+  )
+
+
+def _convert_implicit_surface(
+    prim: Usd.Prim,
+    time: Usd.TimeCode,
+    sensor_bindings: Mapping[Sdf.Path, Usd.Prim],
+    motion_interval: tuple[float, float],
+) -> dict[str, Any]:
+  """Converts a sphere or cylinder prim to native Mitsuba shapes."""
+  if prim.IsA(UsdGeom.Sphere):
+    radius = UsdGeom.Sphere(prim).GetRadiusAttr().Get(time)
+    parts: dict[str, dict[str, Any]] = {
+        '': {'type': 'sphere', 'to_world': mi.ScalarTransform4f().scale(radius)}
+    }
+  else:
+    if prim.IsA(UsdGeom.Cylinder_1):
+      cylinder = UsdGeom.Cylinder_1(prim)
+      radius = cylinder.GetRadiusBottomAttr().Get(time)
+      if cylinder.GetRadiusTopAttr().Get(time) != radius:
+        Tf.Warn(
+            f'Cylinder {prim.GetPath()} has differing top and bottom radii,'
+            ' which is not supported. Rendering it with its bottom radius.'
+        )
+    else:
+      cylinder = UsdGeom.Cylinder(prim)
+      radius = cylinder.GetRadiusAttr().Get(time)
+    height = cylinder.GetHeightAttr().Get(time)
+    # Rotates the Z-aligned Mitsuba shapes onto the spine axis.
+    axis = {
+        UsdGeom.Tokens.x: mi.ScalarTransform4f(
+            [[0, 0, 1, 0], [1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1]]
+        ),
+        UsdGeom.Tokens.y: mi.ScalarTransform4f(
+            [[0, 1, 0, 0], [0, 0, 1, 0], [1, 0, 0, 0], [0, 0, 0, 1]]
+        ),
+        UsdGeom.Tokens.z: mi.ScalarTransform4f(),
+    }[cylinder.GetAxisAttr().Get(time)]
+    top = axis.translate([0, 0, 0.5 * height])
+    bottom = axis.translate([0, 0, -0.5 * height])
+    parts = {
+        'body': {
+            'type': 'cylinder',
+            'to_world': bottom.scale([radius, radius, height]),
+        },
+        'cap_top': {'type': 'disk', 'to_world': top.scale([radius, radius, 1])},
+        'cap_bottom': {
+            'type': 'disk',
+            'to_world': bottom.scale([radius, radius, 1]),
+            'flip_normals': True,
+        },
+    }
+
+  bsdf, emitter, displacement = material.convert_material(prim)
+  if displacement is not None:
+    raise ValueError(
+        'Displacement is not supported for implicit surfaces. Please use a'
+        ' mesh.'
+    )
+  for i, part in enumerate(parts.values()):
+    if bsdf is not None:
+      part['bsdf'] = bsdf
+    if emitter is not None:
+      part['emitter'] = (
+          emitter if i == 0 else material.convert_material(prim)[1]
+      )
+
+  first_part = next(iter(parts.values()))
+  if sensor_prim := sensor_bindings.get(prim.GetPath()):
+    if len(parts) > 1:
+      Tf.Warn(
+          f'The surface sensor of {prim.GetPath()} only measures its side, not'
+          ' its caps.'
+      )
+    first_part['sensor'] = camera.usd_to_mitsuba(
+        UsdGeom.Camera(sensor_prim), time=time
+    )
+
+  prim_id = util.get_mitsuba_id(prim)
+  if emitter is not None or sensor_prim is not None:
+    to_world = util.get_world_transform(prim, time)
+    if not _supports_transform(first_part, to_world):
+      Tf.Warn(
+          f'{prim.GetPath()} has a transform with non-uniform scaling or'
+          ' shearing, which requires a Mitsuba instance, but also an emitter'
+          ' or surface sensor, which Mitsuba does not support on instances. It'
+          ' renders distorted.'
+      )
+  else:
+    to_world = motion.sample_world_transform(
+        prim, time, motion_interval, uniform=True
+    )
+    if isinstance(to_world, mi.AnimatedTransform4f) or not _supports_transform(
+        first_part, to_world
+    ):
+      return motion.wrap_in_instance(prim_id, parts.values(), to_world)
+  return {
+      (f'{prim_id}_{s}' if s else prim_id): {
+          **part,
+          'to_world': to_world @ part['to_world'],
+      }
+      for s, part in parts.items()
+  }
 
 
 def _create_empty_mitsuba_curve(curve_type: str, bsdf: Any) -> mi.Object:
@@ -332,6 +455,14 @@ def convert_to_mitsuba(
       mi_scene_dict.update(_convert_cube(prim, time, motion_interval))
     elif prim.IsA(UsdGeom.Plane):
       mi_scene_dict.update(_convert_plane(prim, time, motion_interval))
+    elif (
+        prim.IsA(UsdGeom.Sphere)
+        or prim.IsA(UsdGeom.Cylinder)
+        or prim.IsA(UsdGeom.Cylinder_1)
+    ):
+      mi_scene_dict.update(
+          _convert_implicit_surface(prim, time, sensor_bindings, motion_interval)
+      )
     elif prim.IsA(UsdGeom.Camera):
       # A sensor bound to a shape is emitted as part of that shape.
       if camera.get_target_shape_path(prim) is None:

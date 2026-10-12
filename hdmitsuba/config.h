@@ -31,6 +31,10 @@ class HdMitsubaConfig {
   /// Global override for kernel freezing: -1 = use USD settings, 0 = force off, 1 = force on
   int use_kernel_freezing = -1;
 
+  /// Whether to tessellate all implicit surfaces, instead of rendering spheres
+  /// and cylinders as native Mitsuba shapes.
+  bool tessellate_implicit_surfaces = false;
+
  private:
   HdMitsubaConfig();
   ~HdMitsubaConfig() = default;

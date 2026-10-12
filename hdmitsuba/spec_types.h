@@ -15,6 +15,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <optional>
 #include <string>
 
@@ -79,6 +80,33 @@ struct LightSpec : public BaseSpec {
   }
 };
 
+// An implicit surface rendered as a native Mitsuba shape (see
+// HdMitsubaImplicitSurface).
+struct ImplicitSurface {
+  TfToken type;  // HdPrimTypeTokens->sphere or HdPrimTypeTokens->cylinder.
+  float radius = 1.0f;
+  float height = 2.0f;  // Cylinders only, which are centered and aligned with Z.
+
+  // Returns whether the native Mitsuba shape can be placed by `transform`
+  // without distortion. Spheres require a similarity transform, and cylinders
+  // an orthogonal one with uniform scaling in X and Y.
+  bool SupportsTransform(const ScalarAffineTransform4f& transform) const {
+    using Vector3f = mitsuba::Vector<float, 3>;
+    const Vector3f x = transform * Vector3f(1.f, 0.f, 0.f),
+                   y = transform * Vector3f(0.f, 1.f, 0.f),
+                   z = transform * Vector3f(0.f, 0.f, 1.f);
+    const float lx = drjit::norm(x), ly = drjit::norm(y), lz = drjit::norm(z);
+    // Same tolerance as Mitsuba's checks in the `sphere` and `cylinder` plugins.
+    constexpr float kEpsilon = 1e-4f;
+    return std::abs(drjit::dot(x, y)) <= kEpsilon * lx * ly &&
+           std::abs(drjit::dot(x, z)) <= kEpsilon * lx * lz &&
+           std::abs(drjit::dot(y, z)) <= kEpsilon * ly * lz &&
+           std::abs(lx - ly) <= kEpsilon * lx &&
+           (type == HdPrimTypeTokens->cylinder ||
+            std::abs(lx - lz) <= kEpsilon * lx);
+  }
+};
+
 struct MeshSpec : public BaseSpec {
   std::vector<SdfPath> material_ids;
   VtIntArray face_material_indices;
@@ -87,10 +115,14 @@ struct MeshSpec : public BaseSpec {
   PrimvarMap primvars;
   GfMatrix4d transform;
   std::optional<LightSpec> emitter_spec = std::nullopt;
+  // If set, the shape is rendered as this native Mitsuba shape with a single
+  // material, and the topology is unused.
+  std::optional<ImplicitSurface> implicit_surface = std::nullopt;
   // Instance-to-world transforms when rendered through Mitsuba instances. For a
-  // non-instanced mesh with an animated transform this holds a single entry and
-  // `motion_wrapped` is set; `transform` then still holds the static transform
-  // at frame time so the SceneManager can fall back to it.
+  // non-instanced mesh with an animated transform (or an implicit surface whose
+  // transform is not supported by its native shape) this holds a single entry
+  // and `motion_wrapped` is set; `transform` then still holds the static
+  // transform at frame time so the SceneManager can fall back to it.
   std::vector<MotionTransform> instance_transforms;
   bool motion_wrapped = false;
   bool is_subdivided = false;

@@ -16,7 +16,9 @@
 // Scene-index plugins for HdMitsuba.
 //
 // Contents:
-// - A scene index converting implicit surfaces to meshes.
+// - A scene index converting implicit surfaces without a native Mitsuba
+//   equivalent to meshes. Spheres and cylinders are kept as implicit surfaces
+//   (see implicit_surface.h).
 // - A scene index publishing the motion interval (the union of all camera
 //   shutter intervals) on the absolute root prim, and invalidating light
 //   transforms when it changes. This is the only data source contributed here.
@@ -63,6 +65,7 @@
 #include <pxr/usdImaging/usdImaging/types.h>
 
 #include "hdmitsuba/camera.h"
+#include "hdmitsuba/config.h"
 #include "hdmitsuba/mesh.h"
 #include "hdmitsuba/motion.h"
 
@@ -197,6 +200,8 @@ class HdMitsuba_MotionIntervalSceneIndex final
     for (const SdfPath& path : HdSceneIndexPrimView(input)) {
       const TfToken& type = input->GetPrim(path).primType;
       if (HdPrimTypeIsLight(type) || type == HdPrimTypeTokens->mesh ||
+          type == HdPrimTypeTokens->sphere ||
+          type == HdPrimTypeTokens->cylinder ||
           type == HdPrimTypeTokens->instancer) {
         dirtied.emplace_back(path, HdXformSchema::GetDefaultLocator());
       }
@@ -209,6 +214,12 @@ class HdMitsuba_MotionIntervalSceneIndex final
 };
 
 // Converts implicit surfaces to meshes and publishes the motion interval.
+//
+// Spheres pass through as native implicit surfaces, and cylinders get their
+// spine axis folded into the transform (so that they are always aligned with
+// Z). All other implicit surfaces have no native Mitsuba equivalent and are
+// tessellated, as is everything if HDMITSUBA_TESSELLATE_IMPLICIT_SURFACES is
+// set.
 class HdMitsuba_SceneIndexPlugin : public HdSceneIndexPlugin {
  protected:
   HdSceneIndexBaseRefPtr _AppendSceneIndex(
@@ -217,14 +228,22 @@ class HdMitsuba_SceneIndexPlugin : public HdSceneIndexPlugin {
     const HdDataSourceBaseHandle to_mesh =
         HdRetainedTypedSampledDataSource<TfToken>::New(
             HdsiImplicitSurfaceSceneIndexTokens->toMesh);
+    const bool tessellate_all =
+        HdMitsubaConfig::GetInstance().tessellate_implicit_surfaces;
     return HdMitsuba_MotionIntervalSceneIndex::New(
         HdsiImplicitSurfaceSceneIndex::New(
             input_scene,
             HdRetainedContainerDataSource::New(
-                HdPrimTypeTokens->sphere, to_mesh, HdPrimTypeTokens->cube,
-                to_mesh, HdPrimTypeTokens->cone, to_mesh,
-                HdPrimTypeTokens->cylinder, to_mesh, HdPrimTypeTokens->capsule,
-                to_mesh, HdPrimTypeTokens->plane, to_mesh)));
+                HdPrimTypeTokens->sphere,
+                tessellate_all ? to_mesh : HdDataSourceBaseHandle(),
+                HdPrimTypeTokens->cube, to_mesh, HdPrimTypeTokens->cone,
+                to_mesh, HdPrimTypeTokens->cylinder,
+                tessellate_all ? to_mesh
+                               : HdRetainedTypedSampledDataSource<TfToken>::New(
+                                     HdsiImplicitSurfaceSceneIndexTokens
+                                         ->axisToTransform),
+                HdPrimTypeTokens->capsule, to_mesh, HdPrimTypeTokens->plane,
+                to_mesh)));
   }
 };
 
