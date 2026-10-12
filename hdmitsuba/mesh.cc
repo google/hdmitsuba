@@ -51,6 +51,7 @@
 #include "hdmitsuba/instancer.h"
 #include "hdmitsuba/mesh/geometry_processor.h"
 #include "hdmitsuba/mesh/subdivision.h"
+#include "hdmitsuba/motion.h"
 #include "hdmitsuba/render_param.h"
 #include "hdmitsuba/scene_manager.h"
 #include "hdmitsuba/spec_types.h"
@@ -525,7 +526,8 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
     for (auto const& [token, descriptor] : primvar_descriptors) {
       // Skip explicitly handled attributes
       if (token == HdTokens->points || token == HdTokens->normals ||
-          token == HdMitsubaMeshTokens->subdivision_level) {
+          token == HdMitsubaMeshTokens->subdivision_level ||
+          token == HdMitsubaMotionTokens->motion_samples) {
         continue;
       }
       TF_DEBUG(HDMITSUBA_SYNC).Msg("SyncPrimvar: %s\n", token.GetText());

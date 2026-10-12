@@ -45,6 +45,7 @@
 #include <pxr/imaging/hd/lightSchema.h>
 #include <pxr/imaging/hd/materialSchema.h>
 #include <pxr/imaging/hd/overlayContainerDataSource.h>
+#include <pxr/imaging/hd/primvarsSchema.h>
 #include <pxr/imaging/hd/retainedDataSource.h>
 #include <pxr/imaging/hd/sceneIndexPlugin.h>
 #include <pxr/imaging/hd/sceneIndexPluginRegistry.h>
@@ -138,14 +139,22 @@ class HdMitsuba_MotionIntervalSceneIndex final
     static const HdDataSourceLocatorSet shutter_locators{
         HdCameraSchema::GetShutterOpenLocator(),
         HdCameraSchema::GetShutterCloseLocator()};
+    static const HdDataSourceLocator motion_samples_locator =
+        HdPrimvarsSchema::GetDefaultLocator().Append(
+            HdMitsubaMotionTokens->motion_samples);
+    HdSceneIndexObserver::DirtiedPrimEntries extra;
     for (const auto& entry : entries) {
       if (auto it = shutters_.find(entry.primPath);
           it != shutters_.end() &&
           entry.dirtyLocators.Intersects(shutter_locators)) {
         it->second = GetShutter(entry.primPath);
       }
+      if (entry.dirtyLocators.Intersects(motion_samples_locator)) {
+        extra.emplace_back(entry.primPath, HdXformSchema::GetDefaultLocator());
+      }
     }
     _SendPrimsDirtied(entries);
+    if (!extra.empty()) _SendPrimsDirtied(extra);
     UpdateMotionInterval();
   }
 

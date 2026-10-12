@@ -20,6 +20,7 @@ import mitsuba as mi
 import numpy as np
 import pytest
 
+from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
 from usd_mitsuba import motion
@@ -49,6 +50,18 @@ def test_sample_world_transform():
   )
   assert list(transform.eval(-0.5).translation()) == [0, 1, 0]
   assert list(transform.eval(0.5).translation()) == [1, 1, 0]
+
+  # `primvars:mitsuba:motion_samples` is inherited from ancestors and controls
+  # the sample count (1 disables motion blur on the prim).
+  motion_samples_pv = UsdGeom.PrimvarsAPI(
+      stage.GetPrimAtPath("/World")
+  ).CreatePrimvar("mitsuba:motion_samples", Sdf.ValueTypeNames.Int)
+  motion_samples_pv.Set(1)
+  assert isinstance(
+      motion.sample_world_transform(prim, Usd.TimeCode(0.5), (-0.5, 0.5)),
+      mi.ScalarTransform4f,
+  )
+  motion_samples_pv.GetAttr().Clear()
 
   # Static cases: constant transform_fn, empty interval, default time, or
   # interval over which the value is constant.
@@ -83,17 +96,29 @@ def test_sample_world_transform_subdivides_curved_motion():
   rotate_op.Set(360.0, 1.0)
   child = UsdGeom.Xform.Define(stage, "/Pivot/Child")
   child.AddTranslateOp().Set((2, 0, 0))
+  prim = child.GetPrim()
 
   # A 360-degree orbit requires intermediate keyframes and tracks the circle.
+  # The chord error of the 31 segments of the default 32-sample budget is
+  # ~1.03e-2, hence the tolerance.
   transform = motion.sample_world_transform(
-      child.GetPrim(), Usd.TimeCode(0.5), (-0.5, 0.5)
+      prim, Usd.TimeCode(0.5), (-0.5, 0.5)
   )
   assert isinstance(transform, mi.AnimatedTransform4f)
   np.testing.assert_allclose(
-      transform.eval(-0.25).translation(), [0, 0, -2], atol=1e-2
+      transform.eval(-0.25).translation(), [0, 0, -2], atol=2e-2
   )
   np.testing.assert_allclose(
-      transform.eval(0.0).translation(), [-2, 0, 0], atol=1e-2
+      transform.eval(0.0).translation(), [-2, 0, 0], atol=2e-2
+  )
+
+  # Capping `primvars:mitsuba:motion_samples` limits adaptive subdivision.
+  UsdGeom.PrimvarsAPI(prim).CreatePrimvar(
+      "mitsuba:motion_samples", Sdf.ValueTypeNames.Int
+  ).Set(5)
+  capped = motion.sample_world_transform(prim, Usd.TimeCode(0.5), (-0.5, 0.5))
+  np.testing.assert_allclose(
+      mi.traverse(capped)["times"], np.linspace(-0.5, 0.5, 5)
   )
 
 

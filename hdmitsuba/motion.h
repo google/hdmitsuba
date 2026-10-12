@@ -30,8 +30,11 @@
 PXR_NAMESPACE_OPEN_SCOPE
 
 // Root-prim data-source key publishing the union of all camera shutter
-// intervals from HdMitsuba_MotionIntervalSceneIndex to HdMitsubaLight::Sync.
-#define HDMITSUBA_MOTION_TOKENS ((motion_interval, "mitsuba:motion_interval"))
+// intervals from HdMitsuba_MotionIntervalSceneIndex, and per-prim primvar
+// controlling the maximum number of transform motion samples.
+#define HDMITSUBA_MOTION_TOKENS                  \
+  ((motion_interval, "mitsuba:motion_interval")) \
+  ((motion_samples, "mitsuba:motion_samples"))
 
 TF_DECLARE_PUBLIC_TOKENS(HdMitsubaMotionTokens, HDMITSUBA_MOTION_TOKENS);
 
@@ -48,28 +51,37 @@ struct MotionSamples {
     return samples.front().second;
   }
 
+  // Returns these samples, collapsed to Static if all values match.
+  MotionSamples Collapsed() && {
+    if (std::all_of(samples.begin() + 1, samples.end(),
+                    [&](const auto& s) { return s.second == First(); })) {
+      return Static(First());
+    }
+    return std::move(*this);
+  }
+
   // Maps every sample through `f`, collapsing to Static if all results match.
   template <typename F>
   auto Map(F&& f) const {
-    using U = decltype(f(First()));
-    MotionSamples<U> result;
+    MotionSamples<decltype(f(First()))> result;
     result.samples.reserve(samples.size());
     for (const auto& [time, value] : samples) {
       result.samples.emplace_back(time, f(value));
     }
-    if (std::all_of(result.samples.begin() + 1, result.samples.end(),
-                    [&](const auto& s) { return s.second == result.First(); })) {
-      return MotionSamples<U>::Static(result.First());
-    }
-    return result;
+    return std::move(result).Collapsed();
   }
 };
 
 using MotionTransform = MotionSamples<ScalarAffineTransform4f>;
 
+// Returns `primvars:mitsuba:motion_samples` on `prim_source`, or the default
+// of 32 if unauthored.
+int GetMotionSamples(const HdContainerDataSourceHandle& prim_source);
+
 // Samples the world transform of `prim_source` (or `prim` at `time`) over
-// `interval`, adaptively subdividing segments where TRS interpolation deviates
-// from the actual trajectory (e.g. rotations >= 90 deg or orbits).
+// `interval` with at most `primvars:mitsuba:motion_samples` samples, adaptively
+// subdividing segments where TRS interpolation deviates from the actual
+// trajectory (e.g. rotations >= 90 deg or orbits).
 MotionSamples<GfMatrix4d> SampleTransform(
     const HdContainerDataSourceHandle& prim_source, const GfVec2f& interval);
 MotionSamples<GfMatrix4d> SampleTransform(const UsdPrim& prim, UsdTimeCode time,

@@ -28,6 +28,7 @@
 #include <pxr/base/gf/vec3d.h>
 #include <pxr/base/tf/diagnostic.h>
 #include <pxr/imaging/hd/dataSource.h>
+#include <pxr/imaging/hd/primvarsSchema.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/imaging/hd/xformSchema.h>
 #include <pxr/pxr.h>
@@ -35,6 +36,8 @@
 #include <pxr/usd/usd/prim.h>
 #include <pxr/usd/usd/timeCode.h>
 #include <pxr/usd/usdGeom/imageable.h>
+#include <pxr/usd/usdGeom/primvar.h>
+#include <pxr/usd/usdGeom/primvarsAPI.h>
 #include <pxr/usd/usdGeom/xformOp.h>
 #include <pxr/usd/usdGeom/xformable.h>
 
@@ -46,8 +49,9 @@ TF_DEFINE_PUBLIC_TOKENS(HdMitsubaMotionTokens, HDMITSUBA_MOTION_TOKENS);
 
 namespace {
 
+constexpr int kDefaultMotionSamples = 32;
+
 // Tolerances of the keyframe refinement in `SampleTransform`.
-constexpr int kMaxRefinementDepth = 5;
 constexpr double kMaxRotationErrorDegrees = 1.0;
 // Keeps segments well below 180 degrees, where the shortest arc is ambiguous.
 constexpr double kMaxSegmentRotationDegrees = 90.0;
@@ -98,26 +102,44 @@ bool IsInterpolatedAccurately(const EvaluatedSample& a,
                              actual.rotation, kMaxRotationErrorDegrees);
 }
 
-// Appends samples of `eval_matrix` in (s0.time, s1.time] to `samples`.
-// Because USD interpolates xformOps before composing matrices while Mitsuba's
-// AnimatedTransform decomposes keyframe matrices into (scale, quat,
-// translation) and slerps along the shortest arc, segments with large (>= 90
-// deg) rotations or curved/orbiting trajectories are adaptively subdivided.
+// Returns whether the segment (s0, s1) must be subdivided: it spans a large
+// rotation, or TRS interpolation deviates from the actual trajectory at its
+// midpoint `s_mid` or at its quarter point (which catches trajectories that
+// happen to agree at the midpoint, e.g. symmetric wobbles).
+bool NeedsRefinement(const MatrixEvalFn& eval_matrix, const EvaluatedSample& s0,
+                     const EvaluatedSample& s1, const EvaluatedSample& s_mid) {
+  return !RotationAngleAtMost(s0.rotation, s1.rotation,
+                              kMaxSegmentRotationDegrees) ||
+         !IsInterpolatedAccurately(s0, s1, 0.5, s_mid) ||
+         !IsInterpolatedAccurately(
+             s0, s1, 0.25,
+             EvaluatedSample(eval_matrix, GfLerp(0.25, s0.time, s1.time)));
+}
+
+// Returns the time of the `i`-th of `n + 1` uniformly spaced grid points over
+// `interval`.
+float GridTime(const GfVec2f& interval, int i, int n) {
+  return static_cast<float>(
+      GfLerp(static_cast<double>(i) / n, interval[0], interval[1]));
+}
+
+// Appends at most `max_segments` samples of `eval_matrix` in (s0.time, s1.time]
+// to `samples`. Because USD interpolates xformOps before composing matrices
+// while Mitsuba's AnimatedTransform decomposes keyframe matrices into (scale,
+// quat, translation) and slerps along the shortest arc, segments with large
+// (>= 90 deg) rotations or curved/orbiting trajectories are adaptively
+// subdivided.
 void AppendRefinedSamples(
     const MatrixEvalFn& eval_matrix, const EvaluatedSample& s0,
-    const EvaluatedSample& s1, int depth,
+    const EvaluatedSample& s1, int max_segments,
     std::vector<std::pair<float, GfMatrix4d>>& samples) {
-  if (depth < kMaxRefinementDepth) {
-    const auto eval_at = [&](double alpha) {
-      return EvaluatedSample(eval_matrix, GfLerp(alpha, s0.time, s1.time));
-    };
-    const EvaluatedSample s_mid = eval_at(0.5);
-    if (!RotationAngleAtMost(s0.rotation, s1.rotation,
-                             kMaxSegmentRotationDegrees) ||
-        !IsInterpolatedAccurately(s0, s1, 0.5, s_mid) ||
-        !IsInterpolatedAccurately(s0, s1, 0.25, eval_at(0.25))) {
-      AppendRefinedSamples(eval_matrix, s0, s_mid, depth + 1, samples);
-      AppendRefinedSamples(eval_matrix, s_mid, s1, depth + 1, samples);
+  if (max_segments > 1) {
+    const EvaluatedSample s_mid(eval_matrix, GfLerp(0.5, s0.time, s1.time));
+    if (NeedsRefinement(eval_matrix, s0, s1, s_mid)) {
+      const int left = max_segments / 2;
+      AppendRefinedSamples(eval_matrix, s0, s_mid, left, samples);
+      AppendRefinedSamples(eval_matrix, s_mid, s1, max_segments - left,
+                           samples);
       return;
     }
   }
@@ -125,32 +147,67 @@ void AppendRefinedSamples(
 }
 
 // Samples `eval_matrix` over `interval` (including any `times` strictly inside
-// `interval`), refining each segment and collapsing to a static sample if all
-// resulting matrices match.
+// `interval`) with at most `max_samples` samples, refining segments as needed
+// and collapsing to a static sample if all resulting matrices match.
 MotionSamples<GfMatrix4d> SampleTransformOverInterval(
     const MatrixEvalFn& eval_matrix, const GfVec2f& interval,
-    std::vector<float> times) {
+    std::vector<float> times, int max_samples) {
   std::sort(times.begin(), times.end());
+  times.erase(
+      std::remove_if(
+          times.begin(), times.end(),
+          [&](float t) { return t <= interval[0] || t >= interval[1]; }),
+      times.end());
+  times.erase(std::unique(times.begin(), times.end()), times.end());
   times.push_back(interval[1]);
 
   MotionSamples<GfMatrix4d> result;
-  EvaluatedSample prev(eval_matrix, interval[0]);
-  result.samples.emplace_back(prev.time, prev.matrix);
-  for (float t : times) {
-    if (t > prev.time && t <= interval[1]) {
-      EvaluatedSample next(eval_matrix, t);
-      AppendRefinedSamples(eval_matrix, prev, next, 0, result.samples);
+  const int init_segments = static_cast<int>(times.size());
+  if (max_samples > 2 && init_segments < max_samples) {
+    EvaluatedSample prev(eval_matrix, interval[0]);
+    result.samples.emplace_back(prev.time, prev.matrix);
+    const int total_segments = max_samples - 1;
+    for (int i = 0; i < init_segments; ++i) {
+      EvaluatedSample next(eval_matrix, times[i]);
+      // Splits the segment budget as evenly as possible over `times`.
+      const int budget = (total_segments * (i + 1)) / init_segments -
+                         (total_segments * i) / init_segments;
+      AppendRefinedSamples(eval_matrix, prev, next, budget, result.samples);
       prev = std::move(next);
     }
   }
-  if (std::all_of(result.samples.begin() + 1, result.samples.end(),
-                  [&](const auto& s) { return s.second == result.First(); })) {
-    return MotionSamples<GfMatrix4d>::Static(result.First());
+  if (result.samples.empty()) {
+    result.samples.reserve(max_samples);
+    for (int i = 0; i < max_samples; ++i) {
+      const float t = GridTime(interval, i, max_samples - 1);
+      result.samples.emplace_back(t, eval_matrix(t));
+    }
   }
-  return result;
+  return std::move(result).Collapsed();
+}
+
+// Returns `primvars:mitsuba:motion_samples` on `prim` or its closest ancestor,
+// or `kDefaultMotionSamples` if unauthored.
+int GetUsdMotionSamples(const UsdPrim& prim) {
+  int samples = kDefaultMotionSamples;
+  if (UsdGeomPrimvar pv = UsdGeomPrimvarsAPI(prim).FindPrimvarWithInheritance(
+          HdMitsubaMotionTokens->motion_samples);
+      pv && !pv.Get(&samples)) {
+    TF_WARN("Ignoring %s on %s: expected an int.",
+            pv.GetName().GetText(), prim.GetPath().GetText());
+  }
+  return samples;
 }
 
 }  // namespace
+
+int GetMotionSamples(const HdContainerDataSourceHandle& prim_source) {
+  return GetParam<int>(
+      HdPrimvarsSchema::GetFromParent(prim_source).GetContainer(),
+      HdDataSourceLocator(HdMitsubaMotionTokens->motion_samples,
+                          HdPrimvarSchemaTokens->primvarValue),
+      kDefaultMotionSamples);
+}
 
 MotionSamples<GfMatrix4d> SampleTransform(
     const HdContainerDataSourceHandle& prim_source, const GfVec2f& interval) {
@@ -159,15 +216,16 @@ MotionSamples<GfMatrix4d> SampleTransform(
   if (!matrix) {
     return MotionSamples<GfMatrix4d>::Static(GfMatrix4d(1.0));
   }
+  const int max_samples = GetMotionSamples(prim_source);
   std::vector<float> times;
-  if (interval[1] <= interval[0] ||
+  if (max_samples <= 1 || interval[1] <= interval[0] ||
       !matrix->GetContributingSampleTimesForInterval(interval[0], interval[1],
                                                      &times)) {
     return MotionSamples<GfMatrix4d>::Static(matrix->GetTypedValue(0.0f));
   }
   return SampleTransformOverInterval(
       [&](float t) { return matrix->GetTypedValue(t); }, interval,
-      std::move(times));
+      std::move(times), max_samples);
 }
 
 MotionSamples<GfMatrix4d> SampleTransform(const UsdPrim& prim, UsdTimeCode time,
@@ -176,8 +234,9 @@ MotionSamples<GfMatrix4d> SampleTransform(const UsdPrim& prim, UsdTimeCode time,
   if (!imageable) {
     return MotionSamples<GfMatrix4d>::Static(GfMatrix4d(1.0));
   }
+  const int max_samples = GetUsdMotionSamples(prim);
   std::vector<UsdGeomXformOp> ops;
-  if (interval[1] > interval[0] && time.IsNumeric()) {
+  if (max_samples > 1 && interval[1] > interval[0] && time.IsNumeric()) {
     for (UsdPrim p = prim; p; p = p.GetParent()) {
       if (UsdGeomXformable xformable{p}) {
         bool resets_xform_stack = false;
@@ -205,7 +264,7 @@ MotionSamples<GfMatrix4d> SampleTransform(const UsdPrim& prim, UsdTimeCode time,
       [&](float offset) {
         return imageable.ComputeLocalToWorldTransform(t0 + offset);
       },
-      interval, std::move(offsets));
+      interval, std::move(offsets), max_samples);
 }
 
 GfVec2f GetMotionInterval(HdSceneDelegate* scene_delegate) {
