@@ -73,6 +73,16 @@ class SdrMitsubaDiscoveryPlugin : public SdrDiscoveryPlugin {
         "lut",
         "mesh_attribute",
         "volume",
+        "constvolume",
+        "gridvolume",
+        "homogeneous",
+        "heterogeneous",
+        "isotropic",
+        "hg",
+        "rayleigh",
+        "blendphase",
+        "sggx",
+        "tabphase",
     };
     ret.reserve(nodes->size());
     for (const auto& node : *nodes) {

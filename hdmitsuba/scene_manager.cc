@@ -475,6 +475,9 @@ class SceneModel final : public SceneManager {
     if (mesh_attributes_.erase(id) > 0) {
       dirty_flags |= DirtyFlags::kNeedsStructureRebuild;
     }
+    if (interior_media_.erase(id) > 0) {
+      dirty_flags |= DirtyFlags::kNeedsStructureRebuild;
+    }
     material_dirty_flags_[id] |= dirty_flags;
     texture_cache_.MarkDirty();
     scene_dirty_ = true;
@@ -867,6 +870,8 @@ class SceneModel final : public SceneManager {
            trans.shape_emitter_props ? &*trans.shape_emitter_props : nullptr);
     update(mesh_attributes_,
            !trans.mesh_attributes.empty() ? &trans.mesh_attributes : nullptr);
+    update(interior_media_,
+           trans.interior_medium ? &trans.interior_medium : nullptr);
     return dirty_flags;
   }
 
@@ -1139,6 +1144,11 @@ class SceneModel final : public SceneManager {
     }
   }
 
+  Object* ResolveInteriorMedium(const SdfPath& material_id) {
+    auto it = interior_media_.find(material_id);
+    return it != interior_media_.end() ? it->second.get() : nullptr;
+  }
+
   // Builds the native shapes of the implicit surface of `spec` into
   // `res.meshes`, or updates the existing ones in place. Instance prototypes
   // are identified by a non-empty `key_prefix` and carry no emitter or sensor.
@@ -1189,10 +1199,12 @@ class SceneModel final : public SceneManager {
       TF_WARN("The surface sensor of %s only measures its side, not its caps.",
               spec.id.GetText());
     }
+    Object* interior_medium = ResolveInteriorMedium(material_id);
     for (size_t i = 0; i < parts.size(); ++i) {
       Properties props(parts[i].plugin);
       props.set("to_world", parts[i].to_world);
       props.set("flip_normals", parts[i].flip_normals);
+      if (interior_medium) props.set("interior", interior_medium);
       // Every part needs an emitter of its own, whereas the sensor can only be
       // attached to the first one (the empty path matches no sensor).
       if (!is_prototype) {
@@ -1227,10 +1239,11 @@ class SceneModel final : public SceneManager {
                                         spec.id, spec.double_sided);
         }
         ref<BSDF> bsdf = ResolveBsdf(sub_mesh.material_id, sub_mesh.primvars);
+        Object* interior_medium = ResolveInteriorMedium(sub_mesh.material_id);
         auto mesh = PrimTranslator::BuildMesh(
             sub_mesh.id, sub_mesh.triangles, sub_mesh.primvars,
             ResolveMeshAttributes(sub_mesh.material_id), bsdf.get(),
-            env.emitter_ptr, env.sensor_ptr);
+            env.emitter_ptr, env.sensor_ptr, interior_medium);
         if (mesh) {
           res.meshes.push_back(mesh);
         }
@@ -1681,6 +1694,7 @@ class SceneModel final : public SceneManager {
       material_emitters_;
   absl::flat_hash_map<SdfPath, MeshAttributeRequests, SdfPath::Hash>
       mesh_attributes_;
+  absl::flat_hash_map<SdfPath, ref<Object>, SdfPath::Hash> interior_media_;
   ref<BSDF> default_bsdf_ = nullptr;
   absl::flat_hash_map<std::tuple<float, float, float>, ref<BSDF>> color_bsdfs_;
   absl::Mutex color_bsdfs_mutex_;

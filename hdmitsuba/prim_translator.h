@@ -87,6 +87,7 @@ struct TranslatedMaterial {
   mitsuba::ref<mitsuba::Object> bsdf = nullptr;
   std::optional<mitsuba::Properties> shape_emitter_props = std::nullopt;
   MaterialDisplacement displacement;
+  mitsuba::ref<mitsuba::Object> interior_medium = nullptr;
   // Primvars that the BSDF and shape emitter read as mesh attributes.
   MeshAttributeRequests mesh_attributes;
 };
@@ -134,7 +135,7 @@ class PrimTranslator {
       const SdfPath& id, const VtIntArray& face_indices,
       const PrimvarMap& primvars, const MeshAttributeRequests& mesh_attributes,
       mitsuba::Object* bsdf, mitsuba::Object* emitter_ptr,
-      mitsuba::Object* sensor_ptr);
+      mitsuba::Object* sensor_ptr, mitsuba::Object* interior_medium = nullptr);
 
   static void UpdateMeshInPlace(mitsuba::Object* mesh_obj,
                                 const VtIntArray& face_indices,
@@ -155,7 +156,7 @@ class PrimTranslator {
   static mitsuba::Properties BuildLightProperties(const LightSpec& spec);
 
   static mitsuba::ref<mitsuba::BSDF<Float, Spectrum>> DefaultBsdf(
-      std::string_view id_str);
+      std::string_view id_str, std::string_view plugin_name = "diffuse");
 
   static TranslatedMaterial ParsePreviewSurface(
       const HdMaterialNetwork2& network2,

@@ -36,6 +36,18 @@ from usd_mitsuba.material import USD_TO_MI_PRINCIPLED_RENAMING
 
 MI_SINGLE_CHANNEL_PROPERTY = ('roughness', 'eta', 'scale')
 
+_SUPPORTED_ROOT_OBJECT_TYPES = (
+    mi.ObjectType.BSDF,
+    mi.ObjectType.Medium,
+)
+
+_SUPPORTED_CHILD_OBJECT_TYPES = (
+    mi.ObjectType.BSDF,
+    mi.ObjectType.PhaseFunction,
+    mi.ObjectType.Volume,
+    mi.ObjectType.Medium,
+)
+
 MI_TO_USD_PRINCIPLED_RENAMING = {
     v: k for k, v in USD_TO_MI_PRINCIPLED_RENAMING.items()
 }
@@ -175,19 +187,31 @@ def _convert_mitsuba_node_to_usd(
                     shader.CreateInput(key, output_type).ConnectToSource(
                         tex_shader.ConnectableAPI(), output_channel
                     )
-            elif child_node.type == mi.ObjectType.BSDF:
-                bsdf_shader_path = material_path.AppendPath(key)
-                bsdf_shader = UsdShade.Shader.Define(stage, bsdf_shader_path)
+            elif child_node.type in _SUPPORTED_CHILD_OBJECT_TYPES:
+                child_shader_path = material_path.AppendPath(key)
+                child_shader = UsdShade.Shader.Define(stage, child_shader_path)
                 _convert_mitsuba_node_to_usd(
-                    stage, bsdf_shader_path, bsdf_shader, state, child_node
+                    stage, child_shader_path, child_shader, state, child_node
                 )
-                if not bsdf_shader.GetOutput('out'):
-                    bsdf_shader.CreateOutput('out', Sdf.ValueTypeNames.Token)
-                shader.CreateInput(key, Sdf.ValueTypeNames.Token).ConnectToSource(
-                    bsdf_shader.ConnectableAPI(), 'out'
+                child_shader.CreateOutput('out', Sdf.ValueTypeNames.Token)
+                child_input = shader.CreateInput(
+                    key, Sdf.ValueTypeNames.Token
+                )
+                child_input.ConnectToSource(
+                    child_shader.ConnectableAPI(), 'out'
+                )
+            else:
+                raise ValueError(
+                    f'Unsupported child object type: {child_node.type}'
                 )
         else:
-            sdf_type, sdf_val = _get_sdf_type_and_value(prop_val)
+            if key == 'filename' and isinstance(prop_val, str):
+                sdf_type, sdf_val = (
+                    Sdf.ValueTypeNames.Asset,
+                    Sdf.AssetPath(prop_val),
+                )
+            else:
+                sdf_type, sdf_val = _get_sdf_type_and_value(prop_val)
             if sdf_type:
                 shader.CreateInput(key, sdf_type).Set(sdf_val)
 
@@ -199,26 +223,29 @@ def add_mitsuba_shader(
 ) -> UsdShade.Shader:
     """Adds a Mitsuba shader to a USD stage.
 
-    This function converts a Mitsuba BSDF in dictionary format to a USD shader.
-    It supports all standard Mitsuba BSDFs, including normal and bumpmaps.
+    This function converts a Mitsuba BSDF or Medium in dictionary format to a
+    USD shader. It supports all standard Mitsuba BSDFs (including normal and
+    bumpmaps) and participating media.
 
     Args:
-      stage: The USD stage to work in.
-      path: The path to the root of the shader.
-      mitsuba_bsdf_dict: The Mitsuba BSDF dictionary. This is expected to be a
-        standard Mitsuba BSDF dictionary.
+        stage: The USD stage to work in.
+        path: The path to the root of the shader.
+        mitsuba_bsdf_dict: The Mitsuba BSDF or Medium dictionary.
 
     Returns:
-      The USD shader.
+        The USD shader.
+
+    Raises:
+        ValueError: If the root object type is not a BSDF or Medium.
     """
     shader = UsdShade.Shader.Define(stage, path)
     config = mi.parser.ParserConfig('scalar_rgb')
     state = mi.parser.parse_dict(config, mitsuba_bsdf_dict)
 
-    if state.root.type != mi.ObjectType.BSDF:
+    if state.root.type not in _SUPPORTED_ROOT_OBJECT_TYPES:
         raise ValueError(
-            'The Mitsuba BSDF dictionary must contain a BSDF object, but got'
-            f' {state.root.type}.'
+            'The Mitsuba shader dictionary must contain a BSDF or Medium'
+            f' object, but got {state.root.type}.'
         )
 
     _convert_mitsuba_node_to_usd(stage, path, shader, state, state.root)

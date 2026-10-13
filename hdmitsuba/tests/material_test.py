@@ -21,8 +21,10 @@ import numpy as np
 import pytest
 
 from pxr import Gf
+from pxr import Sdf
 from pxr import Usd
 from pxr import UsdShade
+from usd_mitsuba import material_authoring
 import usd_render
 from hdmitsuba.tests import test_helpers
 
@@ -140,3 +142,58 @@ def test_modify_material():
   diffuse_color.GetAttr().Clear()
   image_reset = engine.render()['color']
   test_helpers.robust_assert_close(image_reset, image_original, atol=0.05)
+
+
+def test_volume_material():
+  stage = Usd.Stage.Open(
+      f'{test_helpers.TEST_ASSETS_PATH}/materials/materials.usda'
+  )
+  camera_path = '/root/Camera/Camera'
+  render_settings = test_helpers.create_render_settings(stage, spp=32)
+  render_settings.GetPrim().CreateAttribute(
+      'mitsuba:integrator:type', Sdf.ValueTypeNames.String
+  ).Set('volpath')
+
+  material = UsdShade.Material.Get(stage, '/root/_materials/plastic')
+  material.GetSurfaceOutput().ClearSources()
+
+  volume_shader = material_authoring.add_mitsuba_shader(
+      stage,
+      Sdf.Path('/root/_materials/plastic/HomogeneousVolume'),
+      {
+          'type': 'homogeneous',
+          'albedo': {'type': 'srgb', 'color': (0.9, 0.2, 0.2)},
+          'sigma_t': 4.0,
+          'phase': {'type': 'hg', 'g': 0.5},
+      },
+  )
+  volume_output = material.CreateVolumeOutput('mitsuba')
+  volume_output.ConnectToSource(volume_shader.ConnectableAPI(), 'volume')
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      camera_path=camera_path,
+  )
+  image_volume_hd, _ = test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      camera_path,
+      'test_volume_material',
+      spp=32,
+      atol=0.05,
+      engine=engine,
+  )
+
+  volume_output.ClearSources()
+  image_cleared_hd, _ = test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      camera_path,
+      'test_volume_material_cleared',
+      spp=32,
+      atol=0.05,
+      engine=engine,
+  )
+  assert (
+      np.mean(np.abs(image_volume_hd[..., :3] - image_cleared_hd[..., :3]))
+      > 0.005
+  )

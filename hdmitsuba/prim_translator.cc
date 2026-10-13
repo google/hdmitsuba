@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstddef>
 #include <map>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -40,6 +41,7 @@
 #include <mitsuba/core/config.h>
 #include <mitsuba/core/filesystem.h>
 #include <mitsuba/core/fwd.h>
+#include <mitsuba/core/mstream.h>
 #include <mitsuba/core/object.h>
 #include <mitsuba/core/plugin.h>
 #include <mitsuba/core/properties.h>
@@ -56,6 +58,7 @@
 #include <mitsuba/render/sensor.h>
 #include <mitsuba/render/shape.h>
 #include <mitsuba/render/texture.h>
+#include <mitsuba/render/volumegrid.h>
 #include <pxr/base/gf/matrix3d.h>
 #include <pxr/base/gf/matrix3f.h>
 #include <pxr/base/gf/matrix4d.h>
@@ -75,6 +78,9 @@
 #include <pxr/imaging/hd/material.h>
 #include <pxr/imaging/hd/tokens.h>
 #include <pxr/pxr.h>
+#include <pxr/usd/ar/asset.h>
+#include <pxr/usd/ar/resolvedPath.h>
+#include <pxr/usd/ar/resolver.h>
 #include <pxr/usd/sdf/assetPath.h>
 #include <pxr/usd/sdf/path.h>
 
@@ -112,15 +118,26 @@ bool IsScalarOnlyPrincipledInput(const TfToken& input_name) {
          input_name == TfToken("eta");
 }
 
+SdfPath FindTerminal(const HdMaterialNetwork2& network,
+                     const TfToken& mitsuba_terminal,
+                     const TfToken& default_terminal) {
+  auto it = network.terminals.find(mitsuba_terminal);
+  if (it == network.terminals.end() || it->second.upstreamNode.IsEmpty()) {
+    it = network.terminals.find(default_terminal);
+  }
+  return it != network.terminals.end() ? it->second.upstreamNode : SdfPath();
+}
+
+SdfPath FindVolumeTerminal(const HdMaterialNetwork2& network) {
+  return FindTerminal(network, TfToken("mitsuba:volume"),
+                      HdMaterialTerminalTokens->volume);
+}
+
 }  // namespace
 
 SdfPath FindDisplacementTerminal(const HdMaterialNetwork2& network) {
-  // An empty `mitsuba:displacement` terminal does not shadow `displacement`.
-  auto it = network.terminals.find(TfToken("mitsuba:displacement"));
-  if (it == network.terminals.end() || it->second.upstreamNode.IsEmpty()) {
-    it = network.terminals.find(HdMaterialTerminalTokens->displacement);
-  }
-  return it != network.terminals.end() ? it->second.upstreamNode : SdfPath();
+  return FindTerminal(network, TfToken("mitsuba:displacement"),
+                      HdMaterialTerminalTokens->displacement);
 }
 
 std::string MeshAttributeName(std::string_view primvar, int channels) {
@@ -207,6 +224,10 @@ void DiscoverTextures(
       !disp_node.IsEmpty()) {
     visit(disp_node, HdMaterialTerminalTokens->displacement);
   }
+  if (const SdfPath volume_node_path = FindVolumeTerminal(network);
+      !volume_node_path.IsEmpty()) {
+    visit(volume_node_path, HdMaterialTerminalTokens->volume);
+  }
   auto surf_it = network.terminals.find(HdMaterialTerminalTokens->surface);
   if (surf_it != network.terminals.end() &&
       !surf_it->second.upstreamNode.IsEmpty()) {
@@ -215,6 +236,20 @@ void DiscoverTextures(
 }
 
 namespace {
+
+template <typename Float, typename Spectrum>
+mitsuba::ref<mitsuba::VolumeGrid<Float, Spectrum>> LoadVolumeGrid(
+    const std::string& path) {
+  if (std::shared_ptr<ArAsset> asset =
+          ArGetResolver().OpenAsset(ArResolvedPath(path))) {
+    if (std::shared_ptr<const char> buffer = asset->GetBuffer()) {
+      mitsuba::ref<mitsuba::MemoryStream> stream = new mitsuba::MemoryStream(
+          const_cast<char*>(buffer.get()), asset->GetSize());
+      return new mitsuba::VolumeGrid<Float, Spectrum>(stream.get());
+    }
+  }
+  return new mitsuba::VolumeGrid<Float, Spectrum>(path);
+}
 
 template <typename Float, typename Spectrum>
 mitsuba::ref<mitsuba::Object> GetTexture(
@@ -326,6 +361,13 @@ mitsuba::ref<mitsuba::Object> ParseNodeRecursive(
   for (const auto& [param_token, param_value] : node.parameters) {
     SetMitsubaPropertyFromValue(props, param_token.GetString(), param_value);
   }
+  if (mitsuba_plugin_name == "gridvolume" && props.has_property("filename") &&
+      !props.has_property("grid")) {
+    const std::string path = props.get<std::string>("filename");
+    props.remove_property("filename");
+    props.set("grid", mitsuba::ref<mitsuba::Object>(
+                          LoadVolumeGrid<Float, Spectrum>(path)));
+  }
 
   for (const auto& [input_token, connections] : node.inputConnections) {
     if (connections.empty()) continue;
@@ -357,8 +399,9 @@ mitsuba::ref<mitsuba::Object> ParseNodeRecursive(
 
 MI_VARIANT
 mitsuba::ref<mitsuba::BSDF<Float, Spectrum>>
-PrimTranslator<Float, Spectrum>::DefaultBsdf(std::string_view id_str) {
-  mitsuba::Properties props("diffuse");
+PrimTranslator<Float, Spectrum>::DefaultBsdf(std::string_view id_str,
+                                             std::string_view plugin_name) {
+  mitsuba::Properties props(plugin_name);
   auto bsdf = mitsuba::PluginManager::instance()
                   ->create_object<mitsuba::BSDF<Float, Spectrum>>(props);
   bsdf->set_id(id_str);
@@ -474,47 +517,60 @@ PrimTranslator<Float, Spectrum>::BuildMaterial(
   TranslatedMaterial res;
   const HdMaterialNetwork2& network2 = spec.network2;
   const std::string id_str = spec.id.GetAsString();
+  absl::flat_hash_map<SdfPath, mitsuba::ref<mitsuba::Object>, SdfPath::Hash>
+      cache;
 
-  if (SdfPath disp_node = FindDisplacementTerminal(network2);
-      !disp_node.IsEmpty()) {
-    absl::flat_hash_map<SdfPath, mitsuba::ref<mitsuba::Object>, SdfPath::Hash>
-        cache;
+  if (const SdfPath disp_node_path = FindDisplacementTerminal(network2);
+      !disp_node_path.IsEmpty()) {
     res.displacement.texture = ParseNodeRecursive<Float, Spectrum>(
-        disp_node, network2, cache, HdMaterialTerminalTokens->displacement,
+        disp_node_path, network2, cache, HdMaterialTerminalTokens->displacement,
         texture_cache);
   }
-
-  auto terminal_it = network2.terminals.find(HdMaterialTerminalTokens->surface);
-  if (terminal_it == network2.terminals.end()) {
-    res.bsdf = DefaultBsdf(id_str);
-    return res;
-  }
-  const SdfPath& surface_node_path = terminal_it->second.upstreamNode;
-  auto node_it = network2.nodes.find(surface_node_path);
-  if (node_it == network2.nodes.end()) {
-    res.bsdf = DefaultBsdf(id_str);
-    return res;
-  }
-  const HdMaterialNode2& surface_node = node_it->second;
-
-  if (surface_node.nodeTypeId == TfToken("UsdPreviewSurface")) {
-    auto preview_res =
-        ParsePreviewSurface(network2, surface_node, texture_cache);
-    preview_res.bsdf->set_id(id_str);
-    preview_res.displacement = res.displacement;
-    return preview_res;
-  } else {
-    absl::flat_hash_map<SdfPath, mitsuba::ref<mitsuba::Object>, SdfPath::Hash>
-        cache;
-    res.bsdf = ParseNodeRecursive<Float, Spectrum>(
-        surface_node_path, network2, cache, HdMaterialTerminalTokens->surface,
+  if (const SdfPath volume_node_path = FindVolumeTerminal(network2);
+      !volume_node_path.IsEmpty()) {
+    cache.clear();
+    res.interior_medium = ParseNodeRecursive<Float, Spectrum>(
+        volume_node_path, network2, cache, HdMaterialTerminalTokens->volume,
         texture_cache);
-    if (res.bsdf) {
-      res.bsdf->set_id(id_str);
+    if (res.interior_medium) {
+      if (res.interior_medium->type() != mitsuba::ObjectType::Medium) {
+        TF_WARN("Volume shader on material '%s' is not a Mitsuba medium.",
+                id_str.c_str());
+        res.interior_medium = nullptr;
+      } else {
+        res.interior_medium->set_id(id_str);
+      }
+    }
+  }
+
+  const std::string_view default_bsdf_plugin =
+      res.interior_medium ? "null" : "diffuse";
+  if (auto terminal_it =
+          network2.terminals.find(HdMaterialTerminalTokens->surface);
+      terminal_it != network2.terminals.end()) {
+    const SdfPath& surface_node_path = terminal_it->second.upstreamNode;
+    if (auto node_it = network2.nodes.find(surface_node_path);
+        node_it != network2.nodes.end()) {
+      const HdMaterialNode2& surface_node = node_it->second;
+      if (surface_node.nodeTypeId == TfToken("UsdPreviewSurface")) {
+        TranslatedMaterial preview_res =
+            ParsePreviewSurface(network2, surface_node, texture_cache);
+        res.bsdf = std::move(preview_res.bsdf);
+        res.shape_emitter_props = std::move(preview_res.shape_emitter_props);
+        res.mesh_attributes = std::move(preview_res.mesh_attributes);
+      } else {
+        cache.clear();
+        res.bsdf = ParseNodeRecursive<Float, Spectrum>(
+            surface_node_path, network2, cache,
+            HdMaterialTerminalTokens->surface, texture_cache);
+      }
+      if (res.bsdf) {
+        res.bsdf->set_id(id_str);
+      }
     }
   }
   if (!res.bsdf) {
-    res.bsdf = DefaultBsdf(id_str);
+    res.bsdf = DefaultBsdf(id_str, default_bsdf_plugin);
   }
   return res;
 }
@@ -905,7 +961,7 @@ PrimTranslator<Float, Spectrum>::BuildMesh(
     const SdfPath& id, const VtIntArray& face_indices,
     const PrimvarMap& primvars, const MeshAttributeRequests& mesh_attributes,
     mitsuba::Object* bsdf, mitsuba::Object* emitter_ptr,
-    mitsuba::Object* sensor_ptr) {
+    mitsuba::Object* sensor_ptr, mitsuba::Object* interior_medium) {
   using Mesh = mitsuba::Mesh<Float, Spectrum>;
 
   const std::string id_str = id.GetAsString();
@@ -958,6 +1014,9 @@ PrimTranslator<Float, Spectrum>::BuildMesh(
   }
   if (sensor_ptr != nullptr) {
     props.set("sensor", sensor_ptr);
+  }
+  if (interior_medium != nullptr) {
+    props.set("interior", interior_medium);
   }
   mitsuba::ref<Mesh> mesh = new Mesh(props);
   mesh->set_id(id_str);

@@ -212,3 +212,77 @@ def test_displacement_texture_translation():
   result_dict = material.usd_mitsuba_material_to_dict(shader, 'displacement')
   assert result_dict['raw']
 
+
+@pytest.mark.parametrize(
+    'medium_dict',
+    [
+        {
+            'type': 'homogeneous',
+            'sigma_t': 2.5,
+            'scale': 1.5,
+            'albedo': {'type': 'srgb', 'color': (0.8, 0.2, 0.2)},
+            'phase': {'type': 'hg', 'g': 0.5},
+        },
+        {
+            'type': 'heterogeneous',
+            'sigma_t': {'type': 'constvolume', 'value': 2.0},
+            'albedo': {
+                'type': 'constvolume',
+                'value': {'type': 'srgb', 'color': (0.4, 0.6, 0.8)},
+            },
+            'phase': {'type': 'isotropic'},
+            'scale': 1.25,
+        },
+    ],
+)
+def test_mitsuba_medium_to_usd_conversion(medium_dict):
+  stage = Usd.Stage.CreateInMemory()
+  shader = material_authoring.add_mitsuba_shader(
+      stage, Sdf.Path('/Material/VolumeShader'), medium_dict
+  )
+  assert shader.GetShaderId() == 'mitsuba_' + medium_dict['type']
+
+  result_dict = material.usd_mitsuba_material_to_dict(shader, 'volume')
+  _assert_pytree_equals(result_dict, medium_dict)
+  assert isinstance(mi.load_dict(result_dict), mi.Medium)
+
+
+def test_volume_material_terminal_and_gridvolume(tmp_path):
+  vol_path = str(tmp_path / 'density.vol')
+  mi.VolumeGrid(np.ones((2, 2, 2, 1), dtype=np.float32)).write(vol_path)
+
+  stage = Usd.Stage.CreateInMemory()
+  shader = material_authoring.add_mitsuba_shader(
+      stage,
+      Sdf.Path('/Material/VolumeShader'),
+      {
+          'type': 'heterogeneous',
+          'sigma_t': {'type': 'gridvolume', 'filename': vol_path},
+      },
+  )
+  usd_material = UsdShade.Material.Define(stage, Sdf.Path('/Material'))
+  usd_material.CreateVolumeOutput().ConnectToSource(
+      shader.ConnectableAPI(), 'volume'
+  )
+  cube = stage.DefinePrim('/Cube', 'Cube')
+  UsdShade.MaterialBindingAPI.Apply(cube).Bind(usd_material)
+
+  bsdf, emitter, displacement = material.convert_material(cube)
+  assert bsdf is not None and bsdf.class_name() == 'Null'
+  assert emitter is None and displacement is None
+  assert isinstance(material.convert_volume(cube), mi.Medium)
+
+  surface_shader = material_authoring.add_mitsuba_shader(
+      stage, Sdf.Path('/Material/SurfaceShader'), {'type': 'diffuse'}
+  )
+  usd_material.CreateSurfaceOutput('mitsuba').ConnectToSource(
+      surface_shader.ConnectableAPI(), 'surface'
+  )
+  bsdf_with_surface, _, _ = material.convert_material(cube)
+  assert (
+      bsdf_with_surface is not None
+      and bsdf_with_surface.class_name() == 'SmoothDiffuse'
+  )
+
+  usd_material.GetVolumeOutput().ClearSources()
+  assert material.convert_volume(cube) is None

@@ -74,6 +74,7 @@ def _convert_cube(
 ) -> dict[str, Any]:
   """Handles a cube prim and returns the Mitsuba shape dictionary."""
   bsdf, emitter, displacement = material.convert_material(prim)
+  interior_medium = material.convert_volume(prim)
 
   if displacement is not None:
     raise ValueError(
@@ -87,6 +88,8 @@ def _convert_cube(
   }
   if bsdf is not None:
     mi_cube['bsdf'] = bsdf
+  if interior_medium is not None:
+    mi_cube['interior'] = interior_medium
   if emitter is not None:
     mi_cube['emitter'] = emitter
 
@@ -190,6 +193,7 @@ def _convert_implicit_surface(
     }
 
   bsdf, emitter, displacement = material.convert_material(prim)
+  interior_medium = material.convert_volume(prim)
   if displacement is not None:
     raise ValueError(
         'Displacement is not supported for implicit surfaces. Please use a'
@@ -198,6 +202,8 @@ def _convert_implicit_surface(
   for i, part in enumerate(parts.values()):
     if bsdf is not None:
       part['bsdf'] = bsdf
+    if interior_medium is not None:
+      part['interior'] = interior_medium
     if emitter is not None:
       part['emitter'] = (
           emitter if i == 0 else material.convert_material(prim)[1]

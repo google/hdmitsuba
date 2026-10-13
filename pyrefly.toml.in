@@ -23,6 +23,7 @@ ignore-missing-imports = ["usd_render"]
 
 replace-imports-with-any = [
     "pxr",
+    "pxr.Ar",
     "pxr.Usd",
     "pxr.UsdGeom",
     "pxr.UsdShade",

@@ -193,9 +193,12 @@ def convert_mesh(
   for sub, subprim, (bsdf, material_emitter, displacement) in zip(
       sub_meshes, subprims, materials
   ):
+    interior_medium = material.convert_volume(subprim)
     props = mi.Properties()
     if bsdf is not None:
       props['bsdf'] = bsdf
+    if interior_medium is not None:
+      props['interior'] = interior_medium
 
     if custom_transform is None:
       # MeshLightAPI takes precedence over material-driven emission.
