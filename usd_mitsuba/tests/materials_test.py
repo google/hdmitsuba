@@ -212,3 +212,43 @@ def test_displacement_texture_translation():
   result_dict = material.usd_mitsuba_material_to_dict(shader, 'displacement')
   assert result_dict['raw']
 
+
+def test_custom_python_plugins_to_usd_conversion():
+  class _CustomBSDF(mi.BSDF):
+
+    def __init__(self, props: mi.Properties):
+      super().__init__(props)
+      props.mark_queried('reflectance')
+      props.mark_queried('nested')
+      self.m_flags = int(mi.BSDFFlags.DiffuseReflection)
+      self.m_components = [self.m_flags]
+
+  class _CustomTexture(mi.Texture):
+
+    def __init__(self, props: mi.Properties):
+      super().__init__(props)
+      props.mark_queried('value')
+
+  mi.register_bsdf('custom_python_bsdf', _CustomBSDF)
+  mi.register_texture('custom_python_tex', _CustomTexture)
+
+  bsdf_dict = {
+      'type': 'custom_python_bsdf',
+      'reflectance': {'type': 'custom_python_tex', 'value': 0.5},
+      'nested': {'type': 'custom_python_bsdf', 'reflectance': 0.1},
+  }
+  stage = Usd.Stage.CreateInMemory()
+  shader = material_authoring.add_mitsuba_shader(
+      stage, Sdf.Path('/test'), bsdf_dict
+  )
+  _assert_pytree_equals(
+      material.usd_mitsuba_material_to_dict(shader), bsdf_dict
+  )
+
+  with pytest.raises(ValueError, match='ObjectType.Texture'):
+    material_authoring.add_mitsuba_shader(
+        Usd.Stage.CreateInMemory(),
+        Sdf.Path('/invalid'),
+        {'type': 'custom_python_tex', 'value': 0.5},
+    )
+

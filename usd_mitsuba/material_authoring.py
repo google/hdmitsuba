@@ -126,12 +126,25 @@ def _add_texture_to_shader(
     )
 
 
+def _resolve_node_type(node: Any, node_dict: dict[str, Any]) -> Any:
+    """Returns `node.type`, resolving `Unknown` plugins via `mi.load_dict`."""
+    if node.type != mi.ObjectType.Unknown:
+        return node.type
+    obj = mi.load_dict(node_dict)
+    if isinstance(obj, mi.BSDF):
+        return mi.ObjectType.BSDF
+    if isinstance(obj, mi.Texture):
+        return mi.ObjectType.Texture
+    return mi.ObjectType.Unknown
+
+
 def _convert_mitsuba_node_to_usd(
     stage: Usd.Stage,
     material_path: Sdf.Path,
     shader: UsdShade.Shader,
     state: Any,
     node: Any,
+    node_dict: dict[str, Any],
 ) -> None:
     """Converts a Mitsuba node to a USD shader.
 
@@ -141,6 +154,7 @@ def _convert_mitsuba_node_to_usd(
       shader: The USD shader to populate.
       state: The Mitsuba parser state (for resolving child references).
       node: The current Mitsuba node to convert.
+      node_dict: The dictionary corresponding to `node`.
     """
     shader.CreateIdAttr(f'mitsuba_{node.props.plugin_name()}')
     for key in node.props.keys():
@@ -148,7 +162,9 @@ def _convert_mitsuba_node_to_usd(
         prop_val = node.props[key]
         if prop_type == mi.Properties.Type.ResolvedReference:
             child_node = state.nodes[prop_val.index()]
-            if child_node.type == mi.ObjectType.Texture:
+            child_dict = node_dict[key]
+            child_type = _resolve_node_type(child_node, child_dict)
+            if child_type == mi.ObjectType.Texture:
                 is_color = key not in MI_SINGLE_CHANNEL_PROPERTY
                 output_channel = 'rgb' if is_color else 'r'
                 if child_node.props.plugin_name() == 'bitmap':
@@ -164,7 +180,12 @@ def _convert_mitsuba_node_to_usd(
                     tex_shader_path = material_path.AppendPath(key)
                     tex_shader = UsdShade.Shader.Define(stage, tex_shader_path)
                     _convert_mitsuba_node_to_usd(
-                        stage, tex_shader_path, tex_shader, state, child_node
+                        stage,
+                        tex_shader_path,
+                        tex_shader,
+                        state,
+                        child_node,
+                        child_dict,
                     )
                     if is_color:
                         tex_shader.CreateOutput(
@@ -175,11 +196,16 @@ def _convert_mitsuba_node_to_usd(
                     shader.CreateInput(key, output_type).ConnectToSource(
                         tex_shader.ConnectableAPI(), output_channel
                     )
-            elif child_node.type == mi.ObjectType.BSDF:
+            elif child_type == mi.ObjectType.BSDF:
                 bsdf_shader_path = material_path.AppendPath(key)
                 bsdf_shader = UsdShade.Shader.Define(stage, bsdf_shader_path)
                 _convert_mitsuba_node_to_usd(
-                    stage, bsdf_shader_path, bsdf_shader, state, child_node
+                    stage,
+                    bsdf_shader_path,
+                    bsdf_shader,
+                    state,
+                    child_node,
+                    child_dict,
                 )
                 if not bsdf_shader.GetOutput('out'):
                     bsdf_shader.CreateOutput('out', Sdf.ValueTypeNames.Token)
@@ -214,14 +240,17 @@ def add_mitsuba_shader(
     shader = UsdShade.Shader.Define(stage, path)
     config = mi.parser.ParserConfig('scalar_rgb')
     state = mi.parser.parse_dict(config, mitsuba_bsdf_dict)
+    root_type = _resolve_node_type(state.root, mitsuba_bsdf_dict)
 
-    if state.root.type != mi.ObjectType.BSDF:
+    if root_type != mi.ObjectType.BSDF:
         raise ValueError(
             'The Mitsuba BSDF dictionary must contain a BSDF object, but got'
-            f' {state.root.type}.'
+            f' {root_type}.'
         )
 
-    _convert_mitsuba_node_to_usd(stage, path, shader, state, state.root)
+    _convert_mitsuba_node_to_usd(
+        stage, path, shader, state, state.root, mitsuba_bsdf_dict
+    )
     return shader
 
 
