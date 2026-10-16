@@ -32,6 +32,7 @@ PXR_NAMESPACE_OPEN_SCOPE
 #define HDMITSUBA_RENDER_SETTINGS_TOKENS \
   ((variant, "mitsuba:variant")) \
   ((sample_count, "mitsuba:sample_count")) \
+  ((seed, "mitsuba:seed")) \
   ((interactive_samples_per_pass, "mitsuba:interactive_samples_per_pass")) \
   ((integrator_type, "mitsuba:integrator:type")) \
   ((use_kernel_freezing, "mitsuba:use_kernel_freezing"))

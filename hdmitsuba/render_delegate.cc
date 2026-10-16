@@ -108,26 +108,28 @@ HdMitsubaRenderDelegate::~HdMitsubaRenderDelegate() = default;
 
 void HdMitsubaRenderDelegate::Initialize() {
   // Initialize the settings and settings descriptors.
-  setting_descriptors_.resize(6);
+  setting_descriptors_.resize(7);
   setting_descriptors_[0] = {"Variant", HdMitsubaRenderSettingsTokens->variant,
                              VtValue(HdMitsubaConfig::GetInstance().variant)};
   setting_descriptors_[1] = {"Samples Per Pixel",
                              HdMitsubaRenderSettingsTokens->sample_count,
                              VtValue(128)};
-  setting_descriptors_[2] = {
+  setting_descriptors_[2] = {"Seed", HdMitsubaRenderSettingsTokens->seed,
+                             VtValue(0)};
+  setting_descriptors_[3] = {
       "Interactive Samples Per Pass",
       HdMitsubaRenderSettingsTokens->interactive_samples_per_pass, VtValue(1)};
-  setting_descriptors_[3] = {"Integrator Type",
+  setting_descriptors_[4] = {"Integrator Type",
                              HdMitsubaRenderSettingsTokens->integrator_type,
                              VtValue(std::string("path"))};
-  setting_descriptors_[4] = {"Enable Interactive Mode",
+  setting_descriptors_[5] = {"Enable Interactive Mode",
                              HdRenderSettingsTokens->enableInteractive,
                              VtValue(true)};
   bool default_freezing = false;
   if (HdMitsubaConfig::GetInstance().use_kernel_freezing == 1) {
     default_freezing = true;
   }
-  setting_descriptors_[5] = {"Enable Kernel Freezing (Experimental)",
+  setting_descriptors_[6] = {"Enable Kernel Freezing (Experimental)",
                              HdMitsubaRenderSettingsTokens->use_kernel_freezing,
                              VtValue(default_freezing)};
   _PopulateDefaultSettings(setting_descriptors_);
@@ -262,6 +264,8 @@ void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* /*tracker*/) {
       GetRenderSetting(HdMitsubaRenderSettingsTokens->variant);
   namespaced_settings[HdMitsubaRenderSettingsTokens->sample_count.GetString()] =
       GetRenderSetting(HdMitsubaRenderSettingsTokens->sample_count);
+  namespaced_settings[HdMitsubaRenderSettingsTokens->seed.GetString()] =
+      GetRenderSetting(HdMitsubaRenderSettingsTokens->seed);
   namespaced_settings[HdMitsubaRenderSettingsTokens
                           ->interactive_samples_per_pass.GetString()] =
       GetRenderSetting(

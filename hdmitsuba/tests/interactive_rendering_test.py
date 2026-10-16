@@ -203,3 +203,49 @@ def test_interactive_matches_non_interactive_odd_sample_count(
       rtol=1e-2,
       atol=1e-2,
   )
+
+
+@pytest.mark.parametrize('use_kernel_freezing', [False, True])
+def test_seed_change_resets_progressive_rendering(use_kernel_freezing: bool):
+  stage = _create_stage()
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      render_settings_path='/Render/PrimarySettings',
+      width=64,
+      overrides={
+          'enableInteractive': True,
+          'mitsuba:sample_count': 4,
+          'mitsuba:interactive_samples_per_pass': 2,
+          'mitsuba:seed': 0,
+          'mitsuba:use_kernel_freezing': use_kernel_freezing,
+      },
+  )
+  pass_0_seed_0 = engine.render()['color'].astype(np.float64)
+  assert engine.get_render_stats()['numCompletedSamples'] == 2
+  converged_seed_0 = engine.render()['color'].astype(np.float64)
+  assert engine.get_render_stats()['numCompletedSamples'] == 4
+  assert engine.is_converged()
+
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      render_settings_path='/Render/PrimarySettings',
+      width=64,
+      overrides={
+          'enableInteractive': True,
+          'mitsuba:sample_count': 4,
+          'mitsuba:interactive_samples_per_pass': 2,
+          'mitsuba:seed': 2,
+          'mitsuba:use_kernel_freezing': use_kernel_freezing,
+      },
+  )
+  pass_0_seed_2 = engine.render()['color'].astype(np.float64)
+  assert engine.get_render_stats()['numCompletedSamples'] == 2
+  assert not engine.is_converged()
+  converged_seed_2 = engine.render()['color'].astype(np.float64)
+  assert engine.is_converged()
+  assert not np.allclose(pass_0_seed_0, pass_0_seed_2, atol=1e-5)
+  pass_1_seed_0 = 2.0 * converged_seed_0 - pass_0_seed_0
+  assert not np.allclose(pass_1_seed_0, pass_0_seed_2, atol=1e-5)
+  assert not np.allclose(converged_seed_0, converged_seed_2, atol=1e-5)
+

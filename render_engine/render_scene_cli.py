@@ -78,6 +78,12 @@ def main() -> None:
       help='Samples per pixel. If not set, uses default.',
   )
   parser.add_argument(
+      '--seed',
+      type=int,
+      default=None,
+      help='Random seed for rendering. If not set, uses default.',
+  )
+  parser.add_argument(
       '--profile',
       action='store_true',
       help='Enable USD tracing and output to <output_path>.trace.json.',
@@ -133,6 +139,8 @@ def main() -> None:
   overrides = {}
   if args.spp is not None:
     overrides['mitsuba:sample_count'] = args.spp
+  if args.seed is not None:
+    overrides['mitsuba:seed'] = args.seed
 
   engine = usd_render.RenderEngine(stage)
   engine.configure(

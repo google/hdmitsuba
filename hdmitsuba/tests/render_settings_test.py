@@ -269,3 +269,31 @@ def test_variant_change_dynamic():
   test_helpers.robust_assert_close(
       results_scalar["color"], results_llvm["color"], atol=0.05
   )
+
+
+def test_seed_render_setting():
+  stage = Usd.Stage.Open(f"{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda")
+  render_settings = test_helpers.create_render_settings(
+      stage, resolution=(64, 64), spp=1
+  )
+  settings_prim = render_settings.GetPrim()
+  seed_attr = settings_prim.CreateAttribute(
+      "mitsuba:seed", Sdf.ValueTypeNames.Int
+  )
+  seed_attr.Set(0)
+
+  scene = mi.load_dict(usd_mitsuba.convert_to_mitsuba(stage))
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  hd_seed_0 = engine.render()["color"][..., :3]
+  mi_seed_0 = np.array(mi.render(scene, spp=1, seed=0))
+  np.testing.assert_allclose(hd_seed_0, mi_seed_0, rtol=1e-4, atol=1e-4)
+
+  seed_attr.Set(42)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  hd_seed_42 = engine.render()["color"][..., :3]
+  mi_seed_42 = np.array(mi.render(scene, spp=1, seed=42))
+  np.testing.assert_allclose(hd_seed_42, mi_seed_42, rtol=1e-4, atol=1e-4)
+  assert not np.allclose(hd_seed_0, hd_seed_42, atol=1e-4)
+
