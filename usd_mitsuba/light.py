@@ -122,10 +122,12 @@ def _convert_sphere_light(
         }
     return emitter_dict
 
-  world_transform = world_transform.scale(radius)
+  world_radius = dr.norm(world_transform @ mi.ScalarVector3f(radius, 0, 0))
+  world_transform = util.remove_scale_from_transform(world_transform).scale(
+      world_radius
+  )
   if normalize:
-    radius2 = dr.squared_norm(world_transform @ mi.ScalarVector3f(1, 0, 0))
-    color /= 4 * dr.pi * radius2
+    color /= 4 * dr.pi * dr.square(world_radius)
   return {
       'type': 'sphere',
       'to_world': world_transform,

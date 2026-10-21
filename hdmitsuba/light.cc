@@ -104,9 +104,11 @@ ScalarAffineTransform4f ComputeLightTransform(const TfToken& type_id,
     return UsdToMitsubaTransform(scale * align_rotation * transform);
   }
   if (type_id == HdPrimTypeTokens->sphereLight && !params.treat_as_point) {
-    GfMatrix4d scale;
-    scale.SetScale(GfVec3d(params.radius, params.radius, params.radius));
-    return UsdToMitsubaTransform(scale * transform);
+    const float world_radius = static_cast<float>(
+        transform.TransformDir(GfVec3d(params.radius, 0, 0)).GetLength());
+    return RemoveScaleFromTransform(UsdToMitsubaTransform(transform)) *
+           ScalarAffineTransform4f::scale(
+               mitsuba::Vector<float, 3>(world_radius));
   }
   // Non-area emitters (point, spot, directional, envmap) do not support scale
   // or shear, and AnimatedTransform rejects keyframe matrices with shear.
