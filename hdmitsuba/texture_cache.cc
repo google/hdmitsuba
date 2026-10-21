@@ -301,6 +301,9 @@ MI_VARIANT void TextureCache<Float, Spectrum>::Preload(
                          loaded_textures[tex_idx] =
                              LoadTexture(texture_list[tex_idx], *bmp);
                        }
+                       if constexpr (dr::is_jit_v<Float>) {
+                         dr::sync_thread();
+                       }
                      }
                      if constexpr (dr::is_metal_v<Float>) {
                        jit_flush_thread();

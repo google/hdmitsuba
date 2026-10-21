@@ -1312,39 +1312,21 @@ class SceneModel final : public SceneManager {
         drjit::blocked_range<size_t>(0, work_items.size()),
         [&](drjit::blocked_range<size_t> r) {
           JitScopeGuard<Float> jit_guard;
-          bool needs_jit_sync = false;
 
           for (size_t i = r.begin(); i != r.end(); ++i) {
             const MeshSpec& spec = *work_items[i].spec;
-            // Animated instances allocate AnimatedTransform keyframe tensors.
-            if (!spec.needs_rebuild ||
-                std::any_of(spec.instance_transforms.begin(),
-                            spec.instance_transforms.end(),
-                            [](const MotionTransform& t) {
-                              return t.IsAnimated();
-                            }) ||
-                HasEmitter(spec) || shape_sensors_.contains(spec.id) ||
-                std::any_of(work_items[i].displacements.begin(),
-                            work_items[i].displacements.end(),
-                            [](const MaterialDisplacement& d) {
-                              return d.texture != nullptr;
-                            })) {
-              needs_jit_sync = true;
-            }
             if (spec.instance_transforms.empty()) {
               CommitNonInstancedMeshWork(&work_items[i], results[i]);
             } else {
               CommitInstancedMeshWork(&work_items[i], results[i]);
             }
           }
-          // Make sure any pending JIT compilations and scatter side-effects
-          // (e.g. from UpdateMeshInPlace or displacement/emitter setup) are
-          // flushed before exiting the worker scope.
+          // Make sure any pending JIT compilations, scatter side-effects, and
+          // async staging memory copies are flushed before exiting worker
+          // scope.
           if constexpr (dr::is_jit_v<Float>) {
-            if (needs_jit_sync) {
-              dr::eval();
-              dr::sync_thread();
-            }
+            dr::eval();
+            dr::sync_thread();
           }
           if constexpr (dr::is_metal_v<Float>) {
             jit_flush_thread();
