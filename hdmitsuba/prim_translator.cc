@@ -247,16 +247,15 @@ mitsuba::ref<mitsuba::Object> GetTexture(
     }
   }
   // Instantiate a fallback texture.
+  if (is_normal) {
+    return nullptr;
+  }
   mitsuba::Properties fallback_props("srgb");
   auto fallback_it = parameters.find(TfToken("fallback"));
   if (fallback_it != parameters.end()) {
     SetMitsubaPropertyFromValue(fallback_props, "color", fallback_it->second);
   } else {
-    if (is_normal) {
-      fallback_props.set("color", mitsuba::Color<float, 3>(0.5f, 0.5f, 1.0f));
-    } else {
-      fallback_props.set("color", mitsuba::Color<float, 3>(1.0f, 0.0f, 1.0f));
-    }
+    fallback_props.set("color", mitsuba::Color<float, 3>(1.0f, 0.0f, 1.0f));
   }
   return mitsuba::PluginManager::instance()->create_object(
       fallback_props, mitsuba::Texture<Float, Spectrum>::Variant,
