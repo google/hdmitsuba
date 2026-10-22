@@ -86,6 +86,7 @@ def Xform "root"
             float inputs:intensity = 318.30988
             bool inputs:normalize = 1
             float inputs:radius = 0.1
+            string mitsuba:visibility = "all"
         }
     }
 }
