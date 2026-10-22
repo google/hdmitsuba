@@ -110,6 +110,7 @@ def test_dome_light_corrupt_texture_falls_back_to_constant():
     'scene_name',
     [
         'area',
+        'area_shadow_passthrough',
         'constant',
         'directional',
         'disk',

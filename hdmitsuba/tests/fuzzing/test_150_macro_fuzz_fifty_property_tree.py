@@ -73,7 +73,8 @@ def test_macro_fuzz_fifty_property_tree():
   # 3. Light properties
   light = UsdLux.SphereLight.Define(stage, '/root/MacroLight')
   light.CreateTreatAsPointAttr(True)
-  light.CreateIntensityAttr(200.0)
+  # Keep highlights from this (unoccluded) light within the noise tolerance.
+  light.CreateIntensityAttr(20.0)
   light.CreateColorAttr(Gf.Vec3f(0.8, 1.0, 0.8))
   light.AddTranslateOp().Set((0, 0, 4))
 

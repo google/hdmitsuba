@@ -649,6 +649,8 @@ PrimTranslator<Float, Spectrum>::BuildLightProperties(const LightSpec& spec) {
     mitsuba::Properties props = make_props(shape_plugin);
     props.set("visibility", spec.visibility);
     props.set("emitter", CreateAreaEmitter(spec.emission));
+    props.set("bsdf",
+              mitsuba::ref<mitsuba::Object>(DefaultBsdf("", "null")));
     return props;
   };
 

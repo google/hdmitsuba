@@ -204,6 +204,7 @@ def test_sphere_light_area():
   emitter_dict = light.convert_light(prim)
 
   assert emitter_dict['type'] == 'sphere'
+  assert emitter_dict['bsdf'] == {'type': 'null'}
   # Radius should scale the to_world transform
   scale = emitter_dict['to_world'] @ mi.ScalarVector3f(1, 0, 0)
   assert abs(dr.norm(scale) - 2.0) < 1e-6
@@ -245,6 +246,7 @@ def test_rect_light():
   emitter_dict = light.convert_light(prim)
 
   assert emitter_dict['type'] == 'rectangle'
+  assert emitter_dict['bsdf'] == {'type': 'null'}
   # Width/Height should scale the to_world transform (by half width/height)
   to_world = emitter_dict['to_world']
   sx = dr.norm(to_world @ mi.ScalarVector3f(1, 0, 0))
@@ -288,6 +290,7 @@ def test_disk_light():
   emitter_dict = light.convert_light(prim)
 
   assert emitter_dict['type'] == 'disk'
+  assert emitter_dict['bsdf'] == {'type': 'null'}
   to_world = emitter_dict['to_world']
   sx = dr.norm(to_world @ mi.ScalarVector3f(1, 0, 0))
   assert abs(sx - 3.0) < 1e-6

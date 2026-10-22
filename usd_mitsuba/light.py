@@ -298,6 +298,7 @@ def convert_light(
       emitter = converter(prim, world_transform, color, intensity, time)
       vis = prim.GetAttribute('mitsuba:visibility').Get(time)
       if _is_area_light(prim, time):
+        emitter['bsdf'] = {'type': 'null'}
         emitter['visibility'] = vis or 'secondary'
       elif prim.IsA(UsdLux.DomeLight) and vis:
         emitter['visibility'] = vis
