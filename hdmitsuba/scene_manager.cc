@@ -627,8 +627,29 @@ class SceneModel final : public SceneManager {
     }
 
     if (!integrator_) {
-      integrator_ = PluginManager::instance()->create_object<Integrator>(
-          Properties("path"));
+      TF_DEBUG(HDMITSUBA_LIFECYCLE)
+          .Msg("Creating integrator, type: %s, max_depth: %d, rr_depth: %d\n",
+               integrator_type_.c_str(), integrator_max_depth_.value_or(-1),
+               integrator_rr_depth_.value_or(-1));
+      Properties props(integrator_type_);
+      if (integrator_max_depth_) props.set("max_depth", *integrator_max_depth_);
+      if (integrator_rr_depth_) props.set("rr_depth", *integrator_rr_depth_);
+      try {
+        integrator_ =
+            PluginManager::instance()->create_object<Integrator>(props);
+        if (auto unqueried = props.unqueried(); !unqueried.empty()) {
+          TF_WARN("Integrator '%s' ignores unsupported properties: %s",
+                  integrator_type_.c_str(),
+                  absl::StrJoin(unqueried, ", ").c_str());
+        }
+      } catch (const std::exception& e) {
+        TF_WARN(
+            "Failed to create integrator '%s': %s. Falling back to the default "
+            "path tracer.",
+            integrator_type_.c_str(), e.what());
+        integrator_ = PluginManager::instance()->create_object<Integrator>(
+            Properties("path"));
+      }
     }
 
     Integrator* render_integrator = integrator_.get();
@@ -795,22 +816,25 @@ class SceneModel final : public SceneManager {
         reset_progressive_ = true;
       }
     }
-    auto integrator_type =
-        GetSetting<std::string>(namespaced_settings, "mitsuba:integrator:type");
-    if (integrator_type.has_value()) {
-      if (*integrator_type != integrator_type_ || !integrator_) {
-        TF_DEBUG(HDMITSUBA_LIFECYCLE)
-            .Msg("Creating integrator, type: %s (was: %s)\n",
-                 integrator_type->c_str(), integrator_type_.c_str());
-        Properties integrator_props(*integrator_type);
-        integrator_ = PluginManager::instance()->create_object<Integrator>(
-            integrator_props);
-        integrator_type_ = *integrator_type;
-        for (auto& [_, pass_state] : pass_aov_states_) {
-          pass_state.aov_integrator = nullptr;
-        }
-        reset_progressive_ = true;
+    std::string integrator_type =
+        GetSetting<std::string>(namespaced_settings, "mitsuba:integrator:type")
+            .value_or(integrator_type_);
+    auto max_depth =
+        GetSetting<int>(namespaced_settings, "mitsuba:integrator:max_depth");
+    auto rr_depth =
+        GetSetting<int>(namespaced_settings, "mitsuba:integrator:rr_depth");
+    if (integrator_type != integrator_type_ ||
+        max_depth != integrator_max_depth_ ||
+        rr_depth != integrator_rr_depth_) {
+      integrator_type_ = std::move(integrator_type);
+      integrator_max_depth_ = max_depth;
+      integrator_rr_depth_ = rr_depth;
+      integrator_ = nullptr;
+      for (auto& [_, pass_state] : pass_aov_states_) {
+        pass_state.aov_integrator = nullptr;
       }
+      if (frozen_render_) frozen_render_->Clear();
+      reset_progressive_ = true;
     }
     auto sample_count =
         GetSetting<int>(namespaced_settings, "mitsuba:sample_count");
@@ -1666,6 +1690,8 @@ class SceneModel final : public SceneManager {
   ref<Scene> scene_;
   ref<Integrator> integrator_ = nullptr;
   std::string integrator_type_ = "path";
+  std::optional<int> integrator_max_depth_;
+  std::optional<int> integrator_rr_depth_;
   absl::flat_hash_map<const HdRenderPass*, RenderPassState> pass_aov_states_;
   size_t sample_count_ = kDefaultSampleCount;
   uint32_t seed_ = 0;

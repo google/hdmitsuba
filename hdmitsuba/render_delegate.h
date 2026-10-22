@@ -35,6 +35,8 @@ PXR_NAMESPACE_OPEN_SCOPE
   ((seed, "mitsuba:seed")) \
   ((interactive_samples_per_pass, "mitsuba:interactive_samples_per_pass")) \
   ((integrator_type, "mitsuba:integrator:type")) \
+  ((integrator_max_depth, "mitsuba:integrator:max_depth")) \
+  ((integrator_rr_depth, "mitsuba:integrator:rr_depth")) \
   ((use_kernel_freezing, "mitsuba:use_kernel_freezing"))
 
 TF_DECLARE_PUBLIC_TOKENS(HdMitsubaRenderSettingsTokens,

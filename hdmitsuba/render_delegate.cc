@@ -108,7 +108,7 @@ HdMitsubaRenderDelegate::~HdMitsubaRenderDelegate() = default;
 
 void HdMitsubaRenderDelegate::Initialize() {
   // Initialize the settings and settings descriptors.
-  setting_descriptors_.resize(7);
+  setting_descriptors_.resize(9);
   setting_descriptors_[0] = {"Variant", HdMitsubaRenderSettingsTokens->variant,
                              VtValue(HdMitsubaConfig::GetInstance().variant)};
   setting_descriptors_[1] = {"Samples Per Pixel",
@@ -122,14 +122,20 @@ void HdMitsubaRenderDelegate::Initialize() {
   setting_descriptors_[4] = {"Integrator Type",
                              HdMitsubaRenderSettingsTokens->integrator_type,
                              VtValue(std::string("path"))};
-  setting_descriptors_[5] = {"Enable Interactive Mode",
+  setting_descriptors_[5] = {
+      "Integrator Max Depth",
+      HdMitsubaRenderSettingsTokens->integrator_max_depth, VtValue()};
+  setting_descriptors_[6] = {"Integrator Russian Roulette Depth",
+                             HdMitsubaRenderSettingsTokens->integrator_rr_depth,
+                             VtValue()};
+  setting_descriptors_[7] = {"Enable Interactive Mode",
                              HdRenderSettingsTokens->enableInteractive,
                              VtValue(true)};
   bool default_freezing = false;
   if (HdMitsubaConfig::GetInstance().use_kernel_freezing == 1) {
     default_freezing = true;
   }
-  setting_descriptors_[6] = {"Enable Kernel Freezing (Experimental)",
+  setting_descriptors_[8] = {"Enable Kernel Freezing (Experimental)",
                              HdMitsubaRenderSettingsTokens->use_kernel_freezing,
                              VtValue(default_freezing)};
   _PopulateDefaultSettings(setting_descriptors_);
@@ -260,24 +266,9 @@ void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* /*tracker*/) {
   }
 
   VtDictionary namespaced_settings;
-  namespaced_settings[HdMitsubaRenderSettingsTokens->variant.GetString()] =
-      GetRenderSetting(HdMitsubaRenderSettingsTokens->variant);
-  namespaced_settings[HdMitsubaRenderSettingsTokens->sample_count.GetString()] =
-      GetRenderSetting(HdMitsubaRenderSettingsTokens->sample_count);
-  namespaced_settings[HdMitsubaRenderSettingsTokens->seed.GetString()] =
-      GetRenderSetting(HdMitsubaRenderSettingsTokens->seed);
-  namespaced_settings[HdMitsubaRenderSettingsTokens
-                          ->interactive_samples_per_pass.GetString()] =
-      GetRenderSetting(
-          HdMitsubaRenderSettingsTokens->interactive_samples_per_pass);
-  namespaced_settings[HdMitsubaRenderSettingsTokens->integrator_type
-                          .GetString()] =
-      GetRenderSetting(HdMitsubaRenderSettingsTokens->integrator_type);
-  namespaced_settings["enableInteractive"] =
-      GetRenderSetting(HdRenderSettingsTokens->enableInteractive);
-  namespaced_settings[HdMitsubaRenderSettingsTokens->use_kernel_freezing
-                          .GetString()] =
-      GetRenderSetting(HdMitsubaRenderSettingsTokens->use_kernel_freezing);
+  for (const auto& desc : setting_descriptors_) {
+    namespaced_settings[desc.key.GetString()] = GetRenderSetting(desc.key);
+  }
 
   scene_impl_->UpdateNamespacedSettings(namespaced_settings);
   last_settings_version_ = settings_version;

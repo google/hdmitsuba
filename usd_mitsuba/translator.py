@@ -366,12 +366,8 @@ def _convert_render_settings(
 
   prim = render_settings.GetPrim()
   integrator_dict = util.extract_nested_dict(prim, 'mitsuba:integrator:')
-  if integrator_dict:
-    if not integrator_dict.get('type'):
-      raise ValueError(
-          'mitsuba:integrator:type cannot be empty, if specified.')
-  else:
-    integrator_dict = {'type': 'path'}
+  if not integrator_dict.setdefault('type', 'path'):
+    raise ValueError('mitsuba:integrator:type cannot be empty, if specified.')
 
   render_color, aovs = render_settings_lib.parse_aovs(
       stage, render_settings, render_product_path

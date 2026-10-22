@@ -54,6 +54,8 @@ You can configure the render delegate by authoring a `RenderSettings` prim insid
 *   **`mitsuba:seed`**: The random number generator seed offset (int, default `0`) passed to the Mitsuba integrator. Changing `mitsuba:seed` resets progressive accumulation.
 *   **`mitsuba:interactive_samples_per_pass`**: Number of samples per pixel rendered in each Hydra pass while `enableInteractive` is `true` (default `1`). Larger values reduce per-pass overhead (and, with kernel freezing enabled, are replayed as a single frozen kernel) at the cost of coarser progressive updates. Changing `mitsuba:interactive_samples_per_pass` or `mitsuba:sample_count` resets progressive accumulation.
 *   **`mitsuba:integrator:type`**: The Mitsuba integrator to use (e.g., `path`, `aov`, `direct`).
+*   **`mitsuba:integrator:max_depth`**: Maximum path depth for path-tracing integrators (int). If unset, the Mitsuba integrator's default is used.
+*   **`mitsuba:integrator:rr_depth`**: Minimum path depth after which Russian roulette path termination begins (int). If unset, the Mitsuba integrator's default is used.
 *   **`mitsuba:use_kernel_freezing`**: Enables Dr.Jit's kernel freezing. When enabled, the JIT compilation is frozen after the first frame, drastically reducing JIT tracing overhead for subsequent frames (extremely beneficial for interactive camera navigation in viewports). This is currently disabled by default, as it is still in a somewhat experimental state in its Hydra integration, and also will not work in all Mitsuba 3 scenes (e.g., with instancing).
 
 ### Standard Hydra Viewport Settings

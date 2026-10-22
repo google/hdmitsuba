@@ -325,3 +325,55 @@ def test_seed_render_setting():
   np.testing.assert_allclose(hd_seed_42, mi_seed_42, rtol=1e-4, atol=1e-4)
   assert not np.allclose(hd_seed_0, hd_seed_42, atol=1e-4)
 
+
+def test_integrator_depth_render_settings():
+  stage = Usd.Stage.Open(f"{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda")
+  plane = UsdGeom.Plane.Define(stage, "/World/Plane")
+  plane.GetWidthAttr().Set(10)
+  plane.GetLengthAttr().Set(10)
+
+  settings_prim = test_helpers.create_render_settings(
+      stage, resolution=(64, 64), spp=4
+  ).GetPrim()
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:max_depth", Sdf.ValueTypeNames.Int
+  ).Set(2)
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:rr_depth", Sdf.ValueTypeNames.Int
+  ).Set(2)
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  test_helpers.assert_hydra_equal_to_offline(
+      stage, output_prefix="test_integrator_depth_2", spp=4, engine=engine
+  )
+
+  settings_prim.GetAttribute("mitsuba:integrator:max_depth").Set(6)
+  settings_prim.GetAttribute("mitsuba:integrator:rr_depth").Set(4)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  test_helpers.assert_hydra_equal_to_offline(
+      stage, output_prefix="test_integrator_depth_6", spp=4, engine=engine
+  )
+
+
+def test_unsupported_integrator_setting_is_ignored():
+  stage = Usd.Stage.Open(f"{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda")
+  settings_prim = test_helpers.create_render_settings(
+      stage, resolution=(64, 64), spp=4
+  ).GetPrim()
+  # The `direct` integrator does not support `max_depth`.
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:type", Sdf.ValueTypeNames.String
+  ).Set("direct")
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:max_depth", Sdf.ValueTypeNames.Int
+  ).Set(2)
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  hd_image = engine.render()["color"][..., :3]
+
+  scene_dict = usd_mitsuba.convert_to_mitsuba(stage)
+  scene_dict["integrator"] = {"type": "direct"}
+  mi_image = np.array(mi.render(mi.load_dict(scene_dict), spp=4))
+  test_helpers.robust_assert_close(hd_image, mi_image, atol=0.05)
