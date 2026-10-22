@@ -56,6 +56,7 @@ struct LightParams {
   float shaping_cone_angle = 0.0f;
   float shaping_cone_softness = 1.0f;
   std::string texture_file_path;
+  std::string visibility;
 
   GfVec3f BaseEmission() const {
     return color * intensity * std::exp2(exposure);
@@ -67,6 +68,7 @@ struct LightParams {
 
 LightParams ReadLightParams(const HdContainerDataSourceHandle& container) {
   static const TfToken treat_as_point_token("treatAsPoint");
+  static const TfToken visibility_token("mitsuba:visibility");
   LightParams p;
   p.color = GetParam<GfVec3f>(container, HdLightTokens->color, GfVec3f(1.0f));
   p.intensity = GetParam<float>(container, HdLightTokens->intensity, 1.0f);
@@ -88,6 +90,10 @@ LightParams ReadLightParams(const HdContainerDataSourceHandle& container) {
   p.texture_file_path =
       GetParam<SdfAssetPath>(container, HdLightTokens->textureFile)
           .GetResolvedPath();
+  if (auto ds = HdSampledDataSource::Cast(container->Get(visibility_token))) {
+    p.visibility =
+        ds->GetValue(0.0f).Cast<std::string>().GetWithDefault<std::string>();
+  }
   return p;
 }
 
@@ -210,6 +216,9 @@ void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
   spec.shaping_cone_beam_width = params.ShapingConeBeamWidth();
   spec.treat_as_point = params.treat_as_point;
   spec.texture_file_path = params.texture_file_path;
+  spec.visibility = params.visibility.empty()
+                        ? (spec.IsAreaLight() ? "secondary" : "all")
+                        : params.visibility;
   spec.dirty_bits = *dirtyBits;
 
   MotionSamples<GfMatrix4d> world_transform = SampleTransform(
@@ -236,7 +245,7 @@ void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
   const RebuildKey rebuild_key{
       params.treat_as_point, params.angle > 0.0f,
       params.shaping_cone_angle != 0.0f, params.texture_file_path,
-      spec.transform.IsAnimated()};
+      spec.transform.IsAnimated(), spec.visibility};
   spec.needs_rebuild = rebuild_key_ != rebuild_key;
   rebuild_key_ = rebuild_key;
 

@@ -647,6 +647,7 @@ PrimTranslator<Float, Spectrum>::BuildLightProperties(const LightSpec& spec) {
   };
   auto make_area_shape_props = [&](std::string_view shape_plugin) {
     mitsuba::Properties props = make_props(shape_plugin);
+    props.set("visibility", spec.visibility);
     props.set("emitter", CreateAreaEmitter(spec.emission));
     return props;
   };
@@ -671,6 +672,7 @@ PrimTranslator<Float, Spectrum>::BuildLightProperties(const LightSpec& spec) {
         mitsuba::Properties props = make_props("envmap");
         props.set("scale", (color[0] + color[1] + color[2]) / 3.f);
         props.set("bitmap", bitmap.get());
+        props.set("visibility", spec.visibility);
         return props;
       } catch (const std::exception& e) {
         TF_WARN("Failed to load environment texture '%s': %s",
@@ -679,6 +681,7 @@ PrimTranslator<Float, Spectrum>::BuildLightProperties(const LightSpec& spec) {
     }
     mitsuba::Properties props("constant");
     props.set("radiance", color);
+    props.set("visibility", spec.visibility);
     return props;
   }
 

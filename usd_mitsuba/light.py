@@ -295,5 +295,11 @@ def convert_light(
 
   for light_class, converter in _LIGHT_CONVERTERS:
     if prim.IsA(light_class):
-      return converter(prim, world_transform, color, intensity, time)
+      emitter = converter(prim, world_transform, color, intensity, time)
+      vis = prim.GetAttribute('mitsuba:visibility').Get(time)
+      if _is_area_light(prim, time):
+        emitter['visibility'] = vis or 'secondary'
+      elif prim.IsA(UsdLux.DomeLight) and vis:
+        emitter['visibility'] = vis
+      return emitter
   raise ValueError(f'Unsupported light prim: {prim.GetPath()}.')

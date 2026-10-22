@@ -364,3 +364,31 @@ def test_update_mesh_light_intensity():
   assert np.max(engine.render()['color'][..., :3]) > 0.1
 
 
+def test_area_light_primary_visibility():
+  stage = Usd.Stage.Open(f'{test_helpers.TEST_ASSETS_PATH}/lights/sphere.usda')
+  UsdGeom.Xformable(stage.GetPrimAtPath('/root/Area')).ClearXformOpOrder()
+  test_helpers.create_render_settings(stage, resolution=_RENDER_RESOLUTION)
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin')
+
+  image_default, _ = test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      output_prefix='test_area_light_vis_default',
+      atol=0.1,
+      engine=engine,
+  )
+  assert 0.1 < np.max(image_default[..., :3]) < 6.0
+
+  vis_attr = stage.GetPrimAtPath('/root/Area/Area').CreateAttribute(
+      'mitsuba:visibility', Sdf.ValueTypeNames.String
+  )
+  vis_attr.Set('all')
+  image_all, _ = test_helpers.assert_hydra_equal_to_offline(
+      stage, output_prefix='test_area_light_vis_all', atol=0.1, engine=engine
+  )
+  assert np.max(image_all[..., :3]) > 10.0
+
+  vis_attr.Set('secondary')
+  test_helpers.robust_assert_close(
+      engine.render()['color'], image_default, atol=0.05
+  )

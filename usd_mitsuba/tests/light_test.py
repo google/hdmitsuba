@@ -324,3 +324,23 @@ def test_ies_profile_error():
 
   with pytest.raises(ValueError, match='IES files are not yet supported.'):
     light.convert_light(prim)
+
+
+@pytest.mark.parametrize(
+    'light_type, default_vis, override_vis',
+    [
+        (UsdLux.SphereLight, 'secondary', 'all'),
+        (UsdLux.RectLight, 'secondary', 'all'),
+        (UsdLux.DiskLight, 'secondary', 'all'),
+        (UsdLux.DomeLight, None, 'secondary'),
+    ],
+)
+def test_light_mitsuba_visibility(light_type, default_vis, override_vis):
+  stage, prim = _create_stage_with_light(light_type)
+  assert light.convert_light(prim).get('visibility') == default_vis
+  prim.CreateAttribute('mitsuba:visibility', Sdf.ValueTypeNames.String).Set(
+      override_vis
+  )
+  emitter_dict = light.convert_light(prim)
+  assert emitter_dict['visibility'] == override_vis
+  mi.load_dict(emitter_dict)

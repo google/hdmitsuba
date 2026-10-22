@@ -46,7 +46,8 @@ class HdMitsubaLight final : public HdLight {
 
   // Properties that determine the Mitsuba plugin type, whose changes require
   // rebuilding the light object rather than updating it in place.
-  using RebuildKey = std::tuple<bool, bool, bool, std::string, bool>;
+  using RebuildKey =
+      std::tuple<bool, bool, bool, std::string, bool, std::string>;
 
   TfToken type_id_;
   std::optional<RebuildKey> rebuild_key_;

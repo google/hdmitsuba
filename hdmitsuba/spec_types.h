@@ -70,6 +70,7 @@ struct LightSpec : public BaseSpec {
   float shaping_cone_beam_width = 0.0f;
   bool treat_as_point = false;
   std::string texture_file_path;
+  std::string visibility;
 
   // Area lights are represented as Mitsuba shapes with an attached area
   // emitter, rather than standalone emitter objects.

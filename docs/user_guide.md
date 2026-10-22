@@ -27,7 +27,7 @@ This document provides an overview of the USD features supported by `hdMitsuba`,
 *   **Fallback Shading (displayColor)**: If a mesh has no bound material, the delegate automatically maps the USD `displayColor` attribute to a fallback `diffuse` BSDF with its `reflectance` bound to the color.
 
 ### Lights & Camera
-*   **Light Types**: Sphere lights, point lights, spot lights, rectangle lights, distant lights, and dome lights (for HDR environment map backgrounds). Currently, IES profiles are not yet supported.
+*   **Light Types**: Sphere lights, point lights, spot lights, rectangle lights, distant lights, and dome lights (for HDR environment map backgrounds). Currently, IES profiles are not yet supported. Standard USDLux area lights (`SphereLight` when not point, `RectLight`, `DiskLight`) default to `"secondary"` ray visibility (invisible to primary camera rays while still illuminating the scene and reflecting in secondary rays). Ray visibility on area lights and dome lights can be controlled by setting the `mitsuba:visibility` (string or token) attribute (`"all"`, `"primary"`, `"secondary"`, `"hidden"`).
 *   **Cameras & Custom Sensors**:
     *   Supports standard perspective cameras with horizontal/vertical aperture offsets.
     *   **Custom Sensor Type**: Customize the Mitsuba sensor backend by setting `mitsuba:sensor:type` (string, e.g., `perspective`, `irradiancemeter`, `radmeter`) on the Camera prim.

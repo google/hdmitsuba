@@ -269,7 +269,8 @@ class HdMitsuba_APISchemaAdapter : public UsdImagingAPISchemaAdapter {
         // The camera adapter only maps UsdGeomCamera schema attributes.
         result.insert(HdCameraSchema::GetDefaultLocator());
       } else if ((prop == UsdLuxTokens->treatAsPoint ||
-                  prop == UsdLuxTokens->treatAsLine) &&
+                  prop == UsdLuxTokens->treatAsLine ||
+                  prop == TfToken("mitsuba:visibility")) &&
                  prim.HasAPI<UsdLuxLightAPI>()) {
         // The LightAPI adapter only claims `inputs:*` and `light:*`.
         result.insert(HdLightSchema::GetDefaultLocator());
