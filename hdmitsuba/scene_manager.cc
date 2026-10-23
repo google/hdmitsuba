@@ -79,6 +79,7 @@
 #endif
 
 #include "hdmitsuba/debug_codes.h"
+#include "hdmitsuba/denoiser.h"
 #include "hdmitsuba/framebuffer.h"
 #include "hdmitsuba/kernel_freezing.h"
 #include "hdmitsuba/mesh/displacement.h"
@@ -372,6 +373,10 @@ class SceneModel final : public SceneManager {
     TF_DEBUG(HDMITSUBA_SYNC).Msg("SyncCamera: %s\n", spec.id.GetText());
     absl::MutexLock lock(state_mutex_);
     auto prev_it = camera_specs_.find(spec.id);
+    if (prev_it != camera_specs_.end() &&
+        prev_it->second.pixel_filter_type != spec.pixel_filter_type) {
+      spec.needs_rebuild = true;
+    }
     std::optional<SdfPath> prev_target =
         prev_it == camera_specs_.end() ? std::nullopt
                                        : SurfaceSensorTarget(prev_it->second);
@@ -534,6 +539,11 @@ class SceneModel final : public SceneManager {
     pass_state.aov_integrator_keys = absl::StrJoin(aov_strings, ",");
     pass_state.aov_integrator = nullptr;
     reset_progressive_ = true;
+    if constexpr (dr::is_jit_v<Float>) {
+      if (frozen_render_) {
+        frozen_render_->Clear();
+      }
+    }
     absl::MutexLock lock(aov_states_mutex_);
     pass_aov_states_[render_pass] = std::move(pass_state);
   }
@@ -543,6 +553,7 @@ class SceneModel final : public SceneManager {
               const std::optional<GfRect2i>& crop_window = std::nullopt) override {
     absl::MutexLock state_lock(state_mutex_);
     absl::MutexLock aov_lock(aov_states_mutex_);
+    const bool denoise_dirty = std::exchange(denoise_dirty_, false);
     JitScopeGuard<Float> jit_guard;
     auto pass_it = pass_aov_states_.find(render_pass);
     if (pass_it == pass_aov_states_.end() ||
@@ -738,8 +749,14 @@ class SceneModel final : public SceneManager {
                          static_cast<float>(current_progressive_sample_),
                      result.shape());
       } else {
-        display_result = result;
+        display_result = std::move(result);
       }
+    } else if (denoise_dirty && !accum_buffer_.empty() &&
+               current_progressive_sample_ > 0) {
+      display_result =
+          TensorXf(accum_buffer_.array() /
+                       static_cast<float>(current_progressive_sample_),
+                   accum_buffer_.shape());
     } else {
       // Already converged, ensure buffers are marked as converged.
       bool converged = true;
@@ -754,6 +771,11 @@ class SceneModel final : public SceneManager {
 
     // 5. Copy the data to the output render buffers.
     size_t base_channels = sensor->film()->base_channels().size();
+    bool tensor_on_host = false;
+    if (denoise_ && pass_state.color_buffer && base_channels >= 3) {
+      tensor_on_host = denoiser_.Denoise(
+          display_result, sensor, pass_state.aov_requests, base_channels);
+    }
     size_t total_channels = display_result.shape()[2];
     destinations_.clear();
     destinations_.reserve(1 + pass_state.aov_requests.size());
@@ -775,7 +797,8 @@ class SceneModel final : public SceneManager {
       destinations_.push_back({req.buffer, static_cast<int>(current_offset), req.channel_count, is_int});
       current_offset += req.channel_count;
     }
-    PerformBatchedCopy<Float>(display_result, destinations_, crop_window);
+    PerformBatchedCopy<Float>(display_result, destinations_, crop_window,
+                              tensor_on_host);
 
     // 6. Set convergence status
     bool converged =
@@ -791,7 +814,8 @@ class SceneModel final : public SceneManager {
 
   bool IsConverged() const override {
     return !progressive_rendering_ ||
-           (current_progressive_sample_ >= static_cast<int>(sample_count_));
+           (!denoise_dirty_ &&
+            (current_progressive_sample_ >= static_cast<int>(sample_count_)));
   }
 
   int GetCurrentSampleCount() const override {
@@ -859,14 +883,7 @@ class SceneModel final : public SceneManager {
         progressive_rendering_ = *progressive;
         // A change in render mode requires rebuilding the sensors, since
         // this affects the used pixel filter type.
-        for (auto& [_, camera_spec] : camera_specs_) {
-          camera_spec.needs_rebuild = true;
-          if (auto target = SurfaceSensorTarget(camera_spec)) {
-            sensor_binding_dirty_.insert(*target);
-            shape_sensors_dirty_ = true;
-          }
-        }
-        has_pending_commits_ = true;
+        MarkSensorsForRebuild();
         reset_progressive_ = true;
       }
     }
@@ -883,6 +900,22 @@ class SceneModel final : public SceneManager {
           }
         } else {
           frozen_render_.reset(); // Immediately destroys it and frees all JIT GPU memory!
+        }
+      }
+    }
+    auto denoise = GetSetting<bool>(namespaced_settings, "mitsuba:denoise");
+    if (denoise.has_value() && *denoise != denoise_) {
+      denoise_ = *denoise;
+      denoise_dirty_ = true;
+      // Batch sensors without an explicit pixel filter switch to the box filter
+      // while denoising.
+      if (!progressive_rendering_) {
+        for (auto& [_, camera_spec] : camera_specs_) {
+          if (camera_spec.sensor_type != "irradiancemeter" &&
+              camera_spec.pixel_filter_type.empty()) {
+            camera_spec.needs_rebuild = true;
+            has_pending_commits_ = true;
+          }
         }
       }
     }
@@ -1048,7 +1081,12 @@ class SceneModel final : public SceneManager {
             return;
           }
           if (spec->needs_rebuild) {
-            res = PrimTranslator::BuildSensor(*spec, progressive_rendering_);
+            // Denoisers need the uncorrelated pixel noise of the box filter
+            // unless the camera explicitly authors a pixel filter.
+            const bool use_box_filter =
+                progressive_rendering_ ||
+                (denoise_ && spec->pixel_filter_type.empty());
+            res = PrimTranslator::BuildSensor(*spec, use_box_filter);
           } else if (spec->dirty_bits != 0) {
             auto it = sensors_.find(spec->id);
             if (!TF_VERIFY(it != sensors_.end(), "Camera sensor not found: %s",
@@ -1730,6 +1768,20 @@ class SceneModel final : public SceneManager {
 
   TextureCache<Float, Spectrum> texture_cache_;
   std::unique_ptr<FrozenRender<Float, Spectrum>> frozen_render_ = nullptr;
+  bool denoise_ = false;
+  bool denoise_dirty_ = false;
+  Denoiser<Float, Spectrum> denoiser_;
+
+  void MarkSensorsForRebuild() {
+    for (auto& [_, camera_spec] : camera_specs_) {
+      camera_spec.needs_rebuild = true;
+      if (auto target = SurfaceSensorTarget(camera_spec)) {
+        sensor_binding_dirty_.insert(*target);
+        shape_sensors_dirty_ = true;
+      }
+    }
+    has_pending_commits_ = true;
+  }
 
   void PreloadTextures(const std::vector<MaterialSpec*>& pending_specs) {
     absl::flat_hash_set<TextureKey> keys;

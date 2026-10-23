@@ -103,6 +103,7 @@ endif()
 message(STATUS "hdmitsuba: Using OpenUSD ${PXR_MAJOR_VERSION}.${PXR_MINOR_VERSION}.${PXR_PATCH_VERSION} (PXR_VERSION=${PXR_VERSION})")
 
 find_package(OpenSubdiv REQUIRED)
+find_package(OpenImageDenoise 2.1 QUIET)
 
 find_library(MITSUBA_LIBRARY
   NAMES mitsuba

@@ -37,7 +37,8 @@ PXR_NAMESPACE_OPEN_SCOPE
   ((integrator_type, "mitsuba:integrator:type")) \
   ((integrator_max_depth, "mitsuba:integrator:max_depth")) \
   ((integrator_rr_depth, "mitsuba:integrator:rr_depth")) \
-  ((use_kernel_freezing, "mitsuba:use_kernel_freezing"))
+  ((use_kernel_freezing, "mitsuba:use_kernel_freezing")) \
+  ((denoise, "mitsuba:denoise"))
 
 TF_DECLARE_PUBLIC_TOKENS(HdMitsubaRenderSettingsTokens,
                          HDMITSUBA_RENDER_SETTINGS_TOKENS);
@@ -98,6 +99,10 @@ class HdMitsubaRenderDelegate final : public HdRenderDelegate {
   HdAovDescriptor GetDefaultAovDescriptor(const TfToken& name) const override;
 
   HdRenderSettingDescriptorList GetRenderSettingDescriptors() const override;
+
+  bool HasPendingSettings() const {
+    return GetRenderSettingsVersion() != last_settings_version_;
+  }
 
  private:
   void Initialize();

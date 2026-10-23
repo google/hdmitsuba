@@ -25,6 +25,7 @@
 #include <pxr/imaging/hd/rprimCollection.h>
 #include <pxr/pxr.h>
 
+#include "hdmitsuba/render_delegate.h"
 #include "hdmitsuba/render_param.h"
 #include "hdmitsuba/scene_manager.h"
 
@@ -61,8 +62,12 @@ void HdMitsubaRenderPass::_Execute(
 }
 
 bool HdMitsubaRenderPass::IsConverged() const {
-  return static_cast<HdMitsubaRenderParam*>(
-             GetRenderIndex()->GetRenderDelegate()->GetRenderParam())
+  const auto* render_delegate = static_cast<const HdMitsubaRenderDelegate*>(
+      GetRenderIndex()->GetRenderDelegate());
+  if (render_delegate->HasPendingSettings()) {
+    return false;
+  }
+  return static_cast<HdMitsubaRenderParam*>(render_delegate->GetRenderParam())
       ->GetScene()
       ->IsConverged();
 }

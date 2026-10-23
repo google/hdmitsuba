@@ -108,7 +108,7 @@ HdMitsubaRenderDelegate::~HdMitsubaRenderDelegate() = default;
 
 void HdMitsubaRenderDelegate::Initialize() {
   // Initialize the settings and settings descriptors.
-  setting_descriptors_.resize(9);
+  setting_descriptors_.resize(10);
   setting_descriptors_[0] = {"Variant", HdMitsubaRenderSettingsTokens->variant,
                              VtValue(HdMitsubaConfig::GetInstance().variant)};
   setting_descriptors_[1] = {"Samples Per Pixel",
@@ -138,6 +138,9 @@ void HdMitsubaRenderDelegate::Initialize() {
   setting_descriptors_[8] = {"Enable Kernel Freezing (Experimental)",
                              HdMitsubaRenderSettingsTokens->use_kernel_freezing,
                              VtValue(default_freezing)};
+  setting_descriptors_[9] = {"Enable Denoising (OptiX on CUDA, OIDN on CPU)",
+                             HdMitsubaRenderSettingsTokens->denoise,
+                             VtValue(false)};
   _PopulateDefaultSettings(setting_descriptors_);
 
   current_variant_ =

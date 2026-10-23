@@ -115,6 +115,15 @@ set_target_properties(hdMitsuba PROPERTIES
 )
 
 
+# Optional OpenImageDenoise support for CPU/LLVM denoising
+if(OpenImageDenoise_FOUND AND TARGET OpenImageDenoise)
+  message(STATUS "hdmitsuba: Found OpenImageDenoise, enabling OIDN denoiser.")
+  target_compile_definitions(hdMitsuba PRIVATE HDMITSUBA_ENABLE_OIDN=1)
+  target_link_libraries(hdMitsuba PRIVATE OpenImageDenoise)
+else()
+  message(STATUS "hdmitsuba: OpenImageDenoise not found, CPU/LLVM OIDN denoiser disabled.")
+endif()
+
 # Enable CUDA if needed
 option(HDMITSUBA_ENABLE_CUDA "Enable CUDA support for Mitsuba" OFF)
 if(HDMITSUBA_ENABLE_CUDA)

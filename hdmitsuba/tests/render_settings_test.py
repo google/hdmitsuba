@@ -21,6 +21,7 @@ import numpy as np
 import pytest
 
 from pxr import Sdf
+from pxr import Tf
 from pxr import Usd
 from pxr import UsdGeom
 from pxr import UsdRender
@@ -377,3 +378,121 @@ def test_unsupported_integrator_setting_is_ignored():
   scene_dict["integrator"] = {"type": "direct"}
   mi_image = np.array(mi.render(mi.load_dict(scene_dict), spp=4))
   test_helpers.robust_assert_close(hd_image, mi_image, atol=0.05)
+
+
+@pytest.mark.parametrize("variant", ["llvm_ad_rgb", "cuda_ad_rgb"])
+def test_denoise_render_settings(variant: str):
+  try:
+    mi.set_variant(variant)
+  except ImportError as error:
+    pytest.skip(f"Variant {variant} is not available: {error}")
+
+  original_path = f"{test_helpers.TEST_ASSETS_PATH}/render_settings/aovs.usda"
+  stage = Usd.Stage.CreateInMemory()
+  stage.GetRootLayer().subLayerPaths.append(original_path)
+  stage.SetMetadata(
+      UsdRender.Tokens.renderSettingsPrimPath, "/root/Render/Settings"
+  )
+  settings_prim = stage.GetPrimAtPath("/root/Render/Settings")
+  settings_prim.CreateAttribute(
+      "mitsuba:sample_count", Sdf.ValueTypeNames.Int
+  ).Set(1)
+
+  engine = usd_render.RenderEngine(stage)
+
+  def render(denoise: bool, width: int | None = None):
+    engine.configure(
+        hydra_delegate_id="HdMitsubaRendererPlugin",
+        width=width,
+        overrides={
+            "mitsuba:variant": variant,
+            "mitsuba:denoise": denoise,
+        },
+    )
+    return engine.render()
+
+  # Without an explicit pixel filter on the camera, batch mode defaults to
+  # Gaussian while enabling denoising rebuilds the sensor with a box filter.
+  default_results = render(denoise=False)
+  error_mark = Tf.Error.Mark()
+  denoised_results = render(denoise=True)
+  assert not np.allclose(denoised_results["depth"], default_results["depth"])
+
+  # An explicitly authored camera pixel filter must be respected even when
+  # denoising is enabled.
+  pixel_filter_attr = stage.GetPrimAtPath(
+      "/root/Camera/Camera"
+  ).CreateAttribute(
+      "mitsuba:sensor:film:pixel_filter:type", Sdf.ValueTypeNames.String
+  )
+  pixel_filter_attr.Set("gaussian")
+  np.testing.assert_allclose(
+      render(denoise=True)["depth"], default_results["depth"], atol=1e-5
+  )
+  if any(
+      "HDMITSUBA_ENABLE_OIDN" in error.commentary
+      for error in error_mark.GetErrors()
+  ):
+    error_mark.Clear()
+    pytest.skip("OpenImageDenoise is not enabled in this build")
+
+  # Author the box filter explicitly for an apple-to-apples noisy reference.
+  pixel_filter_attr.Set("box")
+  noisy_results = render(denoise=False)
+
+  noisy_rgb = noisy_results["color"][..., :3]
+  denoised_rgb = denoised_results["color"][..., :3]
+
+  # Denoising must modify the noisy 1-spp RGB beauty image and reduce spatial
+  # high-frequency gradient energy while preserving mean luminance and non-color
+  # channels.
+  assert not np.allclose(noisy_rgb, denoised_rgb)
+  noisy_gradient = np.mean(np.square(np.diff(noisy_rgb, axis=1)))
+  denoised_gradient = np.mean(np.square(np.diff(denoised_rgb, axis=1)))
+  assert denoised_gradient < noisy_gradient
+  np.testing.assert_allclose(
+      np.mean(denoised_rgb), np.mean(noisy_rgb), atol=0.05
+  )
+  np.testing.assert_array_equal(
+      denoised_results["color"][..., 3], noisy_results["color"][..., 3]
+  )
+  for aov_name in ("albedo", "normal", "depth"):
+    np.testing.assert_allclose(
+        denoised_results[aov_name], noisy_results[aov_name], atol=1e-5
+    )
+
+  # Alternating between a downsampled resolution and full resolution (plus a
+  # third resolution) exercises both slots and eviction in the denoiser cache.
+  downsampled_rgb = render(denoise=True, width=64)["color"][..., :3]
+  assert downsampled_rgb.shape == (64, 64, 3)
+  np.testing.assert_allclose(
+      render(denoise=True, width=64)["color"][..., :3],
+      downsampled_rgb,
+      rtol=1e-5,
+      atol=1e-5,
+  )
+  np.testing.assert_allclose(
+      render(denoise=True)["color"][..., :3],
+      denoised_rgb,
+      rtol=1e-5,
+      atol=1e-5,
+  )
+  assert render(denoise=True, width=32)["color"].shape == (32, 32, 4)
+
+  # Requesting normals without albedo falls back to unguided color denoising
+  # while preserving the output normal AOV.
+  UsdRender.Product(
+      stage.GetPrimAtPath("/root/Render/Products/MainOutput")
+  ).GetOrderedVarsRel().SetTargets([
+      Sdf.Path("/root/Render/Vars/color"),
+      Sdf.Path("/root/Render/Vars/normal"),
+  ])
+  unguided_results = render(denoise=True)
+  unguided_rgb = unguided_results["color"][..., :3]
+  assert not np.allclose(unguided_rgb, noisy_rgb)
+  assert not np.allclose(denoised_rgb, unguided_rgb)
+  unguided_gradient = np.mean(np.square(np.diff(unguided_rgb, axis=1)))
+  assert unguided_gradient < noisy_gradient
+  np.testing.assert_allclose(
+      unguided_results["normal"], noisy_results["normal"], atol=1e-5
+  )

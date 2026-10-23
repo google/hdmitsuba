@@ -60,9 +60,9 @@ jobs:
         OPENUSD_SPEC: "openusd>=26.05,<27"
       run: |
         if [ "$RUNNER_OS" = "macOS" ] || [ "$RUNNER_OS" = "Windows" ]; then
-          mamba install -y -c conda-forge "$OPENUSD_SPEC" ninja "llvm>=18"
+          mamba install -y -c conda-forge "$OPENUSD_SPEC" openimagedenoise ninja "llvm>=18"
         else
-          mamba install -y -c conda-forge "$OPENUSD_SPEC" ninja
+          mamba install -y -c conda-forge "$OPENUSD_SPEC" openimagedenoise ninja
         fi
         python -c "from pxr import Usd; print('OpenUSD version:', Usd.GetVersion())"
 

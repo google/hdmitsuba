@@ -21,6 +21,7 @@ import numpy as np
 import pytest
 from pxr import Gf
 from pxr import Sdf
+from pxr import Tf
 from pxr import Usd
 from pxr import UsdGeom
 from pxr import UsdLux
@@ -249,3 +250,58 @@ def test_seed_change_resets_progressive_rendering(use_kernel_freezing: bool):
   assert not np.allclose(pass_1_seed_0, pass_0_seed_2, atol=1e-5)
   assert not np.allclose(converged_seed_0, converged_seed_2, atol=1e-5)
 
+
+def test_interactive_denoise_preserves_raw_accumulation():
+  stage = _create_stage()
+
+  def configure(
+      engine: usd_render.RenderEngine, denoise: bool, sample_count: int = 2
+  ) -> None:
+    engine.configure(
+        hydra_delegate_id='HdMitsubaRendererPlugin',
+        render_settings_path='/Render/PrimarySettings',
+        width=64,
+        overrides={
+            'enableInteractive': True,
+            'mitsuba:sample_count': sample_count,
+            'mitsuba:denoise': denoise,
+        },
+    )
+
+  reference_engine = usd_render.RenderEngine(stage)
+  configure(reference_engine, denoise=False)
+  denoised_engine = usd_render.RenderEngine(stage)
+  configure(denoised_engine, denoise=True)
+  for _ in range(2):
+    reference = reference_engine.render()['color']
+    error_mark = Tf.Error.Mark()
+    denoised = denoised_engine.render()['color']
+    if any(
+        'HDMITSUBA_ENABLE_OIDN' in error.commentary
+        for error in error_mark.GetErrors()
+    ):
+      error_mark.Clear()
+      pytest.skip('OpenImageDenoise is not enabled in this build')
+    # Every displayed pass is denoised.
+    assert not np.allclose(denoised[..., :3], reference[..., :3])
+  assert denoised_engine.is_converged()
+
+  # Toggling denoising after convergence must immediately mark the pass
+  # unconverged and switch between raw and denoised accumulation without
+  # rendering additional samples.
+  configure(denoised_engine, denoise=False)
+  assert not denoised_engine.is_converged()
+  np.testing.assert_array_equal(denoised_engine.render()['color'], reference)
+  assert denoised_engine.is_converged()
+  configure(denoised_engine, denoise=True)
+  assert not denoised_engine.is_converged()
+  np.testing.assert_array_equal(denoised_engine.render()['color'], denoised)
+  assert denoised_engine.is_converged()
+  assert denoised_engine.get_render_stats()['numCompletedSamples'] == 2
+
+  # Toggling denoising with zero target samples (empty accumulator) must still
+  # converge cleanly after render().
+  configure(denoised_engine, denoise=False, sample_count=0)
+  assert not denoised_engine.is_converged()
+  denoised_engine.render()
+  assert denoised_engine.is_converged()
