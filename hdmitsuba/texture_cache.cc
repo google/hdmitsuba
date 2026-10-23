@@ -26,6 +26,7 @@
 #include <absl/base/no_destructor.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
+#include <absl/strings/ascii.h>
 #include <absl/strings/match.h>
 #include <drjit-core/jit.h>
 #include <drjit/matrix.h>
@@ -57,8 +58,24 @@ namespace {
 // Converts the source color space to the Mitsuba Bitmap's `raw` flag.
 // Non-color inputs are classified based on the UsdPreviewSurface's
 // specification.
-bool UseRawBitmap(const TfToken& source_color_space,
+bool UseRawBitmap(const std::string& source_color_space,
                   const TfToken& input_name) {
+  // Covers the GfColorSpace names (e.g. `lin_rec709_scene`, `srgb_ap1_scene`,
+  // `g22_rec709_scene`, `raw`) as well as UsdUVTexture's `sRGB` token and
+  // common OCIO aliases (e.g. `lin_srgb`, `srgb_texture`).
+  const std::string lower = absl::AsciiStrToLower(source_color_space);
+  if (!lower.empty() && lower != "auto" && lower != "unknown") {
+    if (lower == "raw" || lower == "data" || lower == "identity" ||
+        lower == "linear" || lower == "acescg" ||
+        absl::StartsWith(lower, "lin_")) {
+      return true;
+    }
+    if (lower == "srgb" || absl::StartsWith(lower, "srgb_") ||
+        absl::StartsWith(lower, "g18_") || absl::StartsWith(lower, "g22_") ||
+        absl::StartsWith(lower, "g24_")) {
+      return false;
+    }
+  }
   static const absl::NoDestructor<
       absl::flat_hash_set<TfToken, TfToken::HashFunctor>>
       kNonColorInputs({
@@ -75,12 +92,7 @@ bool UseRawBitmap(const TfToken& source_color_space,
           TfToken("ior"),
           TfToken("opacity"),
       });
-  const bool is_non_color = kNonColorInputs->contains(input_name);
-  if (source_color_space == TfToken("auto")) {
-    return is_non_color;
-  } else {
-    return (source_color_space == TfToken("raw")) && is_non_color;
-  }
+  return kNonColorInputs->contains(input_name);
 }
 
 // Converts a matrix-valued `to_uv` shader parameter to the 3x3 Mitsuba-space
@@ -178,12 +190,17 @@ std::optional<TextureKey> ExtractTextureKey(
   TextureKey key;
   key.filename = std::move(resolved_path);
   if (nodeTypeId == TfToken("UsdUVTexture")) {
-    TfToken source_color_space("auto");
-    if (auto cs_it = parameters.find(TfToken("sourceColorSpace"));
-        cs_it != parameters.end() && cs_it->second.IsHolding<TfToken>()) {
-      source_color_space = cs_it->second.Get<TfToken>();
-    }
-    key.raw = UseRawBitmap(source_color_space, input_name);
+    auto get_token_str = [&](const TfToken& k) {
+      auto it = parameters.find(k);
+      return it != parameters.end()
+                 ? it->second.GetWithDefault<TfToken>().GetString()
+                 : std::string();
+    };
+    // UsdImaging forwards the `colorSpace` metadata of `inputs:file` as
+    // `colorSpace:file`, which applies if `sourceColorSpace` is unset or auto.
+    std::string cs = get_token_str(TfToken("sourceColorSpace"));
+    if (cs.empty() || cs == "auto") cs = get_token_str(TfToken("colorSpace:file"));
+    key.raw = UseRawBitmap(cs, input_name);
     if (auto wrap_s_it = parameters.find(TfToken("wrapS"));
         wrap_s_it != parameters.end() &&
         wrap_s_it->second.IsHolding<TfToken>()) {

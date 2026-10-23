@@ -1,0 +1,101 @@
+#usda 1.0
+(
+    defaultPrim = "root"
+    upAxis = "Z"
+)
+
+def Xform "root"
+{
+    def Scope "Camera"
+    {
+        def Camera "Camera"
+        {
+            float focalLength = 0.036
+            float horizontalAperture = 0.036
+            float verticalAperture = 0.0252
+            double3 xformOp:translate = (0, 0, 3)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+
+    def DomeLight "Sky"
+    {
+        float inputs:intensity = 0.6
+    }
+
+    def DistantLight "KeyLight"
+    {
+        float inputs:angle = 2
+        float inputs:intensity = 1.5
+        float3 xformOp:rotateXYZ = (25, -20, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def Scope "_materials"
+    {
+        class Material "_Preview"
+        {
+            token outputs:surface.connect = </root/_materials/_Preview/Shader.outputs:surface>
+            def Shader "Shader"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </root/_materials/_Preview/Tex.outputs:rgb>
+                token outputs:surface
+            }
+            def Shader "Tex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./textures/uv_quadrants.png@
+                float3 outputs:rgb
+            }
+        }
+
+        # Explicit sourceColorSpace = "raw" on color input + "sRGB" on scalar.
+        def Material "colorspace_overrides" (inherits = </root/_materials/_Preview>)
+        {
+            over "Shader"
+            {
+                float inputs:roughness.connect = </root/_materials/colorspace_overrides/TexSrgb.outputs:r>
+                float inputs:metallic = 0.8
+            }
+            over "Tex"
+            {
+                token inputs:sourceColorSpace = "Raw"
+            }
+            def Shader "TexSrgb"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./textures/albedo.png@
+                token inputs:sourceColorSpace = "srgb"
+                float outputs:r
+            }
+        }
+
+        # Attribute-level colorSpace metadata (UsdColorSpaceAPI / colorSpace:file).
+        def Material "colorspace_api" (inherits = </root/_materials/_Preview>)
+        {
+            over "Tex"
+            {
+                asset inputs:file = @./textures/uv_quadrants.png@ (colorSpace = "lin_rec709_scene")
+            }
+        }
+    }
+
+    class Mesh "_Tile" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "faceVarying")
+        uniform token subdivisionScheme = "none"
+    }
+    def Mesh "Tile1" (inherits = </root/_Tile>)
+    {
+        rel material:binding = </root/_materials/colorspace_overrides>
+        point3f[] points = [(-1.25, -0.5, 0), (-0.05, -0.5, 0), (-0.05, 0.5, 0), (-1.25, 0.5, 0)]
+    }
+    def Mesh "Tile2" (inherits = </root/_Tile>)
+    {
+        rel material:binding = </root/_materials/colorspace_api>
+        point3f[] points = [(0.05, -0.5, 0), (1.25, -0.5, 0), (1.25, 0.5, 0), (0.05, 0.5, 0)]
+    }
+}

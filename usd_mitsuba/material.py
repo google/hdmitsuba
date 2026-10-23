@@ -135,6 +135,31 @@ def _get_volume_shader(
   return None
 
 
+def _use_raw_bitmap(cs: str, input_name: str | None) -> bool:
+  """Returns whether a UsdUVTexture bitmap should skip sRGB decoding.
+
+  Covers the Gf.ColorSpace names (e.g. `lin_rec709_scene`, `srgb_ap1_scene`,
+  `g22_rec709_scene`, `raw`) as well as UsdUVTexture's `sRGB` token and common
+  OCIO aliases (e.g. `lin_srgb`, `srgb_texture`).
+
+  Args:
+    cs: The source color space name (may be empty or 'auto').
+    input_name: The downstream input name, used if `cs` is unset or 'auto'.
+
+  Returns:
+    True if the bitmap should be treated as linear data.
+  """
+  lower = cs.lower()
+  if lower and lower not in ('auto', 'unknown'):
+    if lower in ('raw', 'data', 'identity', 'linear', 'acescg') or (
+        lower.startswith('lin_')
+    ):
+      return True
+    if lower == 'srgb' or lower.startswith(('srgb_', 'g18_', 'g22_', 'g24_')):
+      return False
+  return input_name in _NON_COLOR_INPUTS
+
+
 def _open_asset_stream(filename: str) -> mi.MemoryStream | None:
   """Opens an Ar-resolved asset into an in-memory Mitsuba stream."""
   asset = Ar.GetResolver().OpenAsset(Ar.ResolvedPath(filename))
@@ -171,15 +196,13 @@ def _convert_uv_texture(
         texture = {'type': 'bitmap', 'bitmap': mi.Bitmap(stream)}
 
       # Handle color space if we have a bitmap.
-      source_color_space = shader.GetInput('sourceColorSpace').Get()
-      if source_color_space is None:
-        source_color_space = 'auto'
-      is_non_color = input_name in _NON_COLOR_INPUTS
-      if source_color_space == 'auto':
-        if is_non_color:
-          texture['raw'] = True
-      else:
-        texture['raw'] = (source_color_space == 'raw') and is_non_color
+      # Like UsdImaging, only consider the `colorSpace` metadata of the file
+      # attribute itself if `sourceColorSpace` is unset or 'auto'.
+      cs = shader.GetInput('sourceColorSpace').Get()
+      if not cs or cs == 'auto':
+        cs = file_input.GetAttr().GetColorSpace()
+      if _use_raw_bitmap(cs, input_name):
+        texture['raw'] = True
       return texture
     else:
       Tf.Warn(
