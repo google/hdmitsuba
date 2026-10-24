@@ -376,6 +376,7 @@ mitsuba::ref<mitsuba::Object> ParseNodeRecursive(
                           LoadVolumeGrid<Float, Spectrum>(path)));
   }
 
+  mitsuba::ref<mitsuba::Object> child_bsdf;
   for (const auto& [input_token, connections] : node.inputConnections) {
     if (connections.empty()) continue;
     if (IsPrincipledNode(node) && IsScalarOnlyPrincipledInput(input_token)) {
@@ -389,8 +390,15 @@ mitsuba::ref<mitsuba::Object> ParseNodeRecursive(
         ParseNodeRecursive<Float, Spectrum>(connections[0], network, cache,
                                             input_token, texture_cache);
     if (upstream_object) {
+      if (upstream_object->type() == mitsuba::ObjectType::BSDF) {
+        child_bsdf = upstream_object;
+      }
       props.set(input_token.GetString(), upstream_object);
     }
+  }
+
+  if (mitsuba_plugin_name == "normalmap" && !props.has_property("normalmap")) {
+    return cache[nodePath] = child_bsdf;
   }
 
   mitsuba::ObjectType object_type =
