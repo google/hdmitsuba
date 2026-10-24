@@ -261,11 +261,10 @@ def _convert_uv_texture(
         f"Normal map input '{input_name}' is connected to single-channel"
         f" output '{output_name}'. Normal maps require at least 3 channels."
     )
-    return None
 
   # 1. Use the texture image if it is valid.
   file_input = shader.GetInput('file')
-  asset_path = file_input.Get()
+  asset_path = None if is_normal and ch_idx >= 0 else file_input.Get()
   filename = asset_path.resolvedPath if asset_path else None
   if filename and (texture := _load_uv_texture_image(filename, ch_idx)):
     if texture['type'] != 'bitmap':
@@ -295,10 +294,14 @@ def _convert_uv_texture(
       texture['to_uv'] = to_uv
     return texture
 
-  if is_normal:
+  if input_name in ('normal', 'bump'):
     return None
 
   # 2. If the file is missing/unresolved, use the fallback color (or magenta).
+  if input_name == 'normalmap':
+    return {'type': 'rgb', 'value': (0.5, 0.5, 1.0)}
+  if input_name == 'bumpmap':
+    return {'type': 'uniform', 'value': 0.0}
   fb = shader.GetInput('fallback').Get()
   fb = tuple(fb) if fb is not None else (1.0, 0.0, 1.0, 1.0)
   if ch_idx >= 0:

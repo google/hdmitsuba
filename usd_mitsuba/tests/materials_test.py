@@ -329,3 +329,26 @@ def test_custom_python_plugins_to_usd_conversion():
         {'type': 'custom_python_tex', 'value': 0.5},
     )
 
+
+def test_invalid_normal_and_bump_fallbacks():
+  stage = Usd.Stage.Open('hdmitsuba/test_assets/materials/uv_texture.usda')
+  stage.SetEditTarget(stage.GetSessionLayer())
+  preview = UsdShade.Shader.Get(stage, '/root/_materials/preview_orm/Shader')
+  missing = UsdShade.Shader.Get(
+      stage, '/root/_materials/mitsuba_channels/MissingTex'
+  )
+  preview.CreateInput('bump', Sdf.ValueTypeNames.Float).ConnectToSource(
+      missing.ConnectableAPI(), 'rgb'
+  )
+  preview_dict, _ = material.usd_preview_surface_to_mitsuba(preview)
+  assert preview_dict['type'] == 'principled'
+
+  mi_dict = material.usd_mitsuba_material_to_dict(
+      UsdShade.Shader.Get(stage, '/root/_materials/mitsuba_channels/BumpMap')
+  )
+  assert mi_dict['bumpmap'] == {'type': 'uniform', 'value': 0.0}
+  assert mi_dict['bsdf']['normalmap'] == {
+      'type': 'rgb',
+      'value': (0.5, 0.5, 1.0),
+  }
+  assert isinstance(mi.load_dict(mi_dict), mi.BSDF)

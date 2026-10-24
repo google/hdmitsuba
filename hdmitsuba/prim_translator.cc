@@ -285,15 +285,21 @@ mitsuba::ref<mitsuba::Object> GetTexture(
     }
   }
   // Instantiate a fallback texture.
-  if (is_normal) {
+  if (input_name == TfToken("normal") || input_name == TfToken("bump")) {
     return nullptr;
   }
   const GfVec4f fb = ExtractFallbackColor(node.parameters);
   const int ch = (node.nodeTypeId == TfToken("UsdUVTexture"))
                      ? UsdUVTextureChannel(output_name)
                      : -1;
-  mitsuba::Properties fallback_props(ch >= 0 ? "uniform" : "srgb");
-  if (ch >= 0) {
+  mitsuba::Properties fallback_props("srgb");
+  if (input_name == TfToken("normalmap")) {
+    fallback_props.set("color", mitsuba::Color<float, 3>(0.5f, 0.5f, 1.0f));
+  } else if (input_name == TfToken("bumpmap")) {
+    fallback_props = mitsuba::Properties("uniform");
+    fallback_props.set("value", 0.0f);
+  } else if (ch >= 0) {
+    fallback_props = mitsuba::Properties("uniform");
     fallback_props.set("value", fb[ch]);
   } else {
     fallback_props.set("color", mitsuba::Color<float, 3>(fb[0], fb[1], fb[2]));
