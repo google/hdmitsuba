@@ -171,6 +171,29 @@ def _open_asset_stream(filename: str) -> mi.MemoryStream | None:
   return None
 
 
+def _extract_usd_transform2d(
+    shader: UsdShade.Shader,
+) -> mi.scalar_rgb.ScalarAffineTransform3f | None:
+  """Extracts a Mitsuba UV transform from upstream UsdTransform2d nodes."""
+  identity = mi.scalar_rgb.ScalarAffineTransform3f()
+  xf = identity
+  curr = find_shader(shader.GetInput('st'))
+  while curr is not None and curr.GetIdAttr().Get() == 'UsdTransform2d':
+    if (t := curr.GetInput('translation').Get()) is not None:
+      xf = xf.translate(tuple(t))
+    if r := curr.GetInput('rotation').Get():
+      xf = xf.rotate(r)
+    if (s := curr.GetInput('scale').Get()) is not None:
+      xf = xf.scale(tuple(s))
+    curr = find_shader(curr.GetInput('in'))
+  if xf == identity:
+    return None
+  # Mesh UVs are V-flipped on load (uv_mi = F @ uv_usd, with F = F^-1), so
+  # conjugate the USD-space transform into Mitsuba UV space: F @ xf @ F.
+  flip = identity.translate([0, 1]).scale([1, -1])
+  return flip @ xf @ flip
+
+
 def _convert_uv_texture(
     shader: UsdShade.Shader,
     input_name: str | None = None,
@@ -216,6 +239,9 @@ def _convert_uv_texture(
               f"Unsupported wrap mode '{w}' on '{param}' for UsdUVTexture"
               f" '{filename}'; ignoring."
           )
+
+      if to_uv := _extract_usd_transform2d(shader):
+        texture['to_uv'] = to_uv
 
       return texture
     else:
