@@ -1,0 +1,124 @@
+#usda 1.0
+(
+    defaultPrim = "root"
+    upAxis = "Z"
+)
+
+def Xform "root"
+{
+    def Scope "Camera"
+    {
+        def Camera "Camera"
+        {
+            float focalLength = 0.036
+            float horizontalAperture = 0.036
+            float verticalAperture = 0.0252
+            double3 xformOp:translate = (0, 0, 3)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+
+    def DomeLight "Sky"
+    {
+    }
+
+    def Scope "_materials"
+    {
+        class Material "_Preview"
+        {
+            token outputs:surface.connect = </root/_materials/_Preview/Shader.outputs:surface>
+            def Shader "Shader"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </root/_materials/_Preview/Tex.outputs:rgb>
+                token outputs:surface
+            }
+            def Shader "Tex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./textures/uv_quadrants.png@
+                float3 outputs:rgb
+            }
+        }
+
+        # Explicit sourceColorSpace = "raw" on color input + "sRGB" on scalar.
+        def Material "colorspace_overrides" (inherits = </root/_materials/_Preview>)
+        {
+            over "Shader"
+            {
+                float inputs:roughness.connect = </root/_materials/colorspace_overrides/TexSrgb.outputs:r>
+                float inputs:metallic = 0.8
+            }
+            over "Tex"
+            {
+                token inputs:sourceColorSpace = "Raw"
+            }
+            def Shader "TexSrgb"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./textures/albedo.png@
+                token inputs:sourceColorSpace = "srgb"
+                float outputs:r
+            }
+        }
+
+        # ColorSpaceAPI metadata + unauthored wrapS falling back to wrapT.
+        def Material "wrap_t_fallback" (inherits = </root/_materials/_Preview>)
+        {
+            over "Tex"
+            {
+                asset inputs:file = @./textures/uv_quadrants.png@ (colorSpace = "lin_rec709_scene")
+                token inputs:wrapT = "clamp"
+            }
+        }
+
+        # wrapS = "useMetadata" falling back to concrete wrapT = "clamp".
+        def Material "wrap_use_metadata" (inherits = </root/_materials/wrap_t_fallback>)
+        {
+            over "Tex"
+            {
+                token inputs:wrapS = "useMetadata"
+            }
+        }
+
+        # Concrete wrapS ("mirror") overrides conflicting wrapT ("clamp").
+        def Material "wrap_s_precedence" (inherits = </root/_materials/wrap_t_fallback>)
+        {
+            over "Tex"
+            {
+                string inputs:wrapS = "mirror"
+            }
+        }
+    }
+
+    class Mesh "_Tile" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "faceVarying")
+        uniform token subdivisionScheme = "none"
+    }
+    def Mesh "Tile1" (inherits = </root/_Tile>)
+    {
+        rel material:binding = </root/_materials/colorspace_overrides>
+        point3f[] points = [(-1.25, 0.05, 0), (-0.05, 0.05, 0), (-0.05, 0.95, 0), (-1.25, 0.95, 0)]
+    }
+    def Mesh "Tile2" (inherits = </root/_Tile>)
+    {
+        rel material:binding = </root/_materials/wrap_t_fallback>
+        texCoord2f[] primvars:st = [(-0.5, -0.5), (1.5, -0.5), (1.5, 1.5), (-0.5, 1.5)] (interpolation = "faceVarying")
+        point3f[] points = [(0.05, 0.05, 0), (1.25, 0.05, 0), (1.25, 0.95, 0), (0.05, 0.95, 0)]
+    }
+    def Mesh "Tile3" (inherits = </root/_Tile>)
+    {
+        rel material:binding = </root/_materials/wrap_use_metadata>
+        texCoord2f[] primvars:st = [(-0.5, -0.5), (1.5, -0.5), (1.5, 1.5), (-0.5, 1.5)] (interpolation = "faceVarying")
+        point3f[] points = [(-1.25, -0.95, 0), (-0.05, -0.95, 0), (-0.05, -0.05, 0), (-1.25, -0.05, 0)]
+    }
+    def Mesh "Tile4" (inherits = </root/_Tile>)
+    {
+        rel material:binding = </root/_materials/wrap_s_precedence>
+        texCoord2f[] primvars:st = [(-0.5, -0.5), (1.5, -0.5), (1.5, 1.5), (-0.5, 1.5)] (interpolation = "faceVarying")
+        point3f[] points = [(0.05, -0.95, 0), (1.25, -0.95, 0), (1.25, -0.05, 0), (0.05, -0.05, 0)]
+    }
+}

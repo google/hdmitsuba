@@ -26,6 +26,7 @@
 #include <absl/base/no_destructor.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
+#include <absl/strings/ascii.h>
 #include <absl/strings/match.h>
 #include <drjit-core/jit.h>
 #include <drjit/matrix.h>
@@ -57,8 +58,24 @@ namespace {
 // Converts the source color space to the Mitsuba Bitmap's `raw` flag.
 // Non-color inputs are classified based on the UsdPreviewSurface's
 // specification.
-bool UseRawBitmap(const TfToken& source_color_space,
+bool UseRawBitmap(const std::string& source_color_space,
                   const TfToken& input_name) {
+  // Covers the GfColorSpace names (e.g. `lin_rec709_scene`, `srgb_ap1_scene`,
+  // `g22_rec709_scene`, `raw`) as well as UsdUVTexture's `sRGB` token and
+  // common OCIO aliases (e.g. `lin_srgb`, `srgb_texture`).
+  const std::string lower = absl::AsciiStrToLower(source_color_space);
+  if (!lower.empty() && lower != "auto" && lower != "unknown") {
+    if (lower == "raw" || lower == "data" || lower == "identity" ||
+        lower == "linear" || lower == "acescg" ||
+        absl::StartsWith(lower, "lin_")) {
+      return true;
+    }
+    if (lower == "srgb" || absl::StartsWith(lower, "srgb_") ||
+        absl::StartsWith(lower, "g18_") || absl::StartsWith(lower, "g22_") ||
+        absl::StartsWith(lower, "g24_")) {
+      return false;
+    }
+  }
   static const absl::NoDestructor<
       absl::flat_hash_set<TfToken, TfToken::HashFunctor>>
       kNonColorInputs({
@@ -75,12 +92,7 @@ bool UseRawBitmap(const TfToken& source_color_space,
           TfToken("ior"),
           TfToken("opacity"),
       });
-  const bool is_non_color = kNonColorInputs->contains(input_name);
-  if (source_color_space == TfToken("auto")) {
-    return is_non_color;
-  } else {
-    return (source_color_space == TfToken("raw")) && is_non_color;
-  }
+  return kNonColorInputs->contains(input_name);
 }
 
 // Converts a matrix-valued `to_uv` shader parameter to the 3x3 Mitsuba-space
@@ -175,21 +187,42 @@ std::optional<TextureKey> ExtractTextureKey(
     return std::nullopt;
   }
 
+  auto set_string = [](const VtValue& v, std::string& dst) {
+    if (v.IsHolding<std::string>()) dst = v.Get<std::string>();
+    else if (v.IsHolding<TfToken>()) dst = v.Get<TfToken>().GetString();
+    else return false;
+    return true;
+  };
+
   TextureKey key;
   key.filename = std::move(resolved_path);
   if (nodeTypeId == TfToken("UsdUVTexture")) {
-    TfToken source_color_space("auto");
-    if (auto cs_it = parameters.find(TfToken("sourceColorSpace"));
-        cs_it != parameters.end() && cs_it->second.IsHolding<TfToken>()) {
-      source_color_space = cs_it->second.Get<TfToken>();
-    }
-    key.raw = UseRawBitmap(source_color_space, input_name);
-    if (auto wrap_s_it = parameters.find(TfToken("wrapS"));
-        wrap_s_it != parameters.end() &&
-        wrap_s_it->second.IsHolding<TfToken>()) {
-      TfToken wrap_s = wrap_s_it->second.Get<TfToken>();
-      if (wrap_s == TfToken("clamp") || wrap_s == TfToken("mirror")) {
-        key.wrap_mode = wrap_s.GetString();
+    auto get_str = [&](const TfToken& k) {
+      std::string s;
+      if (auto it = parameters.find(k); it != parameters.end()) {
+        set_string(it->second, s);
+      }
+      return s;
+    };
+    // UsdImaging forwards the `colorSpace` metadata of `inputs:file` as
+    // `colorSpace:file`, which applies if `sourceColorSpace` is unset or auto.
+    std::string cs = get_str(TfToken("sourceColorSpace"));
+    if (cs.empty() || cs == "auto") cs = get_str(TfToken("colorSpace:file"));
+    key.raw = UseRawBitmap(cs, input_name);
+
+    // Mitsuba's bitmap only has a single wrap_mode: use wrapS, falling back to
+    // wrapT if wrapS is unauthored, `useMetadata` or unsupported.
+    for (const char* param : {"wrapS", "wrapT"}) {
+      std::string w = get_str(TfToken(param));
+      if (w == "repeat" || w == "clamp" || w == "mirror") {
+        key.wrap_mode = std::move(w);
+        break;
+      }
+      if (!w.empty() && w != "useMetadata") {
+        TF_WARN(
+            "Unsupported wrap mode '%s' on '%s' for UsdUVTexture '%s'; "
+            "ignoring.",
+            w.c_str(), param, key.filename.c_str());
       }
     }
   } else if (nodeTypeId == TfToken("mitsuba_bitmap")) {
@@ -198,12 +231,6 @@ std::optional<TextureKey> ExtractTextureKey(
       using T = std::decay_t<decltype(dst)>;
       if (!v.IsHolding<T>()) return false;
       dst = v.Get<T>();
-      return true;
-    };
-    auto set_string = [](const VtValue& v, std::string& dst) {
-      if (v.IsHolding<std::string>()) dst = v.Get<std::string>();
-      else if (v.IsHolding<TfToken>()) dst = v.Get<TfToken>().GetString();
-      else return false;
       return true;
     };
     auto set_uv = [](const VtValue& v, TextureKey::UvMatrix& dst) {

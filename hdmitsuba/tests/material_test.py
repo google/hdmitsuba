@@ -42,6 +42,7 @@ def _set_mitsuba_variant():
         'nodegraphs',
         'display_color',
         'mitsuba_bitmap',
+        'uv_texture',
         'volumes',
     ],
 )
