@@ -52,17 +52,15 @@ struct TextureKey {
   std::string format = "auto";
   bool accel = true;
   UvMatrix to_uv = kIdentityUv;
-  // Mitsuba's `bitmap` texture plugin only stores 1 or 3 channels and strips
-  // the alpha channel when expanding RGBA/YA bitmaps. When true, the image's
-  // alpha channel is extracted into a separate single-channel texture; images
-  // without alpha yield no texture.
-  bool alpha_channel = false;
+  // Extracted channel index for UsdUVTexture single-channel outputs
+  // (-1 for full image, 0 = R, 1 = G, 2 = B, 3 = A).
+  int channel = -1;
 
  private:
   // Single source of truth for equality and hashing. Add new fields here.
   auto Fields() const {
     return std::tie(filename, raw, wrap_mode, filter_type, max_anisotropy,
-                    format, accel, to_uv, alpha_channel);
+                    format, accel, to_uv, channel);
   }
 
  public:
@@ -82,11 +80,22 @@ struct CachedTexture {
   size_t channel_count = 0;
 };
 
+// Returns the channel index (0=R, 1=G, 2=B, 3=A) for a UsdUVTexture
+// single-channel output name, or -1 otherwise.
+inline int UsdUVTextureChannel(const TfToken& output_name) {
+  if (output_name == TfToken("r")) return 0;
+  if (output_name == TfToken("g")) return 1;
+  if (output_name == TfToken("b")) return 2;
+  if (output_name == TfToken("a")) return 3;
+  return -1;
+}
+
 // Builds the cache key for a `UsdUVTexture` or `mitsuba_bitmap` node connected
 // to `input_name`. Returns nullopt if the node has no usable file path.
 std::optional<TextureKey> ExtractTextureKey(const HdMaterialNetwork2& network,
                                             const HdMaterialNode2& node,
-                                            const TfToken& input_name);
+                                            const TfToken& input_name,
+                                            const TfToken& output_name);
 
 // Loads a bitmap through USD's asset resolver so textures embedded in .usdz
 // packages (or served by custom resolvers) can be read from memory. Falls back

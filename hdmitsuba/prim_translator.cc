@@ -193,7 +193,8 @@ void DiscoverTextures(
         if (IsTextureNode(node)) {
           // Texture nodes are keyed by input_name as well, so they are
           // intentionally not deduplicated via visited_nodes.
-          if (auto key_opt = ExtractTextureKey(network, node, input_name)) {
+          if (auto key_opt = ExtractTextureKey(network, node, input_name,
+                                               conn.upstreamOutputName)) {
             callback(*key_opt);
           }
           return;
@@ -238,16 +239,32 @@ mitsuba::ref<mitsuba::VolumeGrid<Float, Spectrum>> LoadVolumeGrid(
   return new mitsuba::VolumeGrid<Float, Spectrum>(path);
 }
 
+// Returns a texture node's RGBA `fallback` parameter (magenta if unset). Alpha
+// defaults to 1 for RGB fallbacks.
+GfVec4f ExtractFallbackColor(const std::map<TfToken, VtValue>& parameters) {
+  auto it = parameters.find(TfToken("fallback"));
+  if (it == parameters.end()) return GfVec4f(1.0f, 0.0f, 1.0f, 1.0f);
+  const VtValue& val = it->second;
+  if (val.IsHolding<GfVec4f>()) return val.UncheckedGet<GfVec4f>();
+  if (val.IsHolding<GfVec3d>()) {
+    const GfVec3f c(val.UncheckedGet<GfVec3d>());
+    return GfVec4f(c[0], c[1], c[2], 1.0f);
+  }
+  const GfVec3f c = val.GetWithDefault(GfVec3f(1.0f, 0.0f, 1.0f));
+  return GfVec4f(c[0], c[1], c[2], 1.0f);
+}
+
 template <typename Float, typename Spectrum>
 mitsuba::ref<mitsuba::Object> GetTexture(
     const HdMaterialNetwork2& network, const HdMaterialNode2& node,
-    const TfToken& input_name,
+    const TfToken& input_name, const TfToken& output_name,
     const TextureCache<Float, Spectrum>& texture_cache) {
   const bool is_normal =
       (input_name == TfToken("normal") || input_name == TfToken("normalmap"));
   // Attempt to find the texture from the texture cache. This
   // assumes the texture cache was pre-populated by DiscoverTextures.
-  if (auto key_opt = ExtractTextureKey(network, node, input_name)) {
+  if (auto key_opt =
+          ExtractTextureKey(network, node, input_name, output_name)) {
     const CachedTexture* cached = texture_cache.Find(*key_opt);
     if (!cached) {
       // The texture discovery pass disagrees with the parser about which
@@ -271,12 +288,15 @@ mitsuba::ref<mitsuba::Object> GetTexture(
   if (is_normal) {
     return nullptr;
   }
-  mitsuba::Properties fallback_props("srgb");
-  auto fallback_it = node.parameters.find(TfToken("fallback"));
-  if (fallback_it != node.parameters.end()) {
-    SetMitsubaPropertyFromValue(fallback_props, "color", fallback_it->second);
+  const GfVec4f fb = ExtractFallbackColor(node.parameters);
+  const int ch = (node.nodeTypeId == TfToken("UsdUVTexture"))
+                     ? UsdUVTextureChannel(output_name)
+                     : -1;
+  mitsuba::Properties fallback_props(ch >= 0 ? "uniform" : "srgb");
+  if (ch >= 0) {
+    fallback_props.set("value", fb[ch]);
   } else {
-    fallback_props.set("color", mitsuba::Color<float, 3>(1.0f, 0.0f, 1.0f));
+    fallback_props.set("color", mitsuba::Color<float, 3>(fb[0], fb[1], fb[2]));
   }
   return mitsuba::PluginManager::instance()->create_object(
       fallback_props, mitsuba::Texture<Float, Spectrum>::Variant,
@@ -293,14 +313,15 @@ mitsuba::ref<mitsuba::Object> ResolveConnectedTexture(
       conn_it->second.empty()) {
     return nullptr;
   }
-  auto node_it = network2.nodes.find(conn_it->second[0].upstreamNode);
+  const HdMaterialConnection2& conn = conn_it->second[0];
+  auto node_it = network2.nodes.find(conn.upstreamNode);
   if (node_it == network2.nodes.end()) {
     return nullptr;
   }
   const HdMaterialNode2& upstream_node = node_it->second;
   if (IsTextureNode(upstream_node)) {
     return GetTexture<Float, Spectrum>(network2, upstream_node, input_name,
-                                       texture_cache);
+                                       conn.upstreamOutputName, texture_cache);
   }
   return nullptr;
 }
@@ -326,7 +347,7 @@ mitsuba::ref<mitsuba::Object> ParseNodeRecursive(
   const auto& node = it->second;
   if (IsTextureNode(node)) {
     return GetTexture<Float, Spectrum>(network, node, input_name,
-                                       texture_cache);
+                                       conn.upstreamOutputName, texture_cache);
   }
 
   if (auto cache_it = cache.find(nodePath); cache_it != cache.end()) {
