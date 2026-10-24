@@ -48,26 +48,100 @@ def Xform "root"
             }
         }
 
-        # Explicit sourceColorSpace = "raw" on color input + "sRGB" on scalar.
+        # Shared RGBA texture driving color (.r, auto sRGB) and scalar (.g, .b,
+        # auto raw) inputs, plus single-channel normal rejection.
+        def Material "preview_orm" (inherits = </root/_materials/_Preview>)
+        {
+            over "Shader"
+            {
+                color3f inputs:diffuseColor.connect = </root/_materials/preview_orm/Tex.outputs:r>
+                float inputs:roughness.connect = </root/_materials/preview_orm/Tex.outputs:g>
+                float inputs:metallic.connect = </root/_materials/preview_orm/Tex.outputs:b>
+                normal3f inputs:normal.connect = </root/_materials/preview_orm/Tex.outputs:r>
+            }
+            over "Tex"
+            {
+                float outputs:r
+                float outputs:g
+                float outputs:b
+            }
+        }
+
+        # Explicit sourceColorSpace overrides: "Raw" on color, "srgb" on scalar.
         def Material "colorspace_overrides" (inherits = </root/_materials/_Preview>)
         {
             over "Shader"
             {
-                color3f inputs:diffuseColor.connect = </root/_materials/colorspace_overrides/Tex.outputs:rgb>
-                float inputs:roughness.connect = </root/_materials/colorspace_overrides/TexSrgb.outputs:r>
+                color3f inputs:diffuseColor.connect = </root/_materials/colorspace_overrides/Tex.outputs:r>
+                float inputs:roughness.connect = </root/_materials/colorspace_overrides/TexSrgb.outputs:g>
                 float inputs:metallic = 0.8
             }
             over "Tex"
             {
                 token inputs:sourceColorSpace = "Raw"
-                float3 outputs:rgb
+                float outputs:r
             }
             def Shader "TexSrgb"
             {
                 uniform token info:id = "UsdUVTexture"
-                asset inputs:file = @./textures/albedo.png@
+                asset inputs:file = @./textures/uv_quadrants.png@
                 token inputs:sourceColorSpace = "srgb"
+                float outputs:g
+            }
+        }
+
+        # Native Mitsuba normalmap unwrap (1-ch normal rejected) + principled
+        # driven by NodeGraph passthrough (.b), missing-file fallback (.g),
+        # linear .a under "sRGB", and RGB-without-alpha (.a -> 1.0).
+        def Material "mitsuba_channels"
+        {
+            token outputs:mitsuba:surface.connect = </root/_materials/mitsuba_channels/NormalMap.outputs:surface>
+            def Shader "NormalMap"
+            {
+                uniform token info:id = "mitsuba_normalmap"
+                color3f inputs:normalmap.connect = </root/_materials/mitsuba_channels/TexRgba.outputs:r>
+                token inputs:bsdf.connect = </root/_materials/mitsuba_channels/BSDF.outputs:out>
+                token outputs:surface
+            }
+            def Shader "BSDF"
+            {
+                uniform token info:id = "mitsuba_principled"
+                color3f inputs:base_color.connect = </root/_materials/mitsuba_channels/NG.outputs:ch_b>
+                float inputs:roughness.connect = </root/_materials/mitsuba_channels/MissingTex.outputs:g>
+                float inputs:metallic.connect = </root/_materials/mitsuba_channels/TexRgba.outputs:a>
+                float inputs:clearcoat.connect = </root/_materials/mitsuba_channels/TexNoAlpha.outputs:a>
+                token outputs:out
+            }
+            def Shader "TexRgba"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./textures/uv_quadrants.png@
+                token inputs:sourceColorSpace = "sRGB"
                 float outputs:r
+                float outputs:a
+            }
+            def Shader "TexNoAlpha"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./textures/albedo.png@
+                float outputs:a
+            }
+            def Shader "MissingTex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./textures/does_not_exist.png@
+                float4 inputs:fallback = (0.1, 0.75, 0.3, 0.9)
+                float outputs:g
+            }
+            def NodeGraph "NG"
+            {
+                float outputs:ch_b.connect = </root/_materials/mitsuba_channels/NG/Tex.outputs:b>
+                def Shader "Tex"
+                {
+                    uniform token info:id = "UsdUVTexture"
+                    asset inputs:file = @./textures/uv_quadrants.png@
+                    float outputs:b
+                }
             }
         }
 
@@ -161,22 +235,32 @@ def Xform "root"
     }
     def Mesh "Tile1" (inherits = </root/_Tile>)
     {
-        rel material:binding = </root/_materials/colorspace_overrides>
-        point3f[] points = [(-1.25, 0.05, 0), (-0.05, 0.05, 0), (-0.05, 0.95, 0), (-1.25, 0.95, 0)]
+        rel material:binding = </root/_materials/preview_orm>
+        point3f[] points = [(-1.45, 0.05, 0), (-0.55, 0.05, 0), (-0.55, 0.95, 0), (-1.45, 0.95, 0)]
     }
     def Mesh "Tile2" (inherits = </root/_Tile>)
     {
-        rel material:binding = </root/_materials/rotate_translate>
-        point3f[] points = [(0.05, 0.05, 0), (1.25, 0.05, 0), (1.25, 0.95, 0), (0.05, 0.95, 0)]
+        rel material:binding = </root/_materials/colorspace_overrides>
+        point3f[] points = [(-0.45, 0.05, 0), (0.45, 0.05, 0), (0.45, 0.95, 0), (-0.45, 0.95, 0)]
     }
     def Mesh "Tile3" (inherits = </root/_Tile>)
     {
-        rel material:binding = </root/_materials/chained_xf>
-        point3f[] points = [(-1.25, -0.95, 0), (-0.05, -0.95, 0), (-0.05, -0.05, 0), (-1.25, -0.05, 0)]
+        rel material:binding = </root/_materials/mitsuba_channels>
+        point3f[] points = [(0.55, 0.05, 0), (1.45, 0.05, 0), (1.45, 0.95, 0), (0.55, 0.95, 0)]
     }
     def Mesh "Tile4" (inherits = </root/_Tile>)
     {
+        rel material:binding = </root/_materials/rotate_translate>
+        point3f[] points = [(-1.45, -0.95, 0), (-0.55, -0.95, 0), (-0.55, -0.05, 0), (-1.45, -0.05, 0)]
+    }
+    def Mesh "Tile5" (inherits = </root/_Tile>)
+    {
+        rel material:binding = </root/_materials/chained_xf>
+        point3f[] points = [(-0.45, -0.95, 0), (0.45, -0.95, 0), (0.45, -0.05, 0), (-0.45, -0.05, 0)]
+    }
+    def Mesh "Tile6" (inherits = </root/_Tile>)
+    {
         rel material:binding = </root/_materials/wrap_s_precedence>
-        point3f[] points = [(0.05, -0.95, 0), (1.25, -0.95, 0), (1.25, -0.05, 0), (0.05, -0.05, 0)]
+        point3f[] points = [(0.55, -0.95, 0), (1.45, -0.95, 0), (1.45, -0.05, 0), (0.55, -0.05, 0)]
     }
 }

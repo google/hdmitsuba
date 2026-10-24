@@ -58,24 +58,32 @@ def test_render(scene_name: str):
   )
 
 
-def test_render_usdz(tmp_path):
+@pytest.mark.parametrize(
+    'scene_name, textures',
+    [
+        ('materials', ['albedo.png']),
+        ('uv_texture', ['uv_quadrants.png', 'albedo.png']),
+    ],
+)
+def test_render_usdz(tmp_path, scene_name: str, textures: list[str]):
   stage = Usd.Stage.Open(
-      f'{test_helpers.TEST_ASSETS_PATH}/materials/materials.usda'
+      f'{test_helpers.TEST_ASSETS_PATH}/materials/{scene_name}.usda'
   )
   test_helpers.create_render_settings(stage)
-  usda_path = str(tmp_path / 'materials.usda')
+  usda_path = str(tmp_path / f'{scene_name}.usda')
   stage.GetRootLayer().Export(usda_path)
-  usdz_path = str(tmp_path / 'materials.usdz')
+  usdz_path = str(tmp_path / f'{scene_name}.usdz')
   with Sdf.ZipFileWriter.CreateNew(usdz_path) as writer:
-    writer.AddFile(usda_path, 'materials.usda')
-    writer.AddFile(
-        f'{test_helpers.TEST_ASSETS_PATH}/materials/textures/albedo.png',
-        'textures/albedo.png',
-    )
+    writer.AddFile(usda_path, f'{scene_name}.usda')
+    for tex in textures:
+      writer.AddFile(
+          f'{test_helpers.TEST_ASSETS_PATH}/materials/textures/{tex}',
+          f'textures/{tex}',
+      )
   test_helpers.assert_hydra_equal_to_offline(
       Usd.Stage.Open(usdz_path),
       '/root/Camera/Camera',
-      'test_render_usdz',
+      f'test_render_usdz_{scene_name}',
       atol=0.05,
   )
 

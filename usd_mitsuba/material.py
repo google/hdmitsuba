@@ -77,6 +77,8 @@ _NON_COLOR_INPUTS = (
     _USD_PREVIEW_SURFACE_NON_COLOR_INPUTS | _MITSUBA_NON_COLOR_INPUTS
 )
 
+_CHANNEL_INDICES = {'r': 0, 'g': 1, 'b': 2, 'a': 3}
+
 _SUPPORTED_IMAGE_EXTENSIONS = frozenset({
     '.exr',
     '.png',
@@ -108,6 +110,17 @@ def _get_displacement_output(
   )
 
 
+def _find_shader_output(
+    prop: UsdShade.Input | UsdShade.Output | None,
+) -> tuple[UsdShade.Shader, str] | None:
+  """Returns the first upstream UsdShade.Shader and its output base name."""
+  if prop and (
+      attrs := prop.GetValueProducingAttributes(shaderOutputsOnly=True)
+  ):
+    return UsdShade.Shader(attrs[0].GetPrim()), attrs[0].GetBaseName()
+  return None
+
+
 def find_shader(
     prop: UsdShade.Input | UsdShade.Output,
 ) -> UsdShade.Shader | None:
@@ -119,8 +132,7 @@ def find_shader(
   Args:
     prop: The UsdShade.Input or UsdShade.Output to find the shader for.
   """
-  attributes = prop.GetValueProducingAttributes(shaderOutputsOnly=True)
-  return UsdShade.Shader(attributes[0].GetPrim()) if attributes else None
+  return conn[0] if (conn := _find_shader_output(prop)) else None
 
 
 def _get_volume_shader(
@@ -135,20 +147,25 @@ def _get_volume_shader(
   return None
 
 
-def _use_raw_bitmap(cs: str, input_name: str | None) -> bool:
+def _use_raw_bitmap(
+    cs: str, input_name: str | None, ch_idx: int
+) -> bool:
   """Returns whether a UsdUVTexture bitmap should skip sRGB decoding.
 
   Covers the Gf.ColorSpace names (e.g. `lin_rec709_scene`, `srgb_ap1_scene`,
   `g22_rec709_scene`, `raw`) as well as UsdUVTexture's `sRGB` token and common
-  OCIO aliases (e.g. `lin_srgb`, `srgb_texture`).
+  OCIO aliases (e.g. `lin_srgb`, `srgb_texture`). Alpha is always linear.
 
   Args:
     cs: The source color space name (may be empty or 'auto').
     input_name: The downstream input name, used if `cs` is unset or 'auto'.
+    ch_idx: The extracted channel index (3 = alpha), or -1 for all channels.
 
   Returns:
     True if the bitmap should be treated as linear data.
   """
+  if ch_idx == 3:
+    return True
   lower = cs.lower()
   if lower and lower not in ('auto', 'unknown'):
     if lower in ('raw', 'data', 'identity', 'linear', 'acescg') or (
@@ -169,6 +186,36 @@ def _open_asset_stream(filename: str) -> mi.MemoryStream | None:
     stream.seek(0)
     return stream
   return None
+
+
+def _get_bitmap(filename: str) -> mi.Bitmap | None:
+  """Decodes an image on disk or an Ar-resolved asset (e.g. inside a .usdz)."""
+  try:
+    if not os.path.exists(filename) and (
+        stream := _open_asset_stream(filename)
+    ):
+      return mi.Bitmap(stream)
+    return mi.Bitmap(filename)
+  except RuntimeError as e:
+    Tf.Warn(f"Failed to load texture '{filename}': {e}. Using fallback.")
+    return None
+
+
+def _extract_channel(bmp: mi.Bitmap, ch_idx: int) -> mi.Bitmap:
+  """Returns channel `ch_idx` (0=R, 1=G, 2=B, 3=A) as a 1-channel bitmap.
+
+  Color channels missing from the image (e.g. `g` of a grayscale+alpha image)
+  read the first channel.
+  """
+  if bmp.pixel_format() == mi.Bitmap.PixelFormat.Y:
+    return bmp
+  color_ch = bmp.channel_count() - bmp.has_alpha()
+  src_ch = color_ch if ch_idx == 3 else (ch_idx if ch_idx < color_ch else 0)
+  arr = np.ascontiguousarray(np.array(bmp, copy=False)[..., src_ch])
+  ch_bmp = mi.Bitmap(arr, mi.Bitmap.PixelFormat.Y)
+  # Alpha stays linear since _use_raw_bitmap() always sets `raw` for it.
+  ch_bmp.set_srgb_gamma(bmp.srgb_gamma())
+  return ch_bmp
 
 
 def _extract_usd_transform2d(
@@ -194,95 +241,131 @@ def _extract_usd_transform2d(
   return flip @ xf @ flip
 
 
+def _load_uv_texture_image(
+    filename: str, ch_idx: int
+) -> dict[str, Any] | None:
+  """Returns the texture dict for a UsdUVTexture image, or None if unusable."""
+  # Strip the closing bracket of package paths like `a.usdz[tex.png]`.
+  _, ext = os.path.splitext(filename.rstrip(']'))
+  # This check is not identical to hdmitsuba's more strict check,
+  # but should be sufficient for the Python conversion.
+  if ext.lower() not in _SUPPORTED_IMAGE_EXTENSIONS:
+    Tf.Warn(
+        f"Texture file '{filename}' has unsupported extension '{ext}'."
+        ' Using fallback.'
+    )
+    return None
+  if os.path.exists(filename) and ch_idx < 0:
+    return {'type': 'bitmap', 'filename': filename}
+  if (bmp := _get_bitmap(filename)) is None:
+    return None
+  if ch_idx == 3 and not bmp.has_alpha():
+    return {'type': 'uniform', 'value': 1.0}
+  if ch_idx >= 0:
+    bmp = _extract_channel(bmp, ch_idx)
+  return {'type': 'bitmap', 'bitmap': bmp}
+
+
 def _convert_uv_texture(
     shader: UsdShade.Shader,
-    input_name: str | None = None,
-) -> dict[str, Any]:
+    input_name: str | None,
+    output_name: str | None,
+) -> dict[str, Any] | None:
   """Extracts texture information from a UsdUVTexture shader."""
+  is_normal = input_name in ('normal', 'normalmap')
+  ch_idx = _CHANNEL_INDICES.get(output_name or '', -1)
+  if is_normal and ch_idx >= 0:
+    Tf.Warn(
+        f"Normal map input '{input_name}' is connected to single-channel"
+        f" output '{output_name}'. Normal maps require at least 3 channels."
+    )
+    return None
+
+  # 1. Use the texture image if it is valid.
   file_input = shader.GetInput('file')
   asset_path = file_input.Get() if file_input else None
-  fallback_input = shader.GetInput('fallback')
-
-  if asset_path and asset_path.resolvedPath:
-    filename = asset_path.resolvedPath
-    # Strip the closing bracket of package paths like `a.usdz[tex.png]`.
-    _, ext = os.path.splitext(filename.rstrip(']'))
-
-    # This check is not identical to hdmitsuba's more strict check,
-    # but should be sufficient for the Python conversion.
-    if ext.lower() in _SUPPORTED_IMAGE_EXTENSIONS:
-      texture = {'type': 'bitmap', 'filename': filename}
-      # Load images that are not on disk (e.g. inside a .usdz) through Ar.
-      if not os.path.exists(filename) and (
-          stream := _open_asset_stream(filename)
-      ):
-        texture = {'type': 'bitmap', 'bitmap': mi.Bitmap(stream)}
-
-      # Handle color space if we have a bitmap.
-      # Like UsdImaging, only consider the `colorSpace` metadata of the file
-      # attribute itself if `sourceColorSpace` is unset or 'auto'.
-      cs = shader.GetInput('sourceColorSpace').Get()
-      if not cs or cs == 'auto':
-        cs = file_input.GetAttr().GetColorSpace()
-      if _use_raw_bitmap(cs, input_name):
-        texture['raw'] = True
-
-      # Mitsuba's bitmap only has a single wrap_mode: use wrapS, falling back
-      # to wrapT if wrapS is unauthored, 'useMetadata' or unsupported.
-      for param in ('wrapS', 'wrapT'):
-        w = shader.GetInput(param).Get()
-        if w in ('repeat', 'clamp', 'mirror'):
-          texture['wrap_mode'] = w
-          break
-        if w and w != 'useMetadata':
-          Tf.Warn(
-              f"Unsupported wrap mode '{w}' on '{param}' for UsdUVTexture"
-              f" '{filename}'; ignoring."
-          )
-
-      if to_uv := _extract_usd_transform2d(shader):
-        texture['to_uv'] = to_uv
-
+  filename = asset_path.resolvedPath if asset_path else None
+  if filename and (texture := _load_uv_texture_image(filename, ch_idx)):
+    if texture['type'] != 'bitmap':
       return texture
-    else:
-      Tf.Warn(
-          f"Texture file '{filename}' has unsupported extension '{ext}'."
-          " Using fallback."
-      )
+    # Like UsdImaging, only consider the `colorSpace` metadata of the file
+    # attribute itself if `sourceColorSpace` is unset or 'auto'.
+    cs = shader.GetInput('sourceColorSpace').Get()
+    if not cs or cs == 'auto':
+      cs = file_input.GetAttr().GetColorSpace()
+    if _use_raw_bitmap(cs, input_name, ch_idx):
+      texture['raw'] = True
 
-  # 2. If the file is missing/unresolved and we have a fallback color, use it.
-  if fallback_input:
-    val = fallback_input.Get()
-    if val is not None:
-      if isinstance(val, (Gf.Vec3f, Gf.Vec4f)):
-        val = tuple(val)[:3]
-      return {'type': 'rgb', 'value': val}
+    # Mitsuba's bitmap only has a single wrap_mode: use wrapS, falling back to
+    # wrapT if wrapS is unauthored, 'useMetadata' or unsupported.
+    for param in ('wrapS', 'wrapT'):
+      w = shader.GetInput(param).Get()
+      if w in ('repeat', 'clamp', 'mirror'):
+        texture['wrap_mode'] = w
+        break
+      if w and w != 'useMetadata':
+        Tf.Warn(
+            f"Unsupported wrap mode '{w}' on '{param}' for UsdUVTexture"
+            f" '{filename}'; ignoring."
+        )
 
-  # 3. Absolute fallback to magenta.
-  return {'type': 'rgb', 'value': (1.0, 0.0, 1.0)}
+    if to_uv := _extract_usd_transform2d(shader):
+      texture['to_uv'] = to_uv
+    return texture
+
+  if is_normal:
+    return None
+
+  # 2. If the file is missing/unresolved, use the fallback color (or magenta).
+  fallback_input = shader.GetInput('fallback')
+  fb = fallback_input.Get() if fallback_input else None
+  fb = tuple(fb) if fb is not None else (1.0, 0.0, 1.0, 1.0)
+  if ch_idx >= 0:
+    return {
+        'type': 'uniform',
+        'value': float(fb[ch_idx]) if ch_idx < len(fb) else 1.0,
+    }
+  return {'type': 'rgb', 'value': fb[:3]}
 
 
 def usd_mitsuba_material_to_dict(
     shader: UsdShade.Shader,
     input_name: str | None = None,
+    output_name: str | None = None,
 ) -> dict[str, Any]:
-  """Converts a USD shader to a Mitsuba BSDF dictionary."""
+  """Converts a USD shader to a Mitsuba BSDF dictionary.
+
+  Args:
+    shader: The USD shader to convert.
+    input_name: Optional downstream input name used for color-space heuristics.
+    output_name: Optional output channel name on `shader` (e.g. 'r', 'rgb').
+
+  Returns:
+    The Mitsuba dictionary representation of the shader, or an empty dictionary
+    if it unwraps to nothing (e.g. a normalmap without texture and nested BSDF).
+  """
 
   def _traverse(
-      shader: UsdShade.Shader, input_name: str | None = None
-  ) -> dict[str, Any]:
+      shader: UsdShade.Shader,
+      input_name: str | None = None,
+      output_name: str | None = None,
+  ) -> dict[str, Any] | None:
     shader_id = shader.GetIdAttr().Get()
     if shader_id == 'UsdUVTexture':
-      return _convert_uv_texture(shader, input_name)
+      return _convert_uv_texture(shader, input_name, output_name)
 
     if not shader_id.startswith(_MI_PREFIX):
       raise ValueError(f'The shader {shader_id} is not a Mitsuba shader.')
 
     result = {'type': shader_id.removeprefix(_MI_PREFIX)}
+    child_bsdf = None
     for usd_input in shader.GetInputs():
       name = usd_input.GetBaseName()
-      if connected_shader := find_shader(usd_input):
-        result[name] = _traverse(connected_shader, name)
+      if conn := _find_shader_output(usd_input):
+        if (child := _traverse(conn[0], name, conn[1])) is not None:
+          result[name] = child
+          if name != 'normalmap':
+            child_bsdf = child
       else:
         attr = usd_input.GetAttr()
         value = attr.Get()
@@ -306,6 +389,9 @@ def usd_mitsuba_material_to_dict(
           else:
             result[name] = value
 
+    if result['type'] == 'normalmap' and 'normalmap' not in result:
+      return child_bsdf
+
     if (
         result['type'] == 'gridvolume'
         and 'filename' in result
@@ -318,7 +404,7 @@ def usd_mitsuba_material_to_dict(
 
     return result
 
-  return _traverse(shader, input_name)
+  return _traverse(shader, input_name, output_name) or {}
 
 
 def usd_preview_surface_to_mitsuba(
@@ -351,10 +437,10 @@ def usd_preview_surface_to_mitsuba(
   for usd_input in shader.GetInputs():
     name = usd_input.GetBaseName()
     val = None
-    if connected_shader := find_shader(usd_input):
-      if connected_shader.GetIdAttr().Get() == 'UsdUVTexture':
-        val = _convert_uv_texture(connected_shader, name)
-        if name in ('opacity', 'clearcoatRoughness'):
+    if conn := _find_shader_output(usd_input):
+      if conn[0].GetIdAttr().Get() == 'UsdUVTexture':
+        val = _convert_uv_texture(conn[0], name, conn[1])
+        if val is not None and name in ('opacity', 'clearcoatRoughness'):
           Tf.Warn(
               f"Texture inversion for {name} is not supported. The resulting"
               " Mitsuba material may look incorrect."
@@ -462,8 +548,8 @@ def convert_material(
       if bsdf is None:
         bsdf = mi.load_dict({'type': 'null'})
 
-    if shader := find_shader(_get_displacement_output(material)):
-      bsdf_dict = usd_mitsuba_material_to_dict(shader, 'displacement')
+    if conn := _find_shader_output(_get_displacement_output(material)):
+      bsdf_dict = usd_mitsuba_material_to_dict(conn[0], 'displacement', conn[1])
       displacement = mi.load_dict(bsdf_dict)
       if not isinstance(displacement, mi.Texture):
         raise ValueError(

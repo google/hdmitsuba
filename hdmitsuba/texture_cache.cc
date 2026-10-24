@@ -43,6 +43,7 @@
 #include <pxr/base/gf/matrix4f.h>
 #include <pxr/base/gf/vec2f.h>
 #include <pxr/base/tf/diagnostic.h>
+#include <pxr/imaging/hd/material.h>
 #include <pxr/usd/ar/asset.h>
 #include <pxr/usd/ar/resolvedPath.h>
 #include <pxr/usd/ar/resolver.h>
@@ -61,7 +62,8 @@ namespace {
 // Non-color inputs are classified based on the UsdPreviewSurface's
 // specification.
 bool UseRawBitmap(const std::string& source_color_space,
-                  const TfToken& input_name) {
+                  const TfToken& input_name, int channel) {
+  if (channel == 3) return true;
   // Covers the GfColorSpace names (e.g. `lin_rec709_scene`, `srgb_ap1_scene`,
   // `g22_rec709_scene`, `raw`) as well as UsdUVTexture's `sRGB` token and
   // common OCIO aliases (e.g. `lin_srgb`, `srgb_texture`).
@@ -155,19 +157,30 @@ TextureKey::UvMatrix ExtractUsdTransform2d(const HdMaterialNetwork2& network,
 mitsuba::ref<mitsuba::Object> CreateBitmapTexture(const TextureKey& key,
                                                   const mitsuba::Bitmap& bitmap,
                                                   std::string_view variant) {
+  if (key.channel == 3 && !bitmap.has_alpha()) {
+    mitsuba::Properties uniform_props("uniform");
+    uniform_props.set("value", 1.0f);
+    return CreateExpandedObject(uniform_props, variant,
+                                mitsuba::ObjectType::Texture);
+  }
   mitsuba::ref<mitsuba::Bitmap> view;
-  if (key.alpha_channel) {
-    if (!bitmap.has_alpha()) return nullptr;
-    // Alpha is stored linearly and is the last channel.
+  if (key.channel >= 0) {
+    // Alpha is the last channel. Color channels missing from the image
+    // (e.g. `g` of a grayscale+alpha image) read the first channel.
+    const size_t color_ch = bitmap.channel_count() - bitmap.has_alpha();
+    const size_t ch = static_cast<size_t>(key.channel);
+    const size_t src_ch = ch == 3 ? color_ch : (ch < color_ch ? ch : 0);
     view = new mitsuba::Bitmap(mitsuba::Bitmap::PixelFormat::Y,
                                bitmap.component_format(), bitmap.size());
-    view->set_srgb_gamma(false);
+    // Alpha stays linear since UseRawBitmap() always sets `raw` for it.
+    view->set_srgb_gamma(bitmap.srgb_gamma());
     const size_t bpp = bitmap.bytes_per_pixel();
     const size_t ch_bytes = bpp / bitmap.channel_count();
     const uint8_t* src = bitmap.uint8_data();
     uint8_t* dst = view->uint8_data();
     for (size_t i = 0, n = view->pixel_count(); i < n; ++i) {
-      std::memcpy(dst + i * ch_bytes, src + (i + 1) * bpp - ch_bytes, ch_bytes);
+      std::memcpy(dst + i * ch_bytes, src + i * bpp + src_ch * ch_bytes,
+                  ch_bytes);
     }
   } else {
     // Wrap the decoded pixel buffer in a non-owning Bitmap header view so
@@ -204,7 +217,8 @@ mitsuba::ref<mitsuba::Object> CreateBitmapTexture(const TextureKey& key,
 
 std::optional<TextureKey> ExtractTextureKey(const HdMaterialNetwork2& network,
                                             const HdMaterialNode2& node,
-                                            const TfToken& input_name) {
+                                            const TfToken& input_name,
+                                            const TfToken& output_name) {
   const auto& parameters = node.parameters;
   const TfToken& nodeTypeId = node.nodeTypeId;
   std::string resolved_path;
@@ -224,19 +238,16 @@ std::optional<TextureKey> ExtractTextureKey(const HdMaterialNetwork2& network,
   }
 
   auto set_string = [](const VtValue& v, std::string& dst) {
-    if (v.IsHolding<std::string>()) {
-      dst = v.Get<std::string>();
-    } else if (v.IsHolding<TfToken>()) {
-      dst = v.Get<TfToken>().GetString();
-    } else {
-      return false;
-    }
+    if (v.IsHolding<std::string>()) dst = v.Get<std::string>();
+    else if (v.IsHolding<TfToken>()) dst = v.Get<TfToken>().GetString();
+    else return false;
     return true;
   };
 
   TextureKey key;
   key.filename = std::move(resolved_path);
   if (nodeTypeId == TfToken("UsdUVTexture")) {
+    key.channel = UsdUVTextureChannel(output_name);
     auto get_str = [&](const TfToken& k) {
       std::string s;
       if (auto it = parameters.find(k); it != parameters.end()) {
@@ -248,7 +259,7 @@ std::optional<TextureKey> ExtractTextureKey(const HdMaterialNetwork2& network,
     // `colorSpace:file`, which applies if `sourceColorSpace` is unset or auto.
     std::string cs = get_str(TfToken("sourceColorSpace"));
     if (cs.empty() || cs == "auto") cs = get_str(TfToken("colorSpace:file"));
-    key.raw = UseRawBitmap(cs, input_name);
+    key.raw = UseRawBitmap(cs, input_name, key.channel);
 
     // Mitsuba's bitmap only has a single wrap_mode: use wrapS, falling back to
     // wrapT if wrapS is unauthored, `useMetadata` or unsupported.
@@ -409,10 +420,10 @@ TextureCache<Float, Spectrum>::LoadBitmap(const std::string& filename) {
 MI_VARIANT CachedTexture TextureCache<Float, Spectrum>::LoadTexture(
     const TextureKey& key, const mitsuba::Bitmap& bitmap) {
   try {
-    size_t channel_count = key.alpha_channel ? 1 : bitmap.channel_count();
-    mitsuba::ref<mitsuba::Object> texture = CreateBitmapTexture(
-        key, bitmap, mitsuba::Texture<Float, Spectrum>::Variant);
-    return CachedTexture{std::move(texture), channel_count};
+    return CachedTexture{
+        CreateBitmapTexture(key, bitmap,
+                            mitsuba::Texture<Float, Spectrum>::Variant),
+        key.channel >= 0 ? 1 : bitmap.channel_count()};
   } catch (const std::exception& e) {
     TF_WARN("Failed to load texture '%s': %s.", key.filename.c_str(), e.what());
     return CachedTexture{};
