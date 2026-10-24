@@ -21,10 +21,12 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <type_traits>
+#include <typeinfo>
 #include <utility>
 #include <vector>
 
-#include <absl/container/flat_hash_set.h>
+#include <absl/container/flat_hash_map.h>
 #include <drjit-core/jit.h>
 #include <drjit/array_router.h>
 #include <drjit/array_traits.h>
@@ -50,7 +52,18 @@ namespace dr = drjit;
 template <typename Float, typename Spectrum>
 struct JITInputs {
   std::vector<uint32_t> flat_indices;
-  std::vector<uint32_t> owned_class_vars;
+  std::vector<uint8_t> layout;
+
+  void AppendBytes(const void* data, size_t size) {
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    layout.insert(layout.end(), bytes, bytes + size);
+  }
+
+  template <typename T>
+  void Append(const T& value) {
+    static_assert(std::is_trivially_copyable_v<T>);
+    AppendBytes(&value, sizeof(T));
+  }
 };
 
 // Gathers all JIT variables from the scene, sensor, and integrator.
@@ -59,51 +72,90 @@ JITInputs<Float, Spectrum> GatherAllJitInputs(
     mitsuba::Scene<Float, Spectrum>* scene,
     mitsuba::Sensor<Float, Spectrum>* sensor,
     mitsuba::Integrator<Float, Spectrum>* integrator) {
-  std::vector<uint32_t> indices;
-  std::vector<uint32_t> owned_class_vars;
-  absl::flat_hash_set<void*> visited_ptrs;
-  absl::flat_hash_set<uint32_t> seen_indices;
-
-  struct CollectPayload {
-    std::vector<uint32_t>* indices;
-    absl::flat_hash_set<uint32_t>* seen_indices;
-  } payload{&indices, &seen_indices};
-
-  auto collect_cb = [](void* p, uint64_t index_combined, const char*,
-                       const char*, const char*) -> uint64_t {
-    auto* state = static_cast<CollectPayload*>(p);
-    uint32_t index = static_cast<uint32_t>(index_combined);
-    if (index != 0 && state->seen_indices->insert(index).second) {
-      state->indices->push_back(index);
-    }
-    return index_combined;
-  };
-
-  dr::TraverseVisitor visitor{dr::TraverseRole::Freeze, collect_cb, nullptr};
+  JITInputs<Float, Spectrum> inputs;
 
   if constexpr (dr::is_jit_v<Float>) {
-    ::JitBackend backend = dr::backend_v<Float>;
-    auto collect_class_var = [&](void* ptr) -> bool {
-      if (!ptr || !visited_ptrs.insert(ptr).second) return false;
-      uint32_t class_var = ::jit_var_class(backend, ptr);
-      if (class_var != 0) {
-        if (seen_indices.insert(class_var).second) {
-          indices.push_back(class_var);
-        }
-        owned_class_vars.push_back(class_var);
-      }
-      return true;
+    enum class Tag : uint8_t {
+      kNullObject,
+      kObjectRef,
+      kObject,
+      kState,
+      kEmptyLeaf,
+      kLiteralLeaf,
+      kSlotLeaf,
     };
 
-    if (scene && collect_class_var(scene)) {
-      dr::traverse_fn(*scene, &payload, visitor);
-    }
-    if (sensor && collect_class_var(sensor)) {
-      dr::traverse_fn(*sensor, &payload, visitor);
-    }
-    if (integrator && collect_class_var(integrator)) {
-      dr::traverse_fn(*integrator, &payload, visitor);
-    }
+    struct CollectPayload {
+      JITInputs<Float, Spectrum>* inputs;
+      absl::flat_hash_map<uint32_t, uint32_t> slot_of_index;
+      absl::flat_hash_map<dr::TraversableBase*, uint32_t> visited_objects;
+      const dr::TraverseVisitor* visitor;
+    };
+
+    auto collect_cb = [](void* p, uint64_t index_combined, const char*,
+                         const char*, const char*) -> uint64_t {
+      auto* state = static_cast<CollectPayload*>(p);
+      uint32_t index = static_cast<uint32_t>(index_combined);
+      if (index == 0) {
+        state->inputs->Append(Tag::kEmptyLeaf);
+        return index_combined;
+      }
+      VarInfo info = ::jit_var_info(index);
+      if (info.state == VarState::Literal ||
+          info.state == VarState::Undefined) {
+        state->inputs->Append(Tag::kLiteralLeaf);
+        state->inputs->Append(info.type);
+        state->inputs->Append(info.state);
+        state->inputs->Append(info.size);
+        state->inputs->Append(info.state == VarState::Literal ? info.literal
+                                                              : uint64_t{0});
+        return index_combined;
+      }
+      if (info.state != VarState::Evaluated) {
+        ::jit_var_schedule(index);
+      }
+      auto [it, inserted] = state->slot_of_index.try_emplace(
+          index, static_cast<uint32_t>(state->inputs->flat_indices.size()));
+      if (inserted) {
+        state->inputs->flat_indices.push_back(index);
+      }
+      state->inputs->Append(Tag::kSlotLeaf);
+      state->inputs->Append(it->second);
+      return index_combined;
+    };
+
+    auto child_cb = [](void* p, dr::TraversableBase* obj, const char*) {
+      auto* state = static_cast<CollectPayload*>(p);
+      if (!obj) {
+        state->inputs->Append(Tag::kNullObject);
+        return;
+      }
+      auto [it, inserted] = state->visited_objects.try_emplace(
+          obj, static_cast<uint32_t>(state->visited_objects.size()));
+      if (!inserted) {
+        state->inputs->Append(Tag::kObjectRef);
+        state->inputs->Append(it->second);
+        return;
+      }
+      state->inputs->Append(Tag::kObject);
+      state->inputs->Append(&typeid(*obj));
+      obj->traverse_cb(p, *state->visitor);
+    };
+
+    auto state_cb = [](void* p, const void* value, size_t size, const char*) {
+      auto* state = static_cast<CollectPayload*>(p);
+      state->inputs->Append(Tag::kState);
+      state->inputs->Append(size);
+      state->inputs->AppendBytes(value, size);
+    };
+
+    dr::TraverseVisitor visitor{dr::TraverseRole::Freeze, collect_cb, child_cb,
+                                state_cb};
+    CollectPayload payload{&inputs, {}, {}, &visitor};
+
+    dr::traverse_fn(scene, &payload, visitor);
+    dr::traverse_fn(sensor, &payload, visitor);
+    dr::traverse_fn(integrator, &payload, visitor);
     if constexpr (mitsuba::is_spectral_v<Spectrum>) {
       using Float32 = dr::float32_array_t<Float>;
       auto tables = mitsuba::detail::get_color_space_tables<Float32>();
@@ -132,18 +184,27 @@ JITInputs<Float, Spectrum> GatherAllJitInputs(
     std::vector<void*> registry_pointers;
     for (const auto& domain : domains) {
       uint32_t registry_bound = ::jit_registry_id_bound(variant_name, domain);
+      inputs.Append(registry_bound);
       if (registry_bound == 0) continue;
       registry_pointers.assign(registry_bound, nullptr);
       ::jit_registry_get_pointers(variant_name, domain, registry_pointers.data());
       for (void* ptr : registry_pointers) {
-        if (!collect_class_var(ptr)) continue;
-        auto* obj = static_cast<mitsuba::Object*>(ptr);
-        dr::traverse_fn(*obj, &payload, visitor);
+        child_cb(&payload, static_cast<mitsuba::Object*>(ptr), "");
       }
+    }
+
+
+    // Force evaluation of all input JIT variables before recording or replay.
+    ::jit_eval();
+    for (uint32_t idx : inputs.flat_indices) {
+      VarInfo info = ::jit_var_info(idx);
+      inputs.Append(info.type);
+      inputs.Append(info.size);
+      inputs.Append(info.unaligned);
     }
   }
 
-  return {std::move(indices), std::move(owned_class_vars)};
+  return inputs;
 }
 
 // State manager for JIT recording state.
@@ -163,23 +224,17 @@ class FrozenRender {
       jit_freeze_destroy(recording_);
       recording_ = nullptr;
     }
-    TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("Clear(): releasing %zu owned class variables\n", owned_class_vars_.size());
-    for (uint32_t var : owned_class_vars_) {
-      jit_var_dec_ref(var);
-    }
-    owned_class_vars_.clear();
     output_indices_.clear();
     output_shape_.clear();
-    recorded_input_count_ = 0;
+    recorded_layout_.clear();
     render_count_ = 0;             // Reset the recording warm-up count!
     TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("Clear(): done\n");
   }
 
   bool CanReplay(const JITInputs<Float, Spectrum>& new_inputs) {
     if (!recording_) return false;
-    if (new_inputs.flat_indices.size() != recorded_input_count_) {
-      TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("CanReplay failed: flat_indices size mismatch (expected %zu, got %zu)\n",
-                                         recorded_input_count_, new_inputs.flat_indices.size());
+    if (new_inputs.layout != recorded_layout_) {
+      TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("CanReplay failed: input layout changed\n");
       return false;
     }
     return jit_freeze_dry_run(recording_, new_inputs.flat_indices.data()) != 0;
@@ -190,13 +245,7 @@ class FrozenRender {
     if constexpr (dr::is_jit_v<Float>) {
       Clear();
       TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("Record: flat_indices size = %zu\n", inputs.flat_indices.size());
-      owned_class_vars_ = inputs.owned_class_vars; // Transfer ownership!
-      recorded_input_count_ = inputs.flat_indices.size();
-      // Force evaluation of all input JIT variables before recording.
-      for (uint32_t idx : inputs.flat_indices) {
-        jit_var_schedule(idx);
-      }
-      jit_eval();
+      recorded_layout_ = inputs.layout;
       jit_freeze_start(backend_, inputs.flat_indices.data(), inputs.flat_indices.size());
       TensorXf result = render_fn();
       dr::eval(result.array());
@@ -213,18 +262,9 @@ class FrozenRender {
 
   TensorXf Replay(const JITInputs<Float, Spectrum>& inputs) {
     if constexpr (dr::is_jit_v<Float>) {
-      // Force evaluation of all new input JIT variables before replaying.
-      for (uint32_t idx : inputs.flat_indices) {
-        jit_var_schedule(idx);
-      }
-      jit_eval();
       TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("Replay: flat_indices size = %zu\n", inputs.flat_indices.size());
       std::vector<uint32_t> new_outputs(output_indices_.size(), 0);
       jit_freeze_replay(recording_, inputs.flat_indices.data(), new_outputs.data());
-      // Decrement reference counts of the temporary class variables created for this replay!
-      for (uint32_t var : inputs.owned_class_vars) {
-        jit_var_dec_ref(var);
-      }
       return TensorXf(std::move(Float::steal(new_outputs[0])), output_shape_);
     } else {
       throw std::runtime_error("FrozenRender::Replay() called on non-JIT variant");
@@ -287,10 +327,9 @@ class FrozenRender {
  private:
   JitBackend backend_;
   Recording* recording_ = nullptr;
-  std::vector<uint32_t> owned_class_vars_;
   std::vector<uint32_t> output_indices_;
   dr::vector<size_t> output_shape_;
-  size_t recorded_input_count_ = 0;
+  std::vector<uint8_t> recorded_layout_;
   uint32_t recorded_samples_to_render_ = 0;
   int render_count_ = 0;
 };

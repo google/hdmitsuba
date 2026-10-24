@@ -687,11 +687,7 @@ class SceneModel final : public SceneManager {
                     seed_, static_cast<uint32_t>(current_progressive_sample_))
                     .first
               : seed_;
-      bool run_frozen = false;
-      if constexpr (dr::is_jit_v<Float>) {
-        run_frozen = !has_instancing_ && frozen_render_;
-      }
-      if (run_frozen) {
+      if (frozen_render_) {
         result = frozen_render_->Render(
             scene_.get(), sensor, render_integrator, pass_seed,
             static_cast<uint32_t>(samples_to_render));
@@ -701,7 +697,6 @@ class SceneModel final : public SceneManager {
             static_cast<uint32_t>(samples_to_render), true, true);
         if constexpr (dr::is_jit_v<Float>) {
           dr::sync_thread();
-          if (frozen_render_) frozen_render_->Clear(); // Clear cache if freezing is disabled
         }
       }
       size_t expected_width = crop_window.has_value() ? crop_window->GetWidth() : buffer_width;
@@ -1326,6 +1321,9 @@ class SceneModel final : public SceneManager {
       }
       res.shapegroup =
           mitsuba::PluginManager::instance()->create_object<Shape>(group_props);
+      // ShapeGroup's constructor leaves m_to_world literal until the first
+      // parameters_changed() call makes it opaque.
+      res.shapegroup->parameters_changed();
 
       // Create Instances.
       res.instances.reserve(spec.instance_transforms.size());
@@ -1418,10 +1416,6 @@ class SceneModel final : public SceneManager {
   }
 
   bool CommitMeshes() {
-    // Dynamically determine if the scene contains any instanced meshes
-    has_instancing_ = std::any_of(
-        mesh_specs_.begin(), mesh_specs_.end(),
-        [&](const auto& entry) { return IsInstanced(entry.second); });
     // 1. Get pending specs.
     auto pending_specs = GetPendingSpecs(mesh_specs_);
     if (pending_specs.empty()) return false;
@@ -1696,7 +1690,6 @@ class SceneModel final : public SceneManager {
   size_t sample_count_ = kDefaultSampleCount;
   uint32_t seed_ = 0;
   int interactive_samples_per_pass_ = 1;
-  bool has_instancing_ = false;
 
   // Progressive rendering state
   bool progressive_rendering_ = false;

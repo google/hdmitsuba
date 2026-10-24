@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import drjit as dr
 import mitsuba as mi
 import numpy as np
 import pytest
@@ -153,13 +154,46 @@ def test_kernel_freezing_dynamic_toggle():
   np.testing.assert_allclose(img_disabled, engine.render()['color'], atol=1e-4, rtol=1e-4)
 
 
-def test_kernel_freezing_instancing_fallback():
-  # Verify that if the scene contains instancing, the engine safely falls back.
-  stage, engine = _create_engine(freeze_enabled=True)
-  # Add a PointInstancer to instance our plane mesh
+def _render_instancing_frames(freeze_enabled: bool) -> list[np.ndarray]:
+  stage, engine = _create_engine(freeze_enabled=freeze_enabled)
   instancer = UsdGeom.PointInstancer.Define(stage, '/instancer')
   instancer.CreatePrototypesRel().SetTargets(['/mesh'])
-  instancer.CreateProtoIndicesAttr().Set([0, 0])
-  instancer.CreatePositionsAttr().Set([(0.0, 0.0, 0.0), (2.0, 0.0, 0.0)])
-  # Render (should run safely on the fallback path without any crashes)
-  assert engine.render()['color'] is not None
+  proto_indices = instancer.CreateProtoIndicesAttr([0, 0])
+  positions = instancer.CreatePositionsAttr([(-1.5, 0.5, 0), (1.5, 0.5, 0)])
+  camera = UsdGeom.Xformable(stage.GetPrimAtPath('/camera')).GetOrderedXformOps()[0]
+  points = UsdGeom.Mesh.Get(stage, '/mesh').GetPointsAttr()
+
+  def render(expect_replay: bool = False) -> np.ndarray:
+    with dr.kernel_history() as kh:
+      img = engine.render()['color']
+    if freeze_enabled and expect_replay:
+      modes = {entry.recording_mode for entry in kh}
+      assert dr.KernelRecordingMode.Replayed in modes
+      assert dr.KernelRecordingMode.Recorded not in modes
+    return img
+
+  frames = [render()]  # Warm-up.
+  camera.Set((0.5, 2.0, 5.0))
+  frames.append(render())  # Records the frozen kernel.
+  camera.Set((1.0, 2.0, 5.0))
+  frames.append(render(expect_replay=True))
+  positions.Set([(-1.2, 0.8, 0.3), (1.5, 0.5, -0.2)])
+  frames.append(render(expect_replay=True))
+  points.Set([p * 1.4 for p in points.Get()])
+  frames.append(render(expect_replay=True))
+  # Changing the instance count is structural and must invalidate the kernel.
+  proto_indices.Set([0, 0, 0])
+  positions.Set([(-1.2, 0.8, 0.3), (1.5, 0.5, -0.2), (0.0, 1.0, 1.5)])
+  frames.append(render())
+  return frames
+
+
+def test_kernel_freezing_instancing():
+  """Tests frozen kernel replay and invalidation with a PointInstancer."""
+  # Render sequentially: a live second engine would invalidate the recording.
+  frozen_frames = _render_instancing_frames(freeze_enabled=True)
+  ref_frames = _render_instancing_frames(freeze_enabled=False)
+  for prev, curr in zip(frozen_frames, frozen_frames[1:]):
+    assert not np.allclose(prev, curr, atol=1e-3)
+  for frozen, ref in zip(frozen_frames, ref_frames):
+    np.testing.assert_allclose(frozen, ref, atol=1e-4, rtol=1e-4)

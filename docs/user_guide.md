@@ -56,7 +56,7 @@ You can configure the render delegate by authoring a `RenderSettings` prim insid
 *   **`mitsuba:integrator:type`**: The Mitsuba integrator to use (e.g., `path`, `aov`, `direct`).
 *   **`mitsuba:integrator:max_depth`**: Maximum path depth for path-tracing integrators (int). If unset, the Mitsuba integrator's default is used.
 *   **`mitsuba:integrator:rr_depth`**: Minimum path depth after which Russian roulette path termination begins (int). If unset, the Mitsuba integrator's default is used.
-*   **`mitsuba:use_kernel_freezing`**: Enables Dr.Jit's kernel freezing. When enabled, the JIT compilation is frozen after the first frame, drastically reducing JIT tracing overhead for subsequent frames (extremely beneficial for interactive camera navigation in viewports). This is currently disabled by default, as it is still in a somewhat experimental state in its Hydra integration, and also will not work in all Mitsuba 3 scenes (e.g., with instancing).
+*   **`mitsuba:use_kernel_freezing`**: Enables Dr.Jit's kernel freezing. When enabled, the JIT compilation is frozen after the first frame, drastically reducing JIT tracing overhead for subsequent frames (extremely beneficial for interactive camera navigation in viewports). This is currently disabled by default, as it is still in a somewhat experimental state in its Hydra integration, and also will not work in all Mitsuba 3 scenes.
 
 ### Standard Hydra Viewport Settings
 *   **`enableInteractive`**:
