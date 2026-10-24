@@ -41,11 +41,14 @@
 #include <pxr/base/gf/matrix3f.h>
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/matrix4f.h>
+#include <pxr/base/gf/vec2f.h>
 #include <pxr/base/tf/diagnostic.h>
+#include <pxr/imaging/hd/material.h>
 #include <pxr/usd/ar/asset.h>
 #include <pxr/usd/ar/resolvedPath.h>
 #include <pxr/usd/ar/resolver.h>
 #include <pxr/usd/sdf/assetPath.h>
+#include <pxr/usd/sdf/path.h>
 
 #include "hdmitsuba/utils.h"
 
@@ -95,27 +98,59 @@ bool UseRawBitmap(const std::string& source_color_space,
   return kNonColorInputs->contains(input_name);
 }
 
+TextureKey::UvMatrix ToUvMatrix(const dr::Matrix<float, 3>& m) {
+  return {m(0, 0), m(0, 1), m(0, 2), m(1, 0), m(1, 1),
+          m(1, 2), m(2, 0), m(2, 1), m(2, 2)};
+}
+
 // Converts a matrix-valued `to_uv` shader parameter to the 3x3 Mitsuba-space
 // matrix stored in TextureKey. 4x4 inputs are reduced with Transform::extract(),
 // which is what Properties::get<Transform3f>() would do with them anyway.
 std::optional<TextureKey::UvMatrix> UvMatrixFromValue(const VtValue& val) {
-  ScalarAffineTransform3f t;
-  if (auto t3 = ExtractTransform3f(val)) {
-    t = *t3;
-  } else if (auto t4 = ExtractTransform4f(val)) {
-    t = t4->extract();
-  } else {
-    return std::nullopt;
+  if (auto t3 = ExtractTransform3f(val)) return ToUvMatrix(t3->matrix);
+  if (auto t4 = ExtractTransform4f(val)) {
+    return ToUvMatrix(t4->extract().matrix);
   }
-  TextureKey::UvMatrix out;
-  for (int i = 0; i < 3; ++i)
-    for (int j = 0; j < 3; ++j) out[i * 3 + j] = t.matrix(i, j);
-  return out;
+  return std::nullopt;
 }
 
 ScalarAffineTransform3f UvMatrixToTransform(const TextureKey::UvMatrix& m) {
   return ScalarAffineTransform3f(
       dr::Matrix<float, 3>(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]));
+}
+
+TextureKey::UvMatrix ExtractUsdTransform2d(const HdMaterialNetwork2& network,
+                                           const HdMaterialNode2& tex_node) {
+  using Matrix3f = dr::Matrix<float, 3>;
+  auto next = [](const HdMaterialNode2& n, const TfToken& input) {
+    auto it = n.inputConnections.find(input);
+    return (it != n.inputConnections.end() && !it->second.empty())
+               ? it->second[0].upstreamNode
+               : SdfPath();
+  };
+  Matrix3f m_usd = dr::identity<Matrix3f>();
+  for (SdfPath p = next(tex_node, TfToken("st")); !p.IsEmpty();) {
+    auto xf_it = network.nodes.find(p);
+    if (xf_it == network.nodes.end() ||
+        xf_it->second.nodeTypeId != TfToken("UsdTransform2d")) {
+      break;
+    }
+    const auto& params = xf_it->second.parameters;
+    auto get = [&](const char* name, auto def) {
+      auto it = params.find(TfToken(name));
+      return it == params.end() ? def : it->second.GetWithDefault(def);
+    };
+    const GfVec2f t = get("translation", GfVec2f(0.0f));
+    const GfVec2f s = get("scale", GfVec2f(1.0f));
+    m_usd = m_usd * dr::translate<Matrix3f>({t[0], t[1]}) *
+            dr::rotate<Matrix3f>(dr::deg_to_rad(get("rotation", 0.0f))) *
+            dr::scale<Matrix3f>({s[0], s[1]});
+    p = next(xf_it->second, TfToken("in"));
+  }
+  // Mesh UVs are V-flipped on load (uv_mi = F * uv_usd, with F = F^-1), so
+  // conjugate the USD-space transform into Mitsuba UV space: F * m_usd * F.
+  const Matrix3f flip(1.0f, 0.0f, 0.0f, 0.0f, -1.0f, 1.0f, 0.0f, 0.0f, 1.0f);
+  return ToUvMatrix(flip * m_usd * flip);
 }
 
 mitsuba::ref<mitsuba::Object> CreateBitmapTexture(const TextureKey& key,
@@ -168,9 +203,11 @@ mitsuba::ref<mitsuba::Object> CreateBitmapTexture(const TextureKey& key,
 
 }  // namespace
 
-std::optional<TextureKey> ExtractTextureKey(
-    const std::map<TfToken, VtValue>& parameters, const TfToken& nodeTypeId,
-    const TfToken& input_name) {
+std::optional<TextureKey> ExtractTextureKey(const HdMaterialNetwork2& network,
+                                            const HdMaterialNode2& node,
+                                            const TfToken& input_name) {
+  const auto& parameters = node.parameters;
+  const TfToken& nodeTypeId = node.nodeTypeId;
   std::string resolved_path;
   if (nodeTypeId == TfToken("UsdUVTexture")) {
     if (auto file_it = parameters.find(TfToken("file"));
@@ -225,6 +262,7 @@ std::optional<TextureKey> ExtractTextureKey(
             w.c_str(), param, key.filename.c_str());
       }
     }
+    key.to_uv = ExtractUsdTransform2d(network, node);
   } else if (nodeTypeId == TfToken("mitsuba_bitmap")) {
     // Each setter returns false if `v` does not hold the expected type.
     auto set_as = [](const VtValue& v, auto& dst) {

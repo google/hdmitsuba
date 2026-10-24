@@ -199,8 +199,7 @@ void DiscoverTextures(
         if (IsTextureNode(node)) {
           // Texture nodes are keyed by input_name as well, so they are
           // intentionally not deduplicated via visited_nodes.
-          if (auto key_opt = ExtractTextureKey(
-                  node.parameters, node.nodeTypeId, input_name)) {
+          if (auto key_opt = ExtractTextureKey(network, node, input_name)) {
             callback(*key_opt);
           }
           return;
@@ -253,15 +252,14 @@ mitsuba::ref<mitsuba::VolumeGrid<Float, Spectrum>> LoadVolumeGrid(
 
 template <typename Float, typename Spectrum>
 mitsuba::ref<mitsuba::Object> GetTexture(
-    const std::map<TfToken, VtValue>& parameters, const TfToken& nodeTypeId,
+    const HdMaterialNetwork2& network, const HdMaterialNode2& node,
     const TfToken& input_name,
     const TextureCache<Float, Spectrum>& texture_cache) {
   const bool is_normal =
       (input_name == TfToken("normal") || input_name == TfToken("normalmap"));
   // Attempt to find the texture from the texture cache. This
   // assumes the texture cache was pre-populated by DiscoverTextures.
-  if (auto key_opt =
-          ExtractTextureKey(parameters, nodeTypeId, input_name)) {
+  if (auto key_opt = ExtractTextureKey(network, node, input_name)) {
     const CachedTexture* cached = texture_cache.Find(*key_opt);
     if (!cached) {
       // The texture discovery pass disagrees with the parser about which
@@ -286,8 +284,8 @@ mitsuba::ref<mitsuba::Object> GetTexture(
     return nullptr;
   }
   mitsuba::Properties fallback_props("srgb");
-  auto fallback_it = parameters.find(TfToken("fallback"));
-  if (fallback_it != parameters.end()) {
+  auto fallback_it = node.parameters.find(TfToken("fallback"));
+  if (fallback_it != node.parameters.end()) {
     SetMitsubaPropertyFromValue(fallback_props, "color", fallback_it->second);
   } else {
     fallback_props.set("color", mitsuba::Color<float, 3>(1.0f, 0.0f, 1.0f));
@@ -313,8 +311,7 @@ mitsuba::ref<mitsuba::Object> ResolveConnectedTexture(
   }
   const HdMaterialNode2& upstream_node = node_it->second;
   if (IsTextureNode(upstream_node)) {
-    return GetTexture<Float, Spectrum>(upstream_node.parameters,
-                                       upstream_node.nodeTypeId, input_name,
+    return GetTexture<Float, Spectrum>(network2, upstream_node, input_name,
                                        texture_cache);
   }
   return nullptr;
@@ -338,8 +335,8 @@ mitsuba::ref<mitsuba::Object> ParseNodeRecursive(
   // resolves the appropriate texture variant per input_name.
   const auto& node = it->second;
   if (IsTextureNode(node)) {
-    return GetTexture<Float, Spectrum>(node.parameters, node.nodeTypeId,
-                                       input_name, texture_cache);
+    return GetTexture<Float, Spectrum>(network, node, input_name,
+                                       texture_cache);
   }
 
   if (auto cache_it = cache.find(nodePath); cache_it != cache.end()) {

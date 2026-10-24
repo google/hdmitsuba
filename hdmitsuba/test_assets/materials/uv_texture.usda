@@ -30,14 +30,12 @@ def Xform "root"
             def Shader "Shader"
             {
                 uniform token info:id = "UsdPreviewSurface"
-                color3f inputs:diffuseColor.connect = </root/_materials/_Preview/Tex.outputs:rgb>
                 token outputs:surface
             }
             def Shader "Tex"
             {
                 uniform token info:id = "UsdUVTexture"
                 asset inputs:file = @./textures/uv_quadrants.png@
-                float3 outputs:rgb
             }
         }
 
@@ -46,12 +44,14 @@ def Xform "root"
         {
             over "Shader"
             {
+                color3f inputs:diffuseColor.connect = </root/_materials/colorspace_overrides/Tex.outputs:rgb>
                 float inputs:roughness.connect = </root/_materials/colorspace_overrides/TexSrgb.outputs:r>
                 float inputs:metallic = 0.8
             }
             over "Tex"
             {
                 token inputs:sourceColorSpace = "Raw"
+                float3 outputs:rgb
             }
             def Shader "TexSrgb"
             {
@@ -62,19 +62,66 @@ def Xform "root"
             }
         }
 
-        # ColorSpaceAPI metadata + unauthored wrapS falling back to wrapT.
-        def Material "wrap_t_fallback" (inherits = </root/_materials/_Preview>)
+        class Material "_PreviewXf" (inherits = </root/_materials/_Preview>)
         {
+            over "Shader"
+            {
+                color3f inputs:diffuseColor = (0, 0, 0)
+                float inputs:specular = 0
+                color3f inputs:emissiveColor.connect = </root/_materials/_PreviewXf/Tex.outputs:rgb>
+            }
+            def Shader "St"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                token inputs:varname = "st"
+                float2 outputs:result
+            }
+            def Shader "Xf"
+            {
+                uniform token info:id = "UsdTransform2d"
+                float2 inputs:in.connect = </root/_materials/_PreviewXf/St.outputs:result>
+                float2 outputs:result
+            }
             over "Tex"
             {
-                asset inputs:file = @./textures/uv_quadrants.png@ (colorSpace = "lin_rec709_scene")
+                float2 inputs:st.connect = </root/_materials/_PreviewXf/Xf.outputs:result>
                 token inputs:wrapT = "clamp"
+                float3 outputs:rgb
             }
         }
 
-        # wrapS = "useMetadata" falling back to concrete wrapT = "clamp".
-        def Material "wrap_use_metadata" (inherits = </root/_materials/wrap_t_fallback>)
+        # 90-deg CCW rotation + translation around USD bottom-left UV origin,
+        # colorSpace metadata, and unauthored wrapS falling back to wrapT.
+        def Material "rotate_translate" (inherits = </root/_materials/_PreviewXf>)
         {
+            over "Xf"
+            {
+                float inputs:rotation = 90
+                float2 inputs:translation = (1.3, 0.25)
+            }
+            over "Tex"
+            {
+                asset inputs:file = @./textures/uv_quadrants.png@ (colorSpace = "lin_rec709_scene")
+            }
+        }
+
+        # Chained UsdTransform2d nodes + wrapS = "useMetadata" -> wrapT.
+        def Material "chained_xf" (inherits = </root/_materials/_PreviewXf>)
+        {
+            def Shader "XfInner"
+            {
+                uniform token info:id = "UsdTransform2d"
+                float2 inputs:in.connect = </root/_materials/chained_xf/St.outputs:result>
+                float2 inputs:scale = (2, 1.5)
+                float2 inputs:translation = (0.15, 0.25)
+                float2 outputs:result
+            }
+            over "Xf"
+            {
+                float2 inputs:in.connect = </root/_materials/chained_xf/XfInner.outputs:result>
+                float inputs:rotation = 35
+                float2 inputs:translation = (-0.2, 0.1)
+            }
             over "Tex"
             {
                 token inputs:wrapS = "useMetadata"
@@ -82,8 +129,13 @@ def Xform "root"
         }
 
         # Concrete wrapS ("mirror") overrides conflicting wrapT ("clamp").
-        def Material "wrap_s_precedence" (inherits = </root/_materials/wrap_t_fallback>)
+        def Material "wrap_s_precedence" (inherits = </root/_materials/_PreviewXf>)
         {
+            over "Xf"
+            {
+                float2 inputs:scale = (2.5, 2.5)
+                float2 inputs:translation = (-0.25, -0.25)
+            }
             over "Tex"
             {
                 string inputs:wrapS = "mirror"
@@ -105,20 +157,17 @@ def Xform "root"
     }
     def Mesh "Tile2" (inherits = </root/_Tile>)
     {
-        rel material:binding = </root/_materials/wrap_t_fallback>
-        texCoord2f[] primvars:st = [(-0.5, -0.5), (1.5, -0.5), (1.5, 1.5), (-0.5, 1.5)] (interpolation = "faceVarying")
+        rel material:binding = </root/_materials/rotate_translate>
         point3f[] points = [(0.05, 0.05, 0), (1.25, 0.05, 0), (1.25, 0.95, 0), (0.05, 0.95, 0)]
     }
     def Mesh "Tile3" (inherits = </root/_Tile>)
     {
-        rel material:binding = </root/_materials/wrap_use_metadata>
-        texCoord2f[] primvars:st = [(-0.5, -0.5), (1.5, -0.5), (1.5, 1.5), (-0.5, 1.5)] (interpolation = "faceVarying")
+        rel material:binding = </root/_materials/chained_xf>
         point3f[] points = [(-1.25, -0.95, 0), (-0.05, -0.95, 0), (-0.05, -0.05, 0), (-1.25, -0.05, 0)]
     }
     def Mesh "Tile4" (inherits = </root/_Tile>)
     {
         rel material:binding = </root/_materials/wrap_s_precedence>
-        texCoord2f[] primvars:st = [(-0.5, -0.5), (1.5, -0.5), (1.5, 1.5), (-0.5, 1.5)] (interpolation = "faceVarying")
         point3f[] points = [(0.05, -0.95, 0), (1.25, -0.95, 0), (1.25, -0.05, 0), (0.05, -0.05, 0)]
     }
 }

@@ -16,7 +16,6 @@
 
 #include <array>
 #include <cstddef>
-#include <map>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -29,10 +28,12 @@
 #include <mitsuba/core/fwd.h>
 #include <mitsuba/core/object.h>
 #include <pxr/base/tf/token.h>
-#include <pxr/base/vt/value.h>
 #include <pxr/pxr.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
+
+struct HdMaterialNetwork2;
+struct HdMaterialNode2;
 
 // Identifies a unique Mitsuba bitmap texture instance. Two material inputs
 // that resolve to the same key share one texture object. Defaults mirror the
@@ -83,9 +84,9 @@ struct CachedTexture {
 
 // Builds the cache key for a `UsdUVTexture` or `mitsuba_bitmap` node connected
 // to `input_name`. Returns nullopt if the node has no usable file path.
-std::optional<TextureKey> ExtractTextureKey(
-    const std::map<TfToken, VtValue>& parameters, const TfToken& nodeTypeId,
-    const TfToken& input_name);
+std::optional<TextureKey> ExtractTextureKey(const HdMaterialNetwork2& network,
+                                            const HdMaterialNode2& node,
+                                            const TfToken& input_name);
 
 // Loads a bitmap through USD's asset resolver so textures embedded in .usdz
 // packages (or served by custom resolvers) can be read from memory. Falls back
