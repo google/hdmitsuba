@@ -323,7 +323,7 @@ def usd_mitsuba_material_to_dict(
 
   Returns:
     The Mitsuba dictionary representation of the shader, or an empty dictionary
-    if the shader is rejected (e.g. a single-channel texture as a normal map).
+    if it unwraps to nothing (e.g. a normalmap without texture and nested BSDF).
   """
 
   def _traverse(
@@ -339,11 +339,14 @@ def usd_mitsuba_material_to_dict(
       raise ValueError(f'The shader {shader_id} is not a Mitsuba shader.')
 
     result = {'type': shader_id.removeprefix(_MI_PREFIX)}
+    child_bsdf = None
     for usd_input in shader.GetInputs():
       name = usd_input.GetBaseName()
       if conn := _find_shader_output(usd_input):
         if (child := _traverse(conn[0], name, conn[1])) is not None:
           result[name] = child
+          if name != 'normalmap':
+            child_bsdf = child
       else:
         attr = usd_input.GetAttr()
         value = attr.Get()
@@ -366,6 +369,9 @@ def usd_mitsuba_material_to_dict(
             result[name] = resolved if resolved else value.path
           else:
             result[name] = value
+
+    if result['type'] == 'normalmap' and 'normalmap' not in result:
+      return child_bsdf
 
     if (
         result['type'] == 'gridvolume'
