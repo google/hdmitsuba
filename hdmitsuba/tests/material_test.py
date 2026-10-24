@@ -21,6 +21,7 @@ import numpy as np
 import pytest
 
 from pxr import Gf
+from pxr import Sdf
 from pxr import Usd
 from pxr import UsdShade
 import usd_render
@@ -53,6 +54,28 @@ def test_render(scene_name: str):
 
   test_helpers.assert_hydra_equal_to_offline(
       stage, camera_path, f'test_render_{scene_name}', atol=0.05
+  )
+
+
+def test_render_usdz(tmp_path):
+  stage = Usd.Stage.Open(
+      f'{test_helpers.TEST_ASSETS_PATH}/materials/materials.usda'
+  )
+  test_helpers.create_render_settings(stage)
+  usda_path = str(tmp_path / 'materials.usda')
+  stage.GetRootLayer().Export(usda_path)
+  usdz_path = str(tmp_path / 'materials.usdz')
+  with Sdf.ZipFileWriter.CreateNew(usdz_path) as writer:
+    writer.AddFile(usda_path, 'materials.usda')
+    writer.AddFile(
+        f'{test_helpers.TEST_ASSETS_PATH}/materials/textures/albedo.png',
+        'textures/albedo.png',
+    )
+  test_helpers.assert_hydra_equal_to_offline(
+      Usd.Stage.Open(usdz_path),
+      '/root/Camera/Camera',
+      'test_render_usdz',
+      atol=0.05,
   )
 
 

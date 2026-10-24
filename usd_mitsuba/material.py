@@ -135,6 +135,17 @@ def _get_volume_shader(
   return None
 
 
+def _open_asset_stream(filename: str) -> mi.MemoryStream | None:
+  """Opens an Ar-resolved asset into an in-memory Mitsuba stream."""
+  asset = Ar.GetResolver().OpenAsset(Ar.ResolvedPath(filename))
+  if asset is not None and (buffer := asset.GetBuffer()) is not None:
+    stream = mi.MemoryStream(asset.GetSize())
+    stream.write(buffer)
+    stream.seek(0)
+    return stream
+  return None
+
+
 def _convert_uv_texture(
     shader: UsdShade.Shader,
     input_name: str | None = None,
@@ -146,12 +157,18 @@ def _convert_uv_texture(
 
   if asset_path and asset_path.resolvedPath:
     filename = asset_path.resolvedPath
-    _, ext = os.path.splitext(filename)
+    # Strip the closing bracket of package paths like `a.usdz[tex.png]`.
+    _, ext = os.path.splitext(filename.rstrip(']'))
 
     # This check is not identical to hdmitsuba's more strict check,
     # but should be sufficient for the Python conversion.
     if ext.lower() in _SUPPORTED_IMAGE_EXTENSIONS:
       texture = {'type': 'bitmap', 'filename': filename}
+      # Load images that are not on disk (e.g. inside a .usdz) through Ar.
+      if not os.path.exists(filename) and (
+          stream := _open_asset_stream(filename)
+      ):
+        texture = {'type': 'bitmap', 'bitmap': mi.Bitmap(stream)}
 
       # Handle color space if we have a bitmap.
       source_color_space = shader.GetInput('sourceColorSpace').Get()
@@ -231,14 +248,10 @@ def usd_mitsuba_material_to_dict(
         and 'filename' in result
         and 'grid' not in result
         and not os.path.exists(result['filename'])
+        and (stream := _open_asset_stream(result['filename']))
     ):
-      asset = Ar.GetResolver().OpenAsset(Ar.ResolvedPath(result['filename']))
-      if asset is not None and (buffer := asset.GetBuffer()) is not None:
-        stream = mi.MemoryStream(asset.GetSize())
-        stream.write(buffer)
-        stream.seek(0)
-        result['grid'] = mi.VolumeGrid(stream)
-        del result['filename']
+      result['grid'] = mi.VolumeGrid(stream)
+      del result['filename']
 
     return result
 
