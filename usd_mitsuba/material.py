@@ -203,6 +203,20 @@ def _convert_uv_texture(
         cs = file_input.GetAttr().GetColorSpace()
       if _use_raw_bitmap(cs, input_name):
         texture['raw'] = True
+
+      # Mitsuba's bitmap only has a single wrap_mode: use wrapS, falling back
+      # to wrapT if wrapS is unauthored, 'useMetadata' or unsupported.
+      for param in ('wrapS', 'wrapT'):
+        w = shader.GetInput(param).Get()
+        if w in ('repeat', 'clamp', 'mirror'):
+          texture['wrap_mode'] = w
+          break
+        if w and w != 'useMetadata':
+          Tf.Warn(
+              f"Unsupported wrap mode '{w}' on '{param}' for UsdUVTexture"
+              f" '{filename}'; ignoring."
+          )
+
       return texture
     else:
       Tf.Warn(
