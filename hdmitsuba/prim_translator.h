@@ -58,10 +58,6 @@ void DiscoverTextures(
     const HdMaterialNetwork2& network,
     const std::function<void(const TextureKey& tex_key)>& callback);
 
-// Returns the upstream node path of the network's displacement terminal
-// (`mitsuba:displacement` or `displacement`), or an empty path if none exists.
-SdfPath FindDisplacementTerminal(const HdMaterialNetwork2& network);
-
 // Displacement texture of a material.
 struct MaterialDisplacement {
   mitsuba::ref<mitsuba::Object> texture = nullptr;

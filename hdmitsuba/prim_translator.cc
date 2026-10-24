@@ -118,27 +118,21 @@ bool IsScalarOnlyPrincipledInput(const TfToken& input_name) {
          input_name == TfToken("eta");
 }
 
-SdfPath FindTerminal(const HdMaterialNetwork2& network,
-                     const TfToken& mitsuba_terminal,
-                     const TfToken& default_terminal) {
-  auto it = network.terminals.find(mitsuba_terminal);
+// Returns the connection of the `mitsuba:<terminal>` terminal, falling back to
+// `<terminal>`, or nullptr if neither is connected.
+const HdMaterialConnection2* FindTerminalConnection(
+    const HdMaterialNetwork2& network, const TfToken& terminal) {
+  auto it = network.terminals.find(
+      TfToken(absl::StrCat("mitsuba:", terminal.GetString())));
   if (it == network.terminals.end() || it->second.upstreamNode.IsEmpty()) {
-    it = network.terminals.find(default_terminal);
+    it = network.terminals.find(terminal);
   }
-  return it != network.terminals.end() ? it->second.upstreamNode : SdfPath();
-}
-
-SdfPath FindVolumeTerminal(const HdMaterialNetwork2& network) {
-  return FindTerminal(network, TfToken("mitsuba:volume"),
-                      HdMaterialTerminalTokens->volume);
+  return (it != network.terminals.end() && !it->second.upstreamNode.IsEmpty())
+             ? &it->second
+             : nullptr;
 }
 
 }  // namespace
-
-SdfPath FindDisplacementTerminal(const HdMaterialNetwork2& network) {
-  return FindTerminal(network, TfToken("mitsuba:displacement"),
-                      HdMaterialTerminalTokens->displacement);
-}
 
 std::string MeshAttributeName(std::string_view primvar, int channels) {
   return absl::StrCat(kVertexAttributePrefix,
@@ -189,9 +183,9 @@ void DiscoverTextures(
     const HdMaterialNetwork2& network,
     const std::function<void(const TextureKey& tex_key)>& callback) {
   absl::flat_hash_set<SdfPath, SdfPath::Hash> visited_nodes;
-  std::function<void(const SdfPath&, const TfToken&)> visit =
-      [&](const SdfPath& node_path, const TfToken& input_name) {
-        auto it = network.nodes.find(node_path);
+  std::function<void(const HdMaterialConnection2&, const TfToken&)> visit =
+      [&](const HdMaterialConnection2& conn, const TfToken& input_name) {
+        auto it = network.nodes.find(conn.upstreamNode);
         if (it == network.nodes.end()) {
           return;
         }
@@ -204,7 +198,7 @@ void DiscoverTextures(
           }
           return;
         }
-        if (!visited_nodes.insert(node_path).second) {
+        if (!visited_nodes.insert(conn.upstreamNode).second) {
           return;
         }
         const bool is_principled = IsPrincipledNode(node);
@@ -215,22 +209,16 @@ void DiscoverTextures(
           if (is_principled && IsScalarOnlyPrincipledInput(conn_input)) {
             continue;
           }
-          visit(connections[0].upstreamNode, conn_input);
+          visit(connections[0], conn_input);
         }
       };
 
-  if (SdfPath disp_node = FindDisplacementTerminal(network);
-      !disp_node.IsEmpty()) {
-    visit(disp_node, HdMaterialTerminalTokens->displacement);
-  }
-  if (const SdfPath volume_node_path = FindVolumeTerminal(network);
-      !volume_node_path.IsEmpty()) {
-    visit(volume_node_path, HdMaterialTerminalTokens->volume);
-  }
-  auto surf_it = network.terminals.find(HdMaterialTerminalTokens->surface);
-  if (surf_it != network.terminals.end() &&
-      !surf_it->second.upstreamNode.IsEmpty()) {
-    visit(surf_it->second.upstreamNode, HdMaterialTerminalTokens->surface);
+  for (const TfToken& terminal :
+       {HdMaterialTerminalTokens->displacement,
+        HdMaterialTerminalTokens->volume, HdMaterialTerminalTokens->surface}) {
+    if (const auto* conn = FindTerminalConnection(network, terminal)) {
+      visit(*conn, terminal);
+    }
   }
 }
 
@@ -319,10 +307,12 @@ mitsuba::ref<mitsuba::Object> ResolveConnectedTexture(
 
 template <typename Float, typename Spectrum>
 mitsuba::ref<mitsuba::Object> ParseNodeRecursive(
-    const SdfPath& nodePath, const HdMaterialNetwork2& network,
+    const HdMaterialConnection2& conn, const HdMaterialNetwork2& network,
     absl::flat_hash_map<SdfPath, mitsuba::ref<mitsuba::Object>, SdfPath::Hash>&
         cache,
-    TfToken input_name, const TextureCache<Float, Spectrum>& texture_cache) {
+    const TfToken& input_name,
+    const TextureCache<Float, Spectrum>& texture_cache) {
+  const SdfPath& nodePath = conn.upstreamNode;
   auto it = network.nodes.find(nodePath);
   if (it == network.nodes.end()) {
     TF_RUNTIME_ERROR("Node %s not found in material network.",
@@ -375,9 +365,8 @@ mitsuba::ref<mitsuba::Object> ParseNodeRecursive(
       continue;
     }
     mitsuba::ref<mitsuba::Object> upstream_object =
-        ParseNodeRecursive<Float, Spectrum>(connections[0].upstreamNode,
-                                            network, cache, input_token,
-                                            texture_cache);
+        ParseNodeRecursive<Float, Spectrum>(connections[0], network, cache,
+                                            input_token, texture_cache);
     if (upstream_object) {
       props.set(input_token.GetString(), upstream_object);
     }
@@ -516,17 +505,17 @@ PrimTranslator<Float, Spectrum>::BuildMaterial(
   absl::flat_hash_map<SdfPath, mitsuba::ref<mitsuba::Object>, SdfPath::Hash>
       cache;
 
-  if (const SdfPath disp_node_path = FindDisplacementTerminal(network2);
-      !disp_node_path.IsEmpty()) {
+  if (const auto* disp_conn = FindTerminalConnection(
+          network2, HdMaterialTerminalTokens->displacement)) {
     res.displacement.texture = ParseNodeRecursive<Float, Spectrum>(
-        disp_node_path, network2, cache, HdMaterialTerminalTokens->displacement,
+        *disp_conn, network2, cache, HdMaterialTerminalTokens->displacement,
         texture_cache);
   }
-  if (const SdfPath volume_node_path = FindVolumeTerminal(network2);
-      !volume_node_path.IsEmpty()) {
+  if (const auto* vol_conn =
+          FindTerminalConnection(network2, HdMaterialTerminalTokens->volume)) {
     cache.clear();
     res.interior_medium = ParseNodeRecursive<Float, Spectrum>(
-        volume_node_path, network2, cache, HdMaterialTerminalTokens->volume,
+        *vol_conn, network2, cache, HdMaterialTerminalTokens->volume,
         texture_cache);
     if (res.interior_medium) {
       if (res.interior_medium->type() != mitsuba::ObjectType::Medium) {
@@ -541,11 +530,9 @@ PrimTranslator<Float, Spectrum>::BuildMaterial(
 
   const std::string_view default_bsdf_plugin =
       res.interior_medium ? "null" : "diffuse";
-  if (auto terminal_it =
-          network2.terminals.find(HdMaterialTerminalTokens->surface);
-      terminal_it != network2.terminals.end()) {
-    const SdfPath& surface_node_path = terminal_it->second.upstreamNode;
-    if (auto node_it = network2.nodes.find(surface_node_path);
+  if (const auto* surf_conn =
+          FindTerminalConnection(network2, HdMaterialTerminalTokens->surface)) {
+    if (auto node_it = network2.nodes.find(surf_conn->upstreamNode);
         node_it != network2.nodes.end()) {
       const HdMaterialNode2& surface_node = node_it->second;
       if (surface_node.nodeTypeId == TfToken("UsdPreviewSurface")) {
@@ -557,8 +544,8 @@ PrimTranslator<Float, Spectrum>::BuildMaterial(
       } else {
         cache.clear();
         res.bsdf = ParseNodeRecursive<Float, Spectrum>(
-            surface_node_path, network2, cache,
-            HdMaterialTerminalTokens->surface, texture_cache);
+            *surf_conn, network2, cache, HdMaterialTerminalTokens->surface,
+            texture_cache);
       }
       if (res.bsdf) {
         res.bsdf->set_id(id_str);
