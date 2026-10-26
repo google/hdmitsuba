@@ -699,9 +699,6 @@ class SceneModel final : public SceneManager {
         result = render_integrator->render(
             scene_.get(), sensor, pass_seed,
             static_cast<uint32_t>(samples_to_render), true, true);
-        if constexpr (dr::is_jit_v<Float>) {
-          dr::sync_thread();
-        }
       }
       size_t expected_width = crop_window.has_value() ? crop_window->GetWidth() : buffer_width;
       size_t expected_height = crop_window.has_value() ? crop_window->GetHeight() : buffer_height;
