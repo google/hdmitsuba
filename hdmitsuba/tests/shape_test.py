@@ -39,6 +39,7 @@ def _set_mitsuba_variant():
         ('subdiv_cube', Usd.TimeCode.Default(), True),
         ('subdiv_plane', Usd.TimeCode.Default(), True),
         ('subdiv_two_quads', Usd.TimeCode.Default(), True),
+        ('subdiv_indexed_uvs', Usd.TimeCode.Default(), True),
         ('displacement_preview_surface', Usd.TimeCode.Default(), True),
         ('curve', Usd.TimeCode.Default(), True),
         ('geom_subsets', Usd.TimeCode.Default(), True),

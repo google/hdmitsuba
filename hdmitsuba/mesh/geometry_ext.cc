@@ -14,7 +14,6 @@
 
 #include <algorithm>
 #include <iterator>
-#include <numeric>
 #include <vector>
 
 #include <nanobind/nanobind.h>
@@ -69,6 +68,11 @@ struct MeshExtractionData {
   TfToken interp_boundary = PxOsdOpenSubdivTokens->edgeAndCorner;
   TfToken face_varying_interp = PxOsdOpenSubdivTokens->cornersPlus1;
   PrimvarMap primvars;
+  // Unflattened values and indices (empty if not indexed) of faceVarying
+  // primvars, which are subdivided using their own face-varying topology.
+  absl::flat_hash_map<TfToken, VtValue, TfToken::HashFunctor>
+      unflattened_fvar_values;
+  absl::flat_hash_map<TfToken, VtIntArray, TfToken::HashFunctor> fvar_indices;
   std::vector<SdfPath> material_ids;
   VtIntArray face_material_indices;
 
@@ -207,6 +211,10 @@ MeshExtractionData ExtractMeshData(UsdStagePtr stage, const SdfPath& path,
     VtValue value;
     if (primvar.ComputeFlattened(&value, time) && !value.IsEmpty()) {
       data.primvars[desc.name] = {std::move(value), desc};
+      if (desc.interpolation == HdInterpolationFaceVarying) {
+        primvar.Get(&data.unflattened_fvar_values[desc.name], time);
+        primvar.GetIndices(&data.fvar_indices[desc.name], time);
+      }
     }
   }
 
@@ -295,36 +303,8 @@ NB_MODULE(geometry_ext, m) {
     MeshExtractionData mesh_data = ExtractMeshData(stage, path, time);
     SubdivisionEvaluator subdiv;
     HdMeshTopology topology = mesh_data.GetTopology();
-
-    std::vector<VtIntArray> fvar_topologies;
-    absl::flat_hash_map<TfToken, int, TfToken::HashFunctor> fvar_map;
-    const TfToken fvar_interp_rule =
-        topology.GetSubdivTags().GetFaceVaryingInterpolationRule();
-
-    if (fvar_interp_rule != PxOsdOpenSubdivTokens->all && refine_level > 0 &&
-        (mesh_data.scheme == PxOsdOpenSubdivTokens->catmullClark ||
-         mesh_data.scheme == PxOsdOpenSubdivTokens->loop)) {
-      int unindexed_channel = -1;
-      for (const auto& [token, state] : mesh_data.primvars) {
-        if (state.descriptor.interpolation == HdInterpolationFaceVarying) {
-          if (unindexed_channel < 0) {
-            const int num_face_varyings = topology.GetNumFaceVaryings();
-            if (num_face_varyings > 0) {
-              VtIntArray indices(num_face_varyings);
-              std::iota(indices.data(), indices.data() + num_face_varyings, 0);
-              unindexed_channel = fvar_topologies.size();
-              fvar_topologies.push_back(std::move(indices));
-            }
-          }
-          if (unindexed_channel >= 0) {
-            fvar_map[token] = unindexed_channel;
-          }
-        }
-      }
-    }
-
     subdiv.Initialize(topology.GetPxOsdMeshTopology(), refine_level,
-                      fvar_topologies, fvar_map, mesh_data.id.GetNameToken());
+                      mesh_data.fvar_indices, mesh_data.id.GetNameToken());
 
     HdMeshTopology refined_topology = topology;
     PrimvarMap primvars = mesh_data.primvars;
@@ -334,6 +314,10 @@ NB_MODULE(geometry_ext, m) {
       // Normals will be recomputed after subdivision, skip refining them here.
       primvars.erase(HdTokens->normals);
       for (auto& [token, state] : primvars) {
+        // FaceVarying primvars are refined on their unflattened values.
+        if (subdiv.HasFVarChannel(token)) {
+          state.value = mesh_data.unflattened_fvar_values.at(token);
+        }
         state.value = subdiv.RefinePrimvar(
             state.value, state.descriptor.interpolation, token);
       }

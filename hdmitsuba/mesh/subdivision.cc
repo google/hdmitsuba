@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cstring>
 #include <memory>
+#include <numeric>
 #include <utility>
 #include <vector>
 
@@ -103,9 +104,8 @@ VtArray<T> EvalSubdivisionStencil(
 
 void SubdivisionEvaluator::Initialize(
     const PxOsdMeshTopology& topology, int refine_level,
-    const std::vector<VtIntArray>& fvar_topologies,
-    const absl::flat_hash_map<TfToken, int, TfToken::HashFunctor>&
-        fvar_primvar_to_channel,
+    const absl::flat_hash_map<TfToken, VtIntArray, TfToken::HashFunctor>&
+        fvar_indices,
     const TfToken& mesh_name) {
   Clear();
 
@@ -116,7 +116,17 @@ void SubdivisionEvaluator::Initialize(
     return;
   }
 
-  fvar_primvar_to_channel_ = fvar_primvar_to_channel;
+  // Non-indexed primvars have one value per face corner.
+  VtIntArray identity(topology.GetFaceVertexIndices().size());
+  std::iota(identity.begin(), identity.end(), 0);
+  std::vector<VtIntArray> fvar_topologies;
+  for (const auto& [token, indices] : fvar_indices) {
+    const VtIntArray& channel_indices = indices.empty() ? identity : indices;
+    auto it = std::find(fvar_topologies.begin(), fvar_topologies.end(),
+                        channel_indices);
+    fvar_primvar_to_channel_[token] = std::distance(fvar_topologies.begin(), it);
+    if (it == fvar_topologies.end()) fvar_topologies.push_back(channel_indices);
+  }
 
   auto refiner =
       PxOsdRefinerFactory::Create(topology, fvar_topologies, mesh_name);

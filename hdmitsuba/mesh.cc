@@ -18,7 +18,6 @@
 #include <cmath>
 #include <cstddef>
 #include <iterator>
-#include <numeric>
 #include <optional>
 #include <string>
 #include <utility>
@@ -251,56 +250,13 @@ void HdMitsubaMesh::SyncTopology(HdSceneDelegate* sceneDelegate,
   }
 
   const TfToken scheme = topology.GetScheme();
-  absl::flat_hash_map<TfToken, int, TfToken::HashFunctor>
-      fvar_primvar_to_channel;
-  std::vector<VtIntArray> fvar_topologies;
-  const TfToken fvar_interp_rule =
-      topology.GetSubdivTags().GetFaceVaryingInterpolationRule();
-
-  if (fvar_interp_rule != PxOsdOpenSubdivTokens->all && refineLevel > 0 &&
-      (scheme == PxOsdOpenSubdivTokens->catmullClark ||
-       scheme == PxOsdOpenSubdivTokens->loop)) {
-    auto fv_primvars =
-        GetPrimvarDescriptors(sceneDelegate, HdInterpolationFaceVarying);
-    int unindexed_channel = -1;
-    for (const auto& primvar : fv_primvars) {
+  absl::flat_hash_map<TfToken, VtIntArray, TfToken::HashFunctor> fvar_indices;
+  if (refineLevel > 0 && scheme != PxOsdOpenSubdivTokens->none) {
+    for (const auto& primvar :
+         GetPrimvarDescriptors(sceneDelegate, HdInterpolationFaceVarying)) {
+      VtIntArray& indices = fvar_indices[primvar.name];
       if (primvar.indexed) {
-        VtIntArray indices;
         GetIndexedPrimvar(sceneDelegate, primvar.name, &indices);
-        if (!indices.empty()) {
-          auto it = std::find(fvar_topologies.begin(), fvar_topologies.end(),
-                              indices);
-          int channel;
-          if (it == fvar_topologies.end()) {
-            channel = fvar_topologies.size();
-            fvar_topologies.push_back(std::move(indices));
-          } else {
-            channel = std::distance(fvar_topologies.begin(), it);
-          }
-          fvar_primvar_to_channel[primvar.name] = channel;
-        }
-      } else {
-        VtValue value = GetPrimvar(sceneDelegate, primvar.name);
-        if (!value.IsEmpty()) {
-          if (unindexed_channel < 0) {
-            const int num_face_varyings = topology.GetNumFaceVaryings();
-            if (num_face_varyings > 0) {
-              VtIntArray indices(num_face_varyings);
-              std::iota(indices.data(), indices.data() + num_face_varyings, 0);
-              auto it = std::find(fvar_topologies.begin(),
-                                  fvar_topologies.end(), indices);
-              if (it == fvar_topologies.end()) {
-                unindexed_channel = fvar_topologies.size();
-                fvar_topologies.push_back(std::move(indices));
-              } else {
-                unindexed_channel = std::distance(fvar_topologies.begin(), it);
-              }
-            }
-          }
-          if (unindexed_channel >= 0) {
-            fvar_primvar_to_channel[primvar.name] = unindexed_channel;
-          }
-        }
       }
     }
   }
@@ -308,8 +264,7 @@ void HdMitsubaMesh::SyncTopology(HdSceneDelegate* sceneDelegate,
   topology.SetSubdivTags(GetSubdivTags(sceneDelegate));
 
   subdiv_evaluator_.Initialize(topology.GetPxOsdMeshTopology(), refineLevel,
-                               fvar_topologies, fvar_primvar_to_channel,
-                               TfToken(GetId().GetText()));
+                               fvar_indices, TfToken(GetId().GetText()));
 
   if (subdiv_evaluator_.IsSubdivided()) {
     face_material_indices_ =
@@ -467,10 +422,15 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
   }
 
   // Helper to resolve the value (computed vs standard)
-  auto resolve_primvar_value = [&](const TfToken& name) -> VtValue {
+  auto resolve_primvar_value = [&](const TfToken& name,
+                                   bool unflattened = false) -> VtValue {
     auto it = computed_values.find(name);
     if (it != computed_values.end()) {
       return it->second;
+    }
+    if (unflattened) {
+      VtIntArray unused_indices;
+      return GetIndexedPrimvar(sceneDelegate, name, &unused_indices);
     }
     return GetPrimvar(sceneDelegate, name);
   };
@@ -478,7 +438,10 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
   // Helper to sync and optionally refine a primvar
   auto sync_primvar = [&](const TfToken& name, const HdPrimvarDescriptor& desc,
                           bool refine = true) {
-    VtValue value = resolve_primvar_value(name);
+    // FaceVarying primvars are refined on their unflattened values, matching
+    // the topology of their OpenSubdiv channel.
+    VtValue value = resolve_primvar_value(
+        name, refine && subdiv_evaluator_.HasFVarChannel(name));
     if (value.IsEmpty()) return;
     if (refine && subdiv_evaluator_.IsSubdivided()) {
       value =

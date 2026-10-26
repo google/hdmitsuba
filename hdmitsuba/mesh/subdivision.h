@@ -37,18 +37,25 @@ class SubdivisionEvaluator {
   ~SubdivisionEvaluator() = default;
 
   // Initializes the OpenSubdiv refiner and stencil tables for the given mesh
-  // topology.
-  void Initialize(const PxOsdMeshTopology& topology, int refine_level,
-                  const std::vector<VtIntArray>& fvar_topologies,
-                  const absl::flat_hash_map<TfToken, int, TfToken::HashFunctor>&
-                      fvar_primvar_to_channel,
-                  const TfToken& mesh_name);
+  // topology. `fvar_indices` maps each faceVarying primvar to its value
+  // indices, or to an empty array if it is not indexed. Primvars with identical
+  // indices share an OpenSubdiv face-varying channel.
+  void Initialize(
+      const PxOsdMeshTopology& topology, int refine_level,
+      const absl::flat_hash_map<TfToken, VtIntArray, TfToken::HashFunctor>&
+          fvar_indices,
+      const TfToken& mesh_name);
 
   // Clears all OpenSubdiv data structures.
   void Clear();
 
   // Returns true if the mesh is currently configured for subdivision.
   bool IsSubdivided() const { return refiner_ != nullptr; }
+
+  // Returns true if `token` has an OpenSubdiv face-varying topology channel.
+  bool HasFVarChannel(const TfToken& token) const {
+    return fvar_primvar_to_channel_.contains(token);
+  }
 
   // Refines a primvar using the evaluated subdivision stencils.
   VtValue RefinePrimvar(const VtValue& value, HdInterpolation interpolation,

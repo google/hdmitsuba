@@ -57,11 +57,8 @@ TEST(SubdivisionEvaluatorTest, RefinePrimvar) {
   VtVec3fArray points = {GfVec3f(-1, -1, 1), GfVec3f(1, -1, 1),
                          GfVec3f(1, 1, 1), GfVec3f(-1, 1, 1)};
 
-  std::vector<VtIntArray> fvar_topologies;
-  absl::flat_hash_map<TfToken, int, TfToken::HashFunctor> fvar_map;
-
   SubdivisionEvaluator subdiv;
-  subdiv.Initialize(topo, 1, fvar_topologies, fvar_map, TfToken("quad"));
+  subdiv.Initialize(topo, 1, /*fvar_indices=*/{}, TfToken("quad"));
 
   ASSERT_TRUE(subdiv.IsSubdivided());
 
