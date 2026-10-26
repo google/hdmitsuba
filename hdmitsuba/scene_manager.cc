@@ -1237,6 +1237,7 @@ class SceneModel final : public SceneManager {
       props.set("to_world", parts[i].to_world);
       props.set("flip_normals", parts[i].flip_normals);
       if (interior_medium) props.set("interior", interior_medium);
+      if (bsdf) props.set("bsdf", bsdf.get());
       // Every part needs an emitter of its own, whereas the sensor can only be
       // attached to the first one (the empty path matches no sensor).
       if (!is_prototype) {
@@ -1248,7 +1249,6 @@ class SceneModel final : public SceneManager {
       }
       auto shape = PluginManager::instance()->create_object<Shape>(props);
       shape->set_id(parts[i].id);
-      shape->set_bsdf(bsdf.get());
       res.meshes.push_back(std::move(shape));
     }
   }

@@ -1042,11 +1042,11 @@ PrimTranslator<Float, Spectrum>::BuildMesh(
   if (interior_medium != nullptr) {
     props.set("interior", interior_medium);
   }
+  if (bsdf != nullptr) {
+    props.set("bsdf", bsdf);
+  }
   mitsuba::ref<Mesh> mesh = new Mesh(props);
   mesh->set_id(id);
-  if (bsdf != nullptr) {
-    mesh->set_bsdf(dynamic_cast<mitsuba::BSDF<Float, Spectrum>*>(bsdf));
-  }
 
   mitsuba::PackedMesh packed(
       dr::backend_v<Float>, vertex_count, face_count,
@@ -1189,14 +1189,14 @@ PrimTranslator<Float, Spectrum>::BuildCurves(const CurveSpec& spec,
   } else {
     TF_RUNTIME_ERROR("Failed to find plugin 'hdMitsuba' to locate resources.");
   }
+  if (bsdf != nullptr) {
+    props.set("bsdf", bsdf);
+  }
 
   mitsuba::ref<mitsuba::Shape<Float, Spectrum>> shape =
       mitsuba::PluginManager::instance()
           ->template create_object<mitsuba::Shape<Float, Spectrum>>(props);
   shape->set_id(id_str);
-  if (bsdf != nullptr) {
-    shape->set_bsdf(dynamic_cast<mitsuba::BSDF<Float, Spectrum>*>(bsdf));
-  }
 
   TraversalCallback cb("", nullptr, /*recurse_objects=*/false);
   shape->traverse(&cb);
