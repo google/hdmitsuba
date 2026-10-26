@@ -184,10 +184,10 @@ std::vector<ImplicitSurfacePart> GetImplicitSurfaceParts(
       to_world * Transform::translate(Vector3f(0.f, 0.f, -0.5f * h));
   const Transform cap_scale = Transform::scale(Vector3f(r, r, 1.f));
   return {
-      {"cylinder", absl::StrCat(id_str, "/body"),
+      {"cylinder", absl::StrCat(id_str, "#body"),
        bottom * Transform::scale(Vector3f(r, r, h))},
-      {"disk", absl::StrCat(id_str, "/cap_top"), top * cap_scale},
-      {"disk", absl::StrCat(id_str, "/cap_bottom"), bottom * cap_scale,
+      {"disk", absl::StrCat(id_str, "#cap_top"), top * cap_scale},
+      {"disk", absl::StrCat(id_str, "#cap_bottom"), bottom * cap_scale,
        /*flip_normals=*/true},
   };
 }
@@ -452,7 +452,7 @@ class SceneModel final : public SceneManager {
     }
 
     // Erase split sub-meshes
-    if (EraseShapesWithPrefix(absl::StrCat(id_str, "/"))) {
+    if (EraseShapesWithPrefix(absl::StrCat(id_str, "#"))) {
       erased = true;
     }
 
@@ -1131,7 +1131,7 @@ class SceneModel final : public SceneManager {
                               std::string_view key_prefix) {
     const bool geometry_dirty = (spec.dirty_bits & kMeshGeometryDirty) != 0;
     for (const auto& sub_mesh : sub_meshes) {
-      std::string key = absl::StrCat(key_prefix, sub_mesh.id.GetAsString());
+      std::string key = absl::StrCat(key_prefix, sub_mesh.id);
       auto it = shapes_.find(key);
       if (!TF_VERIFY(it != shapes_.end(), "Sub-mesh not found: %s",
                      key.c_str())) {
@@ -1163,9 +1163,9 @@ class SceneModel final : public SceneManager {
       return;
     }
     for (size_t i = 0; i < spec.material_ids.size(); ++i) {
-      SdfPath sub_id =
-          GeometryProcessor::MakeSubMeshId(spec.id, spec.material_ids[i], i);
-      std::string key = absl::StrCat(key_prefix, sub_id.GetAsString());
+      std::string key = absl::StrCat(
+          key_prefix,
+          GeometryProcessor::MakeSubMeshId(spec.id, spec.material_ids[i], i));
       auto it = shapes_.find(key);
       if (it == shapes_.end()) {
         // Empty material subset was not emitted by SplitAndCompactMeshes.
@@ -1470,7 +1470,7 @@ class SceneModel final : public SceneManager {
         // Clean up old shapes
         CleanUpInstancing(spec->id);
         shapes_.erase(id_str);
-        EraseShapesWithPrefix(absl::StrCat(id_str, "/"));
+        EraseShapesWithPrefix(absl::StrCat(id_str, "#"));
         if (!spec->instance_transforms.empty()) {
           rebuild |= MergeInstancedMesh(results[i], id_str);
         } else {
@@ -1775,7 +1775,7 @@ class SceneModel final : public SceneManager {
     bool erased = false;
     if (shapes_.erase(absl::StrCat(kProtoPrefix, id_str)) > 0) erased = true;
     // Erase prototype sub-meshes
-    if (EraseShapesWithPrefix(absl::StrCat(kProtoPrefix, id_str, "/"))) {
+    if (EraseShapesWithPrefix(absl::StrCat(kProtoPrefix, id_str, "#"))) {
       erased = true;
     }
     if (shapes_.erase(absl::StrCat(kProtoGroupPrefix, id_str)) > 0)

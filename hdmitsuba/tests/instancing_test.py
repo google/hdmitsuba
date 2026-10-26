@@ -23,6 +23,7 @@ import pytest
 
 from pxr import Usd
 from pxr import UsdGeom
+from pxr import UsdLux
 from pxr import UsdShade
 from pxr import Vt
 from pxr import Gf
@@ -627,3 +628,32 @@ def test_instancing_emitter_warning(tmp_path, capfd):
 
   captured = capfd.readouterr()
   assert "is instanced but has an emitter attached" in captured.err
+
+
+def _render_after_parent_edit(child_path: str) -> np.ndarray:
+  """Renders quads `/mesh` and `child_path` after editing `/mesh`."""
+  stage = Usd.Stage.CreateInMemory()
+  UsdGeom.Camera.Define(stage, '/camera').AddTranslateOp().Set((0, 1, 8))
+  UsdLux.DomeLight.Define(stage, '/light')
+  for path in ('/mesh', child_path):
+    quad = UsdGeom.Mesh.Define(stage, path)
+    quad.GetPointsAttr().Set([(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)])
+    quad.GetFaceVertexCountsAttr().Set([4])
+    quad.GetFaceVertexIndicesAttr().Set([0, 1, 2, 3])
+  quad.AddTranslateOp().Set((0, 2, 0))
+  test_helpers.create_render_settings(stage, resolution=(64, 64))
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin', camera_path='/camera')
+  engine.render()
+  mesh = UsdGeom.Mesh.Get(stage, '/mesh')
+  mesh.GetFaceVertexCountsAttr().Set([3])
+  mesh.GetFaceVertexIndicesAttr().Set([0, 1, 2])
+  return engine.render()['color']
+
+
+def test_parent_edit_preserves_nested_prims():
+  """Editing a mesh must not affect the rendering of prims nested under it."""
+  np.testing.assert_allclose(
+      _render_after_parent_edit('/mesh/child'),
+      _render_after_parent_edit('/child'), atol=1e-4)

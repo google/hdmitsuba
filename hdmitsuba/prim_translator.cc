@@ -983,16 +983,15 @@ void AddMeshAttributes(Mesh* mesh, const PrimvarMap& primvars,
 
 MI_VARIANT mitsuba::ref<mitsuba::Shape<Float, Spectrum>>
 PrimTranslator<Float, Spectrum>::BuildMesh(
-    const SdfPath& id, const VtIntArray& face_indices,
+    const std::string& id, const VtIntArray& face_indices,
     const PrimvarMap& primvars, const MeshAttributeRequests& mesh_attributes,
     mitsuba::Object* bsdf, mitsuba::Object* emitter_ptr,
     mitsuba::Object* sensor_ptr, mitsuba::Object* interior_medium) {
   using Mesh = mitsuba::Mesh<Float, Spectrum>;
 
-  const std::string id_str = id.GetAsString();
   auto points_it = primvars.find(HdTokens->points);
   if (points_it == primvars.end()) {
-    TF_RUNTIME_ERROR("Mesh %s has no points.", id_str.c_str());
+    TF_RUNTIME_ERROR("Mesh %s has no points.", id.c_str());
     return nullptr;
   }
 
@@ -1029,7 +1028,7 @@ PrimTranslator<Float, Spectrum>::BuildMesh(
   }
 
   mitsuba::Properties props;
-  props.set_id(id_str);
+  props.set_id(id);
   // Without authored normals the mesh is flat shaded. Requesting face normals
   // keeps Mitsuba from deriving smooth shading normals of its own: normal
   // computation is handled explicitly by the hydra delegate.
@@ -1044,7 +1043,7 @@ PrimTranslator<Float, Spectrum>::BuildMesh(
     props.set("interior", interior_medium);
   }
   mitsuba::ref<Mesh> mesh = new Mesh(props);
-  mesh->set_id(id_str);
+  mesh->set_id(id);
   if (bsdf != nullptr) {
     mesh->set_bsdf(dynamic_cast<mitsuba::BSDF<Float, Spectrum>*>(bsdf));
   }

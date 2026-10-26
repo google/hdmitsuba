@@ -26,6 +26,7 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/inlined_vector.h>
+#include <absl/strings/str_cat.h>
 #include <absl/strings/str_replace.h>
 #include <absl/time/clock.h>
 #include <absl/time/time.h>
@@ -500,7 +501,7 @@ std::vector<SubMeshOutput> GeometryProcessor::SplitAndCompactMeshes(
   // The single material case is trivial.
   if (material_ids.size() == 1) {
     SubMeshOutput out;
-    out.id = id;
+    out.id = id.GetAsString();
     out.material_id = material_ids[0];
     out.triangles = triangles;
     out.primvars = final_primvars;
@@ -581,15 +582,15 @@ std::vector<SubMeshOutput> GeometryProcessor::SplitAndCompactMeshes(
   return sub_meshes;
 }
 
-SdfPath GeometryProcessor::MakeSubMeshId(const SdfPath& mesh_id,
-                                         const SdfPath& material_id,
-                                         size_t material_index) {
+std::string GeometryProcessor::MakeSubMeshId(const SdfPath& mesh_id,
+                                             const SdfPath& material_id,
+                                             size_t material_index) {
   std::string mat_name =
       material_id.IsEmpty()
           ? "mat_" + std::to_string(material_index)
           : absl::StrReplaceAll(material_id.GetAsString(),
                                 {{"/", "_"}, {":", "_"}});
-  return mesh_id.AppendChild(TfToken(mat_name));
+  return absl::StrCat(mesh_id.GetAsString(), "#", mat_name);
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

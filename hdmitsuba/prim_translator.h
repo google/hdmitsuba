@@ -132,7 +132,7 @@ class PrimTranslator {
   // `mesh_attributes` are uploaded as vertex attributes named by
   // `MeshAttributeName`.
   static mitsuba::ref<mitsuba::Shape<Float, Spectrum>> BuildMesh(
-      const SdfPath& id, const VtIntArray& face_indices,
+      const std::string& id, const VtIntArray& face_indices,
       const PrimvarMap& primvars, const MeshAttributeRequests& mesh_attributes,
       mitsuba::Object* bsdf, mitsuba::Object* emitter_ptr,
       mitsuba::Object* sensor_ptr, mitsuba::Object* interior_medium = nullptr);

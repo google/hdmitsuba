@@ -15,6 +15,7 @@
 #pragma once
 
 #include <functional>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -42,7 +43,7 @@ using PrimvarMap =
     std::unordered_map<TfToken, PrimvarState, TfToken::HashFunctor>;
 
 struct SubMeshOutput {
-  SdfPath id;
+  std::string id;
   SdfPath material_id;
   VtIntArray triangles;
   PrimvarMap primvars;
@@ -120,10 +121,12 @@ class GeometryProcessor {
       const VtIntArray& face_vertex_indices,
       const VtIntArray& face_vertex_counts, const PrimvarMap& primvars);
 
-  // Constructs the sub-mesh SdfPath for a multi-material mesh subset.
-  static SdfPath MakeSubMeshId(const SdfPath& mesh_id,
-                               const SdfPath& material_id,
-                               size_t material_index);
+  // Constructs the shape ID for a multi-material mesh subset. The material
+  // suffix is delimited by '#', which cannot appear in an `SdfPath`, so that
+  // sub-mesh IDs never collide with the paths of child prims.
+  static std::string MakeSubMeshId(const SdfPath& mesh_id,
+                                   const SdfPath& material_id,
+                                   size_t material_index);
 
   // Splits a triangulated mesh into multiple sub-meshes by material index and
   // compacts unused vertices from the primvar buffers.
