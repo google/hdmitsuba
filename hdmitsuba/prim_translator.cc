@@ -619,6 +619,17 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::SetTransformParameter(
   }
 }
 
+MI_VARIANT void PrimTranslator<Float, Spectrum>::SetSpectrumParameter(
+    TraversalCallback& cb, std::string_view name, const GfVec3f& rgb) {
+  using Color3f = mitsuba::Color<Float, 3>;
+  cb.set<Color3f>(absl::StrCat(name, ".value"), Color3f(rgb[0], rgb[1], rgb[2]));
+  auto it = cb.objects.find(name);
+  if (TF_VERIFY(it != cb.objects.end(), "No spectrum object found for %.*s",
+                static_cast<int>(name.size()), name.data())) {
+    it->second->parameters_changed();
+  }
+}
+
 MI_VARIANT typename PrimTranslator<Float, Spectrum>::TranslatedLight
 PrimTranslator<Float, Spectrum>::BuildLight(const LightSpec& spec) {
   mitsuba::Properties props = BuildLightProperties(spec);
@@ -649,11 +660,9 @@ PrimTranslator<Float, Spectrum>::CreateAreaEmitter(const GfVec3f& emission) {
 
 MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateMeshEmitterInPlace(
     mitsuba::Emitter<Float, Spectrum>* emitter, const GfVec3f& emission) {
-  using Color3f = mitsuba::Color<Float, 3>;
   TraversalCallback cb;
   emitter->traverse(&cb);
-  cb.set<Color3f>("radiance.value",
-                  Color3f(emission[0], emission[1], emission[2]));
+  SetSpectrumParameter(cb, "radiance", emission);
   emitter->parameters_changed();
 }
 
@@ -728,10 +737,6 @@ PrimTranslator<Float, Spectrum>::BuildLightProperties(const LightSpec& spec) {
 
 MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateLightInPlace(
     mitsuba::Object* light_obj, const LightSpec& spec) {
-  using Color3f = mitsuba::Color<Float, 3>;
-
-  mitsuba::Color<float, 3> color(spec.emission[0], spec.emission[1],
-                                 spec.emission[2]);
   if (auto* shape = dynamic_cast<mitsuba::Shape<Float, Spectrum>*>(light_obj)) {
     TraversalCallback cb_shape;
     shape->traverse(&cb_shape);
@@ -741,8 +746,7 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateLightInPlace(
       auto* area_emitter = shape->emitter();
       TraversalCallback cb_emitter;
       area_emitter->traverse(&cb_emitter);
-      cb_emitter.set<Color3f>("radiance.value",
-                              Color3f(color[0], color[1], color[2]));
+      SetSpectrumParameter(cb_emitter, "radiance", spec.emission);
       area_emitter->parameters_changed();
     }
   } else if (auto* emitter =
@@ -753,7 +757,7 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateLightInPlace(
     if (spec.prim_type == HdPrimTypeTokens->sphereLight &&
         spec.treat_as_point) {
       SetTransformParameter(cb, spec.transform);
-      cb.set<Color3f>("intensity.value", Color3f(color[0], color[1], color[2]));
+      SetSpectrumParameter(cb, "intensity", spec.emission);
       if (spec.shaping_cone_angle != 0.0f) {
         cb.set<Float>("beam_width", spec.shaping_cone_beam_width);
         cb.set<Float>("cutoff_angle", spec.shaping_cone_angle);
@@ -764,17 +768,17 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateLightInPlace(
       // "scale" and "to_world".
       if (cb.data.contains("scale")) {
         SetTransformParameter(cb, spec.transform);
-        cb.set<Float>("scale", (color[0] + color[1] + color[2]) / 3.f);
+        cb.set<Float>(
+            "scale",
+            (spec.emission[0] + spec.emission[1] + spec.emission[2]) / 3.f);
         emitter->parameters_changed({"scale", "to_world"});
         return;
       } else {
-        cb.set<Color3f>("radiance.value",
-                        Color3f(color[0], color[1], color[2]));
+        SetSpectrumParameter(cb, "radiance", spec.emission);
       }
     } else if (spec.prim_type == HdPrimTypeTokens->distantLight) {
       SetTransformParameter(cb, spec.transform);
-      cb.set<Color3f>("irradiance.value",
-                      Color3f(color[0], color[1], color[2]));
+      SetSpectrumParameter(cb, "irradiance", spec.emission);
       cb.set<Float>("angle", spec.angle);
     }
     emitter->parameters_changed();

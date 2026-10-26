@@ -197,3 +197,31 @@ def test_kernel_freezing_instancing():
     assert not np.allclose(prev, curr, atol=1e-3)
   for frozen, ref in zip(frozen_frames, ref_frames):
     np.testing.assert_allclose(frozen, ref, atol=1e-4, rtol=1e-4)
+
+
+@pytest.mark.parametrize('kind', ['dome', 'point', 'rect', 'distant'])
+def test_kernel_freezing_light_emission_updates(kind: str) -> None:
+  """Tests that in-place light emission updates replay without re-recording."""
+  stage, engine = _create_engine(freeze_enabled=True)
+  if kind == 'dome':
+    intensity = UsdLux.DomeLight.Get(stage, '/light').GetIntensityAttr()
+  else:
+    stage.RemovePrim('/light')
+    light = {'point': UsdLux.SphereLight, 'rect': UsdLux.RectLight, 'distant': UsdLux.DistantLight}[kind].Define(
+        stage, '/test_light'
+    )
+    light.AddTranslateOp().Set((0, 2, 0))
+    light.AddRotateXOp().Set(-90)
+    if kind == 'point':
+      light.CreateTreatAsPointAttr(True)
+    intensity = light.CreateIntensityAttr(2.0)
+  engine.render()  # Warm-up.
+  intensity.Set(2.0 * intensity.Get())
+  assert np.max(engine.render()['color'][..., :3]) > 0.0  # Records the kernel.
+  intensity.Set(0.0)
+  with dr.kernel_history() as kh:
+    img = engine.render()['color'][..., :3]
+  modes = {entry.recording_mode for entry in kh}
+  assert dr.KernelRecordingMode.Replayed in modes
+  assert dr.KernelRecordingMode.Recorded not in modes
+  assert np.max(img) == 0.0

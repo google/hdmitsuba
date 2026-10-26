@@ -101,6 +101,14 @@ class PrimTranslator {
   static void SetTransformParameter(TraversalCallback& cb,
                                     const MotionTransform& transform);
 
+  // Updates a child spectrum plugin's "<name>.value" parameter (e.g.
+  // "radiance", "intensity", or "irradiance") and notifies that child spectrum
+  // object via `parameters_changed()` so its internal state stays opaque for
+  // Dr.Jit kernel freezing and spectral upsampling coefficients are refreshed.
+  // The caller remains responsible for notifying the parent emitter.
+  static void SetSpectrumParameter(TraversalCallback& cb, std::string_view name,
+                                   const GfVec3f& rgb);
+
   static TranslatedMaterial BuildMaterial(
       const MaterialSpec& spec,
       const TextureCache<Float, Spectrum>& texture_cache);
