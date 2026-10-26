@@ -393,3 +393,21 @@ def test_area_light_primary_visibility():
   test_helpers.robust_assert_close(
       engine.render()['color'], image_default, atol=0.05
   )
+
+
+def test_dome_light_selection_by_light_link():
+  stage = Usd.Stage.CreateInMemory()
+  UsdGeom.Camera.Define(stage, '/Camera')
+  # The first DomeLight in path order has a restricted lightLink.
+  background = UsdLux.DomeLight.Define(stage, '/Lights/Background')
+  background.CreateColorAttr((1, 0, 0))
+  link = UsdLux.LightAPI(background).GetLightLinkCollectionAPI()
+  link.GetExcludesRel().AddTarget('/World')
+  UsdLux.DomeLight.Define(stage, '/Lights/Sky').CreateColorAttr((0, 0, 1))
+  test_helpers.create_render_settings(stage, resolution=_RENDER_RESOLUTION)
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin', camera_path='/Camera'
+  )
+  # Only the blue sky dome is visible.
+  assert np.allclose(engine.render()['color'][..., :3], [0, 0, 1], atol=1e-5)

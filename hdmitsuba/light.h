@@ -45,9 +45,10 @@ class HdMitsubaLight final : public HdLight {
   void RemoveFromScene(SceneManager* scene);
 
   // Properties that determine the Mitsuba plugin type, whose changes require
-  // rebuilding the light object rather than updating it in place.
+  // rebuilding the light object rather than updating it in place. `lightLink`
+  // changes require rebuilding the scene, as they may change the active dome.
   using RebuildKey =
-      std::tuple<bool, bool, bool, std::string, bool, std::string>;
+      std::tuple<bool, bool, bool, std::string, bool, std::string, bool>;
 
   TfToken type_id_;
   std::optional<RebuildKey> rebuild_key_;

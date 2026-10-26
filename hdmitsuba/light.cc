@@ -25,14 +25,19 @@
 #include <pxr/base/tf/token.h>
 #include <pxr/base/vt/value.h>
 #include <pxr/imaging/hd/changeTracker.h>
+#include <pxr/imaging/hd/collectionsSchema.h>
 #include <pxr/imaging/hd/light.h>
 #include <pxr/imaging/hd/lightSchema.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
+#include <pxr/imaging/hd/tokens.h>
 #include <pxr/imaging/hd/types.h>
 #include <pxr/imaging/hd/visibilitySchema.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/assetPath.h>
+#include <pxr/usd/sdf/pathExpression.h>
+#include <pxr/usd/usd/collectionMembershipQuery.h>
+#include <pxr/usd/usd/tokens.h>
 
 #include "hdmitsuba/motion.h"
 #include "hdmitsuba/render_param.h"
@@ -219,6 +224,17 @@ void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
   spec.visibility = params.visibility.empty()
                         ? (spec.IsAreaLight() ? "secondary" : "all")
                         : params.visibility;
+  if (auto expr = HdCollectionsSchema::GetFromParent(data_source)
+                      .GetCollection(HdTokens->lightLink)
+                      .GetMembershipExpression()) {
+    // UsdImaging converts a default (includeRoot, no rules) collection to
+    // this expression rather than `SdfPathExpression::Everything()`.
+    static const SdfPathExpression default_light_link =
+        UsdComputePathExpressionFromCollectionMembershipQueryRuleMap(
+            {{SdfPath::AbsoluteRootPath(), UsdTokens->expandPrims}});
+    spec.light_link_everything =
+        expr->GetTypedValue(0.0f) == default_light_link;
+  }
   spec.dirty_bits = *dirtyBits;
 
   MotionSamples<GfMatrix4d> world_transform = SampleTransform(
@@ -242,10 +258,13 @@ void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
                                             : world_transform.First();
   spec.emission = ComputeLightEmission(type_id_, emission_transform, params);
 
-  const RebuildKey rebuild_key{
-      params.treat_as_point, params.angle > 0.0f,
-      params.shaping_cone_angle != 0.0f, params.texture_file_path,
-      spec.transform.IsAnimated(), spec.visibility};
+  const RebuildKey rebuild_key{params.treat_as_point,
+                               params.angle > 0.0f,
+                               params.shaping_cone_angle != 0.0f,
+                               params.texture_file_path,
+                               spec.transform.IsAnimated(),
+                               spec.visibility,
+                               spec.light_link_everything};
   spec.needs_rebuild = rebuild_key_ != rebuild_key;
   rebuild_key_ = rebuild_key;
 

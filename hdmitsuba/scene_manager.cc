@@ -1614,8 +1614,22 @@ class SceneModel final : public SceneManager {
       for (auto& [id, sensor] : sensors_) {
         props.set(id.GetAsString(), sensor.get());
       }
+      // Mitsuba supports at most one environment emitter per scene. Of multiple
+      // DomeLights (e.g., an illumination dome and a camera background dome
+      // whose `lightLink` excludes the scene geometry), select the first one in
+      // SdfPath order whose `lightLink` is unrestricted, or else the first one.
+      const LightSpec* dome = nullptr;
       for (auto& [id, emitter] : emitters_) {
-        props.set(id.GetAsString(), emitter.get());
+        const LightSpec& spec = light_specs_.at(id);
+        if (spec.prim_type != HdPrimTypeTokens->domeLight) {
+          props.set(id.GetAsString(), emitter.get());
+        } else if (!dome || (spec.light_link_everything &&
+                             !dome->light_link_everything)) {
+          dome = &spec;
+        }
+      }
+      if (dome) {
+        props.set(dome->id.GetAsString(), emitters_.at(dome->id).get());
       }
       scene_ = new Scene(props);
       scene_dirty_ = false;

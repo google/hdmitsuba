@@ -71,6 +71,8 @@ struct LightSpec : public BaseSpec {
   bool treat_as_point = false;
   std::string texture_file_path;
   std::string visibility;
+  // Whether the `lightLink` collection includes everything (the default).
+  bool light_link_everything = true;
 
   // Area lights are represented as Mitsuba shapes with an attached area
   // emitter, rather than standalone emitter objects.
