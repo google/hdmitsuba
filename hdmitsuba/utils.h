@@ -42,6 +42,7 @@
 #include <pxr/imaging/hd/visibilitySchema.h>
 #include <pxr/imaging/hd/xformSchema.h>
 #include <pxr/pxr.h>
+#include <pxr/usd/ar/resolverScopedCache.h>
 #include <pxr/usd/sdf/path.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -195,7 +196,8 @@ void NewJitScope() {
 // whenever variables cross thread boundaries. Like Mitsuba's parallel scene
 // loading (`parser.cpp`), a scope is pre-allocated for every item on the
 // calling thread, which continues in a scope succeeding all item scopes. All
-// work queued by `fn` has finished on return.
+// work queued by `fn` has finished on return. Worker threads share the
+// calling thread's ArResolver cache.
 template <typename Float, typename Fn>
 void JitParallelFor(size_t n, Fn&& fn) {
   std::vector<uint32_t> scopes(n);
@@ -205,7 +207,9 @@ void JitParallelFor(size_t n, Fn&& fn) {
       scope = jit_new_scope(drjit::backend_v<Float>);
     }
   }
+  ArResolverScopedCache resolver_cache;
   auto run = [&](drjit::blocked_range<size_t> range) {
+    ArResolverScopedCache worker_resolver_cache(&resolver_cache);
     for (size_t i = range.begin(); i != range.end(); ++i) {
       if constexpr (drjit::is_jit_v<Float>) {
         jit_set_scope(drjit::backend_v<Float>, scopes[i]);

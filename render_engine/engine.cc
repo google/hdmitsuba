@@ -54,6 +54,7 @@
 #include <pxr/imaging/hdx/renderTask.h>
 #include <pxr/imaging/hdx/task.h>
 #include <pxr/pxr.h>
+#include <pxr/usd/ar/resolverScopedCache.h>
 #include <pxr/usd/sdf/path.h>
 #include <pxr/usd/usd/common.h>
 #include <pxr/usd/usd/primRange.h>
@@ -353,6 +354,7 @@ void RenderEngine::Configure(
     std::optional<int> width, const std::optional<SdfPath>& camera_path,
     std::optional<int> refine_level_fallback,
     const HdRenderSettingsMap& overrides) {
+  ArResolverScopedCache resolver_cache;
   // Unconditionally read settings to support robust fallbacks
   HdRenderSettingsMap settings_map;
   UsdRenderSettings render_settings;
@@ -598,6 +600,7 @@ void RenderEngine::UpdateAovsAndBuffers() {
 absl::flat_hash_map<pxr::TfToken, RenderEngine::OutputBuffer,
                     TfToken::HashFunctor>
 RenderEngine::Render(UsdTimeCode time_code) {
+  ArResolverScopedCache resolver_cache;
   bool enable_interactive = false;
   auto it = settings_map_.find(pxr::HdRenderSettingsTokens->enableInteractive);
   if (it != settings_map_.end()) {

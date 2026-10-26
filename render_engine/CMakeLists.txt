@@ -23,6 +23,7 @@ target_link_libraries(engine_lib PUBLIC
   absl::flat_hash_map
   absl::log
   absl::check
+  ar
   usd
   usdImaging
   usdRender

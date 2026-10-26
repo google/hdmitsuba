@@ -142,6 +142,9 @@ void HdMitsubaMaterial::Sync(HdSceneDelegate* scene_delegate,
   if (!TF_VERIFY(scene_index)) {
     return;
   }
+  ScopedResolverCache resolver_cache(
+      static_cast<HdMitsubaRenderParam*>(render_param)->ResolverCacheData());
+
   HdMaterialSchema materialSchema =
       HdMaterialSchema::GetFromParent(scene_index->GetPrim(id).dataSource);
   HdMaterialNetwork2 network2;

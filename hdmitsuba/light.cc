@@ -188,8 +188,8 @@ HdMitsubaLight::HdMitsubaLight(const SdfPath& id, const TfToken& typeId)
 void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
                           HdRenderParam* renderParam, HdDirtyBits* dirtyBits) {
   const SdfPath& id = GetId();
-  SceneManager* scene =
-      static_cast<HdMitsubaRenderParam*>(renderParam)->GetScene();
+  auto* render_param = static_cast<HdMitsubaRenderParam*>(renderParam);
+  SceneManager* scene = render_param->GetScene();
 
   HdContainerDataSourceHandle data_source =
       GetPrimDataSource(sceneDelegate, id);
@@ -211,6 +211,7 @@ void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
     return;
   }
 
+  ScopedResolverCache resolver_cache(render_param->ResolverCacheData());
   const LightParams params = ReadLightParams(light_container);
 
   LightSpec spec;

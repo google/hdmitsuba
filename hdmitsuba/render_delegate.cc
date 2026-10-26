@@ -240,7 +240,14 @@ HdBprim* HdMitsubaRenderDelegate::CreateFallbackBprim(const TfToken& typeId) {
   return nullptr;
 }
 
+void HdMitsubaRenderDelegate::Update() {
+  HdRenderDelegate::Update();
+  render_param_->ResetResolverCache();
+}
+
 void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* /*tracker*/) {
+  ScopedResolverCache resolver_cache(render_param_->TakeResolverCache());
+
   const unsigned int settings_version = GetRenderSettingsVersion();
   if (settings_version == last_settings_version_) {
     scene_impl_->CommitResources();

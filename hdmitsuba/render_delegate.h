@@ -89,6 +89,7 @@ class HdMitsubaRenderDelegate final : public HdRenderDelegate {
   HdSprim* CreateFallbackSprim(const TfToken& typeId) override;
   HdBprim* CreateFallbackBprim(const TfToken& typeId) override;
 
+  void Update() override;
   void CommitResources(HdChangeTracker* tracker) override;
 
   TfToken GetMaterialBindingPurpose() const override;
