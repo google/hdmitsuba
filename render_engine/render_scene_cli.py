@@ -72,6 +72,12 @@ def main() -> None:
       ),
   )
   parser.add_argument(
+      '--width',
+      type=int,
+      default=512,
+      help='Image width in pixels.',
+  )
+  parser.add_argument(
       '--spp',
       type=int,
       default=None,
@@ -145,7 +151,7 @@ def main() -> None:
   engine = usd_render.RenderEngine(stage)
   engine.configure(
       hydra_delegate_id=renderer,
-      width=512,
+      width=args.width,
       camera_path=camera_path,
       overrides=overrides,
   )
