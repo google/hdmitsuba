@@ -1751,8 +1751,14 @@ class SceneModel final : public SceneManager {
                      const std::type_info&) override {}
     } scan;
     for (const auto& [id, shape] : shapes_) {
-      // traverse() is not const even though this scan is read-only.
-      const_cast<Shape*>(shape.get())->traverse(&scan);
+      // Shape groups and instances wrap underlying prototype meshes that are
+      // already present in shapes_. Skipping them avoids duplicate traversals,
+      // and calling Shape::traverse directly avoids Mesh::ensure_views
+      // instantiating unused JIT mesh view buffers.
+      if (shape->is_shape_group() || shape->is_instance()) {
+        continue;
+      }
+      const_cast<Shape*>(shape.get())->Shape::traverse(&scan);
       if (scan.found) return true;
     }
     return false;
