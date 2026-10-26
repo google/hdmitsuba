@@ -20,9 +20,11 @@ import mitsuba as mi
 import numpy as np
 import pytest
 
+from pxr import Gf
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
+from pxr import UsdVol
 from pxr import Vt
 import usd_render
 from hdmitsuba.tests import test_helpers
@@ -365,3 +367,31 @@ def test_modify_implicit_surfaces():
       np.max(np.abs(image_modified[..., :3] - image_original[..., :3])) > 0.2
   )
 
+
+def test_modify_gaussian_splat_positions():
+  stage = Usd.Stage.CreateInMemory()
+  UsdGeom.Camera.Define(stage, '/camera').AddTranslateOp().Set((0, 0, 8))
+  # Multiple fields, so that their in-place updates run on worker threads.
+  splats = []
+  for i in range(4):
+    prim = stage.DefinePrim(f'/Splats_{i}')
+    prim.GetReferences().AddReference(
+        f'{test_helpers.TEST_ASSETS_PATH}/shapes/gaussian_splats.usda',
+        '/World/gaussian_splats',
+    )
+    UsdGeom.Xformable(prim).AddTranslateOp().Set((1.5 * i - 2.25, 0, 0))
+    splats.append(UsdVol.ParticleField3DGaussianSplat(prim))
+  settings = test_helpers.create_render_settings(stage, resolution=(64, 64))
+  settings.GetPrim().CreateAttribute(
+      'mitsuba:integrator:type', Sdf.ValueTypeNames.String
+  ).Set('volprim_rf_basic')
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin', camera_path='/camera'
+  )
+  image = engine.render()['color']
+
+  for field in splats:
+    positions = field.GetPositionsAttr()
+    positions.Set([p + Gf.Vec3f(0, 0, -3) for p in positions.Get()])
+  assert not np.allclose(image, engine.render()['color'], atol=1e-2)

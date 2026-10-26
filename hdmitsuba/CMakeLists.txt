@@ -53,6 +53,7 @@ target_include_directories(hdMitsuba PUBLIC
 target_link_libraries(hdMitsuba
   PUBLIC
     absl::base
+    absl::btree
     absl::flat_hash_map
     absl::flat_hash_set
     absl::inlined_vector

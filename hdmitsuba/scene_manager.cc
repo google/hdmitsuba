@@ -27,6 +27,7 @@
 #include <vector>
 
 #include <absl/base/no_destructor.h>
+#include <absl/container/btree_map.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/strings/match.h>
@@ -547,7 +548,7 @@ class SceneModel final : public SceneManager {
               const std::optional<GfRect2i>& crop_window = std::nullopt) override {
     absl::MutexLock state_lock(state_mutex_);
     absl::MutexLock aov_lock(aov_states_mutex_);
-    JitScopeGuard<Float> jit_guard;
+    NewJitScope<Float>();
     auto pass_it = pass_aov_states_.find(render_pass);
     if (pass_it == pass_aov_states_.end() ||
         (!pass_it->second.color_buffer &&
@@ -964,20 +965,10 @@ class SceneModel final : public SceneManager {
     if (pending_specs.empty()) return false;
 
     std::vector<ValueType> results(pending_specs.size());
+    JitParallelFor<Float>(pending_specs.size(), [&](size_t i) {
+      work_fn(pending_specs[i], results[i]);
+    });
 
-    jit_eval();  // Flush any pending side effects before multithreaded work.
-    drjit::parallel_for(drjit::blocked_range<size_t>(0, pending_specs.size()),
-                        [&](drjit::blocked_range<size_t> r) {
-                          for (size_t i = r.begin(); i != r.end(); ++i) {
-                            JitScopeGuard<Float> jit_guard;
-                            work_fn(pending_specs[i], results[i]);
-                          }
-                          if constexpr (dr::is_metal_v<Float>) {
-                            jit_flush_thread();
-                          }
-                        });
-
-    JitScopeGuard<Float> jit_guard;
     bool rebuild = false;
     for (size_t i = 0; i < pending_specs.size(); ++i) {
       if (pending_specs[i]->needs_rebuild) {
@@ -1436,33 +1427,14 @@ class SceneModel final : public SceneManager {
 
     // 3. Run parallel commit on work items.
     std::vector<CommittedMesh> results(work_items.size());
-    jit_eval();  // Flush any pending side effects before multithreaded work.
-    drjit::parallel_for(
-        drjit::blocked_range<size_t>(0, work_items.size()),
-        [&](drjit::blocked_range<size_t> r) {
-          JitScopeGuard<Float> jit_guard;
+    JitParallelFor<Float>(work_items.size(), [&](size_t i) {
+      if (work_items[i].spec->instance_transforms.empty()) {
+        CommitNonInstancedMeshWork(&work_items[i], results[i]);
+      } else {
+        CommitInstancedMeshWork(&work_items[i], results[i]);
+      }
+    });
 
-          for (size_t i = r.begin(); i != r.end(); ++i) {
-            const MeshSpec& spec = *work_items[i].spec;
-            if (spec.instance_transforms.empty()) {
-              CommitNonInstancedMeshWork(&work_items[i], results[i]);
-            } else {
-              CommitInstancedMeshWork(&work_items[i], results[i]);
-            }
-          }
-          // Make sure any pending JIT compilations, scatter side-effects, and
-          // async staging memory copies are flushed before exiting worker
-          // scope.
-          if constexpr (dr::is_jit_v<Float>) {
-            dr::eval();
-            dr::sync_thread();
-          }
-          if constexpr (dr::is_metal_v<Float>) {
-            jit_flush_thread();
-          }
-        });
-
-    JitScopeGuard<Float> jit_guard;
     bool rebuild = false;
     // 4. Merge results on the main thread.
     for (size_t i = 0; i < pending_specs.size(); ++i) {
@@ -1594,7 +1566,7 @@ class SceneModel final : public SceneManager {
     if (!scene_dirty_ && !has_pending_commits_) {
       return;
     }
-    JitScopeGuard<Float> jit_guard;
+    NewJitScope<Float>();
 
     bool rebuild_scene = scene_dirty_;
     CommitMaterials();
@@ -1700,11 +1672,15 @@ class SceneModel final : public SceneManager {
   absl::flat_hash_map<SdfPath, uint32_t, SdfPath::Hash> material_dirty_flags_;
   absl::flat_hash_set<SdfPath, SdfPath::Hash> sensor_binding_dirty_;
 
-  absl::flat_hash_map<SdfPath, ref<Sensor>, SdfPath::Hash> sensors_;
+  // Sensors, shapes and emitters are ordered, so that the scene is assembled
+  // deterministically. With hash maps, whose iteration order varies between
+  // processes, e.g. the emitter order and thus the light sampling noise would
+  // differ between runs.
+  absl::btree_map<SdfPath, ref<Sensor>> sensors_;
   absl::flat_hash_map<SdfPath, SdfPath, SdfPath::Hash>
       shape_sensors_;  // Shape -> camera
-  absl::flat_hash_map<std::string, ref<Shape>> shapes_;
-  absl::flat_hash_map<SdfPath, ref<Emitter>, SdfPath::Hash> emitters_;
+  absl::btree_map<std::string, ref<Shape>> shapes_;
+  absl::btree_map<SdfPath, ref<Emitter>> emitters_;
   absl::flat_hash_map<SdfPath, ref<BSDF>, SdfPath::Hash> bsdfs_;
   absl::flat_hash_map<SdfPath, MaterialDisplacement, SdfPath::Hash>
       displacements_;
@@ -1770,7 +1746,7 @@ class SceneModel final : public SceneManager {
     bool erased = false;
     for (auto it = shapes_.begin(); it != shapes_.end();) {
       if (absl::StartsWith(it->first, prefix)) {
-        shapes_.erase(it++);
+        it = shapes_.erase(it);
         erased = true;
       } else {
         ++it;

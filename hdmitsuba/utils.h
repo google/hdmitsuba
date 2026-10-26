@@ -18,6 +18,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include <drjit-core/jit.h>
 #include <drjit/matrix.h>
@@ -25,6 +27,7 @@
 #include <mitsuba/core/object.h>
 #include <mitsuba/core/properties.h>
 #include <mitsuba/core/transform.h>
+#include <nanothread/nanothread.h>
 #include <pxr/base/gf/matrix3d.h>
 #include <pxr/base/gf/matrix3f.h>
 #include <pxr/base/gf/matrix4d.h>
@@ -178,35 +181,49 @@ mitsuba::ref<mitsuba::Object> CreateExpandedObject(
     const mitsuba::Properties& props, std::string_view variant,
     mitsuba::ObjectType type);
 
-// Using Dr.Jit in a multithreaded environment requires explicitly creating
-// JIT scopes on each thread. This RAII struct should be used in code blocks
-// that may be executed on different threads, with dependencies crossing
-// thread boundaries (e.g., accessing a texture that was initialized on a
-// different thread).
+// Enters a fresh JIT scope on the calling thread, see `jit_new_scope()`.
 template <typename Float>
-struct JitScopeGuard {
-  uint32_t backend = 0;
-  uint32_t prev_scope = 0;
+void NewJitScope() {
+  if constexpr (drjit::is_jit_v<Float>) {
+    jit_new_scope(drjit::backend_v<Float>);
+  }
+}
 
-  JitScopeGuard() {
-    if constexpr (drjit::is_cuda_v<Float>) {
-      backend = (uint32_t)JitBackend::CUDA;
-    } else if constexpr (drjit::is_llvm_v<Float>) {
-      backend = (uint32_t)JitBackend::LLVM;
-    } else if constexpr (drjit::is_metal_v<Float>) {
-      backend = (uint32_t)JitBackend::Metal;
-    }
-    if (backend) {
-      prev_scope = jit_scope((JitBackend)backend);
-      jit_new_scope((JitBackend)backend);
+// Runs `fn(i)` for all `i` in [0, n) on worker threads.
+//
+// Using Dr.Jit in a multithreaded environment requires a fresh JIT scope
+// whenever variables cross thread boundaries. Like Mitsuba's parallel scene
+// loading (`parser.cpp`), a scope is pre-allocated for every item on the
+// calling thread, which continues in a scope succeeding all item scopes. All
+// work queued by `fn` has finished on return.
+template <typename Float, typename Fn>
+void JitParallelFor(size_t n, Fn&& fn) {
+  std::vector<uint32_t> scopes(n);
+  if constexpr (drjit::is_jit_v<Float>) {
+    jit_eval();  // Flush any pending side effects before multithreaded work.
+    for (uint32_t& scope : scopes) {
+      scope = jit_new_scope(drjit::backend_v<Float>);
     }
   }
-
-  ~JitScopeGuard() {
-    if (backend) {
-      jit_set_scope((JitBackend)backend, prev_scope);
+  auto run = [&](drjit::blocked_range<size_t> range) {
+    for (size_t i = range.begin(); i != range.end(); ++i) {
+      if constexpr (drjit::is_jit_v<Float>) {
+        jit_set_scope(drjit::backend_v<Float>, scopes[i]);
+      }
+      fn(i);
     }
+    if constexpr (drjit::is_jit_v<Float>) {
+      // Side effects (e.g., scatters) queued on this thread can only be
+      // evaluated by this thread.
+      jit_eval();
+      jit_flush_thread();
+    }
+  };
+  drjit::parallel_for(drjit::blocked_range<size_t>(0, n), std::move(run));
+  if constexpr (drjit::is_jit_v<Float>) {
+    jit_sync_device();
+    jit_new_scope(drjit::backend_v<Float>);
   }
-};
+}
 
 PXR_NAMESPACE_CLOSE_SCOPE
