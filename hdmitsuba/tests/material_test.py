@@ -181,3 +181,36 @@ def test_modify_material():
   image_reset = engine.render()['color']
   test_helpers.robust_assert_close(image_reset, image_original, atol=0.05)
 
+
+@pytest.mark.parametrize('render_context', ['', 'glslfx'])
+def test_unsupported_diffuse_falls_back_to_display_color(render_context: str):
+  stage = Usd.Stage.Open(
+      f'{test_helpers.TEST_ASSETS_PATH}/materials/display_color.usda'
+  )
+  stage.SetEditTarget(stage.GetSessionLayer())
+  cube = stage.GetPrimAtPath('/root/Cube/Cube')
+  cube.GetAttribute('primvars:displayColor').Set([(0.1, 0.9, 0.15)])
+  mat = UsdShade.Material.Define(stage, '/root/_materials/PtexMat')
+  surf = UsdShade.Shader.Define(stage, '/root/_materials/PtexMat/Preview')
+  surf.CreateIdAttr('UsdPreviewSurface')
+  diffuse = surf.CreateInput('diffuseColor', Sdf.ValueTypeNames.Color3f)
+  diffuse.Set(Gf.Vec3f(0.15, 0.2, 0.9))
+  mat.CreateSurfaceOutput(render_context).ConnectToSource(
+      surf.ConnectableAPI(), 'surface'
+  )
+  UsdShade.MaterialBindingAPI.Apply(cube).Bind(mat)
+  test_helpers.create_render_settings(stage, resolution=(64, 64), spp=16)
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      camera_path='/root/Camera/Camera',
+  )
+  r, g, b = engine.render()['color'][32, 32, :3]
+  assert b > 2.0 * max(r, g)
+
+  # Connecting an unsupported (Ptex) texture reveals the green displayColor.
+  ptex = UsdShade.Shader.Define(stage, '/root/_materials/PtexMat/Ptex')
+  ptex.CreateIdAttr('HwPtexTexture_1')
+  diffuse.ConnectToSource(ptex.ConnectableAPI(), 'rgb')
+  r, g, b = engine.render()['color'][32, 32, :3]
+  assert g > 2.0 * max(r, b)

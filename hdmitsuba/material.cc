@@ -148,15 +148,11 @@ void HdMitsubaMaterial::Sync(HdSceneDelegate* scene_delegate,
   if (materialSchema.IsDefined()) {
     // Merge the universal network with renderer-specific contexts in reverse
     // priority order so partial context overrides retain base terminals.
-    ConvertMaterialNetwork(materialSchema.GetMaterialNetwork(), network2);
     const TfTokenVector contexts = scene_delegate->GetRenderIndex()
                                        .GetRenderDelegate()
                                        ->GetMaterialRenderContexts();
     for (auto it = contexts.rbegin(); it != contexts.rend(); ++it) {
-      if (!it->IsEmpty()) {
-        ConvertMaterialNetwork(materialSchema.GetMaterialNetwork(*it),
-                               network2);
-      }
+      ConvertMaterialNetwork(materialSchema.GetMaterialNetwork(*it), network2);
     }
   }
 

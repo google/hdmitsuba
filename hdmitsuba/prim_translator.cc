@@ -426,6 +426,17 @@ PrimTranslator<Float, Spectrum>::ParsePreviewSurface(
     const HdMaterialNode2& preview_surface_node,
     const TextureCache<Float, Spectrum>& texture_cache) {
   TranslatedMaterial res;
+  // Leave the BSDF null for unsupported diffuse inputs (e.g. Ptex) so that the
+  // geometry falls back to its displayColor.
+  if (auto it = preview_surface_node.inputConnections.find(
+          TfToken("diffuseColor"));
+      it != preview_surface_node.inputConnections.end() &&
+      !it->second.empty()) {
+    auto node_it = network2.nodes.find(it->second[0].upstreamNode);
+    if (node_it == network2.nodes.end() || !IsTextureNode(node_it->second)) {
+      return res;
+    }
+  }
   struct ParamMapping {
     TfToken usd_name;
     std::string_view mitsuba_name;
@@ -555,8 +566,6 @@ PrimTranslator<Float, Spectrum>::BuildMaterial(
     }
   }
 
-  const std::string_view default_bsdf_plugin =
-      res.interior_medium ? "null" : "diffuse";
   if (const auto* surf_conn =
           FindTerminalConnection(network2, HdMaterialTerminalTokens->surface)) {
     if (auto node_it = network2.nodes.find(surf_conn->upstreamNode);
@@ -579,8 +588,8 @@ PrimTranslator<Float, Spectrum>::BuildMaterial(
       }
     }
   }
-  if (!res.bsdf) {
-    res.bsdf = DefaultBsdf(id_str, default_bsdf_plugin);
+  if (!res.bsdf && res.interior_medium) {
+    res.bsdf = DefaultBsdf(id_str, "null");
   }
   return res;
 }

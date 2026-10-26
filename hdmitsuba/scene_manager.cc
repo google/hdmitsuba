@@ -1004,6 +1004,8 @@ class SceneModel final : public SceneManager {
         [&](MaterialSpec* spec, TranslatedMaterial& trans) {
           if (trans.bsdf) {
             bsdfs_[spec->id] = dynamic_cast<BSDF*>(trans.bsdf.get());
+          } else {
+            bsdfs_.erase(spec->id);
           }
           material_dirty_flags_[spec->id] |=
               UpdateMaterialStructure(spec->id, trans) |
