@@ -228,25 +228,34 @@ void HdMitsubaMesh::SyncTopology(HdSceneDelegate* sceneDelegate,
 
   const HdGeomSubsets& geom_subsets = topology.GetGeomSubsets();
   const int num_coarse_faces = topology.GetNumFaces();
-  const SdfPath material_id = sceneDelegate->GetMaterialId(GetId());
   material_ids_.clear();
-  material_ids_.push_back(material_id);
-  face_material_indices_.assign(num_coarse_faces, 0);
-  for (const auto& subset : geom_subsets) {
+  auto find_or_add_material = [this](const SdfPath& material_id) -> int {
     auto it = std::find(material_ids_.begin(), material_ids_.end(),
-                        subset.materialId);
-    int material_index = 0;
-    if (it == material_ids_.end()) {
-      material_index = material_ids_.size();
-      material_ids_.push_back(subset.materialId);
-    } else {
-      material_index = std::distance(material_ids_.begin(), it);
+                        material_id);
+    if (it != material_ids_.end()) {
+      return std::distance(material_ids_.begin(), it);
     }
+    material_ids_.push_back(material_id);
+    return material_ids_.size() - 1;
+  };
+  face_material_indices_.assign(num_coarse_faces, -1);
+  for (const auto& subset : geom_subsets) {
+    const int material_index = find_or_add_material(subset.materialId);
     for (const int face_index : subset.indices) {
       if (face_index >= 0 && face_index < num_coarse_faces) {
         face_material_indices_[face_index] = material_index;
       }
     }
+  }
+  // Faces not covered by any GeomSubset use the mesh's own material. Only add
+  // this slot if it is referenced, so that meshes fully partitioned into
+  // single-material GeomSubsets hit the unsplit single-material fast path.
+  if (material_ids_.empty() ||
+      std::find(face_material_indices_.cbegin(), face_material_indices_.cend(),
+                -1) != face_material_indices_.cend()) {
+    std::replace(face_material_indices_.begin(), face_material_indices_.end(),
+                 -1,
+                 find_or_add_material(sceneDelegate->GetMaterialId(GetId())));
   }
 
   const TfToken scheme = topology.GetScheme();

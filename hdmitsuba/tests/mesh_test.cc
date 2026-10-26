@@ -42,7 +42,11 @@
 #include <pxr/usd/usd/stage.h>
 #include <pxr/usd/usdGeom/mesh.h>
 #include <pxr/usd/usdGeom/primvarsAPI.h>
+#include <pxr/usd/usdGeom/subset.h>
 #include <pxr/usd/usdGeom/tokens.h>
+#include <pxr/usd/usdShade/material.h>
+#include <pxr/usd/usdShade/materialBindingAPI.h>
+#include <pxr/usd/usdShade/tokens.h>
 #include <pxr/usdImaging/usdImaging/delegate.h>
 
 #include "hdmitsuba/mesh/geometry_processor.h"
@@ -241,6 +245,42 @@ TEST(HdMitsubaMeshTest, SubdivisionLevelReactivity) {
     // At level 2, 1 quad -> 16 quads -> 32 triangles.
     EXPECT_EQ(mitsuba_mesh_obj->face_count(), 32);
   }
+
+  scene_delegate.reset();
+  render_index.reset();
+  render_delegate.reset();
+}
+
+TEST(HdMitsubaMeshTest, GeomSubsetsSkipUnusedBaseMaterialSlot) {
+  pxr::UsdStageRefPtr stage = pxr::UsdStage::CreateInMemory();
+  pxr::UsdGeomMesh usd_mesh = pxr::UsdGeomMesh::Define(stage, SdfPath("/mesh"));
+  usd_mesh.CreatePointsAttr(VtValue(VtVec3fArray{
+      GfVec3f(0, 0, 0), GfVec3f(1, 0, 0), GfVec3f(1, 1, 0), GfVec3f(0, 1, 0)}));
+  usd_mesh.CreateFaceVertexCountsAttr(VtValue(VtIntArray{4}));
+  usd_mesh.CreateFaceVertexIndicesAttr(VtValue(VtIntArray{0, 1, 2, 3}));
+
+  // A GeomSubset covering all faces leaves the base-mesh material unused, so
+  // the mesh should not be split.
+  pxr::UsdGeomSubset subset = pxr::UsdGeomSubset::CreateGeomSubset(
+      usd_mesh, TfToken("subset"), pxr::UsdGeomTokens->face, VtIntArray{0},
+      pxr::UsdShadeTokens->materialBind);
+  pxr::UsdShadeMaterialBindingAPI::Apply(subset.GetPrim())
+      .Bind(pxr::UsdShadeMaterial::Define(stage, SdfPath("/Looks/Mat")));
+
+  auto [render_delegate, render_index, scene_delegate, scene_manager,
+        render_param] = CreateRenderDelegateStateObjects<Scene>();
+  scene_delegate->Populate(stage->GetPseudoRoot());
+
+  pxr::HdMitsubaMesh mitsuba_mesh(SdfPath("/mesh"));
+  pxr::HdDirtyBits dirty_bits = pxr::HdChangeTracker::AllDirty;
+  mitsuba_mesh.Sync(scene_delegate.get(), render_param, &dirty_bits,
+                    pxr::HdReprTokens->hull);
+  scene_manager->CommitResources();
+
+  Scene* scene = dynamic_cast<Scene*>(scene_manager->GetScene());
+  ASSERT_NE(scene, nullptr);
+  ASSERT_EQ(scene->shapes().size(), 1);
+  EXPECT_EQ(scene->shapes()[0]->id(), "/mesh");
 
   scene_delegate.reset();
   render_index.reset();
