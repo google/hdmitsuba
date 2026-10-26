@@ -25,7 +25,6 @@
 #include <vector>
 
 #include <absl/container/flat_hash_map.h>
-#include <absl/container/inlined_vector.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_replace.h>
 #include <absl/time/clock.h>
@@ -56,14 +55,6 @@ namespace {
 
 constexpr bool kUseMeshCompression = true;
 
-using VertexDataKey = absl::InlinedVector<int, 8>;
-
-inline int AsInt(float f) {
-  int i;
-  std::memcpy(&i, &f, sizeof(f));
-  return i;
-}
-
 using PrimvarArrayVariant =
     std::variant<VtFloatArray, VtVec2fArray, VtVec3fArray>;
 
@@ -76,67 +67,19 @@ constexpr size_t PrimvarDimension() {
   }
 }
 
-inline void AppendValueToKey(VertexDataKey& key, float val) {
-  key.push_back(AsInt(val));
-}
-
-template <typename Vec>
-inline void AppendValueToKey(VertexDataKey& key, const Vec& val) {
-  for (size_t i = 0; i < Vec::dimension; ++i) {
-    key.push_back(AsInt(val[i]));
-  }
-}
-
-template <typename T>
-T SamplePrimvar(const VtArray<T>& data, HdInterpolation interpolation, int face,
-                int corner, const VtIntArray& face_indices) {
-  if (data.empty()) return T(0.f);
-  switch (interpolation) {
-    case HdInterpolationConstant:
-      return data[0];
-    case HdInterpolationUniform:
-      return data[face];
-    case HdInterpolationVertex:
-    case HdInterpolationVarying:
-      return data[face_indices[corner]];
-    case HdInterpolationFaceVarying:
-      return data[corner];
-    default:
-      return T(0.f);
-  }
-}
-
 struct ExpandChannel {
   TfToken name;
   HdPrimvarDescriptor descriptor;
   PrimvarArrayVariant src;
 };
 
-void AppendChannelToKey(const ExpandChannel& channel, VertexDataKey& key,
-                        int face, int corner, const VtIntArray& face_indices) {
-  switch (channel.descriptor.interpolation) {
-    case HdInterpolationVertex:
-    case HdInterpolationVarying:
-      key.push_back(face_indices[corner]);
-      break;
-    case HdInterpolationFaceVarying:
-      std::visit(
-          [&](const auto& src) {
-            AppendValueToKey(key, SamplePrimvar(src, HdInterpolationFaceVarying,
-                                                face, corner, face_indices));
-          },
-          channel.src);
-      break;
-    case HdInterpolationUniform:
-      key.push_back(face);
-      break;
-    case HdInterpolationConstant:
-      key.push_back(0);
-      break;
-    default:
-      break;
-  }
-}
+// Flat view of a FaceVarying or Uniform channel used to build dedup keys.
+struct VaryingChannelView {
+  // Raw float bits of a FaceVarying channel, or nullptr for Uniform channels
+  // (keyed by face index).
+  const int* data = nullptr;
+  size_t dim = 0;
+};
 
 std::optional<PrimvarArrayVariant> ExtractPrimvarArray(const VtValue& value) {
   if (value.IsHolding<VtVec3fArray>()) {
@@ -173,6 +116,9 @@ VtValue TransformArray<GfVec3f>(const VtVec3fArray& initial_values,
                                 const GfMatrix4d& transform) {
   const size_t n = initial_values.size();
   if (descriptor.role == HdPrimvarRoleTokens->point) {
+    if (transform == GfMatrix4d(1.0)) {
+      return VtValue(initial_values);
+    }
     VtVec3fArray values(n);
     GfVec3f* dst = values.data();
     for (size_t i = 0; i < n; ++i) {
@@ -356,7 +302,7 @@ std::pair<VtIntArray, PrimvarMap> GeometryProcessor::ExpandPrimData(
     // Uniform channels within each point's valence list (typically 1-2 entries).
     bool has_vertex_channel = false;
     size_t num_points = 0;
-    std::vector<const ExpandChannel*> varying_channels;
+    std::vector<VaryingChannelView> varying_channels;
     size_t key_stride = 0;
     for (const auto& channel : channels) {
       const HdInterpolation interp = channel.descriptor.interpolation;
@@ -367,20 +313,22 @@ std::pair<VtIntArray, PrimvarMap> GeometryProcessor::ExpandPrimData(
               num_points = std::max(num_points, arr.size());
             },
             channel.src);
-      } else if (interp == HdInterpolationFaceVarying ||
-                 interp == HdInterpolationUniform) {
-        varying_channels.push_back(&channel);
-        if (interp == HdInterpolationUniform) {
-          key_stride += 1;
-        } else {
-          std::visit(
-              [&](const auto& arr) {
-                using ArrayType = std::decay_t<decltype(arr)>;
-                key_stride +=
-                    PrimvarDimension<typename ArrayType::value_type>();
-              },
-              channel.src);
-        }
+      } else if (interp == HdInterpolationUniform) {
+        varying_channels.push_back({nullptr, 1});
+        key_stride += 1;
+      } else if (interp == HdInterpolationFaceVarying) {
+        std::visit(
+            [&](const auto& arr) {
+              // Empty channels are dropped from the output and cannot
+              // distinguish corners, so they do not contribute to the key.
+              if (arr.empty()) return;
+              constexpr size_t dim = PrimvarDimension<
+                  typename std::decay_t<decltype(arr)>::value_type>();
+              varying_channels.push_back(
+                  {reinterpret_cast<const int*>(arr.cdata()), dim});
+              key_stride += dim;
+            },
+            channel.src);
       }
     }
     if (!has_vertex_channel) {
@@ -409,10 +357,9 @@ std::pair<VtIntArray, PrimvarMap> GeometryProcessor::ExpandPrimData(
     } else {
       std::vector<int> next_vertex;
       next_vertex.reserve(num_face_varyings);
-      std::vector<int> vertex_keys;
-      vertex_keys.reserve(num_face_varyings * key_stride);
-      VertexDataKey key;
-      key.reserve(key_stride);
+      // Candidate keys are written in place at the slot of the next unique
+      // vertex, so accepting a new vertex requires no copy.
+      std::vector<int> vertex_keys(num_face_varyings * key_stride);
 
       int corner_index = 0;
       for (int face_idx = 0; face_idx < num_faces; ++face_idx) {
@@ -420,16 +367,23 @@ std::pair<VtIntArray, PrimvarMap> GeometryProcessor::ExpandPrimData(
         for (int i = 0; i < count; ++i) {
           const int p =
               has_vertex_channel ? face_vertex_indices[corner_index] : 0;
-          key.clear();
-          for (const ExpandChannel* channel : varying_channels) {
-            AppendChannelToKey(*channel, key, face_idx, corner_index,
-                               face_vertex_indices);
+          int* candidate_key =
+              vertex_keys.data() + unique_locs.size() * key_stride;
+          int* key_ptr = candidate_key;
+          for (const VaryingChannelView& ch : varying_channels) {
+            if (ch.data != nullptr) {
+              std::memcpy(key_ptr, ch.data + corner_index * ch.dim,
+                          ch.dim * sizeof(int));
+              key_ptr += ch.dim;
+            } else {
+              *key_ptr++ = face_idx;
+            }
           }
           int v = first_vertex_for_point[p];
           while (v >= 0) {
             if (std::memcmp(
                     vertex_keys.data() + static_cast<size_t>(v) * key_stride,
-                    key.data(), key_stride * sizeof(int)) == 0) {
+                    candidate_key, key_stride * sizeof(int)) == 0) {
               break;
             }
             v = next_vertex[v];
@@ -439,7 +393,6 @@ std::pair<VtIntArray, PrimvarMap> GeometryProcessor::ExpandPrimData(
             unique_locs.push_back({face_idx, corner_index});
             next_vertex.push_back(first_vertex_for_point[p]);
             first_vertex_for_point[p] = v;
-            vertex_keys.insert(vertex_keys.end(), key.begin(), key.end());
           }
           final_face_indices_ptr[corner_index] = v;
           corner_index++;
@@ -476,10 +429,28 @@ std::pair<VtIntArray, PrimvarMap> GeometryProcessor::ExpandPrimData(
           if (src.empty() || num_unique == 0) return;
           ArrayType dst_array(num_unique);
           auto* dst_ptr = dst_array.data();
-          for (size_t i = 0; i < num_unique; ++i) {
-            dst_ptr[i] = SamplePrimvar(src, interp, unique_locs[i].face,
-                                       unique_locs[i].corner,
-                                       face_vertex_indices);
+          switch (interp) {
+            case HdInterpolationConstant:
+              std::fill_n(dst_ptr, num_unique, src[0]);
+              break;
+            case HdInterpolationUniform:
+              for (size_t i = 0; i < num_unique; ++i) {
+                dst_ptr[i] = src[unique_locs[i].face];
+              }
+              break;
+            case HdInterpolationVertex:
+            case HdInterpolationVarying:
+              for (size_t i = 0; i < num_unique; ++i) {
+                dst_ptr[i] = src[face_vertex_indices[unique_locs[i].corner]];
+              }
+              break;
+            case HdInterpolationFaceVarying:
+              for (size_t i = 0; i < num_unique; ++i) {
+                dst_ptr[i] = src[unique_locs[i].corner];
+              }
+              break;
+            default:
+              break;
           }
           final_primvars[channel.name] = {VtValue(std::move(dst_array)),
                                           channel.descriptor};

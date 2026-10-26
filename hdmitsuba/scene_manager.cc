@@ -199,9 +199,10 @@ std::vector<ImplicitSurfacePart> GetImplicitSurfaceParts(
 //      displacement.
 //   2. Applies per-material displacements (`displacements[i]` corresponds to
 //      `spec.material_ids[i]`) in object space via `ApplyDisplacement`.
-//   3. Transforms points and normals by `spec.transform`, then recomputes smooth
-//      vertex normals if any displacement occurred.
-//   4. Expands face-varying/uniform primvars into vertex-indexed buffers,
+//   3. If any displacement occurred, transforms points and normals by
+//      `spec.transform` and recomputes smooth vertex normals.
+//   4. Expands face-varying/uniform primvars into vertex-indexed buffers (and,
+//      for non-displaced meshes, transforms the deduplicated primvars),
 //      triangulates polygons, and splits/compacts the mesh into one
 //      `SubMeshOutput` per assigned material.
 template <typename Float, typename Spectrum>
@@ -255,8 +256,8 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
       }
     }
   }
-  GeometryProcessor::TransformPrimvars(final_primvars, spec.transform);
   if (displaced) {
+    GeometryProcessor::TransformPrimvars(final_primvars, spec.transform);
     GeometryProcessor::ComputeNormals(final_primvars, spec.face_vertex_indices,
                                       spec.face_vertex_counts);
   }
@@ -264,6 +265,9 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
   // Expand primvar data, triangulate and split into submeshes.
   auto [face_indices, expanded_primvars] = GeometryProcessor::ExpandPrimData(
       spec.face_vertex_indices, spec.face_vertex_counts, final_primvars);
+  if (!displaced) {
+    GeometryProcessor::TransformPrimvars(expanded_primvars, spec.transform);
+  }
   auto [triangles, primitive_params] =
       GeometryProcessor::TriangulateWithFaceMapping(spec.face_vertex_counts,
                                                     face_indices);
