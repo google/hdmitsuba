@@ -195,3 +195,38 @@ install(TARGETS geometry_ext
   RUNTIME DESTINATION lib/python/hdmitsuba
 )
 
+# --- IES Mitsuba Emitter Plugin ---
+add_library(ies SHARED
+  ies_emitter.cc
+  ies_parser.cc
+)
+target_include_directories(ies PRIVATE
+  ${HDMITSUBA_COMMON_INCLUDES}
+)
+target_link_libraries(ies PRIVATE
+  absl::strings
+  ar
+  arch
+  tf
+  ${MITSUBA_LIBRARY}
+  ${DRJIT_CORE_LIBRARY}
+  ${NANOTHREAD_LIBRARY}
+)
+if(MITSUBA_HAS_AD)
+  target_link_libraries(ies PRIVATE ${DRJIT_EXTRA_LIBRARY})
+endif()
+if(HDMITSUBA_ENABLE_CUDA)
+  target_compile_definitions(ies PRIVATE MI_ENABLE_CUDA)
+endif()
+set_target_properties(ies PROPERTIES
+  PREFIX ""
+  LIBRARY_OUTPUT_DIRECTORY "$<1:${CMAKE_CURRENT_BINARY_DIR}/plugins>"
+  RUNTIME_OUTPUT_DIRECTORY "$<1:${CMAKE_CURRENT_BINARY_DIR}/plugins>"
+  INSTALL_RPATH "${PLATFORM_ORIGIN}/../../../lib"
+)
+install(TARGETS ies
+  LIBRARY DESTINATION plugin/usd/plugins
+  ARCHIVE DESTINATION plugin/usd/plugins
+  RUNTIME DESTINATION plugin/usd/plugins
+)
+

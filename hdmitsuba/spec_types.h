@@ -18,6 +18,7 @@
 #include <cmath>
 #include <optional>
 #include <string>
+#include <tuple>
 
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/quatf.h>
@@ -61,8 +62,24 @@ struct MaterialSpec : public BaseSpec {
   HdMaterialNetwork2 network2;
 };
 
+// UsdLuxShapingAPI IES profile of a light (`inputs:shaping:ies:*`).
+struct IesSpec {
+  std::string file_path;
+  float angle_scale = 0.0f;
+  bool normalize = false;
+
+  auto Fields() const { return std::tie(file_path, angle_scale, normalize); }
+
+  bool operator==(const IesSpec& other) const {
+    return Fields() == other.Fields();
+  }
+  bool operator!=(const IesSpec& other) const { return !(*this == other); }
+};
+
 struct LightSpec : public BaseSpec {
   TfToken prim_type;
+  // For mesh lights, which bake their transform into the vertices, this is the
+  // light frame of the `ies` emitter (see `HdMitsubaMesh::UpdateScene`).
   MotionTransform transform;
   GfVec3f emission;
   float angle = 0.0f;
@@ -73,6 +90,7 @@ struct LightSpec : public BaseSpec {
   std::string visibility;
   // Whether the `lightLink` collection includes everything (the default).
   bool light_link_everything = true;
+  IesSpec ies;
 
   // Area lights are represented as Mitsuba shapes with an attached area
   // emitter, rather than standalone emitter objects.
@@ -133,6 +151,8 @@ struct MeshSpec : public BaseSpec {
 
   void FoldPendingFrom(const MeshSpec& prev) {
     if (emitter_spec.has_value() != prev.emitter_spec.has_value() ||
+        (emitter_spec.has_value() && prev.emitter_spec.has_value() &&
+         emitter_spec->ies != prev.emitter_spec->ies) ||
         material_ids != prev.material_ids ||
         double_sided != prev.double_sided ||
         !std::equal(instance_transforms.begin(), instance_transforms.end(),

@@ -22,6 +22,7 @@
 #include <pxr/base/gf/rotation.h>
 #include <pxr/base/gf/vec3d.h>
 #include <pxr/base/gf/vec3f.h>
+#include <pxr/base/tf/diagnostic.h>
 #include <pxr/base/tf/token.h>
 #include <pxr/base/vt/value.h>
 #include <pxr/imaging/hd/changeTracker.h>
@@ -120,16 +121,17 @@ ScalarAffineTransform4f ComputeLightTransform(const TfToken& type_id,
   if (type_id == HdPrimTypeTokens->sphereLight && !params.treat_as_point) {
     const float world_radius = static_cast<float>(
         transform.TransformDir(GfVec3d(params.radius, 0, 0)).GetLength());
-    return RemoveScaleFromTransform(UsdToMitsubaTransform(transform)) *
+    // The rotation leaves the sphere unchanged but aligns its IES frame.
+    return RemoveScaleFromTransform(
+               UsdToMitsubaTransform(align_rotation * transform)) *
            ScalarAffineTransform4f::scale(
                mitsuba::Vector<float, 3>(world_radius));
   }
-  // Non-area emitters (point, spot, directional, envmap) do not support scale
-  // or shear, and AnimatedTransform rejects keyframe matrices with shear.
+  // Non-area emitters (point, spot, ies, directional, envmap) do not support
+  // scale or shear, and AnimatedTransform rejects keyframe matrices with shear.
   ScalarAffineTransform4f to_world =
       RemoveScaleFromTransform(UsdToMitsubaTransform(transform));
-  if ((type_id == HdPrimTypeTokens->sphereLight &&
-       params.shaping_cone_angle != 0.0f) ||
+  if (type_id == HdPrimTypeTokens->sphereLight ||
       type_id == HdPrimTypeTokens->distantLight) {
     using ScalarVector3f = mitsuba::Vector<float, 3>;
     to_world = to_world *
@@ -179,6 +181,19 @@ GfVec3f ComputeLightEmission(const TfToken& type_id,
 }
 
 }  // namespace
+
+std::string GetSupportedIesFilePath(const SdfPath& id,
+                                    const SdfAssetPath& ies_file) {
+  if (ies_file.GetAssetPath().empty()) {
+    return "";
+  }
+  if (ies_file.GetResolvedPath().empty()) {
+    TF_WARN("Could not resolve IES file '%s' of light %s. Ignoring it.",
+            ies_file.GetAssetPath().c_str(), id.GetText());
+    return "";
+  }
+  return ies_file.GetResolvedPath();
+}
 
 HdMitsubaLight::HdMitsubaLight(const SdfPath& id, const TfToken& typeId)
     : HdLight(id) {
@@ -236,6 +251,23 @@ void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
     spec.light_link_everything =
         expr->GetTypedValue(0.0f) == default_light_link;
   }
+
+  const SdfAssetPath shaping_ies_asset =
+      GetParam<SdfAssetPath>(light_container, HdLightTokens->shapingIesFile);
+  if (!spec.IsAreaLight() && type_id_ != HdPrimTypeTokens->sphereLight) {
+    if (!shaping_ies_asset.GetAssetPath().empty()) {
+      TF_WARN(
+          "IES files are only supported on positional lights, but %s is a %s. "
+          "Ignoring it.",
+          id.GetText(), type_id_.GetText());
+    }
+  } else {
+    spec.ies.file_path = GetSupportedIesFilePath(id, shaping_ies_asset);
+    spec.ies.angle_scale = GetParam<float>(
+        light_container, HdLightTokens->shapingIesAngleScale, 0.0f);
+    spec.ies.normalize = GetParam<bool>(
+        light_container, HdLightTokens->shapingIesNormalize, false);
+  }
   spec.dirty_bits = *dirtyBits;
 
   MotionSamples<GfMatrix4d> world_transform = SampleTransform(
@@ -263,6 +295,7 @@ void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
                                params.angle > 0.0f,
                                params.shaping_cone_angle != 0.0f,
                                params.texture_file_path,
+                               spec.ies,
                                spec.transform.IsAnimated(),
                                spec.visibility,
                                spec.light_link_everything};

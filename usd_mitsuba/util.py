@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import drjit as dr
@@ -25,6 +26,25 @@ import numpy as np
 from pxr import Gf
 from pxr import Usd
 from pxr import UsdGeom
+
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_PLUGIN_DIRS = (
+    os.path.join(_BASE_DIR, 'hdmitsuba'),
+    os.path.join(_BASE_DIR, 'build', 'hdmitsuba'),
+    os.path.normpath(os.path.join(_BASE_DIR, '..', '..', 'plugin', 'usd')),
+)
+
+
+def ensure_plugin_registration() -> None:
+  """Ensures hdMitsuba's C++ plugin directory is in Mitsuba's file resolver."""
+  dirs = list(_PLUGIN_DIRS)
+  if 'HDMITSUBA_BUILD_DIR' in os.environ:
+    dirs.append(os.path.join(os.environ['HDMITSUBA_BUILD_DIR'], 'hdmitsuba'))
+  fr = mi.file_resolver()
+  existing = [str(p) for p in fr]
+  for d in dirs:
+    if os.path.exists(d) and d not in existing:
+      fr.append(d)
 
 
 def get_mitsuba_id(prim: Usd.Prim) -> str:

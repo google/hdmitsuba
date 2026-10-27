@@ -1073,8 +1073,8 @@ class SceneModel final : public SceneManager {
       const SdfPath& shape_id, bool double_sided) {
     EmitterSensorPair pair;
     if (emitter_spec.has_value()) {
-      pair.mesh_emitter =
-           PrimTranslator::CreateAreaEmitter(emitter_spec->emission);
+      pair.mesh_emitter = PrimTranslator::CreateAreaEmitter(
+          *emitter_spec, /*set_ies_transform=*/true);
       pair.emitter_ptr = pair.mesh_emitter.get();
     }
     if (pair.emitter_ptr == nullptr) {
@@ -1113,9 +1113,9 @@ class SceneModel final : public SceneManager {
     ref<BSDF> bsdf = ResolveBsdf(material_id, primvars);
     if (key_prefix.empty() && spec.dirty_bits != 0 && shape->is_emitter() &&
         spec.emitter_spec.has_value()) {
-      // Update emissive mesh radiance in-place
+      // Update emissive mesh radiance (and IES light frame) in-place
       PrimTranslator::UpdateMeshEmitterInPlace(shape->emitter(),
-                                               spec.emitter_spec->emission);
+                                               *spec.emitter_spec);
     }
     shape->set_bsdf(bsdf.get());
   }
@@ -1823,6 +1823,7 @@ SceneManager::SceneManager() {
     jit_set_log_level_stderr(LogLevel::Disable);
 #endif
   }
+  EnsurePluginDirInFileResolver();
   active_instances_++;
 }
 

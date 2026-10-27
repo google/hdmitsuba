@@ -18,14 +18,33 @@
 #include <string_view>
 #include <vector>
 
+#include <mitsuba/core/filesystem.h>
+#include <mitsuba/core/fresolver.h>
 #include <mitsuba/core/object.h>
 #include <mitsuba/core/plugin.h>
 #include <mitsuba/core/properties.h>
+#include <pxr/base/arch/symbols.h>
 #include <pxr/base/vt/value.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/assetPath.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
+
+void EnsurePluginDirInFileResolver() {
+  mitsuba::FileResolver* fr = mitsuba::file_resolver();
+  if (fr == nullptr) {
+    return;
+  }
+  std::string lib_path;
+  if (ArchGetAddressInfo(reinterpret_cast<void*>(&EnsurePluginDirInFileResolver),
+                         &lib_path, nullptr, nullptr, nullptr) &&
+      !lib_path.empty()) {
+    mitsuba::fs::path plugin_dir = mitsuba::fs::path(lib_path).parent_path();
+    if (!fr->contains(plugin_dir)) {
+      fr->append(plugin_dir);
+    }
+  }
+}
 
 std::string ResolvePathFromValue(const VtValue& value) {
   if (value.IsHolding<SdfAssetPath>()) {

@@ -24,6 +24,7 @@
 #include <vector>
 
 #include <absl/container/flat_hash_map.h>
+#include <mitsuba/core/vector.h>
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/tf/diagnostic.h>
@@ -45,15 +46,18 @@
 #include <pxr/imaging/hd/types.h>
 #include <pxr/imaging/pxOsd/tokens.h>
 #include <pxr/pxr.h>
+#include <pxr/usd/sdf/assetPath.h>
 
 #include "hdmitsuba/debug_codes.h"
 #include "hdmitsuba/instancer.h"
+#include "hdmitsuba/light.h"
 #include "hdmitsuba/mesh/geometry_processor.h"
 #include "hdmitsuba/mesh/subdivision.h"
 #include "hdmitsuba/motion.h"
 #include "hdmitsuba/render_param.h"
 #include "hdmitsuba/scene_manager.h"
 #include "hdmitsuba/spec_types.h"
+#include "hdmitsuba/utils.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -112,6 +116,15 @@ std::optional<LightSpec> GetMeshEmitterSpec(HdSceneDelegate* sceneDelegate,
     exposure = light_exposure.Get<float>();
   }
   spec.emission = color * intensity * std::exp2(exposure);
+  spec.ies.file_path = GetSupportedIesFilePath(
+      id, sceneDelegate->GetLightParamValue(id, HdLightTokens->shapingIesFile)
+              .GetWithDefault<SdfAssetPath>());
+  spec.ies.angle_scale =
+      sceneDelegate->GetLightParamValue(id, HdLightTokens->shapingIesAngleScale)
+          .GetWithDefault<float>(0.0f);
+  spec.ies.normalize =
+      sceneDelegate->GetLightParamValue(id, HdLightTokens->shapingIesNormalize)
+          .GetWithDefault<bool>(false);
   return spec;
 }
 
@@ -306,6 +319,15 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
   std::optional<LightSpec> emitter_spec = GetMeshEmitterSpec(sceneDelegate, id);
 
   GfMatrix4d transform = sceneDelegate->GetTransform(id);
+  if (emitter_spec.has_value() && !emitter_spec->ies.file_path.empty()) {
+    // Meshes bake their transform into the vertices, so the `ies` light frame
+    // is given explicitly. USD lights emit along -Z, the `ies` emitter along
+    // +Z.
+    emitter_spec->transform =
+        MotionTransform::Static(UsdToMitsubaTransform(transform) *
+                                ScalarAffineTransform4f::rotate(
+                                    mitsuba::Vector<float, 3>(1, 0, 0), 180));
+  }
   std::vector<MotionTransform> instance_transforms;
   bool motion_wrapped = false;
   const SdfPath& instancer_id = GetInstancerId();

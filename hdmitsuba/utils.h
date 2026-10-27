@@ -171,6 +171,10 @@ inline std::optional<ScalarAffineTransform4f> ExtractTransform4f(
   return std::nullopt;
 }
 
+// Ensures the directory of hdMitsuba's own Mitsuba plugins (e.g. `ies`) is in
+// Mitsuba's file resolver, so that the plugin manager loads them by name.
+void EnsurePluginDirInFileResolver();
+
 // Returns the resolved path of an `SdfAssetPath` value (or its asset path if
 // it is unresolved), or an empty string otherwise.
 std::string ResolvePathFromValue(const VtValue& value);

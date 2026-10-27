@@ -16,11 +16,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import os
 from typing import Any
 
 import mitsuba as mi
 import numpy as np
+import numpy.typing as npt
 
 from pxr import Gf
 from pxr import Sdf
@@ -162,3 +164,38 @@ def assert_hydra_equal_to_offline(
 
   robust_assert_close(image_hd[..., :3], image_usd, atol=atol, rtol=rtol)
   return image_hd, image_usd
+
+
+def write_ies_file(
+    path: str | os.PathLike[str],
+    vertical_angles: Sequence[float],
+    values: npt.ArrayLike,
+    horizontal_angles: Sequence[float] = (0.0,),
+) -> str:
+  """Writes a Type C IES (LM-63-2002) luminous intensity profile.
+
+  Args:
+    path: Path of the file to write.
+    vertical_angles: Vertical (theta) knot angles in degrees.
+    values: Candela values at the knots, reshapable to `(H, V)` with `H =
+      len(horizontal_angles)` and `V = len(vertical_angles)`.
+    horizontal_angles: Horizontal (phi) knot angles in degrees. A single angle
+      gives a radially symmetric profile.
+
+  Returns:
+    `path` as a string.
+  """
+  rows = np.reshape(values, (len(horizontal_angles), len(vertical_angles)))
+  lines = [
+      'IESNA:LM-63-2002',
+      'TILT=NONE',
+      f'1 -1 1 {len(vertical_angles)} {len(horizontal_angles)} 1 2 0.1 0.1 0',
+      '1 1 0',
+      ' '.join(str(angle) for angle in vertical_angles),
+      ' '.join(str(angle) for angle in horizontal_angles),
+  ]
+  for row in rows:
+    lines.append(' '.join(str(value) for value in row))
+  with open(path, 'w') as f:
+    f.write('\n'.join(lines) + '\n')
+  return str(path)

@@ -403,6 +403,7 @@ def convert_to_mitsuba(
   Returns:
     A Mitsuba scene dictionary.
   """
+  util.ensure_plugin_registration()
   render_settings = render_settings_lib.get_render_settings(stage)
   mi_scene_dict: dict[str, Any] = {'type': 'scene'}
   mi_scene_dict['integrator'] = _convert_render_settings(

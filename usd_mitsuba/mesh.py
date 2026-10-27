@@ -32,6 +32,7 @@ from pxr import UsdGeom
 from pxr import Vt
 from hdmitsuba import geometry_ext as geom_lib
 from usd_mitsuba import camera
+from usd_mitsuba import light
 from usd_mitsuba import material
 from usd_mitsuba import motion
 from usd_mitsuba import util
@@ -97,21 +98,28 @@ def _to_mitsuba_mesh(sub: Any, properties: mi.Properties) -> mi.Mesh:
 def _get_mesh_light_emitter(
     prim: Usd.Prim,
     time: Usd.TimeCode,
+    world_transform: Gf.Matrix4d,
 ) -> mi.Emitter | None:
-  """Detects MeshLightAPI and returns a Mitsuba area emitter if present."""
+  """Detects MeshLightAPI and returns a Mitsuba area or IES emitter."""
   if not prim.HasAPI(UsdLux.MeshLightAPI):
     return None
   light_api = UsdLux.LightAPI(prim)
   intensity = light_api.GetIntensityAttr().Get(time)
   color = light_api.GetColorAttr().Get(time)
   exposure = light_api.GetExposureAttr().Get(time)
-  return mi.load_dict({
-      'type': 'area',
-      'radiance': {
-          'type': 'rgb',
-          'value': mi.ScalarColor3f(*color) * intensity * (2.0**exposure),
-      },
-  })
+  radiance = mi.ScalarColor3f(*color) * intensity * (2.0**exposure)
+  return mi.load_dict(
+      light.maybe_wrap_ies(
+          prim,
+          time,
+          {'type': 'area', 'radiance': {'type': 'rgb', 'value': radiance}},
+          # Meshes bake their transform into the vertices, so the IES light
+          # frame (USD lights emit along -Z) must be given explicitly.
+          to_world=util.to_mitsuba_transform(world_transform).rotate(
+              [1, 0, 0], 180
+          ),
+      )
+  )
 
 
 def convert_mesh(
@@ -166,10 +174,9 @@ def convert_mesh(
   # not support them on instances, so prototypes do without, and shapes
   # carrying them are not wrapped in an instance for motion blur below (they
   # render with their static transform at frame time, like area lights).
-  mesh_light_emitter = _get_mesh_light_emitter(prim, time)
   sensor_prim = sensor_bindings.get(path)
   has_emitter_or_sensor = (
-      mesh_light_emitter is not None
+      prim.HasAPI(UsdLux.MeshLightAPI)
       or sensor_prim is not None
       or any(emitter is not None for _, emitter, _, _ in materials)
   )
@@ -203,7 +210,10 @@ def convert_mesh(
       props['interior'] = interior_medium
 
     if custom_transform is None:
-      # MeshLightAPI takes precedence over material-driven emission.
+      # MeshLightAPI takes precedence over material-driven emission. Each
+      # sub-mesh needs its own emitter instance, and the world transform is
+      # also the IES light frame of a mesh light.
+      mesh_light_emitter = _get_mesh_light_emitter(prim, time, world_transform)
       if mesh_light_emitter is not None:
         props['emitter'] = mesh_light_emitter
       elif material_emitter is not None:

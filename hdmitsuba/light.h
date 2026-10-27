@@ -23,11 +23,20 @@
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/types.h>
 #include <pxr/pxr.h>
+#include <pxr/usd/sdf/assetPath.h>
 #include <pxr/usd/sdf/path.h>
+
+#include "hdmitsuba/spec_types.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
 class SceneManager;
+
+// Returns the resolved path of the `inputs:shaping:ies:file` `ies_file` of
+// light `id`, or "" if it is unset or cannot be resolved (with a warning in
+// the latter case).
+std::string GetSupportedIesFilePath(const SdfPath& id,
+                                    const SdfAssetPath& ies_file);
 
 class HdMitsubaLight final : public HdLight {
  public:
@@ -47,8 +56,8 @@ class HdMitsubaLight final : public HdLight {
   // Properties that determine the Mitsuba plugin type, whose changes require
   // rebuilding the light object rather than updating it in place. `lightLink`
   // changes require rebuilding the scene, as they may change the active dome.
-  using RebuildKey =
-      std::tuple<bool, bool, bool, std::string, bool, std::string, bool>;
+  using RebuildKey = std::tuple<bool, bool, bool, std::string, IesSpec, bool,
+                                std::string, bool>;
 
   TfToken type_id_;
   std::optional<RebuildKey> rebuild_key_;
