@@ -68,18 +68,17 @@ struct IesSpec {
   float angle_scale = 0.0f;
   bool normalize = false;
 
-  auto Fields() const { return std::tie(file_path, angle_scale, normalize); }
-
-  bool operator==(const IesSpec& other) const {
-    return Fields() == other.Fields();
+  bool operator==(const IesSpec& o) const {
+    return std::tie(file_path, angle_scale, normalize) ==
+           std::tie(o.file_path, o.angle_scale, o.normalize);
   }
-  bool operator!=(const IesSpec& other) const { return !(*this == other); }
+  bool operator!=(const IesSpec& o) const { return !(*this == o); }
 };
 
 struct LightSpec : public BaseSpec {
   TfToken prim_type;
   // For mesh lights, which bake their transform into the vertices, this is the
-  // light frame of the `ies` emitter (see `HdMitsubaMesh::UpdateScene`).
+  // light frame of the `ies` emitter (see `GetMeshEmitterSpec` in mesh.cc).
   MotionTransform transform;
   GfVec3f emission;
   float angle = 0.0f;
@@ -151,8 +150,7 @@ struct MeshSpec : public BaseSpec {
 
   void FoldPendingFrom(const MeshSpec& prev) {
     if (emitter_spec.has_value() != prev.emitter_spec.has_value() ||
-        (emitter_spec.has_value() && prev.emitter_spec.has_value() &&
-         emitter_spec->ies != prev.emitter_spec->ies) ||
+        (emitter_spec && emitter_spec->ies != prev.emitter_spec->ies) ||
         material_ids != prev.material_ids ||
         double_sided != prev.double_sided ||
         !std::equal(instance_transforms.begin(), instance_transforms.end(),

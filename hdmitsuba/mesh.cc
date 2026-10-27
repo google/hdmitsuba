@@ -38,6 +38,7 @@
 #include <pxr/imaging/hd/extComputationUtils.h>
 #include <pxr/imaging/hd/geomSubset.h>
 #include <pxr/imaging/hd/light.h>
+#include <pxr/imaging/hd/lightSchema.h>
 #include <pxr/imaging/hd/mesh.h>
 #include <pxr/imaging/hd/meshTopology.h>
 #include <pxr/imaging/hd/renderDelegate.h>
@@ -46,7 +47,6 @@
 #include <pxr/imaging/hd/types.h>
 #include <pxr/imaging/pxOsd/tokens.h>
 #include <pxr/pxr.h>
-#include <pxr/usd/sdf/assetPath.h>
 
 #include "hdmitsuba/debug_codes.h"
 #include "hdmitsuba/instancer.h"
@@ -95,36 +95,26 @@ bool ValidatePrimvarSize(const VtValue& value, HdInterpolation interpolation,
 
 std::optional<LightSpec> GetMeshEmitterSpec(HdSceneDelegate* sceneDelegate,
                                             const SdfPath& id) {
-  VtValue light_intensity =
-      sceneDelegate->GetLightParamValue(id, HdLightTokens->intensity);
-  if (light_intensity.IsEmpty() || !light_intensity.IsHolding<float>()) {
+  const HdContainerDataSourceHandle prim_source =
+      GetPrimDataSource(sceneDelegate, id);
+  const HdContainerDataSourceHandle light =
+      HdLightSchema::GetFromParent(prim_source).GetContainer();
+  if (!light ||
+      !HdSampledDataSource::Cast(light->Get(HdLightTokens->intensity))) {
     return std::nullopt;
   }
   LightSpec spec;
   spec.id = id;
-  float intensity = light_intensity.Get<float>();
-  GfVec3f color(1.0f, 1.0f, 1.0f);
-  VtValue light_color =
-      sceneDelegate->GetLightParamValue(id, HdLightTokens->color);
-  if (light_color.IsHolding<GfVec3f>()) {
-    color = light_color.Get<GfVec3f>();
-  }
-  float exposure = 0.0f;
-  VtValue light_exposure =
-      sceneDelegate->GetLightParamValue(id, HdLightTokens->exposure);
-  if (light_exposure.IsHolding<float>()) {
-    exposure = light_exposure.Get<float>();
-  }
-  spec.emission = color * intensity * std::exp2(exposure);
-  spec.ies.file_path = GetSupportedIesFilePath(
-      id, sceneDelegate->GetLightParamValue(id, HdLightTokens->shapingIesFile)
-              .GetWithDefault<SdfAssetPath>());
-  spec.ies.angle_scale =
-      sceneDelegate->GetLightParamValue(id, HdLightTokens->shapingIesAngleScale)
-          .GetWithDefault<float>(0.0f);
-  spec.ies.normalize =
-      sceneDelegate->GetLightParamValue(id, HdLightTokens->shapingIesNormalize)
-          .GetWithDefault<bool>(false);
+  spec.emission =
+      GetParam<GfVec3f>(light, HdLightTokens->color, GfVec3f(1.0f)) *
+      GetParam<float>(light, HdLightTokens->intensity, 1.0f) *
+      std::exp2(GetParam<float>(light, HdLightTokens->exposure, 0.0f));
+  spec.ies = GetIesSpec(light, id);
+  // Meshes bake their transform into the vertices, so the `ies` light frame is
+  // given explicitly. USD lights emit along -Z, the `ies` emitter along +Z.
+  spec.transform = MotionTransform::Static(
+      UsdToMitsubaTransform(GetPrimTransform(prim_source)) *
+      ScalarAffineTransform4f::rotate(mitsuba::Vector<float, 3>(1, 0, 0), 180));
   return spec;
 }
 
@@ -319,15 +309,6 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
   std::optional<LightSpec> emitter_spec = GetMeshEmitterSpec(sceneDelegate, id);
 
   GfMatrix4d transform = sceneDelegate->GetTransform(id);
-  if (emitter_spec.has_value() && !emitter_spec->ies.file_path.empty()) {
-    // Meshes bake their transform into the vertices, so the `ies` light frame
-    // is given explicitly. USD lights emit along -Z, the `ies` emitter along
-    // +Z.
-    emitter_spec->transform =
-        MotionTransform::Static(UsdToMitsubaTransform(transform) *
-                                ScalarAffineTransform4f::rotate(
-                                    mitsuba::Vector<float, 3>(1, 0, 0), 180));
-  }
   std::vector<MotionTransform> instance_transforms;
   bool motion_wrapped = false;
   const SdfPath& instancer_id = GetInstancerId();

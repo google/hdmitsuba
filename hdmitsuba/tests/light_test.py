@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import mitsuba as mi
 import numpy as np
 import pytest
@@ -29,24 +31,6 @@ import usd_render
 from hdmitsuba.tests import test_helpers
 
 _RENDER_RESOLUTION = (64, 64)
-# hdEmbree render settings to compare IES lights against it.
-_HDEMBREE_SETTINGS = {
-    'enableLighting': True,
-    'ambientOcclusionSamples': 0,
-    'convergedSamplesPerPixel': 256,
-}
-_ASYMMETRIC_IES_PROFILE = """IESNA:LM-63-2002
-TILT=NONE
-1 -1 1 3 5 1 2 -0.02 -0.02 0
-1 1 40
-0 45 90
-0 90 180 270 360
-100 100 100
-200 200 200
-300 300 300
-400 400 400
-100 100 100
-"""
 
 
 @pytest.fixture(autouse=True)
@@ -97,6 +81,28 @@ def _create_stage() -> Usd.Stage:
   return stage
 
 
+def _open_ies_stage(light_type: str) -> Usd.Stage:
+  """Opens the `ies_<light_type>.usda` scene with 256 spp render settings."""
+  stage = Usd.Stage.Open(
+      f'{test_helpers.TEST_ASSETS_PATH}/lights/ies_{light_type}.usda'
+  )
+  test_helpers.create_render_settings(
+      stage, resolution=_RENDER_RESOLUTION, spp=256
+  )
+  return stage
+
+
+def _render(
+    stage: Usd.Stage,
+    renderer: str = 'HdMitsubaRendererPlugin',
+    overrides: dict[str, Any] | None = None,
+) -> np.ndarray:
+  """Renders `stage` with the Hydra `renderer` and render setting overrides."""
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id=renderer, overrides=overrides)
+  return engine.render()['color']
+
+
 def test_dome_light_untextured():
   stage = _create_stage()
   test_helpers.assert_hydra_equal_to_offline(
@@ -143,6 +149,12 @@ def test_dome_light_corrupt_texture_falls_back_to_constant():
         'spot',
         'textured_light',
         'ies',
+        'ies_disk',
+        'ies_mesh',
+        'ies_mesh_subsets',
+        'ies_point',
+        'ies_rect',
+        'ies_sphere',
     ],
 )
 def test_render(scene_name: str):
@@ -444,74 +456,61 @@ def test_update_ies_light():
   test_helpers.assert_hydra_equal_to_offline(
       stage,
       output_prefix='test_update_ies_light_intensity',
-      atol=0.1,
+      atol=1e-3,
       engine=engine,
   )
 
-  # 2. Update shaping:ies:angleScale and shaping:ies:normalize.
+  # 2. Update shaping:ies:angleScale and turn off shaping:ies:normalize, with
+  # the intensity scaled by ~1 / 1000 cd, the average of `step.ies`.
   shaping = UsdLux.ShapingAPI(disk_light.GetPrim())
   shaping.GetShapingIesAngleScaleAttr().Set(0.75)
-  shaping.GetShapingIesNormalizeAttr().Set(True)
+  shaping.GetShapingIesNormalizeAttr().Set(False)
+  disk_light.GetIntensityAttr().Set(0.006)
   test_helpers.assert_hydra_equal_to_offline(
       stage,
       output_prefix='test_update_ies_light_shaping',
-      atol=0.1,
+      atol=1e-3,
       engine=engine,
   )
 
   # 3. Dynamically clear the IES file path (switches from 'ies' back to 'area').
   shaping.GetShapingIesFileAttr().Set(Sdf.AssetPath(''))
+  disk_light.GetIntensityAttr().Set(6.0)
   test_helpers.assert_hydra_equal_to_offline(
       stage,
       output_prefix='test_update_ies_light_cleared',
-      atol=0.1,
+      atol=1e-3,
       engine=engine,
   )
 
 
-def test_ies_mesh_light_matches_rect_light(tmp_path):
-  """A quad mesh light with an IES profile matches the same `RectLight`.
-
-  This also holds when the quad is split into material subsets, each of which
-  gets its own emitter.
-
-  Args:
-    tmp_path: Temporary directory for the IES file.
-  """
-  ies_path = tmp_path / 'asymmetric.ies'
-  ies_path.write_text(_ASYMMETRIC_IES_PROFILE)
-  images = []
-  for light_type in ('rect', 'mesh', 'mesh_subsets'):
-    image, _ = test_helpers.assert_hydra_equal_to_offline(
-        _create_ies_stage(light_type, str(ies_path)),
-        camera_path='/camera',
-        output_prefix=f'test_ies_mesh_light_{light_type}',
-        spp=256,
-        atol=0.1,
+def test_ies_mesh_light_matches_rect_light():
+  """Quad mesh lights with an IES profile match the same `RectLight`."""
+  images = {
+      light_type: _render(_open_ies_stage(light_type))
+      for light_type in ('rect', 'mesh', 'mesh_subsets')
+  }
+  for light_type, image in images.items():
+    test_helpers.write_image(image, f'test_ies_mesh_light_{light_type}.png')
+  for light_type in ('mesh', 'mesh_subsets'):
+    test_helpers.robust_assert_close(
+        images[light_type], images['rect'], atol=1e-3
     )
-    images.append(image)
-  for image in images[1:]:
-    test_helpers.robust_assert_close(image, images[0], atol=0.05, rtol=0.1)
 
 
-def test_update_ies_mesh_light_transform(tmp_path):
+def test_update_ies_mesh_light_transform():
   """Rotating an IES mesh light updates its light frame."""
-  ies_path = tmp_path / 'asymmetric.ies'
-  ies_path.write_text(_ASYMMETRIC_IES_PROFILE)
-  stage = _create_ies_stage('mesh', str(ies_path))
+  stage = _open_ies_stage('mesh')
   engine = usd_render.RenderEngine(stage)
-  engine.configure(
-      hydra_delegate_id='HdMitsubaRendererPlugin', camera_path='/camera'
-  )
+  engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin')
   engine.render()
 
   light = UsdGeom.Xformable(stage.GetPrimAtPath('/light'))
-  rotate_z = light.GetOrderedXformOps()[1]
-  rotate_z.Set(120.0)
+  light.GetOrderedXformOps()[1].Set(120.0)
   test_helpers.assert_hydra_equal_to_offline(
       stage,
       output_prefix='test_update_ies_mesh_light_transform',
-      atol=0.1,
+      atol=1e-3,
       spp=256,
       engine=engine,
   )
@@ -527,7 +526,7 @@ def test_update_ies_mesh_light_transform(tmp_path):
     ],
 )
 def test_ies_matches_hdembree(
-    tmp_path, light_type: str, angle_scale: float, normalize: bool
+    light_type: str, angle_scale: float, normalize: bool
 ):
   """Checks IES lights against OpenUSD's hdEmbree reference.
 
@@ -537,33 +536,17 @@ def test_ies_matches_hdembree(
   `shaping:ies:normalize` total-power scaling.
 
   Args:
-    tmp_path: Temporary directory for the IES file.
     light_type: The USD light type.
     angle_scale: The `shaping:ies:angleScale` value.
     normalize: The `shaping:ies:normalize` value.
   """
-  ies_path = tmp_path / 'asymmetric.ies'
-  ies_path.write_text(_ASYMMETRIC_IES_PROFILE)
-  stage = _create_ies_stage(light_type, str(ies_path))
+  if 'HdEmbreeRendererPlugin' not in usd_render.get_registered_renderers():
+    pytest.skip('HdEmbreeRendererPlugin not available')
+  stage = _open_ies_stage(light_type)
   shaping = UsdLux.ShapingAPI(stage.GetPrimAtPath('/light'))
   shaping.GetShapingIesAngleScaleAttr().Set(angle_scale)
   shaping.GetShapingIesNormalizeAttr().Set(normalize)
   name = f'{light_type}_{angle_scale}_{normalize}'
-  image_mitsuba, _ = test_helpers.assert_hydra_equal_to_offline(
-      stage,
-      camera_path='/camera',
-      output_prefix=f'test_ies_matches_hdembree_offline_{name}',
-      spp=256,
-      atol=0.1,
-  )
-  if 'HdEmbreeRendererPlugin' not in usd_render.get_registered_renderers():
-    pytest.skip('HdEmbreeRendererPlugin not available')
-  engine = usd_render.RenderEngine(stage)
-  engine.configure(
-      hydra_delegate_id='HdEmbreeRendererPlugin',
-      camera_path='/camera',
-      overrides=_HDEMBREE_SETTINGS,
-  )
 
   def normalized_luminance(image: np.ndarray) -> np.ndarray:
     luminance = np.array(image)[..., :3].mean(axis=-1)
@@ -573,11 +556,20 @@ def test_ies_matches_hdembree(
     return luminance / np.median(luminance[luminance > 0])
 
   images = {}
-  for renderer, image in (
-      ('HdEmbreeRendererPlugin', engine.render()['color']),
-      ('HdMitsubaRendererPlugin', image_mitsuba),
+  for renderer, overrides in (
+      (
+          'HdEmbreeRendererPlugin',
+          {
+              'enableLighting': True,
+              'ambientOcclusionSamples': 0,
+              'convergedSamplesPerPixel': 256,
+          },
+      ),
+      ('HdMitsubaRendererPlugin', None),
   ):
-    images[renderer] = normalized_luminance(image)
+    images[renderer] = normalized_luminance(
+        _render(stage, renderer, overrides)
+    )
     test_helpers.write_image(
         images[renderer] / images[renderer].max(),
         f'test_ies_matches_hdembree_{name}_{renderer}.png',
@@ -589,70 +581,3 @@ def test_ies_matches_hdembree(
       atol=0.05,
       rtol=0.1,
   )
-
-
-def _create_ies_stage(light_type: str, ies_path: str) -> Usd.Stage:
-  """Creates a floor lit from 1 m above by a small light with an IES profile.
-
-  The light points down (-Z) and is rotated about its emission axis, so that
-  any rotation or mirroring of the light frame is visible on the floor.
-
-  Args:
-    light_type: `disk`, `rect`, `sphere`, `mesh` (a quad with `MeshLightAPI`,
-      matching `rect`) or `mesh_subsets` (the same quad split into two triangles
-      bound to different materials).
-    ies_path: Path of the IES file.
-
-  Returns:
-    The stage, with a top-down camera at `/camera`.
-  """
-  stage = Usd.Stage.CreateInMemory()
-  floor = UsdGeom.Mesh.Define(stage, '/floor')
-  floor.GetPointsAttr().Set([(-2, -2, 0), (2, -2, 0), (2, 2, 0), (-2, 2, 0)])
-  floor.GetFaceVertexCountsAttr().Set([4])
-  floor.GetFaceVertexIndicesAttr().Set([0, 1, 2, 3])
-  camera = UsdGeom.Camera.Define(stage, '/camera')
-  camera.AddTranslateOp().Set((0, 0, 4))
-  camera.GetFocalLengthAttr().Set(25.0)
-  if light_type == 'disk':
-    light_prim = UsdLux.DiskLight.Define(stage, '/light')
-    light_prim.GetRadiusAttr().Set(0.02)
-  elif light_type == 'rect':
-    light_prim = UsdLux.RectLight.Define(stage, '/light')
-    light_prim.GetWidthAttr().Set(0.04)
-    light_prim.GetHeightAttr().Set(0.04)
-  elif light_type == 'sphere':
-    light_prim = UsdLux.SphereLight.Define(stage, '/light')
-    light_prim.GetRadiusAttr().Set(0.02)
-  else:
-    light_prim = UsdGeom.Mesh.Define(stage, '/light')
-    # Clockwise seen from +Z, so that the quad emits along -Z.
-    light_prim.GetPointsAttr().Set(
-        [(-0.02, -0.02, 0), (-0.02, 0.02, 0), (0.02, 0.02, 0), (0.02, -0.02, 0)]
-    )
-    if light_type == 'mesh_subsets':
-      light_prim.GetFaceVertexCountsAttr().Set([3, 3])
-      light_prim.GetFaceVertexIndicesAttr().Set([0, 1, 2, 0, 2, 3])
-      for face in (0, 1):
-        subset = UsdGeom.Subset.CreateGeomSubset(
-            light_prim,
-            f'subset{face}',
-            UsdGeom.Tokens.face,
-            [face],
-            UsdShade.Tokens.materialBind,
-        )
-        UsdShade.MaterialBindingAPI.Apply(subset.GetPrim()).Bind(
-            UsdShade.Material.Define(stage, f'/material{face}')
-        )
-    else:
-      light_prim.GetFaceVertexCountsAttr().Set([4])
-      light_prim.GetFaceVertexIndicesAttr().Set([0, 1, 2, 3])
-    light_prim.GetSubdivisionSchemeAttr().Set(UsdGeom.Tokens.none)
-    UsdLux.MeshLightAPI.Apply(light_prim.GetPrim())
-  light_prim.AddTranslateOp().Set((0, 0, 1))
-  light_prim.AddRotateZOp().Set(30.0)
-  UsdLux.ShapingAPI.Apply(light_prim.GetPrim()).GetShapingIesFileAttr().Set(
-      Sdf.AssetPath(ies_path)
-  )
-  test_helpers.create_render_settings(stage, resolution=(64, 64), spp=256)
-  return stage

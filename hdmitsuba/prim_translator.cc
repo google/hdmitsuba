@@ -659,61 +659,64 @@ PrimTranslator<Float, Spectrum>::BuildLight(const LightSpec& spec) {
 namespace {
 
 // Returns `nested_props` if `spec` has no IES profile, and otherwise the
-// properties of an `ies` emitter wrapping the emitter they describe.
-// `set_transform` sets the light frame of the `ies` emitter to `spec.transform`
-// (for mesh lights, which bake their transform into the vertices).
+// properties of an `ies` emitter wrapping the emitter they describe. Its light
+// frame is `spec.transform` without scale.
 template <typename Float, typename Spectrum>
 mitsuba::Properties MaybeWrapIesProps(mitsuba::Properties nested_props,
-                                      const LightSpec& spec,
-                                      bool set_transform) {
+                                      const LightSpec& spec) {
   if (spec.ies.file_path.empty()) {
     return nested_props;
   }
+  using Emitter = mitsuba::Emitter<Float, Spectrum>;
   mitsuba::Properties props("ies");
   props.set("filename", spec.ies.file_path);
   props.set("nested_emitter",
             mitsuba::PluginManager::instance()->create_object(
-                nested_props, mitsuba::Emitter<Float, Spectrum>::Variant,
-                mitsuba::Emitter<Float, Spectrum>::Type));
-  if (spec.ies.angle_scale != 0.0f) {
-    props.set("angle_scale", spec.ies.angle_scale);
-  }
-  if (spec.ies.normalize) {
-    props.set("normalize", true);
-  }
-  if (set_transform) {
-    props.set("to_world", spec.transform.First());
-  }
+                nested_props, Emitter::Variant, Emitter::Type));
+  props.set("angle_scale", spec.ies.angle_scale);
+  props.set("normalize", spec.ies.normalize);
+  PrimTranslator<Float, Spectrum>::SetTransformProperty(
+      props, spec.transform.Map(RemoveScaleFromTransform));
   return props;
+}
+
+// Updates the light frame of the `ies` emitter `emitter` if `spec` has an IES
+// profile, and returns the emitter it wraps (or `emitter` otherwise). The
+// caller must still call `emitter->parameters_changed()`.
+template <typename Float, typename Spectrum>
+mitsuba::Emitter<Float, Spectrum>* UpdateIesFrameInPlace(
+    mitsuba::Emitter<Float, Spectrum>* emitter, const LightSpec& spec) {
+  if (spec.ies.file_path.empty()) {
+    return emitter;
+  }
+  TraversalCallback cb;
+  emitter->traverse(&cb);
+  PrimTranslator<Float, Spectrum>::SetTransformParameter(
+      cb, spec.transform.Map(RemoveScaleFromTransform));
+  return static_cast<mitsuba::Emitter<Float, Spectrum>*>(
+      cb.objects.at("nested_emitter"));
 }
 
 }  // namespace
 
 MI_VARIANT mitsuba::ref<mitsuba::Object>
-PrimTranslator<Float, Spectrum>::CreateAreaEmitter(const LightSpec& spec,
-                                                   bool set_ies_transform) {
+PrimTranslator<Float, Spectrum>::CreateAreaEmitter(const LightSpec& spec) {
   mitsuba::Properties emitter_props("area");
   emitter_props.set("radiance",
                     mitsuba::Color<float, 3>(spec.emission[0], spec.emission[1],
                                              spec.emission[2]));
   return mitsuba::PluginManager::instance()->create_object(
-      MaybeWrapIesProps<Float, Spectrum>(std::move(emitter_props), spec,
-                                         set_ies_transform),
+      MaybeWrapIesProps<Float, Spectrum>(std::move(emitter_props), spec),
       mitsuba::Emitter<Float, Spectrum>::Variant,
       mitsuba::Emitter<Float, Spectrum>::Type);
 }
 
-MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateMeshEmitterInPlace(
+MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateAreaEmitterInPlace(
     mitsuba::Emitter<Float, Spectrum>* emitter, const LightSpec& spec) {
   TraversalCallback cb;
-  emitter->traverse(&cb);
-  if (cb.data.contains("nested_emitter.radiance.value")) {
-    SetSpectrumParameter(cb, "nested_emitter.radiance", spec.emission);
-    SetTransformParameter(cb, spec.transform);
-  } else {
-    SetSpectrumParameter(cb, "radiance", spec.emission);
-  }
-  emitter->parameters_changed({"radiance", "to_world"});
+  UpdateIesFrameInPlace<Float, Spectrum>(emitter, spec)->traverse(&cb);
+  SetSpectrumParameter(cb, "radiance", spec.emission);
+  emitter->parameters_changed();
 }
 
 MI_VARIANT mitsuba::Properties
@@ -728,7 +731,7 @@ PrimTranslator<Float, Spectrum>::BuildLightProperties(const LightSpec& spec) {
   auto make_area_shape_props = [&](std::string_view shape_plugin) {
     mitsuba::Properties props = make_props(shape_plugin);
     props.set("visibility", spec.visibility);
-    props.set("emitter", CreateAreaEmitter(spec, /*set_ies_transform=*/false));
+    props.set("emitter", CreateAreaEmitter(spec));
     props.set("bsdf",
               mitsuba::ref<mitsuba::Object>(DefaultBsdf("", "null")));
     return props;
@@ -736,16 +739,14 @@ PrimTranslator<Float, Spectrum>::BuildLightProperties(const LightSpec& spec) {
 
   if (spec.prim_type == HdPrimTypeTokens->sphereLight) {
     if (!spec.treat_as_point) return make_area_shape_props("sphere");
-    const bool is_spot =
-        spec.ies.file_path.empty() && spec.shaping_cone_angle != 0.0f;
+    const bool is_spot = spec.shaping_cone_angle != 0.0f;
     mitsuba::Properties props = make_props(is_spot ? "spot" : "point");
     props.set("intensity", color);
     if (is_spot) {
       props.set("beam_width", spec.shaping_cone_beam_width);
       props.set("cutoff_angle", spec.shaping_cone_angle);
     }
-    return MaybeWrapIesProps<Float, Spectrum>(std::move(props), spec,
-                                              /*set_transform=*/false);
+    return MaybeWrapIesProps<Float, Spectrum>(std::move(props), spec);
   }
 
   if (spec.prim_type == HdPrimTypeTokens->domeLight) {
@@ -789,45 +790,27 @@ PrimTranslator<Float, Spectrum>::BuildLightProperties(const LightSpec& spec) {
 
 MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateLightInPlace(
     mitsuba::Object* light_obj, const LightSpec& spec) {
-  auto unwrap_nested = [](mitsuba::Emitter<Float, Spectrum>*& em,
-                          TraversalCallback& cb) {
-    if (auto it = cb.objects.find("nested_emitter"); it != cb.objects.end()) {
-      em = static_cast<mitsuba::Emitter<Float, Spectrum>*>(it->second);
-      cb = TraversalCallback();
-      em->traverse(&cb);
-    }
-  };
-
   if (auto* shape = dynamic_cast<mitsuba::Shape<Float, Spectrum>*>(light_obj)) {
     TraversalCallback cb_shape;
     shape->traverse(&cb_shape);
     SetTransformParameter(cb_shape, spec.transform);
     shape->parameters_changed();
     if (shape->is_emitter()) {
-      auto* area_emitter = shape->emitter();
-      TraversalCallback cb_emitter;
-      area_emitter->traverse(&cb_emitter);
-      unwrap_nested(area_emitter, cb_emitter);
-      SetSpectrumParameter(cb_emitter, "radiance", spec.emission);
-      area_emitter->parameters_changed({"radiance"});
+      UpdateAreaEmitterInPlace(shape->emitter(), spec);
     }
   } else if (auto* emitter =
                  dynamic_cast<mitsuba::Emitter<Float, Spectrum>*>(light_obj)) {
     TraversalCallback cb;
-    emitter->traverse(&cb);
-    unwrap_nested(emitter, cb);
+    UpdateIesFrameInPlace<Float, Spectrum>(emitter, spec)->traverse(&cb);
 
     if (spec.prim_type == HdPrimTypeTokens->sphereLight &&
         spec.treat_as_point) {
       SetTransformParameter(cb, spec.transform);
       SetSpectrumParameter(cb, "intensity", spec.emission);
-      if (spec.ies.file_path.empty() && spec.shaping_cone_angle != 0.0f) {
+      if (spec.shaping_cone_angle != 0.0f) {
         cb.set<Float>("beam_width", spec.shaping_cone_beam_width);
         cb.set<Float>("cutoff_angle", spec.shaping_cone_angle);
       }
-      emitter->parameters_changed(
-          {"intensity", "to_world", "beam_width", "cutoff_angle"});
-      return;
     } else if (spec.prim_type == HdPrimTypeTokens->domeLight) {
       // A domeLight with a missing/corrupt texture falls back to a "constant"
       // emitter in BuildLightProperties, which has "radiance.value" rather than

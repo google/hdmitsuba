@@ -29,7 +29,8 @@ def Xform "root" (
             bool inputs:enableColorTemperature = 1
             float inputs:intensity = 3.1830988
             bool inputs:normalize = 1
-            asset inputs:shaping:ies:file = @./textures/step.ies@
+            asset inputs:shaping:ies:file = @./textures/ies/step.ies@
+            bool inputs:shaping:ies:normalize = 1
         }
     }
 

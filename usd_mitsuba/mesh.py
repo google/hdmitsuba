@@ -95,33 +95,6 @@ def _to_mitsuba_mesh(sub: Any, properties: mi.Properties) -> mi.Mesh:
   return mi_mesh
 
 
-def _get_mesh_light_emitter(
-    prim: Usd.Prim,
-    time: Usd.TimeCode,
-    world_transform: Gf.Matrix4d,
-) -> mi.Emitter | None:
-  """Detects MeshLightAPI and returns a Mitsuba area or IES emitter."""
-  if not prim.HasAPI(UsdLux.MeshLightAPI):
-    return None
-  light_api = UsdLux.LightAPI(prim)
-  intensity = light_api.GetIntensityAttr().Get(time)
-  color = light_api.GetColorAttr().Get(time)
-  exposure = light_api.GetExposureAttr().Get(time)
-  radiance = mi.ScalarColor3f(*color) * intensity * (2.0**exposure)
-  return mi.load_dict(
-      light.maybe_wrap_ies(
-          prim,
-          time,
-          {'type': 'area', 'radiance': {'type': 'rgb', 'value': radiance}},
-          # Meshes bake their transform into the vertices, so the IES light
-          # frame (USD lights emit along -Z) must be given explicitly.
-          to_world=util.to_mitsuba_transform(world_transform).rotate(
-              [1, 0, 0], 180
-          ),
-      )
-  )
-
-
 def convert_mesh(
     prim: Usd.Prim,
     subdivision_level: int,
@@ -213,7 +186,7 @@ def convert_mesh(
       # MeshLightAPI takes precedence over material-driven emission. Each
       # sub-mesh needs its own emitter instance, and the world transform is
       # also the IES light frame of a mesh light.
-      mesh_light_emitter = _get_mesh_light_emitter(prim, time, world_transform)
+      mesh_light_emitter = light.convert_mesh_light(prim, time, world_transform)
       if mesh_light_emitter is not None:
         props['emitter'] = mesh_light_emitter
       elif material_emitter is not None:

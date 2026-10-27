@@ -121,15 +121,12 @@ class PrimTranslator {
   static TranslatedLight BuildLight(const LightSpec& spec);
 
   // Creates the `area` emitter of `spec`, wrapped in an `ies` emitter if `spec`
-  // has an IES profile. `set_ies_transform` sets the `ies` light frame to
-  // `spec.transform`, for mesh lights, which bake their transform into the
-  // vertices.
-  static mitsuba::ref<mitsuba::Object> CreateAreaEmitter(
-      const LightSpec& spec, bool set_ies_transform);
+  // has an IES profile.
+  static mitsuba::ref<mitsuba::Object> CreateAreaEmitter(const LightSpec& spec);
 
-  // Updates the radiance and, for `ies` emitters, the light frame of an emitter
-  // created by `CreateAreaEmitter` for the mesh light `spec`.
-  static void UpdateMeshEmitterInPlace(
+  // Updates the radiance and IES light frame of an emitter created by
+  // `CreateAreaEmitter`.
+  static void UpdateAreaEmitterInPlace(
       mitsuba::Emitter<Float, Spectrum>* emitter, const LightSpec& spec);
 
   static void UpdateLightInPlace(mitsuba::Object* light_obj,

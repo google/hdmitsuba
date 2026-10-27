@@ -35,7 +35,7 @@ _EXR_PATH = os.path.abspath(
     'hdmitsuba/test_assets/lights/textures/envmap.png'
 )
 _IES_PATH = os.path.abspath(
-    'hdmitsuba/test_assets/lights/textures/step.ies'
+    'hdmitsuba/test_assets/lights/textures/ies/step.ies'
 )
 
 
@@ -320,98 +320,61 @@ def test_disk_light_normalized():
   )
 
 
-@pytest.mark.parametrize(
-    ('light_type', 'ies_file', 'match'),
-    [
-        (
-            UsdLux.DomeLight,
-            _IES_PATH,
-            'IES files are only supported on positional lights.',
-        ),
-        (
-            UsdLux.DistantLight,
-            _IES_PATH,
-            'IES files are only supported on positional lights.',
-        ),
-        (
-            UsdLux.SphereLight,
-            'does_not_exist.ies',
-            'Could not resolve IES file',
-        ),
-    ],
-)
-def test_ies_profile_error(light_type, ies_file, match):
-  _, prim = _create_stage_with_light(light_type)
-  shaping_api = UsdLux.ShapingAPI.Apply(prim)
-  shaping_api.GetShapingIesFileAttr().Set(Sdf.AssetPath(ies_file))
+def test_ies_profile_unresolved():
+  _, prim = _create_stage_with_light(UsdLux.SphereLight)
+  UsdLux.ShapingAPI.Apply(prim).GetShapingIesFileAttr().Set(
+      Sdf.AssetPath('does_not_exist.ies')
+  )
 
-  with pytest.raises(ValueError, match=match):
+  with pytest.raises(ValueError, match='Could not resolve IES file'):
     light.convert_light(prim)
 
 
-def _assert_ies_frame_flipped(to_world: mi.ScalarTransform4f) -> None:
-  """Asserts that `to_world` maps the `ies` emitter's +Z onto USD's -Z."""
-  for axis, expected in (([0, 1, 0], [0, -1, 0]), ([0, 0, 1], [0, 0, -1])):
-    mapped = np.array(to_world @ mi.ScalarVector3f(axis))
-    np.testing.assert_allclose(
-        mapped / np.linalg.norm(mapped), expected, atol=1e-6
-    )
+@pytest.mark.parametrize('light_type', [UsdLux.DomeLight, UsdLux.DistantLight])
+def test_ies_profile_ignored_on_non_positional_lights(light_type):
+  _, prim = _create_stage_with_light(light_type)
+  UsdLux.ShapingAPI.Apply(prim).GetShapingIesFileAttr().Set(
+      Sdf.AssetPath(_IES_PATH)
+  )
+
+  assert light.convert_light(prim)['type'] != 'ies'
 
 
-def test_ies_point_light():
-  _, prim = _create_stage_with_light(UsdLux.SphereLight)
-  UsdLux.SphereLight(prim).GetTreatAsPointAttr().Set(True)
+@pytest.mark.parametrize(
+    ('light_type', 'treat_as_point'),
+    [
+        (UsdLux.DiskLight, False),
+        (UsdLux.RectLight, False),
+        (UsdLux.SphereLight, False),
+        (UsdLux.SphereLight, True),
+    ],
+)
+def test_ies_light(light_type, treat_as_point):
+  _, prim = _create_stage_with_light(light_type)
+  if treat_as_point:
+    UsdLux.SphereLight(prim).GetTreatAsPointAttr().Set(True)
   shaping_api = UsdLux.ShapingAPI.Apply(prim)
   shaping_api.GetShapingIesFileAttr().Set(Sdf.AssetPath(_IES_PATH))
   shaping_api.GetShapingIesAngleScaleAttr().Set(0.5)
   shaping_api.GetShapingIesNormalizeAttr().Set(True)
 
   emitter_dict = light.convert_light(prim)
+  ies_dict = emitter_dict if treat_as_point else emitter_dict['emitter']
 
-  assert emitter_dict['type'] == 'ies'
-  assert emitter_dict['filename'] == _IES_PATH
-  assert emitter_dict['angle_scale'] == pytest.approx(0.5)
-  assert emitter_dict['normalize'] is True
-  assert emitter_dict['nested_emitter']['type'] == 'point'
-  _assert_ies_frame_flipped(emitter_dict['nested_emitter']['to_world'])
-  emitter = mi.load_dict(emitter_dict)
-  assert emitter.flags() == int(mi.EmitterFlags.DeltaPosition)
-
-
-@pytest.mark.parametrize(
-    'light_type',
-    [UsdLux.DiskLight, UsdLux.RectLight, UsdLux.SphereLight],
-)
-def test_ies_surface_lights(light_type):
-  _, prim = _create_stage_with_light(light_type)
-  shaping_api = UsdLux.ShapingAPI.Apply(prim)
-  shaping_api.GetShapingIesFileAttr().Set(Sdf.AssetPath(_IES_PATH))
-  shaping_api.GetShapingIesAngleScaleAttr().Set(1.25)
-  shaping_api.GetShapingIesNormalizeAttr().Set(True)
-
-  emitter_dict = light.convert_light(prim)
-
-  assert emitter_dict['emitter']['type'] == 'ies'
-  assert emitter_dict['emitter']['filename'] == _IES_PATH
-  assert emitter_dict['emitter']['angle_scale'] == pytest.approx(1.25)
-  assert emitter_dict['emitter']['normalize'] is True
-  assert emitter_dict['emitter']['nested_emitter']['type'] == 'area'
-  _assert_ies_frame_flipped(emitter_dict['to_world'])
-  shape = mi.load_dict(emitter_dict)
-  assert shape.emitter() is not None
-
-
-def test_dome_light_with_shaping_api_is_not_flipped():
-  _, prim = _create_stage_with_light(UsdLux.DomeLight)
-  UsdLux.DomeLight(prim).GetTextureFileAttr().Set(Sdf.AssetPath(_EXR_PATH))
-  reference = light.convert_light(prim)['to_world']
-  # The `shaping:cone:angle` fallback (90 deg) must not flip dome lights.
-  UsdLux.ShapingAPI.Apply(prim)
-
-  np.testing.assert_allclose(
-      np.array(light.convert_light(prim)['to_world'].matrix),
-      np.array(reference.matrix),
+  assert ies_dict['type'] == 'ies'
+  assert ies_dict['filename'] == _IES_PATH
+  assert ies_dict['angle_scale'] == pytest.approx(0.5)
+  assert ies_dict['normalize'] is True
+  # The ShapingAPI cone angle (90 deg by default) still applies to point
+  # lights, as in hdEmbree.
+  assert ies_dict['nested_emitter']['type'] == (
+      'spot' if treat_as_point else 'area'
   )
+  # The `ies` emitter's +Y and +Z axes map onto USD's -Y and -Z.
+  for axis, expected in (([0, 1, 0], [0, -1, 0]), ([0, 0, 1], [0, 0, -1])):
+    mapped = np.array(ies_dict['to_world'] @ mi.ScalarVector3f(axis))
+    np.testing.assert_allclose(mapped, expected, atol=1e-6)
+  mi.load_dict(emitter_dict)
 
 
 @pytest.mark.parametrize(

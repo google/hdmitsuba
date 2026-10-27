@@ -1,0 +1,16 @@
+#usda 1.0
+(
+    subLayers = [@./ies_base.usda@]
+)
+
+def RectLight "light" (
+    prepend apiSchemas = ["ShapingAPI"]
+)
+{
+    float inputs:height = 0.04
+    float inputs:width = 0.04
+    asset inputs:shaping:ies:file = @./textures/ies/asymmetric.ies@
+    double3 xformOp:translate = (0, 0, 1)
+    float xformOp:rotateZ = 30
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+}

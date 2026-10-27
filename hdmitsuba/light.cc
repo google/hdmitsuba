@@ -182,17 +182,23 @@ GfVec3f ComputeLightEmission(const TfToken& type_id,
 
 }  // namespace
 
-std::string GetSupportedIesFilePath(const SdfPath& id,
-                                    const SdfAssetPath& ies_file) {
+IesSpec GetIesSpec(const HdContainerDataSourceHandle& light_container,
+                   const SdfPath& id) {
+  const auto ies_file =
+      GetParam<SdfAssetPath>(light_container, HdLightTokens->shapingIesFile);
   if (ies_file.GetAssetPath().empty()) {
-    return "";
+    return {};
   }
   if (ies_file.GetResolvedPath().empty()) {
     TF_WARN("Could not resolve IES file '%s' of light %s. Ignoring it.",
             ies_file.GetAssetPath().c_str(), id.GetText());
-    return "";
+    return {};
   }
-  return ies_file.GetResolvedPath();
+  return {ies_file.GetResolvedPath(),
+          GetParam<float>(light_container, HdLightTokens->shapingIesAngleScale,
+                          0.0f),
+          GetParam<bool>(light_container, HdLightTokens->shapingIesNormalize,
+                         false)};
 }
 
 HdMitsubaLight::HdMitsubaLight(const SdfPath& id, const TfToken& typeId)
@@ -252,21 +258,9 @@ void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
         expr->GetTypedValue(0.0f) == default_light_link;
   }
 
-  const SdfAssetPath shaping_ies_asset =
-      GetParam<SdfAssetPath>(light_container, HdLightTokens->shapingIesFile);
-  if (!spec.IsAreaLight() && type_id_ != HdPrimTypeTokens->sphereLight) {
-    if (!shaping_ies_asset.GetAssetPath().empty()) {
-      TF_WARN(
-          "IES files are only supported on positional lights, but %s is a %s. "
-          "Ignoring it.",
-          id.GetText(), type_id_.GetText());
-    }
-  } else {
-    spec.ies.file_path = GetSupportedIesFilePath(id, shaping_ies_asset);
-    spec.ies.angle_scale = GetParam<float>(
-        light_container, HdLightTokens->shapingIesAngleScale, 0.0f);
-    spec.ies.normalize = GetParam<bool>(
-        light_container, HdLightTokens->shapingIesNormalize, false);
+  // IES profiles only apply to positional lights, and are ignored otherwise.
+  if (spec.IsAreaLight() || type_id_ == HdPrimTypeTokens->sphereLight) {
+    spec.ies = GetIesSpec(light_container, id);
   }
   spec.dirty_bits = *dirtyBits;
 

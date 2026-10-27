@@ -29,85 +29,54 @@ from usd_mitsuba import motion
 from usd_mitsuba import util
 
 
-def get_ies_file_path(
-    prim: Usd.Prim, time: Usd.TimeCode = Usd.TimeCode.Default()
-) -> str:
-  """Returns the resolved `inputs:shaping:ies:file` path, or `''` if unset.
+def _maybe_wrap_ies(
+    prim: Usd.Prim,
+    time: Usd.TimeCode,
+    emitter_dict: dict[str, Any],
+    to_world: mi.ScalarTransform4f | mi.AnimatedTransform4f,
+) -> dict[str, Any]:
+  """Wraps `emitter_dict` in an `'ies'` emitter if `prim` has an IES profile.
 
-  Args:
-    prim: The USD light or mesh prim to inspect.
-    time: The time code to evaluate attributes at.
-
-  Returns:
-    The resolved filesystem path to the IES profile, or `''` if no IES file is
-    authored on `prim`.
-
-  Raises:
-    ValueError: If the authored IES file cannot be resolved.
+  `to_world` is the rigid light frame of the `'ies'` emitter, whose +Z axis is
+  the photometric axis (the light's -Z axis in USD).
   """
   if not prim.HasAPI(UsdLux.ShapingAPI):
-    return ''
+    return emitter_dict
   shaping_api = UsdLux.ShapingAPI(prim)
   ies_file = shaping_api.GetShapingIesFileAttr().Get(time)
-  if not ies_file or not ies_file.path:
-    return ''
+  if not ies_file:
+    return emitter_dict
   if not ies_file.resolvedPath:
     raise ValueError(
         f'Could not resolve IES file {ies_file.path!r} of {prim.GetPath()}.'
     )
-  return ies_file.resolvedPath
-
-
-def maybe_wrap_ies(
-    prim: Usd.Prim,
-    time: Usd.TimeCode,
-    emitter_dict: dict[str, Any],
-    to_world: mi.ScalarTransform4f | None = None,
-) -> dict[str, Any]:
-  """Wraps an emitter in an `'ies'` emitter if `prim` has an IES profile.
-
-  Mirrors `MaybeWrapIesProps` in hdmitsuba/prim_translator.cc.
-
-  Args:
-    prim: The USD light or mesh prim to inspect.
-    time: The time code to evaluate attributes at.
-    emitter_dict: The `'area'` or `'point'` emitter dictionary to wrap.
-    to_world: The light frame of the `'ies'` emitter, for mesh lights, which
-      bake their transform into the vertices.
-
-  Returns:
-    The `'ies'` emitter dictionary wrapping `emitter_dict`, or `emitter_dict`
-    if `prim` has no IES profile.
-  """
-  ies_file_path = get_ies_file_path(prim, time)
-  if not ies_file_path:
-    return emitter_dict
-  util.ensure_plugin_registration()
-  shaping_api = UsdLux.ShapingAPI(prim)
-  angle_scale = shaping_api.GetShapingIesAngleScaleAttr().Get(time)
   return {
       'type': 'ies',
-      'filename': ies_file_path,
+      'filename': ies_file.resolvedPath,
       'nested_emitter': emitter_dict,
-      **({'to_world': to_world} if to_world is not None else {}),
-      **({'angle_scale': float(angle_scale)} if angle_scale else {}),
-      **(
-          {'normalize': True}
-          if shaping_api.GetShapingIesNormalizeAttr().Get(time)
-          else {}
-      ),
+      'to_world': to_world,
+      'angle_scale': shaping_api.GetShapingIesAngleScaleAttr().Get(time),
+      'normalize': shaping_api.GetShapingIesNormalizeAttr().Get(time),
   }
 
 
-def _check_ies_profile(
-    prim: Usd.Prim, time: Usd.TimeCode = Usd.TimeCode.Default()
-) -> None:
-  """Raises a ValueError if a non-positional light prim has an IES profile."""
-  if prim.HasAPI(UsdLux.ShapingAPI):
-    shaping_api = UsdLux.ShapingAPI(prim)
-    ies_file = shaping_api.GetShapingIesFileAttr().Get(time)
-    if ies_file and ies_file.path:
-      raise ValueError('IES files are only supported on positional lights.')
+def _area_emitter(
+    prim: Usd.Prim,
+    time: Usd.TimeCode,
+    radiance: mi.ScalarColor3f,
+    to_world: mi.ScalarTransform4f,
+) -> dict[str, Any]:
+  """Returns an `'area'` emitter, wrapped in `'ies'` if `prim` has a profile.
+
+  `to_world` is the transform of the emitting shape, whose +Z axis is the
+  photometric axis.
+  """
+  return _maybe_wrap_ies(
+      prim,
+      time,
+      {'type': 'area', 'radiance': {'type': 'rgb', 'value': radiance}},
+      util.remove_scale_from_transform(to_world),
+  )
 
 
 def _convert_dome_light(
@@ -117,7 +86,6 @@ def _convert_dome_light(
     intensity: float,
     time: Usd.TimeCode,
 ) -> dict[str, Any]:
-  _check_ies_profile(prim, time)
   dome_light = UsdLux.DomeLight(prim)
   texture_file_attr = dome_light.GetTextureFileAttr().Get(time)
   if texture_file_attr:
@@ -190,8 +158,7 @@ def _convert_sphere_light(
         'to_world': world_transform,
         'intensity': {'type': 'rgb', 'value': color},
     }
-    # IES profiles take precedence over cone shaping.
-    if prim.HasAPI(UsdLux.ShapingAPI) and not get_ies_file_path(prim, time):
+    if prim.HasAPI(UsdLux.ShapingAPI):
       shaping = UsdLux.ShapingAPI(prim)
       if cone_angle := shaping.GetShapingConeAngleAttr().Get(time):
         softness = shaping.GetShapingConeSoftnessAttr().Get(time)
@@ -200,24 +167,19 @@ def _convert_sphere_light(
             'beam_width': cone_angle * (1.0 - softness),
             'cutoff_angle': cone_angle,
         }
-    return maybe_wrap_ies(prim, time, emitter_dict)
+    return _maybe_wrap_ies(prim, time, emitter_dict, world_transform)
 
   world_radius = dr.norm(world_transform @ mi.ScalarVector3f(radius, 0, 0))
   # The rotation leaves the sphere unchanged but aligns its IES frame.
-  world_transform = world_transform.rotate([1, 0, 0], 180)
-  world_transform = util.remove_scale_from_transform(world_transform).scale(
-      world_radius
-  )
+  world_transform = util.remove_scale_from_transform(
+      world_transform.rotate([1, 0, 0], 180)
+  ).scale(world_radius)
   if normalize:
     color /= 4 * dr.pi * dr.square(world_radius)
   return {
       'type': 'sphere',
       'to_world': world_transform,
-      'emitter': maybe_wrap_ies(
-          prim,
-          time,
-          {'type': 'area', 'radiance': {'type': 'rgb', 'value': color}},
-      ),
+      'emitter': _area_emitter(prim, time, color, world_transform),
   }
 
 
@@ -228,7 +190,6 @@ def _convert_distant_light(
     intensity: float,
     time: Usd.TimeCode,
 ) -> dict[str, Any]:
-  _check_ies_profile(prim, time)
   distant_light = UsdLux.DistantLight(prim)
   angle = distant_light.GetAngleAttr().Get(time)
   return {
@@ -265,13 +226,8 @@ def _convert_rect_light(
   return {
       'type': 'rectangle',
       'to_world': world_transform,
-      'emitter': maybe_wrap_ies(
-          prim,
-          time,
-          {
-              'type': 'area',
-              'radiance': {'type': 'rgb', 'value': color * intensity},
-          },
+      'emitter': _area_emitter(
+          prim, time, color * intensity, world_transform
       ),
   }
 
@@ -296,15 +252,45 @@ def _convert_disk_light(
   return {
       'type': 'disk',
       'to_world': world_transform,
-      'emitter': maybe_wrap_ies(
-          prim,
-          time,
-          {
-              'type': 'area',
-              'radiance': {'type': 'rgb', 'value': color * intensity},
-          },
+      'emitter': _area_emitter(
+          prim, time, color * intensity, world_transform
       ),
   }
+
+
+def convert_mesh_light(
+    prim: Usd.Prim,
+    time: Usd.TimeCode,
+    world_transform: Gf.Matrix4d,
+) -> mi.Emitter | None:
+  """Returns the emitter of a `MeshLightAPI` mesh.
+
+  Args:
+    prim: The USD mesh prim.
+    time: The time code to evaluate attributes at.
+    world_transform: The world transform of `prim`.
+
+  Returns:
+    The `'area'` emitter, wrapped in an `'ies'` emitter if `prim` has an IES
+    profile, or None if `prim` has no `MeshLightAPI`.
+  """
+  if not prim.HasAPI(UsdLux.MeshLightAPI):
+    return None
+  light_api = UsdLux.LightAPI(prim)
+  intensity = light_api.GetIntensityAttr().Get(time)
+  color = light_api.GetColorAttr().Get(time)
+  exposure = light_api.GetExposureAttr().Get(time)
+  radiance = mi.ScalarColor3f(*color) * intensity * (2.0**exposure)
+  # Meshes bake their transform into the vertices, so the IES light frame
+  # (USD lights emit along -Z) must be given explicitly.
+  return mi.load_dict(
+      _area_emitter(
+          prim,
+          time,
+          radiance,
+          util.to_mitsuba_transform(world_transform).rotate([1, 0, 0], 180),
+      )
+  )
 
 
 _LIGHT_CONVERTERS = [
