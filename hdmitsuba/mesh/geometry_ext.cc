@@ -46,6 +46,7 @@
 #include <pxr/usd/usdSkel/skinningQuery.h>
 #include <pxr/usd/usdSkel/utils.h>
 
+#include "hdmitsuba/ies_emitter.h"
 #include "hdmitsuba/mesh/geometry_processor.h"
 #include "hdmitsuba/mesh/subdivision.h"
 #include "hdmitsuba/motion.h"
@@ -278,6 +279,7 @@ MeshExtractionData ExtractMeshData(UsdStagePtr stage, const SdfPath& path,
 }
 
 NB_MODULE(geometry_ext, m) {
+  PXR_NS::RegisterIesEmitter();
   m.doc() = "Python bindings for hdmitsuba geometry processing utilities.";
 
   nb::class_<PrimvarState>(m, "PrimvarState")

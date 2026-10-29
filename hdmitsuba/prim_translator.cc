@@ -84,6 +84,7 @@
 #include <pxr/usd/sdf/assetPath.h>
 #include <pxr/usd/sdf/path.h>
 
+#include "hdmitsuba/ies_emitter.h"
 #include "hdmitsuba/motion.h"
 #include "hdmitsuba/spec_types.h"
 #include "hdmitsuba/traversal.h"
@@ -667,6 +668,7 @@ mitsuba::Properties MaybeWrapIesProps(mitsuba::Properties nested_props,
   if (spec.ies.file_path.empty()) {
     return nested_props;
   }
+  RegisterIesEmitter();
   using Emitter = mitsuba::Emitter<Float, Spectrum>;
   mitsuba::Properties props("ies");
   props.set("filename", spec.ies.file_path);

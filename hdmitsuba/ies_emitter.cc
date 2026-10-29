@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "hdmitsuba/ies_emitter.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -40,6 +42,9 @@
 #include <mitsuba/render/fwd.h>
 #include <mitsuba/render/interaction.h>
 #include <mitsuba/render/records.h>
+#include <pxr/pxr.h>
+
+PXR_NAMESPACE_OPEN_SCOPE
 
 namespace {
 
@@ -508,14 +513,16 @@ class IesEmitter final : public Emitter<Float, Spectrum> {
 
 }  // namespace
 
-// Registers the `ies` emitter with Mitsuba's plugin manager whenever
-// libhdMitsuba is loaded, by USD as the Hydra render delegate, or by Python
-// through `hdmitsuba.geometry_ext`.
-const bool kIesEmitterRegistered = [] {
-  using namespace mitsuba;  // For `MI_REGISTER_PLUGIN`.
-  auto register_fn = [](auto... args) {
-    PluginManager::instance()->register_plugin(args..., nullptr, nullptr);
-  };
-  MI_REGISTER_PLUGIN(register_fn, "ies", IesEmitter)
-  return true;
-}();
+void RegisterIesEmitter() {
+  static const bool registered = [] {
+    using namespace mitsuba;  // For `MI_REGISTER_PLUGIN`.
+    auto register_fn = [](auto... args) {
+      PluginManager::instance()->register_plugin(args..., nullptr, nullptr);
+    };
+    MI_REGISTER_PLUGIN(register_fn, "ies", IesEmitter)
+    return true;
+  }();
+  (void)registered;
+}
+
+PXR_NAMESPACE_CLOSE_SCOPE
