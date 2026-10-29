@@ -901,16 +901,9 @@ class SceneModel final : public SceneManager {
     if (denoise.has_value() && *denoise != denoise_) {
       denoise_ = *denoise;
       denoise_dirty_ = true;
-      // Batch sensors without an explicit pixel filter switch to the box filter
-      // while denoising.
+      // Batch sensors switch to the box filter while denoising.
       if (!progressive_rendering_) {
-        for (auto& [_, camera_spec] : camera_specs_) {
-          if (camera_spec.sensor_type != "irradiancemeter" &&
-              camera_spec.pixel_filter_type.empty()) {
-            camera_spec.needs_rebuild = true;
-            has_pending_commits_ = true;
-          }
-        }
+        MarkSensorsForRebuild();
       }
     }
   }
@@ -1067,11 +1060,8 @@ class SceneModel final : public SceneManager {
             return;
           }
           if (spec->needs_rebuild) {
-            // Denoisers need the uncorrelated pixel noise of the box filter
-            // unless the camera explicitly authors a pixel filter.
-            const bool use_box_filter =
-                progressive_rendering_ ||
-                (denoise_ && spec->pixel_filter_type.empty());
+            // Denoisers require the uncorrelated pixel noise of the box filter.
+            const bool use_box_filter = progressive_rendering_ || denoise_;
             res = PrimTranslator::BuildSensor(*spec, use_box_filter);
           } else if (spec->dirty_bits != 0) {
             auto it = sensors_.find(spec->id);
@@ -1129,7 +1119,8 @@ class SceneModel final : public SceneManager {
     auto sens_it = shape_sensors_.find(shape_id);
     if (sens_it != shape_sensors_.end()) {
       pair.mesh_sensor = PrimTranslator::BuildSensor(
-          camera_specs_.at(sens_it->second), progressive_rendering_);
+          camera_specs_.at(sens_it->second),
+          progressive_rendering_ || denoise_);
       pair.sensor_ptr = pair.mesh_sensor.get();
     }
     return pair;

@@ -405,8 +405,8 @@ def test_denoise_render_settings(variant: str):
     )
     return engine.render()
 
-  # Enabling denoising switches batch cameras without an explicit pixel filter
-  # from Gaussian to box, while respecting an explicitly authored filter.
+  # Enabling denoising forces the box pixel filter in batch mode, even when
+  # the camera explicitly authors another filter.
   default_depth = render(denoise=False)["depth"]
   error_mark = Tf.Error.Mark()
   denoised_results = render(denoise=True)
@@ -417,9 +417,12 @@ def test_denoise_render_settings(variant: str):
   ).CreateAttribute(
       "mitsuba:sensor:film:pixel_filter:type", Sdf.ValueTypeNames.String
   )
-  pixel_filter_attr.Set("gaussian")
+  pixel_filter_attr.Set("tent")
+  assert not np.allclose(
+      render(denoise=False)["depth"], denoised_results["depth"]
+  )
   np.testing.assert_allclose(
-      render(denoise=True)["depth"], default_depth, atol=1e-5
+      render(denoise=True)["depth"], denoised_results["depth"], atol=1e-5
   )
   if any(
       "HDMITSUBA_ENABLE_OIDN" in error.commentary
