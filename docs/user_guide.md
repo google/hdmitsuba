@@ -11,7 +11,7 @@ This document provides an overview of the USD features supported by `hdMitsuba`,
 *   **Curves**: Linear and cubic curves (translated to Mitsuba curve shapes). USD supports additional curve types (e.g., Bezier) which Mitsuba itself currently does not support.
 *   **Implicit Surfaces**: Spheres and cylinders are rendered as exact native Mitsuba shapes (cylinders as a `cylinder` with two `disk` caps), including under non-uniform scaling, which is handled by wrapping them in a Mitsuba instance. Since Mitsuba has no tapered cylinder, a cylinder with differing `radiusTop` and `radiusBottom` is rendered with its bottom radius. Displacement is not supported on these shapes. Cubes, planes, cones, and capsules are tessellated. Set the environment variable `HDMITSUBA_TESSELLATE_IMPLICIT_SURFACES=1` to tessellate spheres and cylinders as well.
 *   **Instancing**: Full support for USD point instancers and instanced geometry references. Note that Mitsuba's instances cannot be light sources currently.
-*   **Displacement Mapping**: Fully supports displacement mapping. The delegate evaluates connected displacement textures from both standard USD displacement terminals and `mitsuba:displacement` terminals.
+*   **Displacement Mapping**: Fully supports displacement mapping. The delegate evaluates displacement textures connected to `mitsuba:displacement` or standard USD displacement terminals, either directly or through a `UsdPreviewSurface`'s `inputs:displacement`. Scalar displacement values are used as-is as offsets along the vertex normal (there is no implicit 0.5 mid-level); remap them with `UsdUVTexture` `inputs:scale` and `inputs:bias`.
 
 ### Shading & Materials
 *   **UsdPreviewSurface**: Various USD preview surface parameters are mapped to Mitsuba's `principled` BSDF:
@@ -22,7 +22,8 @@ This document provides an overview of the USD features supported by `hdMitsuba`,
     *   `clearcoat` & `clearcoatRoughness`
     *   `opacity` (Transmission)
     *   `ior` (Index of refraction)
-    *   `normal` (Normal mapping)
+    *   `normal` (Normal mapping; expects tangent-space normals in `[-1, 1]` as per the [UsdPreviewSurface spec](https://openusd.org/release/spec_usdpreviewsurface.html#preview-surface), i.e. 8-bit textures need `scale = (2, 2, 2, 1)` and `bias = (-1, -1, -1, 0)`)
+*   **UsdUVTexture**: `inputs:scale` and `inputs:bias` are applied (`texture * scale + bias`).
 *   **Native Mitsuba BSDFs & Textures**: We support embedding native Mitsuba BSDFs and textures as custom USD shader prims. This allows accessing all of Mitsuba's built-in BSDFs. Examples for this are provided in `test_assets/materials`. Note that USD natively allows specifying both a generic preview surface and a renderer-specific material. hdMitsuba will automatically use the shader that is connected to `outputs:mitsuba:surface`, if available. 
 *   **Fallback Shading (displayColor)**: If a mesh has no bound material, the delegate automatically maps the USD `displayColor` attribute to a fallback `diffuse` BSDF with its `reflectance` bound to the color.
 

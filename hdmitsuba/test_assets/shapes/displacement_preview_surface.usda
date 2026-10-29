@@ -68,7 +68,6 @@ def Xform "root"
         {
             token outputs:surface.connect = </root/_materials/Material/Principled_BSDF.outputs:surface>
             token outputs:displacement.connect = </root/_materials/Material/Principled_BSDF.outputs:displacement>
-            token outputs:mitsuba:displacement.connect = </root/_materials/Material/displacement_texture.outputs:r>
 
             def Shader "Principled_BSDF"
             {
@@ -88,6 +87,7 @@ def Xform "root"
             def Shader "displacement_texture"
             {
                 uniform token info:id = "UsdUVTexture"
+                float4 inputs:bias = (-0.5, -0.5, -0.5, 0)
                 asset inputs:file = @./textures/displacement.png@
                 float2 inputs:st.connect = </root/_materials/Material/uvmap.outputs:result>
                 token inputs:wrapS = "repeat"

@@ -107,7 +107,7 @@ def _add_texture_to_shader(
     input_name: str,
     output_channel: str,
     texture_path: str,
-) -> None:
+) -> UsdShade.Shader:
     """Creates and connects a texture sampler network to a given shader input.
 
     This helper function sets up a UsdPrimvarReader_float2 to read UV
@@ -121,6 +121,9 @@ def _add_texture_to_shader(
         output_channel: The output channel to use from the texture ('rgb', 'r',
           'g', 'b').
         texture_path: The file path to the texture asset.
+
+    Returns:
+        The UsdUVTexture shader.
     """
     material_path = shader.GetPath().GetParentPath()
     texture = UsdShade.Shader.Define(
@@ -136,6 +139,7 @@ def _add_texture_to_shader(
     shader.CreateInput(input_name, output_type).ConnectToSource(
         texture.ConnectableAPI(), output_channel
     )
+    return texture
 
 
 def _resolve_node_type(node: Any, node_dict: dict[str, Any]) -> Any:
@@ -320,8 +324,16 @@ def _parse_mi_node_to_usd_preview(
             raise ValueError(
                 f'Unsupported {plugin_name} texture type at {base_path}')
         if plugin_name == 'normalmap':
-            _add_texture_to_shader(
+            texture = _add_texture_to_shader(
                 usd_shader, 'normal', 'rgb', normal_tex_node.props['filename']
+            )
+            # UsdPreviewSurface expects `[-1, 1]` normals, whereas Mitsuba's
+            # normal map textures are `[0, 1]`-encoded.
+            texture.CreateInput('scale', Sdf.ValueTypeNames.Float4).Set(
+                Gf.Vec4f(2, 2, 2, 1)
+            )
+            texture.CreateInput('bias', Sdf.ValueTypeNames.Float4).Set(
+                Gf.Vec4f(-1, -1, -1, 0)
             )
         else:
             pass  # Bumpmap texture is not supported in preview surface.
