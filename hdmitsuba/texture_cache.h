@@ -42,6 +42,7 @@ struct TextureKey {
   // Row-major 3x3 UV transform in Mitsuba's (column-vector) convention, i.e.
   // exactly what the bitmap plugin's `to_uv` parameter consumes.
   using UvMatrix = std::array<float, 9>;
+  using Rgb = std::array<float, 3>;
   static constexpr UvMatrix kIdentityUv = {1, 0, 0, 0, 1, 0, 0, 0, 1};
 
   std::string filename;
@@ -55,12 +56,15 @@ struct TextureKey {
   // Extracted channel index for UsdUVTexture single-channel outputs
   // (-1 for full image, 0 = R, 1 = G, 2 = B, 3 = A).
   int channel = -1;
+  // Per-channel `(scale, bias)` applied as `texture * scale + bias`, if
+  // authored on a UsdUVTexture.
+  std::optional<std::pair<Rgb, Rgb>> scale_bias;
 
  private:
   // Single source of truth for equality and hashing. Add new fields here.
   auto Fields() const {
     return std::tie(filename, raw, wrap_mode, filter_type, max_anisotropy,
-                    format, accel, to_uv, channel);
+                    format, accel, to_uv, channel, scale_bias);
   }
 
  public:

@@ -44,7 +44,7 @@ PXR_NAMESPACE_OPEN_SCOPE
 // Evaluates a material's displacement texture at each unique vertex of a face
 // subset and offsets `primvars[HdTokens->points]` in place. Scalar
 // displacement offsets the points along the interpolated vertex normal:
-//   p' = p + (texture.eval_1(si) - displacement.bias) * n
+//   p' = p + texture.eval_1(si) * n
 // Vector displacement (`displacement.is_vector`) offsets the points by the 3D
 // vector `texture.eval_3(si)` expressed in the vertex tangent frame computed
 // by `mitsuba::Mesh::tangents()`.
@@ -181,7 +181,6 @@ void ApplyDisplacement(const SdfPath& mesh_id,
   // 2) Evaluate the displacement offsets and add them to the target vertices.
   using mitsuba::detail::deinterleave;
   using mitsuba::detail::interleaved;
-  const float bias = displacement.bias;
   FloatBuffer offsets = interleaved<3, FloatBuffer>(
       n_vertices, [&](const auto& i) -> Vector3f {
         Vector2f uv(deinterleave<2>(uv_buf, i));
@@ -201,7 +200,7 @@ void ApplyDisplacement(const SdfPath& mesh_id,
               Vector3f(displacement_texture->eval_3(si)));
         }
         si.sh_frame = mitsuba::Frame<Float>(n);
-        return (displacement_texture->eval_1(si) - bias) * n;
+        return displacement_texture->eval_1(si) * n;
       });
 
   const FloatBuffer& host_offset = dr::migrate(offsets, JitBackend::None);

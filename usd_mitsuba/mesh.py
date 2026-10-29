@@ -46,7 +46,7 @@ def _apply_displacement(
   uv = np.array(uv_state.value)
   si = dr.zeros(mi.SurfaceInteraction3f)
   si.uv = mi.Point2f(uv[:, 0], 1.0 - uv[:, 1])
-  offset = np.array(displacement.eval_1(si))[..., None] - 0.5
+  offset = np.array(displacement.eval_1(si))[..., None]
   points = np.array(sub.primvars['points'].value)
   points += offset * np.array(sub.primvars['normals'].value)
   sub.primvars['points'].value = Vt.Vec3fArray.FromNumpy(

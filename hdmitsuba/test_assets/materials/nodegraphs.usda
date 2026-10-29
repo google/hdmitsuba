@@ -88,7 +88,9 @@ def Xform "root"
                 def Shader "Texture"
                 {
                     uniform token info:id = "UsdUVTexture"
+                    float4 inputs:bias = (0.05, 0, -0.05, 0)
                     asset inputs:file = @textures/albedo.png@
+                    float4 inputs:scale = (0.8, 1, 1.2, 1)
                     float3 outputs:rgb
                 }
             }

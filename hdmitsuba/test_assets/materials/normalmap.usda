@@ -30,7 +30,9 @@ def Xform "root"
             def Shader "normalmap_texture"
             {
                 uniform token info:id = "UsdUVTexture"
+                float4 inputs:bias = (-1, -1, -1, 0)
                 asset inputs:file = @./textures/normalmap.png@
+                float4 inputs:scale = (2, 2, 2, 1)
                 token inputs:sourceColorSpace = "raw"
                 float2 inputs:st.connect = </root/materials/ground/uvmap.outputs:result>
                 token inputs:wrapS = "repeat"

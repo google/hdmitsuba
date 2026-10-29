@@ -61,9 +61,6 @@ void DiscoverTextures(
 // Displacement texture of a material.
 struct MaterialDisplacement {
   mitsuba::ref<mitsuba::Object> texture = nullptr;
-  // Scalar bias subtracted from 1D displacement values before scaling by the
-  // surface normal (0.5 for [0, 1]-centered maps, 0.0 for signed displacement).
-  float bias = 0.5f;
   // Whether evaluating `texture` requires UV coordinates ("st") on the mesh.
   bool requires_uv = true;
   // Whether `texture` returns a 3D vector displacement in
@@ -71,8 +68,8 @@ struct MaterialDisplacement {
   bool is_vector = false;
 
   bool operator==(const MaterialDisplacement& other) const {
-    return texture == other.texture && bias == other.bias &&
-           requires_uv == other.requires_uv && is_vector == other.is_vector;
+    return texture == other.texture && requires_uv == other.requires_uv &&
+           is_vector == other.is_vector;
   }
   bool operator!=(const MaterialDisplacement& other) const {
     return !(*this == other);
