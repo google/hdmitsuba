@@ -13,9 +13,10 @@
 // limitations under the License.
 
 #include "hdmitsuba/curves.h"
-#include "hdmitsuba/debug_codes.h"
 
 #include <pxr/base/gf/matrix4d.h>
+#include <pxr/base/gf/matrix4f.h>
+#include <pxr/base/gf/vec4f.h>
 #include <pxr/base/tf/diagnostic.h>
 #include <pxr/base/tf/token.h>
 #include <pxr/base/vt/types.h>
@@ -37,6 +38,11 @@
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
 
+#include <algorithm>
+#include <cstddef>
+#include <vector>
+
+#include "hdmitsuba/debug_codes.h"
 #include "hdmitsuba/render_param.h"
 #include "hdmitsuba/scene_manager.h"
 #include "hdmitsuba/spec_types.h"
@@ -70,6 +76,47 @@ std::vector<float> PackControlPoints(const VtVec3fArray& points,
   return control_points;
 }
 
+// Converts Catmull-Rom strands into disjoint 4-point B-spline segments via
+// M_bspline^-1 * M_catmullRom. With `wrap = pinned`, reflects phantom
+// endpoint positions (2*P_0 - P_1, 2*P_{N-1} - P_{N-2}) while clamping
+// endpoint radii so tapered tips do not extrapolate to negative radii.
+std::vector<float> ConvertCatmullRomToBSpline(
+    bool pinned, const VtIntArray& vertex_counts,
+    const std::vector<float>& control_points) {
+  static const GfMatrix4f kCatmullRomToBSpline(
+      7.0f / 6.0f, -4.0f / 6.0f, 5.0f / 6.0f, -2.0f / 6.0f, -2.0f / 6.0f,
+      11.0f / 6.0f, -4.0f / 6.0f, 1.0f / 6.0f, 1.0f / 6.0f, -4.0f / 6.0f,
+      11.0f / 6.0f, -2.0f / 6.0f, -2.0f / 6.0f, 5.0f / 6.0f, -4.0f / 6.0f,
+      7.0f / 6.0f);
+  int first = pinned ? -1 : 0;
+  size_t num_segments = 0;
+  for (int count : vertex_counts) {
+    num_segments += std::max(0, count - 3 - 2 * first);
+  }
+  std::vector<float> bspline_points(num_segments * 16);
+  float* out = bspline_points.data();
+  int offset = 0;
+  for (int count : vertex_counts) {
+    for (int start = first; start + 3 <= count - 1 - first; ++start) {
+      GfMatrix4f window;
+      for (int k = 0; k < 4; ++k) {
+        int local = start + k;
+        int clamped = std::clamp(local, 0, count - 1);
+        // For in-range indices, clamped == local, so 2*anchor - neighbor ==
+        // anchor.
+        GfVec4f anchor(&control_points[4 * (offset + clamped)]);
+        GfVec4f neighbor(&control_points[4 * (offset + 2 * clamped - local)]);
+        GfVec4f row = 2.0f * anchor - neighbor;
+        row[3] = anchor[3];
+        window.SetRow(k, row);
+      }
+      out = std::copy_n((kCatmullRomToBSpline * window).data(), 16, out);
+    }
+    offset += count;
+  }
+  return bspline_points;
+}
+
 }  // namespace
 
 HdMitsubaCurves::HdMitsubaCurves(const SdfPath& id) : HdBasisCurves(id) {}
@@ -100,6 +147,9 @@ void HdMitsubaCurves::Sync(HdSceneDelegate* sceneDelegate,
   static const HdDataSourceLocator type_locator(
       TfToken("basisCurves"), TfToken("topology"),
       HdBasisCurvesTopologySchemaTokens->type);
+  static const HdDataSourceLocator wrap_locator(
+      TfToken("basisCurves"), TfToken("topology"),
+      HdBasisCurvesTopologySchemaTokens->wrap);
   static const HdDataSourceLocator vertex_counts_locator(
       TfToken("basisCurves"), TfToken("topology"),
       HdBasisCurvesTopologySchemaTokens->curveVertexCounts);
@@ -145,7 +195,10 @@ void HdMitsubaCurves::Sync(HdSceneDelegate* sceneDelegate,
   std::string plugin_name = "linearcurve";
   TfToken basis = GetParam<TfToken>(data_source, basis_locator);
   TfToken type = GetParam<TfToken>(data_source, type_locator);
-  if (basis == HdTokens->bspline && type == HdTokens->cubic) {
+  const bool is_catmull_rom =
+      basis == HdTokens->catmullRom && type == HdTokens->cubic;
+  if ((basis == HdTokens->bspline && type == HdTokens->cubic) ||
+      is_catmull_rom) {
     plugin_name = "bsplinecurve";
   }
   const VtIntArray vertex_counts =
@@ -155,6 +208,22 @@ void HdMitsubaCurves::Sync(HdSceneDelegate* sceneDelegate,
     TF_DEBUG(HDMITSUBA_LIFECYCLE)
         .Msg("Curves %s has no points or widths. Removing from scene.\n",
              id.GetText());
+    RemoveFromScene(scene_manager);
+    *dirtyBits = HdChangeTracker::Clean;
+    return;
+  }
+
+  int min_count = 0;
+  ptrdiff_t total_vertices = 0;
+  for (int count : vertex_counts) {
+    min_count = std::min(min_count, count);
+    total_vertices += count;
+  }
+  if (min_count < 0 || static_cast<size_t>(total_vertices) != points_.size()) {
+    TF_WARN(
+        "Curves %s: curveVertexCounts sum to %td (min %d) but there are %zu "
+        "points. Fix the curve topology in the USD asset. Removing from scene.",
+        id.GetText(), total_vertices, min_count, points_.size());
     RemoveFromScene(scene_manager);
     *dirtyBits = HdChangeTracker::Clean;
     return;
@@ -185,21 +254,29 @@ void HdMitsubaCurves::Sync(HdSceneDelegate* sceneDelegate,
         points_, [&](size_t /*i*/) { return uniform_radius; });
   }
 
+  if (is_catmull_rom) {
+    spec.control_points = ConvertCatmullRomToBSpline(
+        GetParam<TfToken>(data_source, wrap_locator) == HdTokens->pinned,
+        vertex_counts, spec.control_points);
+  }
+
   // Generate segment indices
   int degree = (spec.plugin_name == "bsplinecurve") ? 3 : 1;
-  int n_indices = 0;
-  for (int count : vertex_counts) {
-    n_indices += std::max(0, count - degree);
-  }
-  spec.segment_indices.resize(n_indices);
-  int index = 0;
   int accumulated_vertices = 0;
-  for (int count : vertex_counts) {
-    int num_segments = count - degree;
-    for (int j = 0; j < num_segments; ++j, ++index) {
-      spec.segment_indices[index] = accumulated_vertices + j;
+  for (int count : is_catmull_rom
+                       ? VtIntArray(spec.control_points.size() / 16, 4)
+                       : vertex_counts) {
+    for (int j = 0; j < count - degree; ++j) {
+      spec.segment_indices.push_back(accumulated_vertices + j);
     }
     accumulated_vertices += count;
+  }
+  if (spec.segment_indices.empty()) {
+    TF_WARN("Curves %s has no valid segments. Removing from scene.",
+            id.GetText());
+    RemoveFromScene(scene_manager);
+    *dirtyBits = HdChangeTracker::Clean;
+    return;
   }
   scene_manager->SyncCurves(std::move(spec));
   in_scene_ = true;
