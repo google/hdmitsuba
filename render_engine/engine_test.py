@@ -93,7 +93,7 @@ def test_render_different_cameras(delegate_id: str):
   assert images is not None
   assert 'color' in images
   color_image = images['color']
-  assert color_image.shape == (73, 100, 4)
+  assert color_image.shape == (73, 100, 3)
 
   # Modify camera position and render again.
   xformable = UsdGeom.Xformable.Get(stage, '/World/camera')
@@ -102,7 +102,7 @@ def test_render_different_cameras(delegate_id: str):
   assert images_mod is not None
   assert 'color' in images_mod
   color_image_modified = images_mod['color']
-  assert color_image_modified.shape == (73, 100, 4)
+  assert color_image_modified.shape == (73, 100, 3)
 
   assert np.mean(np.abs(color_image_modified - color_image)) > 0.1
 
@@ -133,7 +133,7 @@ def test_change_width(force_rebuild: bool, delegate_id: str):
   assert engine is not None
   images = engine.render()
   assert images is not None
-  assert images['color'].shape == (73, 100, 4)
+  assert images['color'].shape == (73, 100, 3)
 
   render_settings_path = _RENDER_SETTINGS_PATH if force_rebuild else None
   _skip_missing_delegate(delegate_id)
@@ -144,7 +144,7 @@ def test_change_width(force_rebuild: bool, delegate_id: str):
   )
   images = engine.render()
   assert images is not None
-  assert images['color'].shape == (36, 50, 4)
+  assert images['color'].shape == (36, 50, 3)
 
 
 @pytest.mark.parametrize("delegate_id", _DELEGATES)
@@ -162,7 +162,7 @@ def test_render_resolution_updates_on_camera_aspect_ratio_change(delegate_id: st
       camera_path='/World/camera',
   )
   images = engine.render()
-  assert images['color'].shape == (200, 300, 4)
+  assert images['color'].shape == (200, 300, 3)
 
   # Change camera aspect ratio to 1.0
   camera.GetVerticalApertureAttr().Set(36.0)
@@ -174,7 +174,7 @@ def test_render_resolution_updates_on_camera_aspect_ratio_change(delegate_id: st
       width=300,
       camera_path='/World/camera',
   )
-  assert engine.render()['color'].shape == (300, 300, 4)
+  assert engine.render()['color'].shape == (300, 300, 3)
 
 
 def test_invalid_camera_throws():

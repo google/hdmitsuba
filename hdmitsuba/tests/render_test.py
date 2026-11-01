@@ -143,3 +143,32 @@ def test_progressive_vs_non_progressive_convergence():
   images_prog = engine_prog.render()
   img_prog = images_prog['color']
   np.testing.assert_allclose(img_single, img_prog, atol=1e-6, rtol=1e-6)
+
+
+def test_alpha_channel():
+  stage = Usd.Stage.CreateInMemory()
+  UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+  UsdGeom.Sphere.Define(stage, '/sphere')
+  camera = UsdGeom.Camera.Define(stage, '/camera')
+  camera.AddTranslateOp().Set((0, 0, 5))
+  light = UsdLux.DistantLight.Define(stage, '/light')
+  light.CreateIntensityAttr(1.0)
+  test_helpers.create_render_settings(
+      stage, resolution=(32, 32), spp=4, color_data_type='color4f'
+  )
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin', camera_path='/camera'
+  )
+  image = engine.render()['color']
+  assert image.shape[2] == 4
+  np.testing.assert_allclose(image[16, 16, 3], 1.0, atol=1e-6)
+  np.testing.assert_allclose(image[0, 0], [0.0, 0.0, 0.0, 0.0], atol=1e-6)
+
+  # Requesting a 3-channel buffer switches the film back to RGB.
+  UsdRender.Var.Get(stage, '/Render/Vars/color').GetDataTypeAttr().Set(
+      'color3f'
+  )
+  rgb_image = engine.render()['color']
+  np.testing.assert_allclose(rgb_image, image[..., :3], atol=1e-6)

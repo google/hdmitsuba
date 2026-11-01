@@ -19,9 +19,9 @@
 
 #include <absl/base/no_destructor.h>
 #include <absl/container/flat_hash_map.h>
+#include <absl/strings/match.h>
 #include <pxr/base/gf/vec2f.h>
 #include <pxr/base/gf/vec3f.h>
-#include <pxr/base/gf/vec4f.h>
 #include <pxr/base/tf/diagnostic.h>
 #include <pxr/base/tf/staticTokens.h>
 #include <pxr/base/tf/token.h>
@@ -280,6 +280,12 @@ void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* /*tracker*/) {
   for (const auto& desc : setting_descriptors_) {
     namespaced_settings[desc.key.GetString()] = GetRenderSetting(desc.key);
   }
+  for (const auto& [key, val] : _settingsMap) {
+    if (absl::StartsWith(key.GetString(), "mitsuba:integrator:") &&
+        !val.IsEmpty()) {
+      namespaced_settings[key.GetString()] = val;
+    }
+  }
 
   scene_impl_->UpdateNamespacedSettings(namespaced_settings);
   last_settings_version_ = settings_version;
@@ -320,11 +326,9 @@ const MitsubaAovSpec* FindMitsubaAovSpec(const TfToken& name) {
       absl::flat_hash_map<TfToken, MitsubaAovSpec, TfToken::HashFunctor>>
       kAovSpecs({
           {HdAovTokens->color,
-           {"", 4, HdFormatFloat32Vec4,
-            VtValue(GfVec4f(0.0f, 0.0f, 0.0f, 1.0f))}},
+           {"", 3, HdFormatFloat32Vec3, VtValue(GfVec3f(0.0f))}},
           {TfToken("raw"),
-           {"", 4, HdFormatFloat32Vec4,
-            VtValue(GfVec4f(0.0f, 0.0f, 0.0f, 1.0f))}},
+           {"", 3, HdFormatFloat32Vec3, VtValue(GfVec3f(0.0f))}},
           {HdAovTokens->depth,
            {"depth:depth", 1, HdFormatFloat32, VtValue(1.0f)}},
           {HdAovTokens->primId,

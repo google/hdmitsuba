@@ -20,6 +20,7 @@ import mitsuba as mi
 import numpy as np
 import pytest
 
+from pxr import Gf
 from pxr import Sdf
 from pxr import Tf
 from pxr import Usd
@@ -391,6 +392,10 @@ def test_denoise_render_settings(variant: str):
       f"{test_helpers.TEST_ASSETS_PATH}/render_settings/aovs.usda"
   )
   stage.SetEditTarget(stage.GetSessionLayer())
+  # Request alpha to cover the RGBA denoising path.
+  UsdRender.Var.Get(stage, "/root/Render/Vars/color").GetDataTypeAttr().Set(
+      "color4f"
+  )
   engine = usd_render.RenderEngine(stage)
 
   def render(denoise: bool, width: int | None = None):
@@ -469,3 +474,59 @@ def test_denoise_render_settings(variant: str):
   np.testing.assert_allclose(
       unguided_results["normal"], noisy_results["normal"], atol=1e-5
   )
+
+
+def test_integrator_parameters():
+  def _register_flat_color(*_):
+    if not mi.variant():
+      return
+
+    class _FlatColorIntegrator(mi.SamplingIntegrator):
+
+      def __init__(self, props: mi.Properties):
+        super().__init__(props)
+        self._tint = tuple(props.get("tint", (0.1, 0.2, 0.3)))
+
+      def sample(self, scene, sampler, ray, medium=None, active=True):
+        del scene, sampler, ray, medium, active
+        return mi.Color3f(*self._tint), True
+
+    mi.register_integrator("_test_flat_color", _FlatColorIntegrator)
+
+  mi.detail.add_variant_callback(_register_flat_color)
+  try:
+    _register_flat_color()
+
+    stage = Usd.Stage.Open(f"{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda")
+    render_settings = test_helpers.create_render_settings(
+        stage, resolution=(16, 16), spp=1
+    )
+    settings_prim = render_settings.GetPrim()
+    settings_prim.CreateAttribute(
+        "mitsuba:integrator:type", Sdf.ValueTypeNames.String
+    ).Set("_test_flat_color")
+    tint_attr = settings_prim.CreateAttribute(
+        "mitsuba:integrator:tint", Sdf.ValueTypeNames.Color3f
+    )
+    tint_attr.Set(Gf.Vec3f(0.25, 0.5, 0.75))
+
+    engine = usd_render.RenderEngine(stage)
+    engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+    np.testing.assert_allclose(
+        engine.render()["color"][0, 0, :3], [0.25, 0.5, 0.75], atol=1e-5
+    )
+
+    # Dynamic update and attribute removal without rebuilding the delegate.
+    tint_attr.Set(Gf.Vec3f(0.8, 0.4, 0.2))
+    engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+    np.testing.assert_allclose(
+        engine.render()["color"][0, 0, :3], [0.8, 0.4, 0.2], atol=1e-5
+    )
+
+    settings_prim.RemoveProperty("mitsuba:integrator:tint")
+    engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+    np.testing.assert_allclose(
+        engine.render()["color"][0, 0, :3], [0.1, 0.2, 0.3], atol=1e-5
+    )
+  finally:
+    mi.detail.remove_variant_callback(_register_flat_color)

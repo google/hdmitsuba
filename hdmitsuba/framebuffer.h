@@ -47,8 +47,10 @@ void CopyFromHostToRenderBuffer(
     return;
   }
   int dst_channels = HdGetComponentCount(render_buffer->GetFormat());
+  // RGB <-> RGBA conversions pad alpha with 1 or drop it, respectively.
   if (!TF_VERIFY(
-          dst_channels == channels || (dst_channels == 4 && channels == 3),
+          dst_channels == channels || (dst_channels == 4 && channels == 3) ||
+              (dst_channels == 3 && channels == 4),
           "Destination and source channel counts do not match (%d vs %d)",
           dst_channels, channels)) {
     return;

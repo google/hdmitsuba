@@ -23,6 +23,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -34,6 +35,7 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/string_view.h>
+#include <absl/strings/strip.h>
 #include <absl/synchronization/mutex.h>
 #include <drjit-core/jit.h>
 #include <drjit/array_router.h>
@@ -48,12 +50,15 @@
 #include <mitsuba/core/plugin.h>
 #include <mitsuba/core/properties.h>
 #include <mitsuba/core/random.h>
+#include <mitsuba/core/rfilter.h>
 #include <mitsuba/core/thread.h>
 #include <mitsuba/core/util.h>
+#include <mitsuba/render/film.h>
 #include <mitsuba/render/fwd.h>
 #include <mitsuba/render/integrator.h>
 #include <mitsuba/render/mesh.h>
 #include <mitsuba/render/scene.h>
+#include <mitsuba/render/sensor.h>
 #include <nanothread/nanothread.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/tf/diagnostic.h>
@@ -283,8 +288,8 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
 template <typename Float, typename Spectrum>
 class SceneModel final : public SceneManager {
  public:
-  MI_IMPORT_TYPES(BSDF, Emitter, Film, Integrator, Mesh, Scene, Sensor, Shape,
-                  Texture);
+  MI_IMPORT_TYPES(BSDF, Emitter, Film, Integrator, Mesh, ReconstructionFilter,
+                  Scene, Sensor, Shape, Texture);
   using PrimTranslator = PrimTranslator<Float, Spectrum>;
 
   struct CommittedMesh {
@@ -615,8 +620,25 @@ class SceneModel final : public SceneManager {
     }
 
     Film* film = sensor->film();
-    auto film_size = film->size();
     bool film_changed = false;
+    // Only output alpha if a 4-channel color buffer requests it, since the
+    // extra film channel can make accumulation significantly more expensive.
+    if constexpr (!mitsuba::is_monochromatic_v<Spectrum>) {
+      const bool want_alpha =
+          pass_state.color_buffer &&
+          HdGetComponentCount(pass_state.color_buffer->GetFormat()) == 4;
+      if (want_alpha != (film->base_channels().size() == 4)) {
+        Properties film_props("hdrfilm");
+        film_props.set("pixel_format", want_alpha ? "rgba" : "rgb");
+        film_props.set("rfilter", static_cast<Object*>(const_cast<
+                                      ReconstructionFilter*>(film->rfilter())));
+        sensor->set_film(
+            PluginManager::instance()->create_object<Film>(film_props).get());
+        film = sensor->film();
+        film_changed = true;
+      }
+    }
+    auto film_size = film->size();
     // If necessary, resize film to match USD buffer size.
     if (film_size.x() != buffer_width || film_size.y() != buffer_height) {
       film->set_size(ScalarPoint2u(buffer_width, buffer_height));
@@ -643,12 +665,12 @@ class SceneModel final : public SceneManager {
 
     if (!integrator_) {
       TF_DEBUG(HDMITSUBA_LIFECYCLE)
-          .Msg("Creating integrator, type: %s, max_depth: %d, rr_depth: %d\n",
-               integrator_type_.c_str(), integrator_max_depth_.value_or(-1),
-               integrator_rr_depth_.value_or(-1));
+          .Msg("Creating integrator, type: %s (%zu properties)\n",
+               integrator_type_.c_str(), integrator_settings_.size());
       Properties props(integrator_type_);
-      if (integrator_max_depth_) props.set("max_depth", *integrator_max_depth_);
-      if (integrator_rr_depth_) props.set("rr_depth", *integrator_rr_depth_);
+      for (const auto& [param, val] : integrator_settings_) {
+        SetMitsubaPropertyFromValue(props, param, val);
+      }
       try {
         integrator_ =
             PluginManager::instance()->create_object<Integrator>(props);
@@ -837,16 +859,18 @@ class SceneModel final : public SceneManager {
     std::string integrator_type =
         GetSetting<std::string>(namespaced_settings, "mitsuba:integrator:type")
             .value_or(integrator_type_);
-    auto max_depth =
-        GetSetting<int>(namespaced_settings, "mitsuba:integrator:max_depth");
-    auto rr_depth =
-        GetSetting<int>(namespaced_settings, "mitsuba:integrator:rr_depth");
+    VtDictionary integrator_settings;
+    for (const auto& [key, val] : namespaced_settings) {
+      std::string_view param = key;
+      if (absl::ConsumePrefix(&param, "mitsuba:integrator:") &&
+          !param.empty() && param != "type" && !val.IsEmpty()) {
+        integrator_settings[std::string(param)] = val;
+      }
+    }
     if (integrator_type != integrator_type_ ||
-        max_depth != integrator_max_depth_ ||
-        rr_depth != integrator_rr_depth_) {
+        integrator_settings != integrator_settings_) {
       integrator_type_ = std::move(integrator_type);
-      integrator_max_depth_ = max_depth;
-      integrator_rr_depth_ = rr_depth;
+      integrator_settings_ = std::move(integrator_settings);
       integrator_ = nullptr;
       for (auto& [_, pass_state] : pass_aov_states_) {
         pass_state.aov_integrator = nullptr;
@@ -1685,8 +1709,7 @@ class SceneModel final : public SceneManager {
   ref<Scene> scene_;
   ref<Integrator> integrator_ = nullptr;
   std::string integrator_type_ = "path";
-  std::optional<int> integrator_max_depth_;
-  std::optional<int> integrator_rr_depth_;
+  VtDictionary integrator_settings_;
   absl::flat_hash_map<const HdRenderPass*, RenderPassState> pass_aov_states_;
   size_t sample_count_ = kDefaultSampleCount;
   uint32_t seed_ = 0;

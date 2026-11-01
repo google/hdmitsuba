@@ -36,6 +36,8 @@ This document provides an overview of the USD features supported by `hdMitsuba`,
 *   **Motion Blur**: Transformation motion blur is supported for cameras, non-area lights (point, spot, distant, and dome lights), and geometry (meshes, implicit surfaces, and point instancers, wrapped in Mitsuba instances when their transform is animated) via standard USD time-sampled transforms and camera `shutter:open` / `shutter:close` attributes. The maximum number of transform samples over the shutter interval can be overridden by authoring the `primvars:mitsuba:motion_samples` (int, default `32`) primvar on a prim or any of its ancestors. Area lights, emissive meshes, meshes with an attached surface sensor, and deformation motion blur are not supported; these render with their static transform at frame time.
 
 ### Hydra AOVs (Arbitrary Output Variables)
+The `color` AOV is RGB (3 channels, `Float32Vec3`) by default. To also render an alpha channel, request a 4-channel buffer, e.g., by setting the `dataType` of the color `RenderVar` to `color4f` (or `float4`). Alpha then holds pixel coverage (`0` where no geometry is visible). Alpha is only rendered when requested, since the extra film channel makes film accumulation noticeably slower.
+
 When requested by the Hydra host, `hdMitsuba` automatically routes and maps standard AOVs to Mitsuba's AOV integrator. It supports the following standard USD AOVs:
 *   `depth` $\rightarrow$ `depth:depth` (1 channel)
 *   `normal` $\rightarrow$ `sh_normal:sh_normal` (3 channels)
@@ -54,8 +56,7 @@ You can configure the render delegate by authoring a `RenderSettings` prim insid
 *   **`mitsuba:seed`**: The random number generator seed offset (int, default `0`) passed to the Mitsuba integrator. Changing `mitsuba:seed` resets progressive accumulation.
 *   **`mitsuba:interactive_samples_per_pass`**: Number of samples per pixel rendered in each Hydra pass while `enableInteractive` is `true` (default `1`). Larger values reduce per-pass overhead (and, with kernel freezing enabled, are replayed as a single frozen kernel) at the cost of coarser progressive updates. Changing `mitsuba:interactive_samples_per_pass` or `mitsuba:sample_count` resets progressive accumulation.
 *   **`mitsuba:integrator:type`**: The Mitsuba integrator to use (e.g., `path`, `aov`, `direct`).
-*   **`mitsuba:integrator:max_depth`**: Maximum path depth for path-tracing integrators (int). If unset, the Mitsuba integrator's default is used.
-*   **`mitsuba:integrator:rr_depth`**: Minimum path depth after which Russian roulette path termination begins (int). If unset, the Mitsuba integrator's default is used.
+*   **`mitsuba:integrator:<param>`**: Any other setting in the `mitsuba:integrator:` namespace is forwarded as the property `<param>` to the Mitsuba integrator (e.g., `mitsuba:integrator:max_depth` or `mitsuba:integrator:rr_depth` for path-tracing integrators). Unset properties use the Mitsuba integrator's defaults, and properties not supported by the integrator are ignored with a warning. Changing these settings recreates the integrator and resets progressive accumulation.
 *   **`mitsuba:use_kernel_freezing`**: Enables Dr.Jit's kernel freezing. When enabled, the JIT compilation is frozen after the first frame, drastically reducing JIT tracing overhead for subsequent frames (extremely beneficial for interactive camera navigation in viewports). This is currently disabled by default, as it is still in a somewhat experimental state in its Hydra integration, and also will not work in all Mitsuba 3 scenes.
 *   **`mitsuba:denoise`**: Denoises the rendered `color` image (bool, default
     `false`) using NVIDIA OptiX on CUDA variants (`cuda_*`) or Intel

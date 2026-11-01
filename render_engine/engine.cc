@@ -28,8 +28,10 @@
 #include <absl/container/flat_hash_map.h>
 #include <pxr/base/gf/camera.h>
 #include <pxr/base/gf/vec2i.h>
+#include <pxr/base/gf/vec3f.h>
 #include <pxr/base/gf/vec3i.h>
 #include <pxr/base/gf/vec4d.h>
+#include <pxr/base/gf/vec4f.h>
 #include <pxr/base/tf/diagnostic.h>
 #include <pxr/base/tf/pyLock.h>
 #include <pxr/base/tf/staticTokens.h>
@@ -72,7 +74,8 @@ PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace hdmitsuba {
 
-TF_DEFINE_PRIVATE_TOKENS(HdRenderEngineDataTypeTokens, (color4f));
+TF_DEFINE_PRIVATE_TOKENS(HdRenderEngineDataTypeTokens,
+                         (color3f)(color4f)(float3)(float4));
 TF_DEFINE_PRIVATE_TOKENS(HdRenderEngineTokens, (renderBufferDescriptor));
 
 class EngineSceneDelegate final : public HdSceneDelegate {
@@ -153,6 +156,20 @@ std::vector<RenderEngine::AovInfo> GetAovInfos(
     std::string name = TfGetBaseName(var.renderVarPath.GetString());
     if (name.empty()) {
       throw std::invalid_argument("Invalid AOV:RenderVar Basename empty.");
+    }
+    // Honor the RenderVar's request for 3 vs. 4 channels (e.g., "color3f" vs.
+    // "color4f") when the delegate's default is a float RGB(A) format.
+    if (descriptor.format == HdFormatFloat32Vec3 ||
+        descriptor.format == HdFormatFloat32Vec4) {
+      const auto& tokens = HdRenderEngineDataTypeTokens;
+      if (var.dataType == tokens->color3f || var.dataType == tokens->float3) {
+        descriptor.format = HdFormatFloat32Vec3;
+        descriptor.clearValue = VtValue(GfVec3f(0.0f));
+      } else if (var.dataType == tokens->color4f ||
+                 var.dataType == tokens->float4) {
+        descriptor.format = HdFormatFloat32Vec4;
+        descriptor.clearValue = VtValue(GfVec4f(0.0f));
+      }
     }
     descriptor.aovSettings = SettingsMapFromVtDict(var.namespacedSettings);
     ret.push_back({std::move(var), std::move(name), std::move(descriptor)});
@@ -386,6 +403,11 @@ void RenderEngine::Configure(
       (render_settings_prim_path != render_settings_prim_path_);
 
   if (!rebuild_delegate) {
+    for (const auto& [key, _] : settings_map_) {
+      if (settings_map.find(key) == settings_map.end()) {
+        render_delegate_->SetRenderSetting(key, VtValue());
+      }
+    }
     for (const auto& desc : render_delegate_->GetRenderSettingDescriptors()) {
       auto it = settings_map.find(desc.key);
       const VtValue& val =
@@ -570,7 +592,7 @@ void RenderEngine::UpdateAovsAndBuffers() {
   }
   if (aovs.empty()) {
     aovs.push_back({.renderVarPath = SdfPath{"/Render/Vars/color"},
-                    .dataType = HdRenderEngineDataTypeTokens->color4f,
+                    .dataType = HdRenderEngineDataTypeTokens->color3f,
                     .sourceName = "color",
                     .sourceType = TfToken{},
                     .namespacedSettings = VtDictionary{}});
