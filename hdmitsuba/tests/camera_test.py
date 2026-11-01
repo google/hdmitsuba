@@ -107,7 +107,7 @@ def _modify_camera(
 def test_compare_to_hdembree():
   stage = Usd.Stage.CreateInMemory()
   _setup_stage(stage)
-  test_helpers.create_render_settings(stage)
+  test_helpers.create_render_settings(stage, color_data_type='color4f')
 
   engine = usd_render.RenderEngine(stage)
 
@@ -209,7 +209,7 @@ def test_camera_update_translation():
   outputs = engine.render()
   image1 = outputs['color']
   test_helpers.write_image(image1, 'test_camera_update_translation.png')
-  assert image1.shape[2] == 4
+  assert image1.shape[2] == 3
 
 
 def test_camera_update_focal_length():
@@ -229,7 +229,7 @@ def test_camera_update_focal_length():
   outputs = engine.render()
   image2 = outputs['color']
   test_helpers.write_image(image2, 'test_camera_update_focal_length.png')
-  assert image2.shape[2] == 4
+  assert image2.shape[2] == 3
 
 
 def test_irradiancemeter_render():

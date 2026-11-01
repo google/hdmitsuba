@@ -37,7 +37,10 @@ OUTPUTS_DIR = os.environ.get('TEST_UNDECLARED_OUTPUTS_DIR', 'test_outputs')
 
 
 def create_render_settings(
-    stage: Usd.Stage, resolution: tuple[int, int] = (200, 140), spp: int = 128
+    stage: Usd.Stage,
+    resolution: tuple[int, int] = (200, 140),
+    spp: int = 128,
+    color_data_type: str | None = None,
 ) -> UsdRender.Settings:
   """Creates a render settings prim in the USD stage.
 
@@ -45,6 +48,8 @@ def create_render_settings(
     stage: The USD stage to create the render settings in.
     resolution: The resolution of the render settings.
     spp: The sample count (SPP) override.
+    color_data_type: If set, adds a color RenderVar with this data type (e.g.,
+      "color4f" to request an alpha channel).
 
   Returns:
     The render settings prim.
@@ -60,6 +65,13 @@ def create_render_settings(
   render_settings_prim.CreateAttribute(
       UsdRender.Tokens.resolution, Sdf.ValueTypeNames.Int2
   ).Set(Gf.Vec2i(*resolution))
+  if color_data_type:
+    product = UsdRender.Product.Define(stage, '/Render/Product')
+    color_var = UsdRender.Var.Define(stage, '/Render/Vars/color')
+    color_var.CreateDataTypeAttr(color_data_type)
+    color_var.CreateSourceNameAttr('color')
+    product.CreateOrderedVarsRel().SetTargets([color_var.GetPath()])
+    render_settings.CreateProductsRel().SetTargets([product.GetPath()])
 
   # Set the stage-level settings metadata. For this, temporarily set the edit
   # target to the root layer and restore the previous target afterwards.
