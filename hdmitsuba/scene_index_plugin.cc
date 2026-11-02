@@ -42,6 +42,7 @@
 #include <pxr/base/tf/registryManager.h>
 #include <pxr/base/tf/type.h>
 #include <pxr/imaging/hd/cameraSchema.h>
+#include <pxr/imaging/hd/dependencyForwardingSceneIndex.h>
 #include <pxr/imaging/hd/dirtyBitsTranslator.h>
 #include <pxr/imaging/hd/filteringSceneIndex.h>
 #include <pxr/imaging/hd/lightSchema.h>
@@ -232,7 +233,10 @@ class HdMitsuba_SceneIndexPlugin : public HdSceneIndexPlugin {
         HdMitsubaConfig::GetInstance().tessellate_implicit_surfaces;
     return HdMitsuba_MotionIntervalSceneIndex::New(
         HdsiImplicitSurfaceSceneIndex::New(
-            input_scene,
+            // Forwards dirtiness along declared dependencies, e.g., from
+            // USD RenderSettings attributes to the flattened `renderSettings`
+            // prim, so that RenderSettings edits trigger a re-sync.
+            HdDependencyForwardingSceneIndex::New(input_scene),
             HdRetainedContainerDataSource::New(
                 HdPrimTypeTokens->sphere,
                 tessellate_all ? to_mesh : HdDataSourceBaseHandle(),
