@@ -44,6 +44,8 @@ def _set_mitsuba_variant():
         ('subdiv_indexed_uvs', Usd.TimeCode.Default(), True),
         ('displacement_preview_surface', Usd.TimeCode.Default(), True),
         ('curve', Usd.TimeCode.Default(), True),
+        ('curve_catmull_rom', Usd.TimeCode.Default(), True),
+        ('curve_catmull_rom_pinned', Usd.TimeCode.Default(), True),
         ('geom_subsets', Usd.TimeCode.Default(), True),
         ('empty_mesh', Usd.TimeCode.Default(), False),
         ('skinned_mesh', Usd.TimeCode(20), True),
