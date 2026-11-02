@@ -516,15 +516,14 @@ def test_integrator_parameters():
         engine.render()["color"][0, 0, :3], [0.25, 0.5, 0.75], atol=1e-5
     )
 
-    # Dynamic update and attribute removal without rebuilding the delegate.
+    # Edits to the RenderSettings prim (including attribute removal) are picked
+    # up on the next render without reconfiguring the engine.
     tint_attr.Set(Gf.Vec3f(0.8, 0.4, 0.2))
-    engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
     np.testing.assert_allclose(
         engine.render()["color"][0, 0, :3], [0.8, 0.4, 0.2], atol=1e-5
     )
 
     settings_prim.RemoveProperty("mitsuba:integrator:tint")
-    engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
     np.testing.assert_allclose(
         engine.render()["color"][0, 0, :3], [0.1, 0.2, 0.3], atol=1e-5
     )
