@@ -14,6 +14,10 @@
 
 #include "hdmitsuba/curves.h"
 
+#include <algorithm>
+#include <cstddef>
+#include <vector>
+
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/matrix4f.h>
 #include <pxr/base/gf/vec4f.h>
@@ -37,10 +41,6 @@
 #include <pxr/imaging/hd/xformSchema.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
-
-#include <algorithm>
-#include <cstddef>
-#include <vector>
 
 #include "hdmitsuba/debug_codes.h"
 #include "hdmitsuba/render_param.h"
@@ -213,17 +213,18 @@ void HdMitsubaCurves::Sync(HdSceneDelegate* sceneDelegate,
     return;
   }
 
-  int min_count = 0;
-  ptrdiff_t total_vertices = 0;
+  bool has_negative = false;
+  size_t total_vertices = 0;
   for (int count : vertex_counts) {
-    min_count = std::min(min_count, count);
+    if (count < 0) {
+      has_negative = true;
+      break;
+    }
     total_vertices += count;
   }
-  if (min_count < 0 || static_cast<size_t>(total_vertices) != points_.size()) {
-    TF_WARN(
-        "Curves %s: curveVertexCounts sum to %td (min %d) but there are %zu "
-        "points. Fix the curve topology in the USD asset. Removing from scene.",
-        id.GetText(), total_vertices, min_count, points_.size());
+  if (has_negative || total_vertices != points_.size()) {
+    TF_WARN("Curves %s has invalid curveVertexCounts. Removing from scene.",
+            id.GetText());
     RemoveFromScene(scene_manager);
     *dirtyBits = HdChangeTracker::Clean;
     return;

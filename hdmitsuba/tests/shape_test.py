@@ -44,6 +44,8 @@ def _set_mitsuba_variant():
         ('subdiv_indexed_uvs', Usd.TimeCode.Default(), True),
         ('displacement_preview_surface', Usd.TimeCode.Default(), True),
         ('curve', Usd.TimeCode.Default(), True),
+        ('curve_catmull_rom', Usd.TimeCode.Default(), True),
+        ('curve_catmull_rom_pinned', Usd.TimeCode.Default(), True),
         ('geom_subsets', Usd.TimeCode.Default(), True),
         ('empty_mesh', Usd.TimeCode.Default(), False),
         ('skinned_mesh', Usd.TimeCode(20), True),
@@ -264,23 +266,6 @@ def test_curve_bspline_type():
   test_helpers.assert_hydra_equal_to_offline(
       stage,
       output_prefix='test_curve_bspline_type',
-      atol=0.05,
-  )
-
-
-@pytest.mark.parametrize(
-    'wrap', [UsdGeom.Tokens.nonperiodic, UsdGeom.Tokens.pinned]
-)
-def test_curve_catmull_rom_type(wrap: str):
-  stage = Usd.Stage.Open(f'{test_helpers.TEST_ASSETS_PATH}/shapes/curve.usda')
-  test_helpers.create_render_settings(stage, resolution=(128, 128))
-  curve = UsdGeom.BasisCurves.Get(stage, '/root/mycurve/curve')
-  curve.GetBasisAttr().Set(UsdGeom.Tokens.catmullRom)
-  curve.GetTypeAttr().Set(UsdGeom.Tokens.cubic)
-  curve.GetWrapAttr().Set(wrap)
-  test_helpers.assert_hydra_equal_to_offline(
-      stage,
-      output_prefix=f'test_curve_catmull_rom_{wrap}',
       atol=0.05,
   )
 

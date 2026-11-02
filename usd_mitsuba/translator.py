@@ -351,10 +351,7 @@ def _convert_curves(
       or curve_point_counts.sum() != curve_points.shape[0]
   ):
     raise ValueError(
-        f"Curves prim '{prim.GetPath()}': curveVertexCounts sum to "
-        f'{curve_point_counts.sum()} (min {curve_point_counts.min(initial=0)})'
-        f' but there are {curve_points.shape[0]} points. Fix the curve '
-        'topology in the USD asset.'
+        f"Curves prim '{prim.GetPath()}' has invalid curveVertexCounts."
     )
 
   curve_points = mi.Float(curve_points.ravel())
