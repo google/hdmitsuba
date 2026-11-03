@@ -42,6 +42,7 @@
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/matrix4f.h>
 #include <pxr/base/gf/vec2f.h>
+#include <pxr/base/gf/vec4f.h>
 #include <pxr/base/tf/diagnostic.h>
 #include <pxr/imaging/hd/material.h>
 #include <pxr/usd/ar/asset.h>
@@ -214,6 +215,28 @@ mitsuba::ref<mitsuba::Object> CreateBitmapTexture(const TextureKey& key,
   return CreateExpandedObject(props, variant, mitsuba::ObjectType::Texture);
 }
 
+// Wraps `texture` in a Mitsuba `math` texture computing
+// `texture * scale + bias` if `key` has an authored scale/bias.
+mitsuba::ref<mitsuba::Object> ApplyScaleBias(
+    const TextureKey& key, mitsuba::ref<mitsuba::Object> texture,
+    std::string_view variant) {
+  if (!key.scale_bias) return texture;
+  // Unbounded `srgb` constants hold per-channel scale and bias values outside
+  // of `[0, 1]` (e.g. negative biases).
+  auto constant = [&](const TextureKey::Rgb& c) {
+    mitsuba::Properties props("srgb");
+    props.set("color", mitsuba::Color<float, 3>(c[0], c[1], c[2]));
+    props.set("unbounded", true);
+    return CreateExpandedObject(props, variant, mitsuba::ObjectType::Texture);
+  };
+  mitsuba::Properties props("math");
+  props.set("expr", std::string("in[0] * in[1] + in[2]"));
+  props.set("in0", texture);
+  props.set("in1", constant(key.scale_bias->first));
+  props.set("in2", constant(key.scale_bias->second));
+  return CreateExpandedObject(props, variant, mitsuba::ObjectType::Texture);
+}
+
 }  // namespace
 
 std::optional<TextureKey> ExtractTextureKey(const HdMaterialNetwork2& network,
@@ -278,6 +301,28 @@ std::optional<TextureKey> ExtractTextureKey(const HdMaterialNetwork2& network,
       }
     }
     key.to_uv = ExtractUsdTransform2d(network, node);
+
+    // UsdUVTexture outputs `texture * scale + bias`.
+    auto scale_it = parameters.find(TfToken("scale"));
+    auto bias_it = parameters.find(TfToken("bias"));
+    if (scale_it != parameters.end() || bias_it != parameters.end()) {
+      auto get_rgb = [&](auto it, float fallback) {
+        GfVec4f v = it == parameters.end()
+                        ? GfVec4f(fallback)
+                        : it->second.GetWithDefault(GfVec4f(fallback));
+        int c = key.channel;
+        return c >= 0 ? TextureKey::Rgb{v[c], v[c], v[c]}
+                      : TextureKey::Rgb{v[0], v[1], v[2]};
+      };
+      TextureKey::Rgb scale = get_rgb(scale_it, 1.0f);
+      TextureKey::Rgb bias = get_rgb(bias_it, 0.0f);
+      // Authored identities (e.g. defaults written by tools) keep the plain
+      // bitmap, sharing its cache entry.
+      if (scale != TextureKey::Rgb{1, 1, 1} ||
+          bias != TextureKey::Rgb{0, 0, 0}) {
+        key.scale_bias.emplace(scale, bias);
+      }
+    }
   } else if (nodeTypeId == TfToken("mitsuba_bitmap")) {
     // Each setter returns false if `v` does not hold the expected type.
     auto set_as = [](const VtValue& v, auto& dst) {
@@ -409,9 +454,10 @@ TextureCache<Float, Spectrum>::LoadBitmap(const std::string& filename) {
 MI_VARIANT CachedTexture TextureCache<Float, Spectrum>::LoadTexture(
     const TextureKey& key, const mitsuba::Bitmap& bitmap) {
   try {
+    std::string_view variant = mitsuba::Texture<Float, Spectrum>::Variant;
     return CachedTexture{
-        CreateBitmapTexture(key, bitmap,
-                            mitsuba::Texture<Float, Spectrum>::Variant),
+        ApplyScaleBias(key, CreateBitmapTexture(key, bitmap, variant),
+                       variant),
         key.channel >= 0 ? 1 : bitmap.channel_count()};
   } catch (const std::exception& e) {
     TF_WARN("Failed to load texture '%s': %s.", key.filename.c_str(), e.what());

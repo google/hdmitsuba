@@ -268,7 +268,7 @@ def _convert_uv_texture(
   filename = asset_path.resolvedPath if asset_path else None
   if filename and (texture := _load_uv_texture_image(filename, ch_idx)):
     if texture['type'] != 'bitmap':
-      return texture
+      return _apply_uv_texture_scale_bias(shader, ch_idx, texture)
     # Like UsdImaging, only consider the `colorSpace` metadata of the file
     # attribute itself if `sourceColorSpace` is unset or 'auto'.
     cs = shader.GetInput('sourceColorSpace').Get()
@@ -292,7 +292,7 @@ def _convert_uv_texture(
 
     if to_uv := _extract_usd_transform2d(shader):
       texture['to_uv'] = to_uv
-    return texture
+    return _apply_uv_texture_scale_bias(shader, ch_idx, texture)
 
   if input_name in ('normal', 'bump'):
     return None
@@ -414,6 +414,8 @@ def usd_preview_surface_to_mitsuba(
   emitter_dict: dict[str, Any] = {'type': 'area'}
   for usd_input in shader.GetInputs():
     name = usd_input.GetBaseName()
+    if name == 'displacement':  # Handled by convert_material().
+      continue
     val = None
     if conn := _find_shader_output(usd_input):
       if conn[0].GetIdAttr().Get() == 'UsdUVTexture':
@@ -438,7 +440,10 @@ def usd_preview_surface_to_mitsuba(
     elif name in renaming:
       bsdf_dict[renaming[name]] = val
     elif name == 'normal':
-      parent_bsdf_dict = {'type': 'normalmap', 'normalmap': val}
+      # UsdPreviewSurface normals are in `[-1, 1]`, whereas Mitsuba's
+      # `normalmap` decodes its texture `t` as `2 * t - 1`.
+      encoded = {'type': 'math', 'expr': 'in[0] * 0.5 + 0.5', 'in0': val}
+      parent_bsdf_dict = {'type': 'normalmap', 'normalmap': encoded}
     elif name == 'bump':
       parent_bsdf_dict = {'type': 'bumpmap', 'bumpmap': val}
     else:
@@ -475,7 +480,7 @@ def has_displacement(prim: Usd.Prim) -> bool:
   for p in prims_to_check:
     material, _ = UsdShade.MaterialBindingAPI(p).ComputeBoundMaterial()
     if material:
-      if find_shader(_get_displacement_output(material)) is not None:
+      if _find_displacement_connection(material) is not None:
         return True
 
   return False
@@ -526,7 +531,7 @@ def convert_material(
       if bsdf is None:
         bsdf = mi.load_dict({'type': 'null'})
 
-    if conn := _find_shader_output(_get_displacement_output(material)):
+    if conn := _find_displacement_connection(material):
       bsdf_dict = usd_mitsuba_material_to_dict(conn[0], 'displacement', conn[1])
       displacement = mi.load_dict(bsdf_dict)
       if not isinstance(displacement, mi.Texture):
@@ -547,3 +552,40 @@ def convert_material(
 
   return bsdf, emitter, displacement, interior_medium
 
+
+def _find_displacement_connection(
+    material: UsdShade.Material,
+) -> tuple[UsdShade.Shader, str] | None:
+  """Returns the `(shader, output)` driving `material`'s displacement."""
+  conn = _find_shader_output(_get_displacement_output(material))
+  if conn is not None and conn[0].GetShaderId() == 'UsdPreviewSurface':
+    return _find_shader_output(conn[0].GetInput('displacement'))
+  return conn
+
+
+def _apply_uv_texture_scale_bias(
+    shader: UsdShade.Shader, ch_idx: int, texture: dict[str, Any]
+) -> dict[str, Any]:
+  """Applies the UsdUVTexture `scale` and `bias` inputs to a texture dict."""
+  raw_scale = shader.GetInput('scale').Get()
+  raw_bias = shader.GetInput('bias').Get()
+  if raw_scale is None and raw_bias is None:
+    return texture
+
+  scale = raw_scale if raw_scale is not None else Gf.Vec4f(1.0)
+  bias = raw_bias if raw_bias is not None else Gf.Vec4f(0.0)
+  channels = [ch_idx] * 3 if ch_idx >= 0 else [0, 1, 2]
+  scale = [scale[c] for c in channels]
+  bias = [bias[c] for c in channels]
+  # Authored identities (e.g. defaults written by tools) keep the plain bitmap.
+  if scale == [1.0] * 3 and bias == [0.0] * 3:
+    return texture
+  # Unbounded `srgb` constants hold per-channel scale and bias values outside
+  # of `[0, 1]` (e.g. negative biases).
+  return {
+      'type': 'math',
+      'expr': 'in[0] * in[1] + in[2]',
+      'in0': texture,
+      'in1': {'type': 'srgb', 'color': scale, 'unbounded': True},
+      'in2': {'type': 'srgb', 'color': bias, 'unbounded': True},
+  }

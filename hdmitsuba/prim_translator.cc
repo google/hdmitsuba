@@ -120,7 +120,9 @@ bool IsScalarOnlyPrincipledInput(const TfToken& input_name) {
 }
 
 // Returns the connection of the `mitsuba:<terminal>` terminal, falling back to
-// `<terminal>`, or nullptr if neither is connected.
+// `<terminal>`, or nullptr if neither is connected. A displacement terminal
+// driven by a `UsdPreviewSurface` resolves to that shader's
+// `inputs:displacement` connection (nullptr if unconnected).
 const HdMaterialConnection2* FindTerminalConnection(
     const HdMaterialNetwork2& network, const TfToken& terminal) {
   auto it = network.terminals.find(
@@ -128,9 +130,23 @@ const HdMaterialConnection2* FindTerminalConnection(
   if (it == network.terminals.end() || it->second.upstreamNode.IsEmpty()) {
     it = network.terminals.find(terminal);
   }
-  return (it != network.terminals.end() && !it->second.upstreamNode.IsEmpty())
-             ? &it->second
-             : nullptr;
+  if (it == network.terminals.end() || it->second.upstreamNode.IsEmpty()) {
+    return nullptr;
+  }
+  if (terminal == HdMaterialTerminalTokens->displacement) {
+    auto node_it = network.nodes.find(it->second.upstreamNode);
+    if (node_it != network.nodes.end() &&
+        node_it->second.nodeTypeId == TfToken("UsdPreviewSurface")) {
+      auto conn_it =
+          node_it->second.inputConnections.find(TfToken("displacement"));
+      if (conn_it == node_it->second.inputConnections.end() ||
+          conn_it->second.empty()) {
+        return nullptr;
+      }
+      return &conn_it->second[0];
+    }
+  }
+  return &it->second;
 }
 
 }  // namespace
@@ -524,8 +540,17 @@ PrimTranslator<Float, Spectrum>::ParsePreviewSurface(
       ResolveConnectedTexture<Float, Spectrum>(network2, preview_surface_node,
                                                normal_token, texture_cache);
   if (texture) {
+    // UsdPreviewSurface normals are in `[-1, 1]`, whereas Mitsuba's `normalmap`
+    // decodes its texture `t` as `2 * t - 1`.
+    mitsuba::Properties encode_props("math");
+    encode_props.set("expr", std::string("in[0] * 0.5 + 0.5"));
+    encode_props.set("in0", texture);
     mitsuba::Properties normal_props("normalmap");
-    normal_props.set("normalmap", texture);
+    normal_props.set(
+        "normalmap",
+        mitsuba::PluginManager::instance()->create_object(
+            encode_props, mitsuba::Texture<Float, Spectrum>::Variant,
+            mitsuba::Texture<Float, Spectrum>::Type));
     normal_props.set("nested_bsdf", res.bsdf);
     res.bsdf = mitsuba::PluginManager::instance()->create_object(
         normal_props, mitsuba::BSDF<Float, Spectrum>::Variant,

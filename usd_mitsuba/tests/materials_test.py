@@ -169,6 +169,16 @@ def test_add_mitsuba_shader_as_usd_preview_surface(bsdf_dict):
 
   if 'bumpmap' in bsdf_dict:  # Bumpmap is not supported in preview surface.
     ref_dict = bsdf_dict['nested_bsdf']
+  elif 'normalmap' in bsdf_dict:
+    # The normal map round-trips through a `[-1, 1]` UsdUVTexture encoding.
+    si = dr.zeros(mi.SurfaceInteraction3f)
+    si.uv = mi.Point2f(0.25, 0.75)
+    np.testing.assert_allclose(
+        mi.load_dict(result_dict.pop('normalmap')).eval_3(si),
+        mi.load_dict(bsdf_dict['normalmap']).eval_3(si),
+        atol=1e-5,
+    )
+    ref_dict = {'type': 'normalmap', 'nested_bsdf': bsdf_dict['nested_bsdf']}
   else:
     ref_dict = bsdf_dict
 
@@ -352,3 +362,60 @@ def test_invalid_normal_and_bump_fallbacks():
       'value': (0.5, 0.5, 1.0),
   }
   assert isinstance(mi.load_dict(mi_dict), mi.BSDF)
+
+
+@pytest.mark.parametrize(
+    'input_name, output_name, scale, bias',
+    [
+        ('displacement', 'r', (0.5, 1, 1, 1), (-0.25, 0, 0, 0)),
+        ('diffuseColor', None, (1, 2, 3, 1), (0, 0, 0.5, 0)),
+    ],
+)
+def test_uv_texture_scale_bias(input_name, output_name, scale, bias):
+  stage = Usd.Stage.CreateInMemory()
+  shader = UsdShade.Shader.Define(stage, Sdf.Path('/Material/texture'))
+  shader.CreateIdAttr('UsdUVTexture')
+  shader.CreateInput('file', Sdf.ValueTypeNames.Asset).Set(_ALBEDO_PNG)
+  shader.CreateInput('scale', Sdf.ValueTypeNames.Float4).Set(scale)
+  shader.CreateInput('bias', Sdf.ValueTypeNames.Float4).Set(bias)
+
+  tex = mi.load_dict(
+      material.usd_mitsuba_material_to_dict(shader, input_name, output_name)
+  )
+  si = dr.zeros(mi.SurfaceInteraction3f)
+  si.uv = mi.Point2f(0.25, 0.75)
+  raw_tex = mi.load_dict({
+      'type': 'bitmap',
+      'filename': _ALBEDO_PNG,
+      'raw': input_name != 'diffuseColor',
+  })
+  expected = np.array(raw_tex.eval_3(si)).squeeze() * scale[:3] + bias[:3]
+  if output_name == 'r':
+    actual, expected = np.array(tex.eval_1(si)), expected[0]
+  else:
+    actual = np.array(tex.eval_3(si)).squeeze()
+  np.testing.assert_allclose(actual, expected, atol=1e-5)
+
+
+def test_displacement_through_preview_surface():
+  stage = Usd.Stage.CreateInMemory()
+  usd_material = UsdShade.Material.Define(stage, Sdf.Path('/Material'))
+  surface = UsdShade.Shader.Define(stage, Sdf.Path('/Material/surface'))
+  surface.CreateIdAttr('UsdPreviewSurface')
+  texture = UsdShade.Shader.Define(stage, Sdf.Path('/Material/texture'))
+  texture.CreateIdAttr('UsdUVTexture')
+  texture.CreateInput('file', Sdf.ValueTypeNames.Asset).Set(_ALBEDO_PNG)
+  surface.CreateInput('displacement', Sdf.ValueTypeNames.Float).ConnectToSource(
+      texture.CreateOutput('r', Sdf.ValueTypeNames.Float)
+  )
+  usd_material.CreateDisplacementOutput().ConnectToSource(
+      surface.CreateOutput('displacement', Sdf.ValueTypeNames.Token)
+  )
+  mesh = stage.DefinePrim('/Mesh', 'Mesh')
+  UsdShade.MaterialBindingAPI.Apply(mesh).Bind(usd_material)
+  assert material.has_displacement(mesh)
+  assert isinstance(material.convert_material(mesh)[2], mi.Texture)
+
+  surface.GetInput('displacement').DisconnectSource()
+  assert not material.has_displacement(mesh)
+  assert material.convert_material(mesh)[2] is None
