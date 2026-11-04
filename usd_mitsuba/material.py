@@ -35,6 +35,8 @@ from pxr import Usd
 from pxr import UsdGeom
 from pxr import UsdShade
 
+from usd_mitsuba import util
+
 
 USD_TO_MI_PRINCIPLED_RENAMING = {
     'diffuseColor': 'base_color',
@@ -483,6 +485,7 @@ def has_displacement(prim: Usd.Prim) -> bool:
 
 def convert_material(
     prim: Usd.Prim,
+    emitter_overrides: dict[str, Any] | None = None,
 ) -> tuple[
     mi.BSDF | None, mi.Emitter | None, mi.Texture | None, mi.Medium | None
 ]:
@@ -496,6 +499,7 @@ def convert_material(
 
   Args:
     prim: The USD prim to extract the material from.
+    emitter_overrides: Optional `mitsuba:emitter:*` overrides from the shape.
 
   Returns:
     A tuple of the Mitsuba BSDF, emitter, displacement texture, and interior
@@ -509,6 +513,11 @@ def convert_material(
       if shader.GetShaderId() == 'UsdPreviewSurface':
         bsdf_dict, emitter_dict = usd_preview_surface_to_mitsuba(shader)
         bsdf = mi.load_dict(bsdf_dict)
+        if emitter_dict and emitter_overrides:
+          custom_type = emitter_overrides.get('type')
+          if custom_type and custom_type != emitter_dict.get('type'):
+            emitter_dict = {'type': custom_type}
+          util.deep_merge_dict(emitter_dict, emitter_overrides)
         emitter = mi.load_dict(emitter_dict) if emitter_dict else None
       elif shader.GetShaderId().startswith(_MI_PREFIX):
         if bsdf_dict := usd_mitsuba_material_to_dict(shader):

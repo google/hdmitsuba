@@ -70,18 +70,21 @@ def _to_mitsuba_mesh(sub: Any, properties: mi.Properties) -> mi.Mesh:
   has_vertex_normals = 'normals' in sub.primvars
   # Without authored normals the mesh is flat shaded. Requesting face normals
   # keeps Mitsuba from deriving smooth shading normals of its own.
-  properties['face_normals'] = not has_vertex_normals
+  if 'face_normals' not in properties:
+    properties['face_normals'] = not has_vertex_normals
   texture_coordinates = (
       np.array(sub.primvars['st'].value) if 'st' in sub.primvars else None
   )
 
   normals = mi.TensorXf()
-  if has_vertex_normals:
-      normals = mi.TensorXf(np.array(sub.primvars['normals'].value, dtype=np.float32))
+  if has_vertex_normals and not properties['face_normals']:
+    normals = mi.TensorXf(
+        np.array(sub.primvars['normals'].value, dtype=np.float32)
+    )
   texcoords = mi.TensorXf()
   if texture_coordinates is not None:
-      texture_coordinates[:, 1] = 1 - texture_coordinates[:, 1]
-      texcoords = mi.TensorXf(texture_coordinates.astype(np.float32))
+    texture_coordinates[:, 1] = 1 - texture_coordinates[:, 1]
+    texcoords = mi.TensorXf(texture_coordinates.astype(np.float32))
 
   # The mesh fields are immutable after construction, so they all have to be
   # supplied up front.
@@ -93,6 +96,31 @@ def _to_mitsuba_mesh(sub: Any, properties: mi.Properties) -> mi.Mesh:
       texcoords=texcoords,
   )
   return mi_mesh
+
+
+def _set_plugin_properties(
+    properties: mi.Properties, overrides: dict[str, Any]
+) -> None:
+  """Applies scalar parameters and instantiated child plugins onto `properties`."""
+  for key, value in overrides.items():
+    if key in ('type', 'id'):
+      continue
+    if isinstance(value, dict):
+      if 'type' not in value:
+        raise ValueError(
+            f"Nested Mitsuba shape override '{key}' is missing '{key}:type'."
+        )
+      loaded = mi.load_dict(value)
+      if isinstance(loaded, list):
+        if len(loaded) == 1:
+          properties[key] = loaded[0]
+        elif len(loaded) > 1:
+          for idx, item in enumerate(loaded):
+            properties[f'{key}_{idx}'] = item
+      else:
+        properties[key] = loaded
+    else:
+      properties[key] = value
 
 
 def convert_mesh(
@@ -141,7 +169,14 @@ def convert_mesh(
       else prim
       for sub in sub_meshes
   ]
-  materials = [material.convert_material(subprim) for subprim in subprims]
+  emitter_overrides = util.extract_nested_dict(prim, 'mitsuba:emitter:', time)
+  shape_overrides = util.extract_nested_dict(prim, 'mitsuba:shape:', time)
+  custom_id = shape_overrides.pop('id', None)
+
+  materials = [
+      material.convert_material(subprim, emitter_overrides=emitter_overrides)
+      for subprim in subprims
+  ]
 
   # Emitters and sensors are only attached to top-level shapes: Mitsuba does
   # not support them on instances, so prototypes do without, and shapes
@@ -151,12 +186,17 @@ def convert_mesh(
   has_emitter_or_sensor = (
       prim.HasAPI(UsdLux.MeshLightAPI)
       or sensor_prim is not None
+      or bool(emitter_overrides.get('type'))
+      or 'emitter' in shape_overrides
+      or 'sensor' in shape_overrides
       or any(emitter is not None for _, emitter, _, _ in materials)
   )
 
   motion_transform = None
   if custom_transform is not None:
     world_transform = custom_transform
+    shape_overrides.pop('emitter', None)
+    shape_overrides.pop('sensor', None)
   elif has_emitter_or_sensor:
     world_transform = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
   else:
@@ -169,40 +209,86 @@ def convert_mesh(
       world_transform = Gf.Matrix4d(1.0)
       motion_transform = motion.to_mitsuba_transform(samples)
 
+  geom_transform = world_transform
+  if 'to_world' in shape_overrides:
+    extra_to_world = shape_overrides.pop('to_world')
+    if hasattr(extra_to_world, 'matrix'):
+      extra_matrix = Gf.Matrix4d(
+          np.array(extra_to_world.matrix, dtype=np.float64).T.tolist()
+      )
+      geom_transform = extra_matrix * world_transform
+  has_medium = 'interior' in shape_overrides or 'exterior' in shape_overrides
+  if (
+      custom_transform is None
+      and sensor_prim is not None
+      and len(sub_meshes) > 1
+  ):
+    Tf.Warn(
+        f'The surface sensor of {prim.GetPath()} only measures its first'
+        ' material subset.'
+    )
+
   converted_meshes = {}
-  for sub, subprim, (
-      bsdf,
-      material_emitter,
-      displacement,
-      interior_medium,
-  ) in zip(sub_meshes, subprims, materials):
+  for i, (
+      sub,
+      subprim,
+      (
+          bsdf,
+          material_emitter,
+          displacement,
+          interior_medium,
+      ),
+  ) in enumerate(zip(sub_meshes, subprims, materials)):
     props = mi.Properties()
-    if bsdf is not None:
-      props['bsdf'] = bsdf
     if interior_medium is not None:
       props['interior'] = interior_medium
+    if 'bsdf' not in shape_overrides:
+      if bsdf is not None:
+        props['bsdf'] = bsdf
+      elif has_medium or interior_medium is not None:
+        props['bsdf'] = mi.load_dict({'type': 'null'})
 
     if custom_transform is None:
       # MeshLightAPI takes precedence over material-driven emission. Each
       # sub-mesh needs its own emitter instance, and the world transform is
       # also the IES light frame of a mesh light.
-      mesh_light_emitter = light.convert_mesh_light(prim, time, world_transform)
+      mesh_light_emitter = light.convert_mesh_light(
+          prim, time, world_transform, emitter_overrides
+      )
       if mesh_light_emitter is not None:
         props['emitter'] = mesh_light_emitter
       elif material_emitter is not None:
         props['emitter'] = material_emitter
+      elif emitter_overrides.get('type'):
+        props['emitter'] = mi.load_dict(emitter_overrides)
 
-      if sensor_prim is not None:
+      if sensor_prim is not None and i == 0:
         props['sensor'] = mi.load_dict(
             camera.usd_to_mitsuba(UsdGeom.Camera(sensor_prim), time=time)
         )
 
+    if shape_overrides:
+      sub_overrides = (
+          {k: v for k, v in shape_overrides.items() if k != 'sensor'}
+          if i > 0 and 'sensor' in shape_overrides
+          else shape_overrides
+      )
+      _set_plugin_properties(props, sub_overrides)
+
     if displacement is not None:
       _apply_displacement(sub, displacement, mesh_data)
 
-    sub.primvars = geom_lib.transform_primvars(sub.primvars, world_transform)
-    converted_meshes[util.get_mitsuba_id(
-        subprim)] = _to_mitsuba_mesh(sub, props)
+    sub.primvars = geom_lib.transform_primvars(sub.primvars, geom_transform)
+    mesh_id = util.get_mitsuba_id(subprim)
+    if (
+        custom_transform is None
+        and len(sub_meshes) == 1
+        and isinstance(custom_id, str)
+        and custom_id
+    ):
+      mesh_id = custom_id
+    props.set_id(mesh_id)
+    converted_meshes[mesh_id] = _to_mitsuba_mesh(sub, props)
 
   if motion_transform is not None and converted_meshes:
     return motion.wrap_in_instance(

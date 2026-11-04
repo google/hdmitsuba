@@ -79,7 +79,7 @@ struct IesSpec {
 struct LightSpec : public BaseSpec {
   TfToken prim_type;
   // For mesh lights, which bake their transform into the vertices, this is the
-  // light frame of the `ies` emitter (see `GetMeshEmitterSpec` in mesh.cc).
+  // light frame of the `ies` emitter (see `GetMeshEmitterSpec` in light.h).
   MotionTransform transform;
   GfVec3f emission;
   float angle = 0.0f;
@@ -91,6 +91,22 @@ struct LightSpec : public BaseSpec {
   // Whether the `lightLink` collection includes everything (the default).
   bool light_link_everything = true;
   IesSpec ies;
+  PluginSpecNode emitter_spec;
+  PluginSpecNode shape_spec;
+  std::optional<PluginSpecNode> committed_emitter_spec = std::nullopt;
+  std::optional<PluginSpecNode> committed_shape_spec = std::nullopt;
+
+  void FoldPendingFrom(const LightSpec& prev) {
+    committed_emitter_spec = prev.committed_emitter_spec;
+    committed_shape_spec = prev.committed_shape_spec;
+    BaseSpec::FoldPendingFrom(prev);
+  }
+
+  void MarkClean() {
+    BaseSpec::MarkClean();
+    committed_emitter_spec = emitter_spec;
+    committed_shape_spec = shape_spec;
+  }
 
   // Area lights are represented as Mitsuba shapes with an attached area
   // emitter, rather than standalone emitter objects.
@@ -139,6 +155,10 @@ struct MeshSpec : public BaseSpec {
   // If set, the shape is rendered as this native Mitsuba shape with a single
   // material, and the topology is unused.
   std::optional<ImplicitSurface> implicit_surface = std::nullopt;
+  PluginSpecNode shape_spec;
+  PluginSpecNode mitsuba_emitter_spec;
+  std::optional<PluginSpecNode> committed_shape_spec = std::nullopt;
+  std::optional<PluginSpecNode> committed_mitsuba_emitter_spec = std::nullopt;
   // Instance-to-world transforms when rendered through Mitsuba instances. For a
   // non-instanced mesh with an animated transform (or an implicit surface whose
   // transform is not supported by its native shape) this holds a single entry
@@ -150,10 +170,16 @@ struct MeshSpec : public BaseSpec {
   bool double_sided = false;
 
   void FoldPendingFrom(const MeshSpec& prev) {
+    committed_shape_spec = prev.committed_shape_spec;
+    committed_mitsuba_emitter_spec = prev.committed_mitsuba_emitter_spec;
     if (emitter_spec.has_value() != prev.emitter_spec.has_value() ||
         (emitter_spec && emitter_spec->ies != prev.emitter_spec->ies) ||
         material_ids != prev.material_ids ||
         double_sided != prev.double_sided ||
+        motion_wrapped != prev.motion_wrapped ||
+        !CanUpdatePluginStructureInPlace(prev.shape_spec, shape_spec) ||
+        !CanUpdatePluginStructureInPlace(prev.mitsuba_emitter_spec,
+                                         mitsuba_emitter_spec) ||
         !std::equal(instance_transforms.begin(), instance_transforms.end(),
                     prev.instance_transforms.begin(),
                     prev.instance_transforms.end(),
@@ -163,6 +189,12 @@ struct MeshSpec : public BaseSpec {
       needs_rebuild = true;
     }
     BaseSpec::FoldPendingFrom(prev);
+  }
+
+  void MarkClean() {
+    BaseSpec::MarkClean();
+    committed_shape_spec = shape_spec;
+    committed_mitsuba_emitter_spec = mitsuba_emitter_spec;
   }
 };
 
