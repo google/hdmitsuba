@@ -113,7 +113,7 @@ HdMitsubaRenderDelegate::~HdMitsubaRenderDelegate() = default;
 
 void HdMitsubaRenderDelegate::Initialize() {
   // Initialize the settings and settings descriptors.
-  setting_descriptors_.resize(10);
+  setting_descriptors_.resize(11);
   setting_descriptors_[0] = {"Variant", HdMitsubaRenderSettingsTokens->variant,
                              VtValue(HdMitsubaConfig::GetInstance().variant)};
   setting_descriptors_[1] = {"Samples Per Pixel",
@@ -133,19 +133,22 @@ void HdMitsubaRenderDelegate::Initialize() {
   setting_descriptors_[6] = {"Integrator Russian Roulette Depth",
                              HdMitsubaRenderSettingsTokens->integrator_rr_depth,
                              VtValue()};
-  setting_descriptors_[7] = {"Enable Interactive Mode",
+  setting_descriptors_[7] = {"Sampler Type",
+                             HdMitsubaRenderSettingsTokens->sampler_type,
+                             VtValue(std::string("independent"))};
+  setting_descriptors_[8] = {"Enable Interactive Mode",
                              HdRenderSettingsTokens->enableInteractive,
                              VtValue(true)};
   bool default_freezing = false;
   if (HdMitsubaConfig::GetInstance().use_kernel_freezing == 1) {
     default_freezing = true;
   }
-  setting_descriptors_[8] = {"Enable Kernel Freezing (Experimental)",
+  setting_descriptors_[9] = {"Enable Kernel Freezing (Experimental)",
                              HdMitsubaRenderSettingsTokens->use_kernel_freezing,
                              VtValue(default_freezing)};
-  setting_descriptors_[9] = {"Enable Denoising (OptiX on CUDA, OIDN on CPU)",
-                             HdMitsubaRenderSettingsTokens->denoise,
-                             VtValue(false)};
+  setting_descriptors_[10] = {"Enable Denoising (OptiX on CUDA, OIDN on CPU)",
+                              HdMitsubaRenderSettingsTokens->denoise,
+                              VtValue(false)};
   _PopulateDefaultSettings(setting_descriptors_);
 
   current_variant_ = HdMitsubaConfig::GetInstance().variant;
@@ -282,10 +285,22 @@ void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* /*tracker*/) {
         effective_settings[key] = value;
       }
     }
+    if (auto it = scene_render_settings_.find(
+            HdMitsubaRenderSettingsTokens->sampler_sample_count.GetString());
+        it != scene_render_settings_.end() && !it->second.IsEmpty()) {
+      effective_settings[HdMitsubaRenderSettingsTokens->sample_count
+                             .GetString()] = it->second;
+    }
     for (const auto& [key, value] : host_setting_overrides_) {
       if (!value.IsEmpty()) {
         effective_settings[key.GetString()] = value;
       }
+    }
+    if (auto it = host_setting_overrides_.find(
+            HdMitsubaRenderSettingsTokens->sampler_sample_count);
+        it != host_setting_overrides_.end() && !it->second.IsEmpty()) {
+      effective_settings[HdMitsubaRenderSettingsTokens->sample_count
+                             .GetString()] = it->second;
     }
 
     std::string target_variant = HdMitsubaConfig::GetInstance().variant;
@@ -450,8 +465,23 @@ void HdMitsubaRenderDelegate::SetRenderSetting(const TfToken& key,
     return;
   }
 
+  bool erased_conflicting_alias = false;
+  if (key == HdMitsubaRenderSettingsTokens->sample_count) {
+    erased_conflicting_alias =
+        host_setting_overrides_.erase(
+            HdMitsubaRenderSettingsTokens->sampler_sample_count) > 0;
+    if (erased_conflicting_alias) {
+      _settingsMap.erase(HdMitsubaRenderSettingsTokens->sampler_sample_count);
+    }
+  } else if (key == HdMitsubaRenderSettingsTokens->sampler_sample_count) {
+    erased_conflicting_alias =
+        host_setting_overrides_.erase(
+            HdMitsubaRenderSettingsTokens->sample_count) > 0;
+  }
+
   auto it = host_setting_overrides_.find(key);
-  if (it == host_setting_overrides_.end() || it->second != value) {
+  if (erased_conflicting_alias || it == host_setting_overrides_.end() ||
+      it->second != value) {
     host_setting_overrides_[key] = value;
     const auto prev_version = _settingsVersion;
     HdRenderDelegate::SetRenderSetting(key, value);
@@ -463,10 +493,28 @@ void HdMitsubaRenderDelegate::SetRenderSetting(const TfToken& key,
 }
 
 VtValue HdMitsubaRenderDelegate::GetRenderSetting(const TfToken& key) const {
+  const bool is_sample_count =
+      (key == HdMitsubaRenderSettingsTokens->sample_count);
+  if (is_sample_count) {
+    auto sampler_override_it = host_setting_overrides_.find(
+        HdMitsubaRenderSettingsTokens->sampler_sample_count);
+    if (sampler_override_it != host_setting_overrides_.end() &&
+        !sampler_override_it->second.IsEmpty()) {
+      return sampler_override_it->second;
+    }
+  }
   auto override_it = host_setting_overrides_.find(key);
   if (override_it != host_setting_overrides_.end() &&
       !override_it->second.IsEmpty()) {
     return override_it->second;
+  }
+  if (is_sample_count) {
+    auto sampler_scene_it = scene_render_settings_.find(
+        HdMitsubaRenderSettingsTokens->sampler_sample_count.GetString());
+    if (sampler_scene_it != scene_render_settings_.end() &&
+        !sampler_scene_it->second.IsEmpty()) {
+      return sampler_scene_it->second;
+    }
   }
   auto scene_it = scene_render_settings_.find(key.GetString());
   if (scene_it != scene_render_settings_.end() && !scene_it->second.IsEmpty()) {

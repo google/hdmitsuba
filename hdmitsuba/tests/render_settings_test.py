@@ -731,3 +731,107 @@ def test_integrator_parameters_dynamic_update():
   max_depth_attr.Set(1)
   unlit_color = engine.render()["color"]
   np.testing.assert_allclose(unlit_color[..., :3], 0.0, atol=1e-5)
+
+
+@pytest.mark.parametrize(
+    "sampler_type,extra_params",
+    [
+        ("stratified", {"jitter": False}),
+        ("multijitter", {"jitter": True}),
+        ("ldsampler", {"seed": 7}),
+    ],
+)
+def test_sampler_type_and_parameters(sampler_type, extra_params):
+  stage = Usd.Stage.Open(f"{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda")
+  render_settings = test_helpers.create_render_settings(
+      stage, resolution=(16, 16), spp=4
+  )
+  settings_prim = render_settings.GetPrim()
+  # Keep mitsuba:sample_count = 4 on the stage to verify that
+  # mitsuba:sampler:sample_count = 16 takes precedence over it.
+  settings_prim.CreateAttribute(
+      "mitsuba:sampler:type", Sdf.ValueTypeNames.String
+  ).Set(sampler_type)
+  settings_prim.CreateAttribute(
+      "mitsuba:sampler:sample_count", Sdf.ValueTypeNames.Int
+  ).Set(16)
+  for key, value in extra_params.items():
+    sdf_type = (
+        Sdf.ValueTypeNames.Bool
+        if isinstance(value, bool)
+        else Sdf.ValueTypeNames.Int
+    )
+    settings_prim.CreateAttribute(f"mitsuba:sampler:{key}", sdf_type).Set(value)
+
+  scene_dict = usd_mitsuba.convert_to_mitsuba(stage)
+  sensor_key = next(
+      key
+      for key, val in scene_dict.items()
+      if isinstance(val, dict) and "film" in val
+  )
+  expected_sampler = {"type": sampler_type, "sample_count": 16, **extra_params}
+  assert scene_dict[sensor_key]["sampler"] == expected_sampler
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  image_hd = engine.render()["color"]
+  assert engine.get_render_stats()["totalSamples"] == 16
+
+  image_mi = np.array(mi.render(mi.load_dict(scene_dict), spp=16))
+  test_helpers.robust_assert_close(
+      image_hd[..., :3], image_mi[..., :3], atol=0.05
+  )
+
+  # Host overrides: whichever sample-count alias was set most recently wins.
+  engine.configure(
+      hydra_delegate_id="HdMitsubaRendererPlugin",
+      overrides={"mitsuba:sampler:sample_count": 12},
+  )
+  engine.render()
+  assert engine.get_render_stats()["totalSamples"] == 12
+  engine.configure(
+      hydra_delegate_id="HdMitsubaRendererPlugin",
+      overrides={"mitsuba:sample_count": 8},
+  )
+  engine.render()
+  assert engine.get_render_stats()["totalSamples"] == 8
+
+
+def test_sampler_dynamic_update():
+  stage = Usd.Stage.Open(f"{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda")
+  render_settings = test_helpers.create_render_settings(
+      stage, resolution=(16, 16), spp=4
+  )
+  settings_prim = render_settings.GetPrim()
+  sampler_type_attr = settings_prim.CreateAttribute(
+      "mitsuba:sampler:type", Sdf.ValueTypeNames.String
+  )
+  sampler_type_attr.Set("independent")
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  independent_color = engine.render()["color"]
+
+  # Live update of sampler plugin type and parameter without calling configure()
+  sampler_type_attr.Set("stratified")
+  settings_prim.CreateAttribute(
+      "mitsuba:sampler:jitter", Sdf.ValueTypeNames.Bool
+  ).Set(False)
+  stratified_color = engine.render()["color"]
+  assert not np.allclose(independent_color, stratified_color, atol=1e-4)
+
+  scene_dict = usd_mitsuba.convert_to_mitsuba(stage)
+  stratified_mi = np.array(mi.render(mi.load_dict(scene_dict), spp=4))
+  test_helpers.robust_assert_close(
+      stratified_color[..., :3], stratified_mi[..., :3], atol=0.02
+  )
+
+  # Progressive interactive rendering overrides structured samplers with
+  # `independent` so multi-pass accumulation does not collapse to a 1x1 grid.
+  engine.configure(
+      hydra_delegate_id="HdMitsubaRendererPlugin",
+      overrides={"enableInteractive": True, "mitsuba:sample_count": 2},
+  )
+  pass1 = engine.render()["color"]
+  pass2 = engine.render()["color"]
+  assert not np.allclose(pass1, pass2, atol=1e-5)
