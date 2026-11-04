@@ -15,11 +15,10 @@
 #pragma once
 
 #include <optional>
-#include <string>
 #include <string_view>
+#include <tuple>
 
 #include <pxr/base/gf/vec2f.h>
-#include <pxr/base/tf/staticTokens.h>
 #include <pxr/imaging/hd/camera.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
@@ -28,17 +27,11 @@
 #include <pxr/usd/sdf/path.h>
 
 #include "hdmitsuba/motion.h"
+#include "hdmitsuba/plugin_builder.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
 inline constexpr std::string_view kMitsubaSensorNamespace = "mitsuba:sensor:";
-
-#define HDMITSUBA_CAMERA_TOKENS                    \
-  ((sensorType, "mitsuba:sensor:type"))            \
-  ((sensorShape, "mitsuba:sensor:shape"))          \
-  ((sensorPixelFilterType, "mitsuba:sensor:film:pixel_filter:type"))
-
-TF_DECLARE_PUBLIC_TOKENS(HdMitsubaCameraTokens, HDMITSUBA_CAMERA_TOKENS);
 
 class HdMitsubaCamera final : public HdCamera {
  public:
@@ -53,9 +46,10 @@ class HdMitsubaCamera final : public HdCamera {
   float GetHorizontalPrincipalPointOffset() const;
   float GetVerticalPrincipalPointOffset() const;
 
-  std::string sensor_type_ = "perspective";
-  std::string film_pixel_filter_type_ = "";
+  PluginSpecNode sensor_spec_{"perspective"};
   std::optional<SdfPath> target_shape_id_;
+  std::tuple<float, float, float, float, float> usd_params_{
+      90.0f, 0.0f, 0.0f, 0.01f, 1000.0f};
   bool is_instantiated_ = false;
   MotionTransform transform_;
   GfVec2f shutter_{0.0f};

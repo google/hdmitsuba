@@ -93,6 +93,13 @@ inline HdContainerDataSourceHandle GetPrimDataSource(
   return scene_index->GetPrim(id).dataSource;
 }
 
+inline HdContainerDataSourceHandle GetMitsubaDataSource(
+    const HdContainerDataSourceHandle& prim_source) {
+  if (!prim_source) return nullptr;
+  static const TfToken kMitsubaToken("mitsuba", TfToken::Immortal);
+  return HdContainerDataSource::Cast(prim_source->Get(kMitsubaToken));
+}
+
 inline bool GetPrimVisible(const HdContainerDataSourceHandle& prim_source,
                            bool default_visible = true) {
   if (auto schema = HdVisibilitySchema::GetFromParent(prim_source)) {

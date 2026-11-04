@@ -71,6 +71,7 @@ target_link_libraries(hdMitsuba
     pxOsd
     sdf
     tf
+    usd
     usdGeom
     usdImaging
     usdLux
@@ -177,7 +178,9 @@ if(HDMITSUBA_BUILD_TESTS)
       target_link_libraries(${Name} PRIVATE ${DRJIT_EXTRA_LIBRARY})
     endif()
     add_test(NAME ${Name} COMMAND ${Name})
-    set_tests_properties(${Name} PROPERTIES ENVIRONMENT "HDMITSUBA_VARIANT=scalar_rgb")
+    set_tests_properties(${Name} PROPERTIES ENVIRONMENT
+      "HDMITSUBA_VARIANT=scalar_rgb;PXR_PLUGINPATH_NAME=${CMAKE_CURRENT_BINARY_DIR}"
+    )
   endfunction()
 
   add_hdmitsuba_test(plugin_builder_test tests/plugin_builder_test.cc)
