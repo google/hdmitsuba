@@ -48,10 +48,6 @@ using MeshAttributeRequests = std::set<std::pair<std::string, int>>;
 // capitalized to keep the raw values.
 std::string MeshAttributeName(std::string_view primvar, int channels);
 
-void SetMitsubaPropertyFromValue(mitsuba::Properties& props,
-                                 std::string_view name, const pxr::VtValue& val,
-                                 bool invert_float = false);
-
 // Invokes `callback` with the key of every texture the material parsers will
 // look up for `network`, so the TextureCache can be preloaded beforehand.
 void DiscoverTextures(

@@ -474,6 +474,27 @@ def test_denoise_render_settings(variant: str):
       unguided_results["normal"], noisy_results["normal"], atol=1e-5
   )
 
+  # User-configured `aov` integrator prepends its channels before Hydra AOVs;
+  # guided denoising must offset albedo/normal channels past user AOVs.
+  UsdRender.Product(
+      stage.GetPrimAtPath("/root/Render/Products/MainOutput")
+  ).GetOrderedVarsRel().SetTargets([
+      Sdf.Path("/root/Render/Vars/color"),
+      Sdf.Path("/root/Render/Vars/albedo"),
+      Sdf.Path("/root/Render/Vars/normal"),
+  ])
+  settings_prim = stage.GetPrimAtPath("/root/Render/Settings")
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:type", Sdf.ValueTypeNames.String
+  ).Set("aov")
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:aovs", Sdf.ValueTypeNames.String
+  ).Set("dd.y:depth")
+  user_aov_denoised = render(denoise=True, width=16)
+  assert user_aov_denoised["color"].shape == (16, 16, 4)
+  assert user_aov_denoised["albedo"].shape == (16, 16, 3)
+  assert user_aov_denoised["normal"].shape == (16, 16, 3)
+
 
 def test_integrator_parameters():
   def _register_flat_color(*_):
@@ -623,3 +644,90 @@ def test_render_settings_precedence():
   engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin", overrides={})
   engine.render()
   assert engine.get_render_stats()["totalSamples"] == 4
+
+
+def test_integrator_flat_and_nested_parameters():
+  stage = Usd.Stage.Open(f"{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda")
+  plane = UsdGeom.Plane.Define(stage, "/World/Plane")
+  plane.GetWidthAttr().Set(10)
+  plane.GetLengthAttr().Set(10)
+
+  render_settings = test_helpers.create_render_settings(
+      stage, resolution=(16, 16), spp=4
+  )
+  settings_prim = render_settings.GetPrim()
+
+  # Flat integrator parameters without explicit `mitsuba:integrator:type`
+  # default to "path": max_depth = 1 disables surface lighting bounces.
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:max_depth", Sdf.ValueTypeNames.Int
+  ).Set(1)
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:hide_emitters", Sdf.ValueTypeNames.Bool
+  ).Set(True)
+
+  image_hd, _ = test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      output_prefix="test_integrator_flat_max_depth_1",
+      spp=4,
+      atol=0.02,
+  )
+  np.testing.assert_allclose(image_hd[..., :3], 0.0, atol=1e-5)
+
+  # Nested integrator parameters: wrap a configured path integrator inside an
+  # aov integrator under an arbitrary child plugin name (`sub_integrator`).
+  settings_prim.RemoveProperty("mitsuba:integrator:max_depth")
+  settings_prim.RemoveProperty("mitsuba:integrator:hide_emitters")
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:type", Sdf.ValueTypeNames.String
+  ).Set("aov")
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:aovs", Sdf.ValueTypeNames.String
+  ).Set("dd.y:depth")
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:sub_integrator:type", Sdf.ValueTypeNames.String
+  ).Set("path")
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:sub_integrator:max_depth", Sdf.ValueTypeNames.Int
+  ).Set(2)
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  nested_hd = engine.render()["color"]
+
+  scene_dict = usd_mitsuba.convert_to_mitsuba(stage)
+  assert scene_dict["integrator"]["type"] == "aov"
+  assert scene_dict["integrator"]["sub_integrator"] == {
+      "type": "path",
+      "max_depth": 2,
+  }
+  nested_mi = np.array(mi.render(mi.load_dict(scene_dict), spp=4))
+  test_helpers.robust_assert_close(
+      nested_hd[..., :3], nested_mi[..., :3], atol=0.05
+  )
+  assert np.max(nested_hd[..., :3]) > 0.1
+
+
+def test_integrator_parameters_dynamic_update():
+  stage = Usd.Stage.Open(f"{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda")
+  render_settings = test_helpers.create_render_settings(
+      stage, resolution=(16, 16), spp=4
+  )
+  settings_prim = render_settings.GetPrim()
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:type", Sdf.ValueTypeNames.String
+  ).Set("path")
+  max_depth_attr = settings_prim.CreateAttribute(
+      "mitsuba:integrator:max_depth", Sdf.ValueTypeNames.Int
+  )
+  max_depth_attr.Set(2)
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  lit_color = engine.render()["color"]
+  assert np.max(lit_color[..., :3]) > 0.1
+
+  # Live update of mitsuba:integrator:max_depth without calling configure()
+  max_depth_attr.Set(1)
+  unlit_color = engine.render()["color"]
+  np.testing.assert_allclose(unlit_color[..., :3], 0.0, atol=1e-5)

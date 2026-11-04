@@ -290,7 +290,8 @@ MI_VARIANT Denoiser<Float, Spectrum>& Denoiser<Float, Spectrum>::operator=(
 
 MI_VARIANT void Denoiser<Float, Spectrum>::Denoise(
     TensorXf& display_result, const Sensor* sensor,
-    const std::vector<AovRequest>& aov_requests, size_t base_channels) {
+    const std::vector<AovRequest>& aov_requests, size_t base_channels,
+    size_t aov_start_channel) {
   const size_t height = display_result.shape()[0];
   const size_t width = display_result.shape()[1];
   const size_t total_channels = display_result.shape()[2];
@@ -300,7 +301,7 @@ MI_VARIANT void Denoiser<Float, Spectrum>::Denoise(
 
   std::optional<size_t> albedo_offset;
   std::optional<size_t> normal_offset;
-  size_t current_offset = base_channels;
+  size_t current_offset = aov_start_channel;
   for (const AovRequest& aov_request : aov_requests) {
     if (current_offset + aov_request.channel_count > total_channels) {
       break;

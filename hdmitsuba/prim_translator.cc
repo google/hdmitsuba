@@ -86,6 +86,7 @@
 
 #include "hdmitsuba/ies_emitter.h"
 #include "hdmitsuba/motion.h"
+#include "hdmitsuba/plugin_builder.h"
 #include "hdmitsuba/spec_types.h"
 #include "hdmitsuba/traversal.h"
 #include "hdmitsuba/utils.h"
@@ -139,45 +140,6 @@ std::string MeshAttributeName(std::string_view primvar, int channels) {
   return absl::StrCat(kVertexAttributePrefix,
                       absl::StrReplaceAll(primvar, {{"color", "Color"}}), "_",
                       channels);
-}
-
-void SetMitsubaPropertyFromValue(mitsuba::Properties& props,
-                                 std::string_view name, const VtValue& val,
-                                 bool invert_float) {
-  // Color space metadata is consumed when building texture keys.
-  if (absl::StartsWith(name, "colorSpace:")) return;
-  if (val.IsHolding<GfVec3f>()) {
-    auto c = val.Get<GfVec3f>();
-    props.set(name, mitsuba::Color<float, 3>(c[0], c[1], c[2]));
-  } else if (val.IsHolding<GfVec4f>()) {
-    // Mitsuba never uses alpha channels, so we ignore it.
-    auto c = val.Get<GfVec4f>();
-    props.set(name, mitsuba::Color<float, 3>(c[0], c[1], c[2]));
-  } else if (val.IsHolding<GfVec3d>()) {
-    auto c = val.Get<GfVec3d>();
-    props.set(name, mitsuba::Color<float, 3>(static_cast<float>(c[0]),
-                                             static_cast<float>(c[1]),
-                                             static_cast<float>(c[2])));
-  } else if (val.IsHolding<float>()) {
-    props.set(name, invert_float ? 1.0f - val.Get<float>() : val.Get<float>());
-  } else if (val.IsHolding<double>()) {
-    props.set(name, invert_float ? 1.0f - static_cast<float>(val.Get<double>())
-                                 : static_cast<float>(val.Get<double>()));
-  } else if (val.IsHolding<bool>()) {
-    props.set(name, val.Get<bool>());
-  } else if (val.IsHolding<int>()) {
-    props.set(name, val.Get<int>());
-  } else if (auto t3 = ExtractTransform3f(val)) {
-    props.set(name, *t3);
-  } else if (auto t4 = ExtractTransform4f(val)) {
-    props.set(name, *t4);
-  } else if (val.IsHolding<TfToken>()) {
-    props.set(name, val.Get<TfToken>().GetString());
-  } else if (val.IsHolding<std::string>()) {
-    props.set(name, val.Get<std::string>());
-  } else if (val.IsHolding<SdfAssetPath>()) {
-    props.set(name, ResolvePathFromValue(val));
-  }
 }
 
 void DiscoverTextures(

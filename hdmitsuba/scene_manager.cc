@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
 #include <map>
 #include <optional>
 #include <string>
@@ -35,7 +36,6 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/string_view.h>
-#include <absl/strings/strip.h>
 #include <absl/synchronization/mutex.h>
 #include <drjit-core/jit.h>
 #include <drjit/array_router.h>
@@ -90,6 +90,7 @@
 #include "hdmitsuba/kernel_freezing.h"
 #include "hdmitsuba/mesh/displacement.h"
 #include "hdmitsuba/mesh/geometry_processor.h"
+#include "hdmitsuba/plugin_builder.h"
 #include "hdmitsuba/prim_translator.h"
 #include "hdmitsuba/render_buffer.h"
 #include "hdmitsuba/render_delegate.h"
@@ -665,25 +666,15 @@ class SceneModel final : public SceneManager {
 
     if (!integrator_) {
       TF_DEBUG(HDMITSUBA_LIFECYCLE)
-          .Msg("Creating integrator, type: %s (%zu properties)\n",
-               integrator_type_.c_str(), integrator_settings_.size());
-      Properties props(integrator_type_);
-      for (const auto& [param, val] : integrator_settings_) {
-        SetMitsubaPropertyFromValue(props, param, val);
-      }
+          .Msg("Creating integrator, type: %s\n",
+               integrator_spec_.plugin_type.c_str());
       try {
-        integrator_ =
-            PluginManager::instance()->create_object<Integrator>(props);
-        if (auto unqueried = props.unqueried(); !unqueried.empty()) {
-          TF_WARN("Integrator '%s' ignores unsupported properties: %s",
-                  integrator_type_.c_str(),
-                  absl::StrJoin(unqueried, ", ").c_str());
-        }
+        integrator_ = BuildPluginObject<Integrator>(integrator_spec_);
       } catch (const std::exception& e) {
         TF_WARN(
             "Failed to create integrator '%s': %s. Falling back to the default "
             "path tracer.",
-            integrator_type_.c_str(), e.what());
+            integrator_spec_.plugin_type.c_str(), e.what());
         integrator_ = PluginManager::instance()->create_object<Integrator>(
             Properties("path"));
       }
@@ -789,9 +780,12 @@ class SceneModel final : public SceneManager {
 
     // 5. Copy the data to the output render buffers.
     size_t base_channels = sensor->film()->base_channels().size();
+    size_t aov_start_channel =
+        base_channels +
+        (integrator_ ? integrator_->aov_names(sensor->film()).size() : 0);
     if (denoise_ && pass_state.color_buffer && base_channels >= 3) {
       denoiser_.Denoise(display_result, sensor, pass_state.aov_requests,
-                        base_channels);
+                        base_channels, aov_start_channel);
     }
     size_t total_channels = display_result.shape()[2];
     destinations_.clear();
@@ -801,7 +795,7 @@ class SceneModel final : public SceneManager {
       destinations_.push_back({pass_state.color_buffer, 0, static_cast<int>(base_channels), false});
     }
 
-    size_t current_offset = base_channels;
+    size_t current_offset = aov_start_channel;
     for (const auto& req : pass_state.aov_requests) {
       if (!TF_VERIFY(req.buffer, "AOV buffer is null")) continue;
       if (!TF_VERIFY(current_offset + req.channel_count <= total_channels,
@@ -856,21 +850,10 @@ class SceneModel final : public SceneManager {
         reset_progressive_ = true;
       }
     }
-    std::string integrator_type =
-        GetSetting<std::string>(namespaced_settings, "mitsuba:integrator:type")
-            .value_or(integrator_type_);
-    VtDictionary integrator_settings;
-    for (const auto& [key, val] : namespaced_settings) {
-      std::string_view param = key;
-      if (absl::ConsumePrefix(&param, "mitsuba:integrator:") &&
-          !param.empty() && param != "type" && !val.IsEmpty()) {
-        integrator_settings[std::string(param)] = val;
-      }
-    }
-    if (integrator_type != integrator_type_ ||
-        integrator_settings != integrator_settings_) {
-      integrator_type_ = std::move(integrator_type);
-      integrator_settings_ = std::move(integrator_settings);
+    PluginSpecNode integrator_spec = ParsePluginSpec(
+        namespaced_settings, "mitsuba:integrator:", /*default_type=*/"path");
+    if (integrator_spec != integrator_spec_) {
+      integrator_spec_ = std::move(integrator_spec);
       integrator_ = nullptr;
       for (auto& [_, pass_state] : pass_aov_states_) {
         pass_state.aov_integrator = nullptr;
@@ -1533,14 +1516,28 @@ class SceneModel final : public SceneManager {
         });
   }
 
+  static std::string ResolveLeafIntegratorType(const PluginSpecNode& spec) {
+    if (spec.plugin_type == "aov" || spec.plugin_type == "moment") {
+      for (const auto& [_, child] : spec.children) {
+        if (!child.plugin_type.empty() && child.plugin_type != "rgb" &&
+            child.plugin_type != "spectrum" && child.plugin_type != "vector") {
+          return ResolveLeafIntegratorType(child);
+        }
+      }
+    }
+    return spec.plugin_type;
+  }
+
   bool CommitParticleFields() {
+    const std::string leaf_integrator =
+        ResolveLeafIntegratorType(integrator_spec_);
     if (!particle_field_specs_.empty() &&
-        integrator_type_ != "volprim_rf_basic") {
+        leaf_integrator != "volprim_rf_basic") {
       TF_WARN(
           "Scene contains Gaussian splats (%zu), which require the "
           "'volprim_rf_basic' integrator for radiance field evaluation. "
           "Current integrator: '%s'.",
-          particle_field_specs_.size(), integrator_type_.c_str());
+          particle_field_specs_.size(), leaf_integrator.c_str());
     }
     return ParallelCommit<decltype(particle_field_specs_), mitsuba::ref<Shape>>(
         particle_field_specs_,
@@ -1708,8 +1705,7 @@ class SceneModel final : public SceneManager {
   bool scene_dirty_ = true;
   ref<Scene> scene_;
   ref<Integrator> integrator_ = nullptr;
-  std::string integrator_type_ = "path";
-  VtDictionary integrator_settings_;
+  PluginSpecNode integrator_spec_{"path"};
   absl::flat_hash_map<const HdRenderPass*, RenderPassState> pass_aov_states_;
   size_t sample_count_ = kDefaultSampleCount;
   uint32_t seed_ = 0;
