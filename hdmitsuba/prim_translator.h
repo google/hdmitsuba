@@ -28,6 +28,7 @@
 #include <pxr/imaging/hd/material.h>
 #include <pxr/pxr.h>
 
+#include "hdmitsuba/plugin_builder.h"
 #include "hdmitsuba/spec_types.h"
 #include "hdmitsuba/texture_cache.h"
 #include "hdmitsuba/traversal.h"
@@ -47,10 +48,6 @@ using MeshAttributeRequests = std::set<std::pair<std::string, int>>;
 // "color" as rgb2spec coefficients in spectral variants, so "color" is
 // capitalized to keep the raw values.
 std::string MeshAttributeName(std::string_view primvar, int channels);
-
-void SetMitsubaPropertyFromValue(mitsuba::Properties& props,
-                                 std::string_view name, const pxr::VtValue& val,
-                                 bool invert_float = false);
 
 // Invokes `callback` with the key of every texture the material parsers will
 // look up for `network`, so the TextureCache can be preloaded beforehand.
@@ -109,6 +106,15 @@ class PrimTranslator {
   static void SetSpectrumParameter(TraversalCallback& cb, std::string_view name,
                                    const GfVec3f& rgb);
 
+  // Attempts to apply leaf parameter changes from `old_spec` to `new_spec`
+  // onto `root_obj` via `TraversalCallback` and bottom-up
+  // `parameters_changed()` notifications. Returns false without mutating
+  // `root_obj` if the plugin structure changed or any modified parameter is
+  // not exposed as a writable compatible entry in `traverse()`.
+  static bool TryUpdatePluginInPlace(mitsuba::Object* root_obj,
+                                     const PluginSpecNode& old_spec,
+                                     const PluginSpecNode& new_spec);
+
   static TranslatedMaterial BuildMaterial(
       const MaterialSpec& spec,
       const TextureCache<Float, Spectrum>& texture_cache);
@@ -120,23 +126,44 @@ class PrimTranslator {
 
   static TranslatedLight BuildLight(const LightSpec& spec);
 
-  // Creates the `area` emitter of `spec`, wrapped in an `ies` emitter if `spec`
-  // has an IES profile.
-  static mitsuba::ref<mitsuba::Object> CreateAreaEmitter(const LightSpec& spec);
+  // Creates the `area` emitter of `spec` (with optional `emitter_override`),
+  // wrapped in an `ies` emitter if `spec` has an IES profile.
+  static mitsuba::ref<mitsuba::Object> CreateAreaEmitter(
+      const LightSpec& spec, const PluginSpecNode& emitter_override = {});
 
   // Updates the radiance and IES light frame of an emitter created by
   // `CreateAreaEmitter`.
   static void UpdateAreaEmitterInPlace(
-      mitsuba::Emitter<Float, Spectrum>* emitter, const LightSpec& spec);
+      mitsuba::Emitter<Float, Spectrum>* emitter, const LightSpec& spec,
+      const PluginSpecNode& emitter_override = {});
+
+  static bool TryUpdateAreaEmitterInPlace(
+      mitsuba::Emitter<Float, Spectrum>* emitter, const LightSpec& spec,
+      const PluginSpecNode& old_emitter_spec,
+      const PluginSpecNode& new_emitter_spec);
 
   static void UpdateLightInPlace(mitsuba::Object* light_obj,
                                  const LightSpec& spec);
 
+  static bool TryUpdateLightInPlace(mitsuba::Object* light_obj,
+                                    const LightSpec& spec);
+
   static mitsuba::ref<mitsuba::Sensor<Float, Spectrum>> BuildSensor(
-      const CameraSpec& spec, bool is_interactive = false);
+      const CameraSpec& spec, bool use_box_filter = false,
+      const PluginSpecNode& sampler_spec = {},
+      bool force_independent_sampler = false);
+
+  static void UpdateSensorAspectRatio(mitsuba::Object* sensor_obj,
+                                      const CameraSpec& spec, double aspect);
 
   static void UpdateSensorInPlace(mitsuba::Object* sensor_obj,
                                   const CameraSpec& spec);
+
+  // Attempts to update `sensor_obj` in place for both `mitsuba:sensor:*` leaf
+  // parameter diffs and USD camera parameter/transform changes. Returns false
+  // if `sensor_obj` must be rebuilt instead.
+  static bool TryUpdateSensorInPlace(mitsuba::Object* sensor_obj,
+                                     const CameraSpec& spec);
 
   // Builds a mesh from expanded per-vertex `primvars`. The primvars listed in
   // `mesh_attributes` are uploaded as vertex attributes named by
@@ -145,7 +172,8 @@ class PrimTranslator {
       const std::string& id, const VtIntArray& face_indices,
       const PrimvarMap& primvars, const MeshAttributeRequests& mesh_attributes,
       mitsuba::Object* bsdf, mitsuba::Object* emitter_ptr,
-      mitsuba::Object* sensor_ptr, mitsuba::Object* interior_medium = nullptr);
+      mitsuba::Object* sensor_ptr, mitsuba::Object* interior_medium = nullptr,
+      const PluginSpecNode& shape_spec = {});
 
   static void UpdateMeshInPlace(mitsuba::Object* mesh_obj,
                                 const VtIntArray& face_indices,

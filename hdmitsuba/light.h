@@ -26,6 +26,7 @@
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
 
+#include "hdmitsuba/plugin_builder.h"
 #include "hdmitsuba/spec_types.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -37,6 +38,11 @@ class SceneManager;
 // unset or cannot be resolved (with a warning in the latter case).
 IesSpec GetIesSpec(const HdContainerDataSourceHandle& light_container,
                    const SdfPath& id);
+
+// Returns the `MeshLightAPI` emitter specification for shape `id`, or
+// `std::nullopt` if `id` carries no `MeshLightAPI` intensity.
+std::optional<LightSpec> GetMeshEmitterSpec(HdSceneDelegate* sceneDelegate,
+                                            const SdfPath& id);
 
 class HdMitsubaLight final : public HdLight {
  public:
@@ -61,6 +67,8 @@ class HdMitsubaLight final : public HdLight {
 
   TfToken type_id_;
   std::optional<RebuildKey> rebuild_key_;
+  PluginSpecNode emitter_spec_;
+  PluginSpecNode shape_spec_;
   bool warned_unsupported_motion_ = false;
 };
 

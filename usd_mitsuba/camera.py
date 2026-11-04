@@ -41,25 +41,35 @@ def _to_sensor_transform(world_transform: Gf.Matrix4d) -> mi.ScalarTransform4f:
 SENSOR_SHAPE_ATTR = 'mitsuba:sensor:shape'
 
 
-def get_target_shape_path(prim: Usd.Prim) -> Sdf.Path | None:
+def get_target_shape_path(
+    prim: Usd.Prim, time: Usd.TimeCode = Usd.TimeCode.Default()
+) -> Sdf.Path | None:
   """Returns the shape path a sensor prim measures, if any."""
   attr = prim.GetAttribute(SENSOR_SHAPE_ATTR)
   if not attr:
     return None
-  path = attr.Get()
-  if not path:
+  value = attr.Get(time)
+  if not value:
     return None
-  path = Sdf.Path(str(path))
+  if isinstance(value, Sdf.AssetPath):
+    path_str = value.resolvedPath or value.path
+  else:
+    path_str = str(value)
+  if not path_str or not Sdf.Path.IsValidPathString(path_str):
+    return None
+  path = Sdf.Path(path_str)
   return path if not path.isEmpty else None
 
 
-def get_surface_sensor_bindings(stage: Usd.Stage) -> dict[Sdf.Path, Usd.Prim]:
+def get_surface_sensor_bindings(
+    stage: Usd.Stage, time: Usd.TimeCode = Usd.TimeCode.Default()
+) -> dict[Sdf.Path, Usd.Prim]:
   """Maps each measured shape path to the camera prim that measures it."""
   bindings: dict[Sdf.Path, Usd.Prim] = {}
   for prim in stage.Traverse(Usd.TraverseInstanceProxies()):
     if not prim.IsA(UsdGeom.Camera):
       continue
-    shape_path = get_target_shape_path(prim)
+    shape_path = get_target_shape_path(prim, time)
     if shape_path is None:
       continue
     bindings.setdefault(shape_path, prim)
@@ -100,49 +110,60 @@ def usd_to_mitsuba(
     if resolution_attr.HasAuthoredValue():
       resolution = resolution_attr.Get(time)
       image_size = (resolution[0], resolution[1])
+  sensor_overrides = util.extract_nested_dict(prim, 'mitsuba:sensor:', time)
+  sensor_overrides.pop('shape', None)
+  sensor_type = sensor_overrides.get('type', 'perspective')
   if image_size is None:
-    image_size = (512, int(dr.round(512 * aperture_y / aperture_x)))
+    if sensor_type in ('radiancemeter', 'distant'):
+      image_size = (1, 1)
+    else:
+      image_size = (512, int(dr.round(512 * aperture_y / aperture_x)))
 
-  if prim.GetAttribute('mitsuba:sensor:type').Get():
-    sensor_dict = util.extract_nested_dict(prim, 'mitsuba:sensor:')
-    sensor_dict.pop('shape', None)
-    # Irradiancemeter sensors cannot have a transform.
-    if sensor_dict.get('type') != 'irradiancemeter':
-      sensor_dict['to_world'] = world_transform
-    film_dict = sensor_dict.setdefault('film', {})
-    assert isinstance(film_dict, dict)
-    film_dict.setdefault('type', 'hdrfilm')
-    film_dict.setdefault('width', image_size[0])
-    film_dict.setdefault('height', image_size[1])
-  else:
-    sensor_dict = {
-        'type': 'perspective',
-        'to_world': world_transform,
-        'film': {
-            'type': 'hdrfilm',
-            'width': image_size[0],
-            'height': image_size[1],
-        },
-    }
-    focal_length = camera.GetFocalLengthAttr().Get(time)
-    x_fov = 2.0 * dr.atan(aperture_x / (2.0 * focal_length))
-    sensor_dict['fov'] = dr.rad2deg(x_fov)
+  sensor_dict: dict[str, Any] = {'type': sensor_type}
+  has_explicit_ray_frame = any(
+      key in sensor_overrides for key in ('to_world', 'direction', 'origin')
+  )
+  is_surface_sensor = get_target_shape_path(prim, time) is not None
+  if (
+      sensor_type != 'irradiancemeter'
+      and not is_surface_sensor
+      and not has_explicit_ray_frame
+  ):
+    sensor_dict['to_world'] = world_transform
 
+  if sensor_type in ('perspective', 'thinlens'):
+    if 'focal_length' not in sensor_overrides:
+      focal_length = camera.GetFocalLengthAttr().Get(time)
+      x_fov = 2.0 * dr.atan(aperture_x / (2.0 * focal_length))
+      sensor_dict['fov'] = dr.rad2deg(x_fov)
+      sensor_dict['fov_axis'] = 'x'
     sensor_dict['principal_point_offset_x'] = (
         camera.GetHorizontalApertureOffsetAttr().Get(time) / aperture_x
     )
     sensor_dict['principal_point_offset_y'] = (
         -camera.GetVerticalApertureOffsetAttr().Get(time) / aperture_y
     )
+    if sensor_type == 'thinlens':
+      sensor_dict['aperture_radius'] = 0.0
 
+  if sensor_type in ('perspective', 'thinlens', 'orthographic'):
     clipping_range = camera.GetClippingRangeAttr().Get(time)
     if clipping_range:
       sensor_dict['near_clip'] = clipping_range[0]
       sensor_dict['far_clip'] = clipping_range[1]
 
+  sensor_dict['film'] = {
+      'type': 'hdrfilm',
+      'width': image_size[0],
+      'height': image_size[1],
+  }
+  sensor_dict['shutter_open'], sensor_dict['shutter_close'] = shutter
+  util.deep_merge_dict(sensor_dict, sensor_overrides)
+
   film_dict = sensor_dict['film']
   assert isinstance(film_dict, dict)
 
+  has_ndc_crop = False
   # Apply crop window if present in render settings
   if render_settings:
     ndc_attr = render_settings.GetDataWindowNDCAttr()
@@ -150,6 +171,7 @@ def usd_to_mitsuba(
       ndc = ndc_attr.Get(time)
       ndc = tuple(ndc)
       if ndc != (0.0, 0.0, 1.0, 1.0):
+        has_ndc_crop = True
         width, height = image_size
         xmin, ymin, xmax, ymax = ndc
 
@@ -169,20 +191,57 @@ def usd_to_mitsuba(
         film_dict['crop_height'] = crop_height
         film_dict['crop_offset_x'] = crop_offset_x
         film_dict['crop_offset_y'] = crop_offset_y
+  if not has_ndc_crop and any(
+      key in film_dict
+      for key in ('crop_offset_x', 'crop_offset_y', 'crop_width', 'crop_height')
+  ):
+    width, height = int(film_dict['width']), int(film_dict['height'])
+    if width > 0 and height > 0:
+      crop_offset_x = max(
+          0, min(int(film_dict.get('crop_offset_x', 0)), width - 1)
+      )
+      crop_offset_y = max(
+          0, min(int(film_dict.get('crop_offset_y', 0)), height - 1)
+      )
+      crop_width = max(
+          1,
+          min(
+              int(film_dict.get('crop_width', width - crop_offset_x)),
+              width - crop_offset_x,
+          ),
+      )
+      crop_height = max(
+          1,
+          min(
+              int(film_dict.get('crop_height', height - crop_offset_y)),
+              height - crop_offset_y,
+          ),
+      )
+      film_dict['crop_offset_x'] = crop_offset_x
+      film_dict['crop_offset_y'] = crop_offset_y
+      film_dict['crop_width'] = crop_width
+      film_dict['crop_height'] = crop_height
 
-  # TODO: Modify this to also support specifying 'mitsuba:sampler:sample_count'.
-  sample_count = 1
+  sampler_dict: dict[str, Any] = {}
   if render_settings:
-    sample_count_attr = render_settings.GetPrim().GetAttribute('mitsuba:sample_count')
-    if sample_count_attr.HasAuthoredValue():
-      sample_count = sample_count_attr.Get(time)
-
-  sensor_dict['sampler'] = {
-      'type': 'independent',
-      'sample_count': sample_count,
-  }
+    settings_prim = render_settings.GetPrim()
+    sampler_dict = util.extract_nested_dict(
+        settings_prim, 'mitsuba:sampler:', time
+    )
+    sample_count_attr = settings_prim.GetAttribute('mitsuba:sample_count')
+    if sample_count_attr and sample_count_attr.HasAuthoredValue():
+      sampler_dict.setdefault('sample_count', sample_count_attr.Get(time))
+  if not sampler_dict.get('type'):
+    sampler_dict['type'] = 'independent'
+  sampler_dict.setdefault('sample_count', 1)
+  if isinstance(sensor_dict.get('sampler'), dict):
+    if not sensor_dict['sampler'].get('type'):
+      sensor_dict['sampler']['type'] = 'independent'
+  else:
+    sensor_dict.setdefault('sampler', sampler_dict)
 
   if reconstruction_filter is not None:
+    film_dict.pop('pixel_filter', None)
+    film_dict.pop('rfilter', None)
     film_dict['reconstruction_filter'] = reconstruction_filter
-  sensor_dict['shutter_open'], sensor_dict['shutter_close'] = shutter
   return sensor_dict

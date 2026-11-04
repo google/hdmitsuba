@@ -1,0 +1,67 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    renderSettingsPrimPath = "/Render/Settings"
+    upAxis = "Y"
+)
+
+def Scope "Render"
+{
+    def RenderSettings "Settings"
+    {
+        rel camera = </World/Camera>
+        uniform int2 resolution = (64, 64)
+        custom string mitsuba:integrator:type = "path"
+        custom int mitsuba:integrator:max_depth = 4
+        custom string mitsuba:sampler:type = "stratified"
+        custom int mitsuba:sampler:sample_count = 16
+        custom bool mitsuba:sampler:jitter = 0
+    }
+}
+
+def Xform "World"
+{
+    def Camera "Camera"
+    {
+        float2 clippingRange = (0.1, 100)
+        float focalLength = 35
+        float horizontalAperture = 24
+        float verticalAperture = 24
+        double3 xformOp:translate = (0, 0, 4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        custom string mitsuba:sensor:type = "thinlens"
+        custom float mitsuba:sensor:aperture_radius = 0.02
+        custom float mitsuba:sensor:focus_distance = 4.0
+        custom string mitsuba:sensor:film:rfilter:type = "box"
+    }
+
+    def Sphere "Subject"
+    {
+        double radius = 0.65
+        color3f[] primvars:displayColor = [(0.85, 0.35, 0.2)]
+    }
+
+    def Mesh "Backdrop"
+    {
+        uniform bool doubleSided = 0
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-3, 3, -1.5), (3, 3, -1.5), (3, -3, -1.5), (-3, -3, -1.5)]
+        color3f[] primvars:displayColor = [(0.7, 0.75, 0.8)]
+        uniform token subdivisionScheme = "none"
+        custom bool mitsuba:shape:flip_normals = 1
+    }
+
+    def SphereLight "KeyLight"
+    {
+        bool treatAsPoint = 1
+        double3 xformOp:translate = (0.5, 0.5, 3.0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        custom string mitsuba:emitter:type = "spot"
+        custom float mitsuba:emitter:cutoff_angle = 45.0
+        custom float mitsuba:emitter:beam_width = 30.0
+        custom string mitsuba:emitter:intensity:type = "rgb"
+        custom color3f mitsuba:emitter:intensity:value = (25.0, 22.0, 18.0)
+    }
+}

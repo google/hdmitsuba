@@ -27,12 +27,42 @@ This document provides an overview of the USD features supported by `hdMitsuba`,
 *   **Fallback Shading (displayColor)**: If a mesh has no bound material, the delegate automatically maps the USD `displayColor` attribute to a fallback `diffuse` BSDF with its `reflectance` bound to the color.
 
 ### Lights & Camera
-*   **Light Types**: Sphere lights, point lights, spot lights, rectangle lights, distant lights, and dome lights (for HDR environment map backgrounds). IES profiles (`UsdLuxShapingAPI` `inputs:shaping:ies:*`, Type C) are supported on sphere, point, rectangle, disk, and mesh lights. As OpenUSD doesn't define the profile orientation, it follows hdEmbree: `theta = 0` along the light's -Z axis (its emission direction), and `phi = 0` along its -X axis, increasing towards -Y. Standard USDLux area lights (`SphereLight` when not point, `RectLight`, `DiskLight`) default to `"secondary"` ray visibility (invisible to primary camera rays while still illuminating the scene and reflecting in secondary rays). Ray visibility on area lights and dome lights can be controlled by setting the `mitsuba:visibility` (string or token) attribute (`"all"`, `"primary"`, `"secondary"`, `"hidden"`).
+
+*   **Light Types**: Sphere lights, point lights, spot lights, rectangle lights,
+    distant lights, and dome lights (for HDR environment map backgrounds). IES
+    profiles (`UsdLuxShapingAPI` `inputs:shaping:ies:*`, Type C) are supported
+    on sphere, point, rectangle, disk, and mesh lights. As OpenUSD doesn't
+    define the profile orientation, it follows hdEmbree: `theta = 0` along the
+    light's -Z axis (its emission direction), and `phi = 0` along its -X axis,
+    increasing towards -Y. Standard USDLux area lights (`SphereLight` when not
+    point, `RectLight`, `DiskLight`) default to `"secondary"` ray visibility
+    (invisible to primary camera rays while still illuminating the scene and
+    reflecting in secondary rays). Ray visibility on area lights and dome lights
+    can be controlled by setting the `mitsuba:visibility` (string or token)
+    attribute (`"all"`, `"primary"`, `"secondary"`, `"hidden"`). Supported USD
+    lights and geometry prims (`Mesh`, `Sphere`, `Cylinder`, `Cube`, and
+    `Plane`) can also customize or attach native Mitsuba emitters and shape
+    parameters via `mitsuba:emitter:*` and `mitsuba:shape:*` attributes.
 *   **Cameras & Custom Sensors**:
-    *   Supports standard perspective cameras with horizontal/vertical aperture offsets.
-    *   **Custom Sensor Type**: Customize the Mitsuba sensor backend by setting `mitsuba:sensor:type` (string, e.g., `perspective`, `irradiancemeter`, `radmeter`) on the Camera prim.
-    *   **Pixel Filter**: Customize the film's pixel filter by setting `mitsuba:sensor:film:pixel_filter:type` (string) on the Camera prim.
-    *   **Surface Sensors**: Attach a surface sensor (e.g., `irradiancemeter`) to a Mesh geometry prim by setting `mitsuba:sensor:shape` (string) on the Camera prim. This allows measuring light hitting that specific surface (e.g., for irradiance mapping). An example is provided in `test_assets/shapes`.
+    *   Supports standard perspective cameras with horizontal/vertical aperture
+        offsets and clipping ranges.
+    *   **Custom Sensor Specs (`mitsuba:sensor:*`)**: Customize the Mitsuba
+        sensor plugin and any of its parameters or nested child plugins on a
+        `Camera` prim (e.g., `mitsuba:sensor:type = "thinlens"` with
+        `mitsuba:sensor:aperture_radius` and `mitsuba:sensor:focus_distance`, or
+        `orthographic`, `radiancemeter`, `irradiancemeter`, `distant`).
+        Authoring `mitsuba:sensor:sampler:*` configures a standalone per-camera
+        sampler override (defaulting `type` to `"independent"` and
+        `sample_count` to `4` when omitted).
+    *   **Film & Pixel Filter**: Customize film parameters or reconstruction
+        filters via `mitsuba:sensor:film:*` (e.g.,
+        `mitsuba:sensor:film:rfilter:type` or
+        `mitsuba:sensor:film:pixel_filter:type`).
+    *   **Surface Sensors**: Attach a surface sensor (e.g., `irradiancemeter`)
+        to a geometry prim by setting `mitsuba:sensor:shape` (string or asset
+        path) on the `Camera` prim. This allows measuring light hitting that
+        specific surface (e.g., for irradiance mapping). An example is provided
+        in `test_assets/shapes`.
 *   **Motion Blur**: Transformation motion blur is supported for cameras, non-area lights (point, spot, distant, and dome lights), and geometry (meshes, implicit surfaces, and point instancers, wrapped in Mitsuba instances when their transform is animated) via standard USD time-sampled transforms and camera `shutter:open` / `shutter:close` attributes. The maximum number of transform samples over the shutter interval can be overridden by authoring the `primvars:mitsuba:motion_samples` (int, default `32`) primvar on a prim or any of its ancestors. Area lights, emissive meshes, meshes with an attached surface sensor, and deformation motion blur are not supported; these render with their static transform at frame time.
 
 ### Hydra AOVs (Arbitrary Output Variables)
@@ -52,11 +82,26 @@ You can configure the render delegate by authoring a `RenderSettings` prim insid
 
 ### Custom Mitsuba Settings
 *   **`mitsuba:variant`**: The Mitsuba variant to use for rendering (e.g., `scalar_rgb`, `cuda_ad_rgb`, `llvm_ad_rgb`).
-*   **`mitsuba:sample_count`** : The target samples per pixel (SPP) for high-quality offline renders.
+*   **`mitsuba:sample_count`**: The target samples per pixel (SPP) for offline
+    renders (alias for `mitsuba:sampler:sample_count`; if both are authored on
+    `RenderSettings`, `mitsuba:sampler:sample_count` takes precedence).
+*   **`mitsuba:sampler:type`** & **`mitsuba:sampler:<param>`**: Configures the
+    Mitsuba sampler plugin (e.g., `independent`, `stratified`, `multijitter`,
+    `orthogonal`, `ldsampler`) and its parameters (e.g.,
+    `mitsuba:sampler:jitter`, `mitsuba:sampler:seed`). In interactive
+    progressive mode (`enableInteractive = true`), structured samplers
+    automatically fall back to `independent` so multi-pass accumulation remains
+    unbiased.
 *   **`mitsuba:seed`**: The random number generator seed offset (int, default `0`) passed to the Mitsuba integrator. Changing `mitsuba:seed` resets progressive accumulation.
 *   **`mitsuba:interactive_samples_per_pass`**: Number of samples per pixel rendered in each Hydra pass while `enableInteractive` is `true` (default `1`). Larger values reduce per-pass overhead (and, with kernel freezing enabled, are replayed as a single frozen kernel) at the cost of coarser progressive updates. Changing `mitsuba:interactive_samples_per_pass` or `mitsuba:sample_count` resets progressive accumulation.
-*   **`mitsuba:integrator:type`**: The Mitsuba integrator to use (e.g., `path`, `aov`, `direct`).
-*   **`mitsuba:integrator:<param>`**: Any other setting in the `mitsuba:integrator:` namespace is forwarded as the property `<param>` to the Mitsuba integrator (e.g., `mitsuba:integrator:max_depth` or `mitsuba:integrator:rr_depth` for path-tracing integrators). Unset properties use the Mitsuba integrator's defaults, and properties not supported by the integrator are ignored with a warning. Changing these settings recreates the integrator and resets progressive accumulation.
+*   **`mitsuba:integrator:type`**: The Mitsuba integrator to use (e.g., `path`, `volpath`, `aov`, `direct`).
+*   **`mitsuba:integrator:<param>`**: Any flat or nested setting in the
+    `mitsuba:integrator:` namespace is forwarded to the Mitsuba integrator
+    (e.g., `mitsuba:integrator:max_depth`, `mitsuba:integrator:rr_depth`, or
+    nested child integrators). Unset properties use the Mitsuba integrator's
+    defaults, and properties not supported by the integrator are ignored with a
+    warning. Changing these settings recreates the integrator and resets
+    progressive accumulation.
 *   **`mitsuba:use_kernel_freezing`**: Enables Dr.Jit's kernel freezing. When enabled, the JIT compilation is frozen after the first frame, drastically reducing JIT tracing overhead for subsequent frames (extremely beneficial for interactive camera navigation in viewports). This is currently disabled by default, as it is still in a somewhat experimental state in its Hydra integration, and also will not work in all Mitsuba 3 scenes.
 *   **`mitsuba:denoise`**: Denoises the rendered `color` image (bool, default
     `false`) using NVIDIA OptiX on CUDA variants (`cuda_*`) or Intel
@@ -65,6 +110,29 @@ You can configure the render delegate by authoring a `RenderSettings` prim insid
     when requested (normal guidance requires `albedo`). Enabling
     `mitsuba:denoise` forces the `box` pixel filter so pixel noise remains
     uncorrelated.
+
+### Hierarchical Mitsuba Plugin Specs (`mitsuba:<plugin>:*`)
+
+Both `hdMitsuba` and the offline `usd_mitsuba` translator share a uniform USD
+namespace convention for configuring native Mitsuba plugins and nested child
+plugins:
+
+*   **Supported Namespaces**: `mitsuba:integrator:*` and `mitsuba:sampler:*` on
+    `RenderSettings` prims; `mitsuba:sensor:*` on `Camera` prims; and
+    `mitsuba:emitter:*` and `mitsuba:shape:*` on supported USD light and
+    geometry prims (`Mesh`, `Sphere`, `Cylinder`, `Cube`, and `Plane`).
+*   **Hierarchy & Plugin Selection**: Colon-separated attribute names map to
+    nested Mitsuba plugin properties. `:type` selects a plugin type, `:id`
+    assigns a Mitsuba object ID, and nested `:child:type` / `:child:<param>`
+    entries recursively instantiate child plugins (for example,
+    `mitsuba:sensor:film:rfilter:type = "gaussian"` and
+    `mitsuba:sensor:film:rfilter:stddev = 0.5`).
+*   **Value Conversions**: `color3f` attributes convert to RGB spectra, spatial
+    `point3f` / `vector3f` / `normal3f` attributes convert to Mitsuba 3-vectors,
+    `matrix3d` / `matrix4d` convert to Mitsuba transforms, `asset` paths resolve
+    through USD's asset resolver, and inline child specs support
+    `:type = "rgb"`, `"spectrum"` (wavelength:weight pairs or uniform float),
+    and `"vector"`.
 
 ### Standard Hydra Viewport Settings
 *   **`enableInteractive`**:
@@ -87,10 +155,12 @@ def RenderSettings "/Render/MitsubaSettings"
 
     # Custom Mitsuba settings
     custom string mitsuba:variant = "llvm_ad_rgb"
-    custom int mitsuba:sample_count = 256
+    custom string mitsuba:sampler:type = "multijitter"
+    custom int mitsuba:sampler:sample_count = 256
     custom int mitsuba:seed = 0
     custom int mitsuba:interactive_samples_per_pass = 4
     custom string mitsuba:integrator:type = "path"
+    custom int mitsuba:integrator:max_depth = 8
 
     # Enable Dr.Jit kernel freezing for fast interactive viewport updates
     custom bool mitsuba:use_kernel_freezing = true

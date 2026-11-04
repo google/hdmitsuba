@@ -175,3 +175,135 @@ def test_convert_to_mitsuba_with_crop():
   assert film["crop_width"] == 100
   assert film["crop_height"] == 30
 
+
+def test_convert_to_mitsuba_with_sensor_overrides():
+  stage, _ = _create_camera_stage()
+  camera_prim = stage.GetPrimAtPath("/World/MyCamera")
+  camera_prim.CreateAttribute(
+      "mitsuba:sensor:type", Sdf.ValueTypeNames.String
+  ).Set("thinlens")
+  camera_prim.CreateAttribute(
+      "mitsuba:sensor:aperture_radius", Sdf.ValueTypeNames.Float
+  ).Set(0.35)
+  camera_prim.CreateAttribute(
+      "mitsuba:sensor:focus_distance", Sdf.ValueTypeNames.Float
+  ).Set(7.5)
+  camera_prim.CreateAttribute(
+      "mitsuba:sensor:film:pixel_filter:type", Sdf.ValueTypeNames.String
+  ).Set("gaussian")
+  camera_prim.CreateAttribute(
+      "mitsuba:sensor:film:pixel_filter:stddev", Sdf.ValueTypeNames.Float
+  ).Set(1.25)
+
+  mitsuba_camera = camera.usd_to_mitsuba(UsdGeom.Camera(camera_prim))
+  assert mitsuba_camera["type"] == "thinlens"
+  assert abs(mitsuba_camera["fov"] - 39.598) < 1e-3
+  np.testing.assert_allclose(mitsuba_camera["aperture_radius"], 0.35)
+  np.testing.assert_allclose(mitsuba_camera["focus_distance"], 7.5)
+  assert mitsuba_camera["film"]["type"] == "hdrfilm"
+  assert mitsuba_camera["film"]["width"] == 200
+  assert mitsuba_camera["film"]["height"] == 100
+  assert mitsuba_camera["film"]["pixel_filter"] == {
+      "type": "gaussian",
+      "stddev": 1.25,
+  }
+  assert mi.load_dict(mitsuba_camera) is not None
+
+
+def test_thinlens_default_aperture_and_srf_spectrum():
+  stage, _ = _create_camera_stage()
+  camera_prim = stage.GetPrimAtPath("/World/MyCamera")
+  camera_prim.CreateAttribute(
+      "mitsuba:sensor:type", Sdf.ValueTypeNames.String
+  ).Set("thinlens")
+
+  mitsuba_camera = camera.usd_to_mitsuba(UsdGeom.Camera(camera_prim))
+  assert mitsuba_camera["type"] == "thinlens"
+  assert mitsuba_camera["aperture_radius"] == 0.0
+  assert mi.load_dict(mitsuba_camera) is not None
+
+  camera_prim.CreateAttribute(
+      "mitsuba:sensor:srf:type", Sdf.ValueTypeNames.String
+  ).Set("spectrum")
+  camera_prim.CreateAttribute(
+      "mitsuba:sensor:srf:value", Sdf.ValueTypeNames.String
+  ).Set("400:0.5, 500:1.0, 600:0.8")
+  mitsuba_camera = camera.usd_to_mitsuba(UsdGeom.Camera(camera_prim))
+  assert mitsuba_camera["srf"] == {
+      "type": "spectrum",
+      "value": [(400.0, 0.5), (500.0, 1.0), (600.0, 0.8)],
+  }
+  assert mi.load_dict(mitsuba_camera["srf"]) is not None
+
+
+def test_distant_sensor_and_invalid_target_shape():
+  stage = Usd.Stage.CreateInMemory()
+  cam = UsdGeom.Camera.Define(stage, "/World/DistantSensor")
+  prim = cam.GetPrim()
+  prim.CreateAttribute(
+      "mitsuba:sensor:type", Sdf.ValueTypeNames.String
+  ).Set("distant")
+  prim.CreateAttribute(
+      "mitsuba:sensor:direction", Sdf.ValueTypeNames.Vector3f
+  ).Set(Gf.Vec3f(0.0, 0.0, -1.0))
+  prim.CreateAttribute(
+      "mitsuba:sensor:shape", Sdf.ValueTypeNames.String
+  ).Set("not a valid sdf path")
+
+  assert camera.get_target_shape_path(prim) is None
+  sensor_dict = camera.usd_to_mitsuba(cam)
+  assert "to_world" not in sensor_dict
+  assert sensor_dict["film"]["width"] == 1
+  assert sensor_dict["film"]["height"] == 1
+  assert mi.load_dict(sensor_dict) is not None
+
+
+def test_standalone_sensor_sampler_override_and_film_crop_clamping():
+  stage, _ = _create_camera_stage()
+  settings_prim = stage.GetPrimAtPath("/Render/Settings")
+  settings_prim.CreateAttribute(
+      "mitsuba:sampler:type", Sdf.ValueTypeNames.String
+  ).Set("stratified")
+  settings_prim.CreateAttribute(
+      "mitsuba:sampler:jitter", Sdf.ValueTypeNames.Bool
+  ).Set(False)
+  settings_prim.CreateAttribute(
+      "mitsuba:sample_count", Sdf.ValueTypeNames.Int
+  ).Set(32)
+
+  cam = UsdGeom.Camera(stage.GetPrimAtPath("/World/MyCamera"))
+  cam_prim = cam.GetPrim()
+  assert camera.usd_to_mitsuba(cam)["sampler"] == {
+      "type": "stratified",
+      "jitter": False,
+      "sample_count": 32,
+  }
+
+  # Authored `mitsuba:sensor:sampler:*` is a standalone per-sensor override and
+  # must not inherit `type`, `jitter`, or `sample_count` from RenderSettings.
+  cam_prim.CreateAttribute(
+      "mitsuba:sensor:sampler:sample_count", Sdf.ValueTypeNames.Int
+  ).Set(6)
+  spp_only_dict = camera.usd_to_mitsuba(cam)
+  assert spp_only_dict["sampler"] == {"type": "independent", "sample_count": 6}
+  assert mi.load_dict(spp_only_dict).sampler().sample_count() == 6
+
+  cam_prim.RemoveProperty("mitsuba:sensor:sampler:sample_count")
+  cam_prim.CreateAttribute(
+      "mitsuba:sensor:sampler:type", Sdf.ValueTypeNames.String
+  ).Set("multijitter")
+  type_only_dict = camera.usd_to_mitsuba(cam)
+  assert type_only_dict["sampler"] == {"type": "multijitter"}
+  assert mi.load_dict(type_only_dict).sampler().sample_count() == 4
+
+  # Authored `mitsuba:sensor:film:crop_offset_x` without `crop_width` clamps
+  # cleanly to the remaining film width so `mi.load_dict` succeeds.
+  cam_prim.CreateAttribute(
+      "mitsuba:sensor:film:crop_offset_x", Sdf.ValueTypeNames.Int
+  ).Set(150)
+  cropped_dict = camera.usd_to_mitsuba(cam)
+  assert cropped_dict["film"]["crop_offset_x"] == 150
+  assert cropped_dict["film"]["crop_offset_y"] == 0
+  assert cropped_dict["film"]["crop_width"] == 50
+  assert cropped_dict["film"]["crop_height"] == 100
+  assert mi.load_dict(cropped_dict) is not None

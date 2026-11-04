@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
 #include <map>
 #include <optional>
 #include <string>
@@ -35,7 +36,6 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/string_view.h>
-#include <absl/strings/strip.h>
 #include <absl/synchronization/mutex.h>
 #include <drjit-core/jit.h>
 #include <drjit/array_router.h>
@@ -50,7 +50,6 @@
 #include <mitsuba/core/plugin.h>
 #include <mitsuba/core/properties.h>
 #include <mitsuba/core/random.h>
-#include <mitsuba/core/rfilter.h>
 #include <mitsuba/core/thread.h>
 #include <mitsuba/core/util.h>
 #include <mitsuba/render/film.h>
@@ -87,9 +86,11 @@
 #include "hdmitsuba/debug_codes.h"
 #include "hdmitsuba/denoiser.h"
 #include "hdmitsuba/framebuffer.h"
+#include "hdmitsuba/ies_emitter.h"
 #include "hdmitsuba/kernel_freezing.h"
 #include "hdmitsuba/mesh/displacement.h"
 #include "hdmitsuba/mesh/geometry_processor.h"
+#include "hdmitsuba/plugin_builder.h"
 #include "hdmitsuba/prim_translator.h"
 #include "hdmitsuba/render_buffer.h"
 #include "hdmitsuba/render_delegate.h"
@@ -131,6 +132,36 @@ std::optional<T> GetSetting(const VtDictionary& settings,
   }
   TF_WARN("Type mismatch for render setting '%s': expected %s, got %s",
           key.c_str(), TfType::Find<T>().GetTypeName().c_str(),
+          it->second.GetTypeName().c_str());
+  return std::nullopt;
+}
+
+std::optional<int64_t> ExtractIntValue(const VtValue& value) {
+  if (value.IsHolding<int>()) {
+    return static_cast<int64_t>(value.UncheckedGet<int>());
+  }
+  if (value.IsHolding<int64_t>()) {
+    return value.UncheckedGet<int64_t>();
+  }
+  if (value.IsHolding<uint32_t>()) {
+    return static_cast<int64_t>(value.UncheckedGet<uint32_t>());
+  }
+  if (value.IsHolding<uint64_t>()) {
+    return static_cast<int64_t>(value.UncheckedGet<uint64_t>());
+  }
+  return std::nullopt;
+}
+
+std::optional<int64_t> GetIntSetting(const VtDictionary& settings,
+                                     const std::string& key) {
+  auto it = settings.find(key);
+  if (it == settings.end() || it->second.IsEmpty()) {
+    return std::nullopt;
+  }
+  if (std::optional<int64_t> parsed = ExtractIntValue(it->second)) {
+    return parsed;
+  }
+  TF_WARN("Type mismatch for integer render setting '%s': got %s", key.c_str(),
           it->second.GetTypeName().c_str());
   return std::nullopt;
 }
@@ -263,8 +294,15 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
       }
     }
   }
+  GfMatrix4d effective_transform = spec.transform;
+  if (auto xform_it = spec.shape_spec.params.find("to_world");
+      xform_it != spec.shape_spec.params.end()) {
+    if (const auto extra = ExtractMatrix4d(xform_it->second)) {
+      effective_transform = *extra * effective_transform;
+    }
+  }
   if (displaced) {
-    GeometryProcessor::TransformPrimvars(final_primvars, spec.transform);
+    GeometryProcessor::TransformPrimvars(final_primvars, effective_transform);
     GeometryProcessor::ComputeNormals(final_primvars, spec.face_vertex_indices,
                                       spec.face_vertex_counts);
   }
@@ -273,7 +311,8 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
   auto [face_indices, expanded_primvars] = GeometryProcessor::ExpandPrimData(
       spec.face_vertex_indices, spec.face_vertex_counts, final_primvars);
   if (!displaced) {
-    GeometryProcessor::TransformPrimvars(expanded_primvars, spec.transform);
+    GeometryProcessor::TransformPrimvars(expanded_primvars,
+                                         effective_transform);
   }
   auto [triangles, primitive_params] =
       GeometryProcessor::TriangulateWithFaceMapping(spec.face_vertex_counts,
@@ -288,18 +327,18 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
 template <typename Float, typename Spectrum>
 class SceneModel final : public SceneManager {
  public:
-  MI_IMPORT_TYPES(BSDF, Emitter, Film, Integrator, Mesh, ReconstructionFilter,
-                  Scene, Sensor, Shape, Texture);
+  MI_IMPORT_TYPES(BSDF, Emitter, Film, Integrator, Mesh, Scene, Sensor, Shape,
+                  Texture);
   using PrimTranslator = PrimTranslator<Float, Spectrum>;
 
   struct CommittedMesh {
-    std::vector<mitsuba::ref<Shape>> meshes;
+    std::vector<std::pair<std::string, mitsuba::ref<Shape>>> meshes;
     mitsuba::ref<Shape> shapegroup = nullptr;
     std::vector<mitsuba::ref<Shape>> instances;
   };
 
   struct MeshCommitWork {
-    const MeshSpec* spec;
+    MeshSpec* spec;
     // Backing storage of `spec` for motion-wrapped meshes, see
     // `ResolveMotionWrapped`.
     std::optional<MeshSpec> resolved_spec;
@@ -314,12 +353,20 @@ class SceneModel final : public SceneManager {
     default_bsdf_ = mitsuba::PluginManager::instance()
                         ->create_object<mitsuba::BSDF<Float, Spectrum>>(
                             Properties("diffuse"));
+    null_bsdf_ =
+        mitsuba::PluginManager::instance()
+            ->create_object<mitsuba::BSDF<Float, Spectrum>>(Properties("null"));
   }
 
   ref<BSDF> DefaultBsdf() { return default_bsdf_; }
 
-  ref<BSDF> ResolveBsdf(const SdfPath& material_id,
-                        const PrimvarMap& primvars) {
+  static bool HasMedium(const MeshSpec& spec) {
+    return (spec.shape_spec.children.count("interior") > 0) ||
+           (spec.shape_spec.children.count("exterior") > 0);
+  }
+
+  ref<BSDF> ResolveBsdf(const SdfPath& material_id, const PrimvarMap& primvars,
+                        bool has_medium = false) {
     auto bsdf_it = bsdfs_.find(material_id);
     if (bsdf_it != bsdfs_.end()) {
       return bsdf_it->second;
@@ -357,7 +404,7 @@ class SceneModel final : public SceneManager {
         return inserted_it->second;
       }
     }
-    return DefaultBsdf();
+    return has_medium ? null_bsdf_ : DefaultBsdf();
   }
 
   // Returns the primvars that `material_id` reads as mesh attributes.
@@ -383,10 +430,6 @@ class SceneModel final : public SceneManager {
     TF_DEBUG(HDMITSUBA_SYNC).Msg("SyncCamera: %s\n", spec.id.GetText());
     absl::MutexLock lock(state_mutex_);
     auto prev_it = camera_specs_.find(spec.id);
-    if (prev_it != camera_specs_.end() &&
-        prev_it->second.pixel_filter_type != spec.pixel_filter_type) {
-      spec.needs_rebuild = true;
-    }
     std::optional<SdfPath> prev_target =
         prev_it == camera_specs_.end() ? std::nullopt
                                        : SurfaceSensorTarget(prev_it->second);
@@ -619,6 +662,37 @@ class SceneModel final : public SceneManager {
       }
     }
 
+    SdfPath sensor_id;
+    if (camera == nullptr) {
+      if (std::string sensor_path(sensor->id());
+          SdfPath::IsValidPathString(sensor_path)) {
+        sensor_id = SdfPath(sensor_path);
+      }
+    } else {
+      sensor_id = camera->GetId();
+    }
+    auto active_camera_it = camera_specs_.find(sensor_id);
+    size_t effective_sample_count = sample_count_;
+    if (active_camera_it != camera_specs_.end()) {
+      if (auto sampler_it =
+              active_camera_it->second.sensor_spec.children.find("sampler");
+          sampler_it != active_camera_it->second.sensor_spec.children.end()) {
+        effective_sample_count = 4;
+        if (auto spp_it = sampler_it->second.params.find("sample_count");
+            spp_it != sampler_it->second.params.end()) {
+          if (std::optional<int64_t> cam_spp =
+                  ExtractIntValue(spp_it->second)) {
+            effective_sample_count =
+                static_cast<size_t>(std::max<int64_t>(1, *cam_spp));
+          }
+        }
+      }
+    }
+    if (effective_sample_count != active_sample_count_) {
+      active_sample_count_ = effective_sample_count;
+      reset_progressive_ = true;
+    }
+
     Film* film = sensor->film();
     bool film_changed = false;
     // Only output alpha if a 4-channel color buffer requests it, since the
@@ -627,29 +701,120 @@ class SceneModel final : public SceneManager {
       const bool want_alpha =
           pass_state.color_buffer &&
           HdGetComponentCount(pass_state.color_buffer->GetFormat()) == 4;
-      if (want_alpha != (film->base_channels().size() == 4)) {
-        Properties film_props("hdrfilm");
-        film_props.set("pixel_format", want_alpha ? "rgba" : "rgb");
-        film_props.set("rfilter", static_cast<Object*>(const_cast<
-                                      ReconstructionFilter*>(film->rfilter())));
-        sensor->set_film(
-            PluginManager::instance()->create_object<Film>(film_props).get());
-        film = sensor->film();
-        film_changed = true;
+      if (want_alpha != (film->base_channels().size() == 4) &&
+          film->class_name() == "HDRFilm" && !film->base_channels().empty() &&
+          film->base_channels()[0] == "R") {
+        const PluginSpecNode* film_spec = nullptr;
+        if (active_camera_it != camera_specs_.end()) {
+          if (auto film_it =
+                  active_camera_it->second.sensor_spec.children.find("film");
+              film_it != active_camera_it->second.sensor_spec.children.end()) {
+            film_spec = &film_it->second;
+          }
+        }
+        bool supports_alpha_format = true;
+        if (film_spec != nullptr) {
+          if (film_spec->HasProperty("pixel_format")) {
+            supports_alpha_format = false;
+          } else if (auto fmt_it = film_spec->params.find("file_format");
+                     fmt_it != film_spec->params.end()) {
+            std::string file_format;
+            if (fmt_it->second.IsHolding<std::string>()) {
+              file_format = fmt_it->second.UncheckedGet<std::string>();
+            } else if (fmt_it->second.IsHolding<TfToken>()) {
+              file_format =
+                  fmt_it->second.UncheckedGet<TfToken>().GetString();
+            }
+            if (!file_format.empty() && file_format != "openexr") {
+              supports_alpha_format = false;
+            }
+          }
+        }
+        if (supports_alpha_format) {
+          PluginSpecNode rebuilt_film =
+              film_spec == nullptr ? PluginSpecNode{} : *film_spec;
+          rebuilt_film.plugin_type = "hdrfilm";
+          rebuilt_film.params.erase("crop_offset_x");
+          rebuilt_film.params.erase("crop_offset_y");
+          rebuilt_film.params.erase("crop_width");
+          rebuilt_film.params.erase("crop_height");
+          rebuilt_film.params["pixel_format"] =
+              VtValue(std::string(want_alpha ? "rgba" : "rgb"));
+          if (progressive_rendering_ || denoise_) {
+            rebuilt_film.children.erase("reconstruction_filter");
+            rebuilt_film.children.erase("rfilter");
+            rebuilt_film.children["pixel_filter"] =
+                PluginSpecNode("box");
+          }
+          sensor->set_film(BuildPluginObject<Film>(rebuilt_film).get());
+          film = sensor->film();
+          film_changed = true;
+        }
       }
     }
     auto film_size = film->size();
     // If necessary, resize film to match USD buffer size.
     if (film_size.x() != buffer_width || film_size.y() != buffer_height) {
       film->set_size(ScalarPoint2u(buffer_width, buffer_height));
+      if (active_camera_it != camera_specs_.end() && buffer_height > 0) {
+        PrimTranslator::UpdateSensorAspectRatio(
+            sensor, active_camera_it->second,
+            static_cast<double>(buffer_width) /
+                static_cast<double>(buffer_height));
+      }
       film_changed = true;
+    }
+
+    const bool has_hydra_crop =
+        crop_window.has_value() &&
+        (crop_window->GetMinX() != 0 || crop_window->GetMinY() != 0 ||
+         crop_window->GetWidth() != static_cast<int>(buffer_width) ||
+         crop_window->GetHeight() != static_cast<int>(buffer_height));
+    std::optional<GfRect2i> effective_crop_window;
+    if (has_hydra_crop) {
+      effective_crop_window = crop_window;
+    } else if (active_camera_it != camera_specs_.end() && buffer_width > 0 &&
+               buffer_height > 0) {
+      if (auto film_it =
+              active_camera_it->second.sensor_spec.children.find("film");
+          film_it != active_camera_it->second.sensor_spec.children.end()) {
+        const auto& film_params = film_it->second.params;
+        auto read_crop_int = [&](const char* key) -> std::optional<int64_t> {
+          auto it = film_params.find(key);
+          return it != film_params.end() ? ExtractIntValue(it->second)
+                                         : std::nullopt;
+        };
+        const auto ox_opt = read_crop_int("crop_offset_x");
+        const auto oy_opt = read_crop_int("crop_offset_y");
+        const auto cw_opt = read_crop_int("crop_width");
+        const auto ch_opt = read_crop_int("crop_height");
+        if (ox_opt.has_value() || oy_opt.has_value() || cw_opt.has_value() ||
+            ch_opt.has_value()) {
+          const int64_t w = static_cast<int64_t>(buffer_width);
+          const int64_t h = static_cast<int64_t>(buffer_height);
+          const int ox = static_cast<int>(
+              std::clamp<int64_t>(ox_opt.value_or(0), 0, w - 1));
+          const int oy = static_cast<int>(
+              std::clamp<int64_t>(oy_opt.value_or(0), 0, h - 1));
+          const int cw = static_cast<int>(
+              std::clamp<int64_t>(cw_opt.value_or(w - ox), 1, w - ox));
+          const int ch = static_cast<int>(
+              std::clamp<int64_t>(ch_opt.value_or(h - oy), 1, h - oy));
+          if (ox != 0 || oy != 0 || cw != static_cast<int>(buffer_width) ||
+              ch != static_cast<int>(buffer_height)) {
+            effective_crop_window = GfRect2i(GfVec2i(ox, oy), cw, ch);
+          }
+        }
+      }
     }
 
     ScalarPoint2u new_crop_offset(0, 0);
     ScalarVector2u new_crop_size = film->size();
-    if (crop_window.has_value()) {
-      new_crop_offset = ScalarPoint2u(crop_window->GetMinX(), crop_window->GetMinY());
-      new_crop_size = ScalarVector2u(crop_window->GetWidth(), crop_window->GetHeight());
+    if (effective_crop_window.has_value()) {
+      new_crop_offset = ScalarPoint2u(effective_crop_window->GetMinX(),
+                                      effective_crop_window->GetMinY());
+      new_crop_size = ScalarVector2u(effective_crop_window->GetWidth(),
+                                     effective_crop_window->GetHeight());
     }
 
     if (dr::any(film->crop_offset() != new_crop_offset) || dr::any(film->crop_size() != new_crop_size)) {
@@ -665,25 +830,15 @@ class SceneModel final : public SceneManager {
 
     if (!integrator_) {
       TF_DEBUG(HDMITSUBA_LIFECYCLE)
-          .Msg("Creating integrator, type: %s (%zu properties)\n",
-               integrator_type_.c_str(), integrator_settings_.size());
-      Properties props(integrator_type_);
-      for (const auto& [param, val] : integrator_settings_) {
-        SetMitsubaPropertyFromValue(props, param, val);
-      }
+          .Msg("Creating integrator, type: %s\n",
+               integrator_spec_.plugin_type.c_str());
       try {
-        integrator_ =
-            PluginManager::instance()->create_object<Integrator>(props);
-        if (auto unqueried = props.unqueried(); !unqueried.empty()) {
-          TF_WARN("Integrator '%s' ignores unsupported properties: %s",
-                  integrator_type_.c_str(),
-                  absl::StrJoin(unqueried, ", ").c_str());
-        }
+        integrator_ = BuildPluginObject<Integrator>(integrator_spec_);
       } catch (const std::exception& e) {
         TF_WARN(
             "Failed to create integrator '%s': %s. Falling back to the default "
             "path tracer.",
-            integrator_type_.c_str(), e.what());
+            integrator_spec_.plugin_type.c_str(), e.what());
         integrator_ = PluginManager::instance()->create_object<Integrator>(
             Properties("path"));
       }
@@ -707,10 +862,10 @@ class SceneModel final : public SceneManager {
       reset_progressive_ = false;
     }
 
-    int samples_to_render = sample_count_;
+    int samples_to_render = active_sample_count_;
     if (progressive_rendering_) {
       int remaining =
-          static_cast<int>(sample_count_) - current_progressive_sample_;
+          static_cast<int>(active_sample_count_) - current_progressive_sample_;
       samples_to_render =
           std::max(0, std::min(interactive_samples_per_pass_, remaining));
     }
@@ -733,8 +888,12 @@ class SceneModel final : public SceneManager {
             scene_.get(), sensor, pass_seed,
             static_cast<uint32_t>(samples_to_render), true, true);
       }
-      size_t expected_width = crop_window.has_value() ? crop_window->GetWidth() : buffer_width;
-      size_t expected_height = crop_window.has_value() ? crop_window->GetHeight() : buffer_height;
+      size_t expected_width = effective_crop_window.has_value()
+                                  ? effective_crop_window->GetWidth()
+                                  : buffer_width;
+      size_t expected_height = effective_crop_window.has_value()
+                                   ? effective_crop_window->GetHeight()
+                                   : buffer_height;
       if (expected_width != result.shape()[1] ||
           expected_height != result.shape()[0]) {
         TF_RUNTIME_ERROR("Buffer size mismatch: %lu x %lu vs %lu x %lu",
@@ -789,9 +948,12 @@ class SceneModel final : public SceneManager {
 
     // 5. Copy the data to the output render buffers.
     size_t base_channels = sensor->film()->base_channels().size();
+    size_t aov_start_channel =
+        base_channels +
+        (integrator_ ? integrator_->aov_names(sensor->film()).size() : 0);
     if (denoise_ && pass_state.color_buffer && base_channels >= 3) {
       denoiser_.Denoise(display_result, sensor, pass_state.aov_requests,
-                        base_channels);
+                        base_channels, aov_start_channel);
     }
     size_t total_channels = display_result.shape()[2];
     destinations_.clear();
@@ -801,7 +963,7 @@ class SceneModel final : public SceneManager {
       destinations_.push_back({pass_state.color_buffer, 0, static_cast<int>(base_channels), false});
     }
 
-    size_t current_offset = base_channels;
+    size_t current_offset = aov_start_channel;
     for (const auto& req : pass_state.aov_requests) {
       if (!TF_VERIFY(req.buffer, "AOV buffer is null")) continue;
       if (!TF_VERIFY(current_offset + req.channel_count <= total_channels,
@@ -814,12 +976,13 @@ class SceneModel final : public SceneManager {
       destinations_.push_back({req.buffer, static_cast<int>(current_offset), req.channel_count, is_int});
       current_offset += req.channel_count;
     }
-    PerformBatchedCopy<Float>(display_result, destinations_, crop_window);
+    PerformBatchedCopy<Float>(display_result, destinations_,
+                              effective_crop_window);
 
     // 6. Set convergence status
     bool converged =
         !progressive_rendering_ ||
-        (current_progressive_sample_ >= static_cast<int>(sample_count_));
+        (current_progressive_sample_ >= static_cast<int>(active_sample_count_));
     if (pass_state.color_buffer) {
       pass_state.color_buffer->SetConverged(converged);
     }
@@ -830,47 +993,37 @@ class SceneModel final : public SceneManager {
 
   bool IsConverged() const override {
     return !progressive_rendering_ ||
-           (!denoise_dirty_ &&
-            (current_progressive_sample_ >= static_cast<int>(sample_count_)));
+           (!denoise_dirty_ && (current_progressive_sample_ >=
+                                static_cast<int>(active_sample_count_)));
   }
 
   int GetCurrentSampleCount() const override {
     return progressive_rendering_ ? current_progressive_sample_
-                                  : static_cast<int>(sample_count_);
+                                  : static_cast<int>(active_sample_count_);
   }
 
   int GetTargetSampleCount() const override {
-    return static_cast<int>(sample_count_);
+    return static_cast<int>(active_sample_count_);
   }
 
   void UpdateNamespacedSettings(
       const VtDictionary& namespaced_settings) override {
     absl::MutexLock state_lock(state_mutex_);
     absl::MutexLock aov_lock(aov_states_mutex_);
-    auto samples_per_pass = GetSetting<int>(
+    auto samples_per_pass = GetIntSetting(
         namespaced_settings, "mitsuba:interactive_samples_per_pass");
     if (samples_per_pass.has_value()) {
-      int new_samples_per_pass = std::max(1, *samples_per_pass);
+      int new_samples_per_pass =
+          static_cast<int>(std::max<int64_t>(1, *samples_per_pass));
       if (new_samples_per_pass != interactive_samples_per_pass_) {
         interactive_samples_per_pass_ = new_samples_per_pass;
         reset_progressive_ = true;
       }
     }
-    std::string integrator_type =
-        GetSetting<std::string>(namespaced_settings, "mitsuba:integrator:type")
-            .value_or(integrator_type_);
-    VtDictionary integrator_settings;
-    for (const auto& [key, val] : namespaced_settings) {
-      std::string_view param = key;
-      if (absl::ConsumePrefix(&param, "mitsuba:integrator:") &&
-          !param.empty() && param != "type" && !val.IsEmpty()) {
-        integrator_settings[std::string(param)] = val;
-      }
-    }
-    if (integrator_type != integrator_type_ ||
-        integrator_settings != integrator_settings_) {
-      integrator_type_ = std::move(integrator_type);
-      integrator_settings_ = std::move(integrator_settings);
+    PluginSpecNode integrator_spec = ParsePluginSpec(
+        namespaced_settings, "mitsuba:integrator:", /*default_type=*/"path");
+    if (integrator_spec != integrator_spec_) {
+      integrator_spec_ = std::move(integrator_spec);
       integrator_ = nullptr;
       for (auto& [_, pass_state] : pass_aov_states_) {
         pass_state.aov_integrator = nullptr;
@@ -878,15 +1031,37 @@ class SceneModel final : public SceneManager {
       if (frozen_render_) frozen_render_->Clear();
       reset_progressive_ = true;
     }
+    PluginSpecNode sampler_spec =
+        ParsePluginSpec(namespaced_settings, "mitsuba:sampler:",
+                        /*default_type=*/"independent");
+    if (sampler_spec.plugin_type.empty()) {
+      sampler_spec.plugin_type = "independent";
+    }
+    // sample_count is managed via sample_count_ and passed per-render pass,
+    // so omit it from sampler_spec_ to avoid rebuilding sensors when only
+    // mitsuba:sample_count changes.
+    sampler_spec.params.erase("sample_count");
+    if (sampler_spec != sampler_spec_) {
+      TF_DEBUG(HDMITSUBA_LIFECYCLE)
+          .Msg("Updating sampler spec, type: %s (was: %s)\n",
+               sampler_spec.plugin_type.c_str(),
+               sampler_spec_.plugin_type.c_str());
+      sampler_spec_ = std::move(sampler_spec);
+      MarkSensorsForRebuild();
+      reset_progressive_ = true;
+    }
     auto sample_count =
-        GetSetting<int>(namespaced_settings, "mitsuba:sample_count");
+        GetIntSetting(namespaced_settings, "mitsuba:sample_count");
     if (sample_count.has_value()) {
-      if (static_cast<size_t>(*sample_count) != sample_count_) {
-        sample_count_ = *sample_count;
+      size_t clamped_samples =
+          static_cast<size_t>(std::max<int64_t>(1, *sample_count));
+      if (clamped_samples != sample_count_) {
+        sample_count_ = clamped_samples;
+        active_sample_count_ = clamped_samples;
         reset_progressive_ = true;
       }
     }
-    auto seed = GetSetting<int>(namespaced_settings, "mitsuba:seed");
+    auto seed = GetIntSetting(namespaced_settings, "mitsuba:seed");
     if (seed.has_value()) {
       uint32_t new_seed = static_cast<uint32_t>(*seed);
       if (new_seed != seed_) {
@@ -1053,9 +1228,6 @@ class SceneModel final : public SceneManager {
   }
 
   static std::optional<SdfPath> SurfaceSensorTarget(const CameraSpec& spec) {
-    if (spec.sensor_type != "irradiancemeter") {
-      return std::nullopt;
-    }
     return spec.target_shape_id;
   }
 
@@ -1079,26 +1251,57 @@ class SceneModel final : public SceneManager {
     bool rebuild = ParallelCommit<decltype(camera_specs_), mitsuba::ref<Sensor>>(
         camera_specs_,
         [&](CameraSpec* spec, mitsuba::ref<Sensor>& res) {
-          // Surface sensors are built together with their target mesh.
-          if (spec->sensor_type == "irradiancemeter") {
+          // Surface sensors are built together with their target shape.
+          if (spec->target_shape_id.has_value() ||
+              spec->sensor_type == "irradiancemeter") {
+            if (spec->sensor_type == "irradiancemeter" &&
+                !spec->target_shape_id.has_value()) {
+              TF_WARN(
+                  "Camera %s has mitsuba:sensor:type = 'irradiancemeter' "
+                  "without mitsuba:sensor:shape; skipping.",
+                  spec->id.GetText());
+            }
             return;
           }
-          if (spec->needs_rebuild) {
-            // Denoisers require the uncorrelated pixel noise of the box filter.
+          auto build_sensor = [&]() {
+            // Denoisers require the uncorrelated pixel noise of the box filter,
+            // and progressive multi-pass accumulation requires `independent`
+            // so structured samplers (`stratified`, `multijitter`,
+            // `orthogonal`) do not collapse per-pass small sample counts into
+            // biased grids.
             const bool use_box_filter = progressive_rendering_ || denoise_;
-            res = PrimTranslator::BuildSensor(*spec, use_box_filter);
+            const PluginSpecNode effective_sampler =
+                progressive_rendering_
+                    ? PluginSpecNode("independent")
+                    : sampler_spec_;
+            try {
+              res = PrimTranslator::BuildSensor(
+                  *spec, use_box_filter, effective_sampler,
+                  /*force_independent_sampler=*/progressive_rendering_);
+            } catch (const std::exception& e) {
+              TF_RUNTIME_ERROR("Failed to create sensor '%s': %s",
+                               spec->id.GetText(), e.what());
+            }
+          };
+          if (spec->needs_rebuild) {
+            build_sensor();
           } else if (spec->dirty_bits != 0) {
             auto it = sensors_.find(spec->id);
             if (!TF_VERIFY(it != sensors_.end(), "Camera sensor not found: %s",
                            spec->id.GetText())) {
               return;
             }
-            PrimTranslator::UpdateSensorInPlace(it->second.get(), *spec);
+            if (!PrimTranslator::TryUpdateSensorInPlace(it->second.get(),
+                                                        *spec)) {
+              spec->needs_rebuild = true;
+              build_sensor();
+            }
           }
         },
         [&](CameraSpec* spec, mitsuba::ref<Sensor>& res) {
-          if (spec->sensor_type == "irradiancemeter") {
-            return false;
+          if (spec->target_shape_id.has_value() ||
+              spec->sensor_type == "irradiancemeter" || !res) {
+            return sensors_.erase(spec->id) > 0;
           }
           sensors_[spec->id] = res;
           return true;
@@ -1117,35 +1320,82 @@ class SceneModel final : public SceneManager {
     Object* sensor_ptr = nullptr;
   };
 
-  EmitterSensorPair ResolveEmitterAndSensor(
-      const std::optional<LightSpec>& emitter_spec, const SdfPath& material_id,
-      const SdfPath& shape_id, bool double_sided) {
+  EmitterSensorPair ResolveEmitterAndSensor(const MeshSpec& spec,
+                                            const SdfPath& material_id,
+                                            bool attach_sensor = true) {
     EmitterSensorPair pair;
-    if (emitter_spec.has_value()) {
-      pair.mesh_emitter = PrimTranslator::CreateAreaEmitter(*emitter_spec);
-      pair.emitter_ptr = pair.mesh_emitter.get();
+    if (spec.emitter_spec.has_value()) {
+      try {
+        pair.mesh_emitter = PrimTranslator::CreateAreaEmitter(
+            *spec.emitter_spec, spec.mitsuba_emitter_spec);
+        pair.emitter_ptr = pair.mesh_emitter.get();
+      } catch (const std::exception& e) {
+        TF_RUNTIME_ERROR("Failed to create area emitter for '%s': %s",
+                         spec.id.GetText(), e.what());
+      }
     }
     if (pair.emitter_ptr == nullptr) {
       auto emitter_it = material_emitters_.find(material_id);
       if (emitter_it != material_emitters_.end()) {
-        mitsuba::Properties emitter_props = emitter_it->second;
-        if (double_sided) {
-          emitter_props.set("twosided", true, false);
+        try {
+          mitsuba::Properties emitter_props = emitter_it->second;
+          if (!spec.mitsuba_emitter_spec.plugin_type.empty() &&
+              spec.mitsuba_emitter_spec.plugin_type !=
+                  emitter_props.plugin_name()) {
+            emitter_props =
+                mitsuba::Properties(spec.mitsuba_emitter_spec.plugin_type);
+          } else if (spec.double_sided) {
+            emitter_props.set("twosided", true, false);
+          }
+          if (emitter_props.plugin_name() == "ies") {
+            RegisterIesEmitter();
+          }
+          MergePluginProperties(&emitter_props, spec.mitsuba_emitter_spec,
+                                mitsuba::Emitter<Float, Spectrum>::Variant);
+          pair.mesh_emitter = mitsuba::PluginManager::instance()->create_object(
+              emitter_props, mitsuba::Emitter<Float, Spectrum>::Variant,
+              mitsuba::Emitter<Float, Spectrum>::Type);
+          pair.emitter_ptr = pair.mesh_emitter.get();
+        } catch (const std::exception& e) {
+          TF_RUNTIME_ERROR("Failed to create emitter for '%s': %s",
+                           spec.id.GetText(), e.what());
         }
-        pair.mesh_emitter = mitsuba::PluginManager::instance()->create_object(
-            emitter_props, mitsuba::Emitter<Float, Spectrum>::Variant,
-            mitsuba::Emitter<Float, Spectrum>::Type);
-        pair.emitter_ptr = pair.mesh_emitter.get();
+      } else if (!spec.mitsuba_emitter_spec.plugin_type.empty()) {
+        try {
+          if (spec.mitsuba_emitter_spec.plugin_type == "ies") {
+            RegisterIesEmitter();
+          }
+          pair.mesh_emitter =
+              BuildPluginObject(spec.mitsuba_emitter_spec,
+                                mitsuba::Emitter<Float, Spectrum>::Variant,
+                                mitsuba::Emitter<Float, Spectrum>::Type);
+          pair.emitter_ptr = pair.mesh_emitter.get();
+        } catch (const std::exception& e) {
+          TF_RUNTIME_ERROR("Failed to create emitter for '%s': %s",
+                           spec.id.GetText(), e.what());
+        }
       }
     }
     // A Mitsuba sensor can only be attached to one shape, so like the area
     // emitter above, every (re)built mesh gets a fresh one.
-    auto sens_it = shape_sensors_.find(shape_id);
-    if (sens_it != shape_sensors_.end()) {
-      pair.mesh_sensor = PrimTranslator::BuildSensor(
-          camera_specs_.at(sens_it->second),
-          progressive_rendering_ || denoise_);
-      pair.sensor_ptr = pair.mesh_sensor.get();
+    if (attach_sensor) {
+      auto sens_it = shape_sensors_.find(spec.id);
+      if (sens_it != shape_sensors_.end()) {
+        const PluginSpecNode effective_sampler =
+            progressive_rendering_
+                ? PluginSpecNode("independent")
+                : sampler_spec_;
+        try {
+          pair.mesh_sensor = PrimTranslator::BuildSensor(
+              camera_specs_.at(sens_it->second),
+              progressive_rendering_ || denoise_, effective_sampler,
+              /*force_independent_sampler=*/progressive_rendering_);
+          pair.sensor_ptr = pair.mesh_sensor.get();
+        } catch (const std::exception& e) {
+          TF_RUNTIME_ERROR("Failed to create surface sensor '%s': %s",
+                           sens_it->second.GetText(), e.what());
+        }
+      }
     }
     return pair;
   }
@@ -1155,56 +1405,118 @@ class SceneModel final : public SceneManager {
       HdChangeTracker::DirtyNormals | HdChangeTracker::DirtyPrimvar |
       HdChangeTracker::DirtyTopology;
 
-  void UpdateSubMeshEmitterAndBsdf(Shape* shape, const MeshSpec& spec,
-                                   const SdfPath& material_id,
-                                   const PrimvarMap& primvars,
-                                   std::string_view key_prefix) {
-    ref<BSDF> bsdf = ResolveBsdf(material_id, primvars);
-    if (key_prefix.empty() && spec.dirty_bits != 0 && shape->is_emitter() &&
-        spec.emitter_spec.has_value()) {
-      // Update emissive mesh radiance (and IES light frame) in-place
-      PrimTranslator::UpdateAreaEmitterInPlace(shape->emitter(),
-                                               *spec.emitter_spec);
+  static PluginSpecNode StripManagedShapeSpecFields(PluginSpecNode spec,
+                                                    bool is_prototype,
+                                                    size_t part_index = 0,
+                                                    size_t part_count = 1) {
+    spec.params.erase("to_world");
+    spec.params.erase("flip_normals");
+    if (is_prototype || part_count > 1) {
+      spec.id.clear();
     }
-    shape->set_bsdf(bsdf.get());
+    if (is_prototype) {
+      spec.children.erase("emitter");
+      spec.children.erase("sensor");
+    } else if (part_index > 0) {
+      spec.children.erase("sensor");
+    }
+    return spec;
   }
 
-  void UpdateSubMeshesInPlace(const MeshSpec& spec,
-                              const std::vector<SubMeshOutput>& sub_meshes,
-                              std::string_view key_prefix) {
-    const bool geometry_dirty = (spec.dirty_bits & kMeshGeometryDirty) != 0;
-    for (const auto& sub_mesh : sub_meshes) {
+  bool TryUpdateShapePluginSpecsAndBsdf(Shape* shape, const MeshSpec& spec,
+                                        const SdfPath& material_id,
+                                        const PrimvarMap& primvars,
+                                        std::string_view key_prefix,
+                                        size_t part_index = 0,
+                                        size_t part_count = 1) {
+    if (!spec.committed_shape_spec.has_value() ||
+        !spec.committed_mitsuba_emitter_spec.has_value()) {
+      return false;
+    }
+    const bool is_prototype = !key_prefix.empty();
+    const PluginSpecNode old_shape_spec = StripManagedShapeSpecFields(
+        *spec.committed_shape_spec, is_prototype, part_index, part_count);
+    const PluginSpecNode new_shape_spec = StripManagedShapeSpecFields(
+        spec.shape_spec, is_prototype, part_index, part_count);
+    if (!PrimTranslator::TryUpdatePluginInPlace(shape, old_shape_spec,
+                                                new_shape_spec)) {
+      return false;
+    }
+    if (!is_prototype && spec.dirty_bits != 0 &&
+        spec.shape_spec.children.count("emitter") == 0) {
+      if (spec.emitter_spec.has_value()) {
+        if (!shape->is_emitter()) return false;
+        if (!PrimTranslator::TryUpdateAreaEmitterInPlace(
+                shape->emitter(), *spec.emitter_spec,
+                *spec.committed_mitsuba_emitter_spec,
+                spec.mitsuba_emitter_spec)) {
+          return false;
+        }
+      } else if (*spec.committed_mitsuba_emitter_spec !=
+                 spec.mitsuba_emitter_spec) {
+        if (!shape->is_emitter()) return false;
+        if (!PrimTranslator::TryUpdatePluginInPlace(
+                shape->emitter(), *spec.committed_mitsuba_emitter_spec,
+                spec.mitsuba_emitter_spec)) {
+          return false;
+        }
+        shape->parameters_changed({"emitter"});
+      }
+    }
+    Object* interior_medium = ResolveInteriorMedium(material_id);
+    ref<BSDF> bsdf = ResolveBsdf(
+        material_id, primvars, HasMedium(spec) || interior_medium != nullptr);
+    if (spec.shape_spec.children.count("bsdf") == 0) {
+      shape->set_bsdf(bsdf.get());
+    }
+    return true;
+  }
+
+  bool TryUpdateSubMeshesInPlace(const MeshSpec& spec,
+                                 const std::vector<SubMeshOutput>& sub_meshes,
+                                 std::string_view key_prefix) {
+    for (size_t i = 0; i < sub_meshes.size(); ++i) {
+      const auto& sub_mesh = sub_meshes[i];
       std::string key = absl::StrCat(key_prefix, sub_mesh.id);
       auto it = shapes_.find(key);
       if (!TF_VERIFY(it != shapes_.end(), "Sub-mesh not found: %s",
                      key.c_str())) {
-        continue;
+        return false;
       }
-      if (geometry_dirty) {
+      if (!TryUpdateShapePluginSpecsAndBsdf(
+              it->second.get(), spec, sub_mesh.material_id, sub_mesh.primvars,
+              key_prefix, i, sub_meshes.size())) {
+        return false;
+      }
+    }
+    const bool geometry_dirty = (spec.dirty_bits & kMeshGeometryDirty) != 0;
+    if (geometry_dirty) {
+      for (const auto& sub_mesh : sub_meshes) {
+        std::string key = absl::StrCat(key_prefix, sub_mesh.id);
         PrimTranslator::UpdateMeshInPlace(
-            it->second.get(), sub_mesh.triangles, sub_mesh.primvars,
+            shapes_.at(key).get(), sub_mesh.triangles, sub_mesh.primvars,
             ResolveMeshAttributes(sub_mesh.material_id), spec.dirty_bits);
       }
-      UpdateSubMeshEmitterAndBsdf(it->second.get(), spec, sub_mesh.material_id,
-                                  sub_mesh.primvars, key_prefix);
     }
+    return true;
   }
 
-  void UpdateSubMeshesMetadataOnly(const MeshSpec& spec,
-                                   std::string_view key_prefix) {
+  bool TryUpdateSubMeshesMetadataOnly(const MeshSpec& spec,
+                                      std::string_view key_prefix) {
     if (spec.material_ids.size() <= 1) {
       std::string key = absl::StrCat(key_prefix, spec.id.GetAsString());
       auto it = shapes_.find(key);
       if (!TF_VERIFY(it != shapes_.end(), "Sub-mesh not found: %s",
                      key.c_str())) {
-        return;
+        return false;
       }
       const SdfPath& mat_id =
           spec.material_ids.empty() ? SdfPath() : spec.material_ids[0];
-      UpdateSubMeshEmitterAndBsdf(it->second.get(), spec, mat_id, spec.primvars,
-                                  key_prefix);
-      return;
+      return TryUpdateShapePluginSpecsAndBsdf(it->second.get(), spec, mat_id,
+                                              spec.primvars, key_prefix);
     }
+    std::vector<std::pair<Shape*, const SdfPath*>> emitted;
+    emitted.reserve(spec.material_ids.size());
     for (size_t i = 0; i < spec.material_ids.size(); ++i) {
       std::string key = absl::StrCat(
           key_prefix,
@@ -1214,9 +1526,16 @@ class SceneModel final : public SceneManager {
         // Empty material subset was not emitted by SplitAndCompactMeshes.
         continue;
       }
-      UpdateSubMeshEmitterAndBsdf(it->second.get(), spec, spec.material_ids[i],
-                                  spec.primvars, key_prefix);
+      emitted.emplace_back(it->second.get(), &spec.material_ids[i]);
     }
+    for (size_t i = 0; i < emitted.size(); ++i) {
+      if (!TryUpdateShapePluginSpecsAndBsdf(
+              emitted[i].first, spec, *emitted[i].second, spec.primvars,
+              key_prefix, i, emitted.size())) {
+        return false;
+      }
+    }
+    return true;
   }
 
   Object* ResolveInteriorMedium(const SdfPath& material_id) {
@@ -1227,32 +1546,46 @@ class SceneModel final : public SceneManager {
   // Builds the native shapes of the implicit surface of `spec` into
   // `res.meshes`, or updates the existing ones in place. Instance prototypes
   // are identified by a non-empty `key_prefix` and carry no emitter or sensor.
-  void CommitImplicitSurfaceWork(const MeshSpec& spec,
-                                 std::string_view key_prefix,
+  void CommitImplicitSurfaceWork(MeshSpec& spec, std::string_view key_prefix,
                                  CommittedMesh& res) {
     const ImplicitSurface& surface = *spec.implicit_surface;
     const ScalarAffineTransform4f to_world =
         UsdToMitsubaTransform(spec.transform);
     const SdfPath& material_id = spec.material_ids[0];
-    ref<BSDF> bsdf = ResolveBsdf(material_id, spec.primvars);
+    Object* interior_medium = ResolveInteriorMedium(material_id);
+    ref<BSDF> bsdf = ResolveBsdf(
+        material_id, spec.primvars,
+        HasMedium(spec) || interior_medium != nullptr);
     const std::vector<ImplicitSurfacePart> parts =
         GetImplicitSurfaceParts(spec.id, surface, to_world);
     if (!spec.needs_rebuild) {
-      const bool geometry_dirty = (spec.dirty_bits & kMeshGeometryDirty) != 0;
-      for (const ImplicitSurfacePart& part : parts) {
-        std::string key = absl::StrCat(key_prefix, part.id);
+      bool updated_all = true;
+      for (size_t i = 0; i < parts.size(); ++i) {
+        std::string key = absl::StrCat(key_prefix, parts[i].id);
         auto it = shapes_.find(key);
         if (!TF_VERIFY(it != shapes_.end(), "Implicit surface not found: %s",
                        key.c_str())) {
-          continue;
+          updated_all = false;
+          break;
         }
-        if (geometry_dirty) {
-          SetTransform(it->second.get(),
-                       MotionTransform::Static(part.to_world));
+        if (!TryUpdateShapePluginSpecsAndBsdf(it->second.get(), spec,
+                                              material_id, spec.primvars,
+                                              key_prefix, i, parts.size())) {
+          updated_all = false;
+          break;
         }
-        it->second->set_bsdf(bsdf.get());
       }
-      return;
+      if (updated_all) {
+        if ((spec.dirty_bits & kMeshGeometryDirty) != 0) {
+          for (const ImplicitSurfacePart& part : parts) {
+            std::string key = absl::StrCat(key_prefix, part.id);
+            SetTransform(shapes_.at(key).get(),
+                         MotionTransform::Static(part.to_world));
+          }
+        }
+        return;
+      }
+      spec.needs_rebuild = true;
     }
 
     const bool is_prototype = !key_prefix.empty();
@@ -1274,61 +1607,126 @@ class SceneModel final : public SceneManager {
       TF_WARN("The surface sensor of %s only measures its side, not its caps.",
               spec.id.GetText());
     }
-    Object* interior_medium = ResolveInteriorMedium(material_id);
+    PluginSpecNode part_shape_spec = spec.shape_spec;
+    if (is_prototype || parts.size() > 1) {
+      part_shape_spec.id.clear();
+    }
+    if (is_prototype) {
+      part_shape_spec.children.erase("emitter");
+      part_shape_spec.children.erase("sensor");
+    }
+    bool extra_flip_normals = false;
+    if (auto flip_it = part_shape_spec.params.find("flip_normals");
+        flip_it != part_shape_spec.params.end() &&
+        flip_it->second.IsHolding<bool>()) {
+      extra_flip_normals = flip_it->second.UncheckedGet<bool>();
+      part_shape_spec.params.erase(flip_it);
+    }
+    part_shape_spec.params.erase("to_world");
     for (size_t i = 0; i < parts.size(); ++i) {
+      if (i == 1) {
+        part_shape_spec.children.erase("sensor");
+      }
       Properties props(parts[i].plugin);
       props.set("to_world", parts[i].to_world);
-      props.set("flip_normals", parts[i].flip_normals);
+      props.set("flip_normals", parts[i].flip_normals != extra_flip_normals);
       if (interior_medium) props.set("interior", interior_medium);
-      if (bsdf) props.set("bsdf", bsdf.get());
       // Every part needs an emitter of its own, whereas the sensor can only be
-      // attached to the first one (the empty path matches no sensor).
+      // attached to the first one.
       if (!is_prototype) {
-        auto env = ResolveEmitterAndSensor(spec.emitter_spec, material_id,
-                                           i == 0 ? spec.id : SdfPath(),
-                                           spec.double_sided);
+        auto env = ResolveEmitterAndSensor(spec, material_id,
+                                           /*attach_sensor=*/i == 0);
         if (env.emitter_ptr) props.set("emitter", env.emitter_ptr);
         if (env.sensor_ptr) props.set("sensor", env.sensor_ptr);
       }
-      auto shape = PluginManager::instance()->create_object<Shape>(props);
-      shape->set_id(parts[i].id);
-      res.meshes.push_back(std::move(shape));
+      if (!part_shape_spec.Empty()) {
+        try {
+          MergePluginProperties(&props, part_shape_spec, Shape::Variant);
+        } catch (const std::exception& e) {
+          TF_RUNTIME_ERROR("Failed to apply shape properties for '%s': %s",
+                           parts[i].id.c_str(), e.what());
+        }
+      }
+      if (bsdf && !props.has_property("bsdf")) {
+        props.set("bsdf", bsdf.get());
+      }
+      try {
+        auto shape = PluginManager::instance()->create_object<Shape>(props);
+        if (!shape) {
+          continue;
+        }
+        shape->set_id(!part_shape_spec.id.empty() ? part_shape_spec.id
+                                                  : parts[i].id);
+        res.meshes.emplace_back(parts[i].id, std::move(shape));
+      } catch (const std::exception& e) {
+        TF_RUNTIME_ERROR("Failed to create shape '%s': %s",
+                         parts[i].id.c_str(), e.what());
+      }
     }
   }
 
   void CommitNonInstancedMeshWork(MeshCommitWork* work, CommittedMesh& res,
                                   std::string_view key_prefix = "") {
-    const auto& spec = *(work->spec);
+    MeshSpec& spec = *(work->spec);
     if (spec.implicit_surface.has_value()) {
       CommitImplicitSurfaceWork(spec, key_prefix, res);
       return;
     }
-    if (spec.needs_rebuild) {
-      auto sub_meshes =
-          RunGeometryPipeline<Float, Spectrum>(spec, work->displacements);
-      res.meshes.reserve(sub_meshes.size());
-      for (const auto& sub_mesh : sub_meshes) {
-        EmitterSensorPair env;
-        if (key_prefix.empty()) {
-          env = ResolveEmitterAndSensor(spec.emitter_spec, sub_mesh.material_id,
-                                        spec.id, spec.double_sided);
+    std::optional<std::vector<SubMeshOutput>> cached_sub_meshes;
+    if (!spec.needs_rebuild) {
+      if ((spec.dirty_bits & kMeshGeometryDirty) != 0) {
+        cached_sub_meshes =
+            RunGeometryPipeline<Float, Spectrum>(spec, work->displacements);
+        if (TryUpdateSubMeshesInPlace(spec, *cached_sub_meshes, key_prefix)) {
+          return;
         }
-        ref<BSDF> bsdf = ResolveBsdf(sub_mesh.material_id, sub_mesh.primvars);
-        Object* interior_medium = ResolveInteriorMedium(sub_mesh.material_id);
-        auto mesh = PrimTranslator::BuildMesh(
-            sub_mesh.id, sub_mesh.triangles, sub_mesh.primvars,
-            ResolveMeshAttributes(sub_mesh.material_id), bsdf.get(),
-            env.emitter_ptr, env.sensor_ptr, interior_medium);
-        if (mesh) {
-          res.meshes.push_back(mesh);
-        }
+      } else if (TryUpdateSubMeshesMetadataOnly(spec, key_prefix)) {
+        return;
       }
-    } else if ((spec.dirty_bits & kMeshGeometryDirty) != 0) {
-      auto sub_meshes =
-          RunGeometryPipeline<Float, Spectrum>(spec, work->displacements);
-      UpdateSubMeshesInPlace(spec, sub_meshes, key_prefix);
-    } else {
-      UpdateSubMeshesMetadataOnly(spec, key_prefix);
+      spec.needs_rebuild = true;
+    }
+    auto sub_meshes = cached_sub_meshes.has_value()
+                          ? std::move(*cached_sub_meshes)
+                          : RunGeometryPipeline<Float, Spectrum>(
+                                spec, work->displacements);
+    const bool is_prototype = !key_prefix.empty();
+    if (!is_prototype && sub_meshes.size() > 1 &&
+        shape_sensors_.contains(spec.id)) {
+      TF_WARN(
+          "The surface sensor of %s only measures its first material subset.",
+          spec.id.GetText());
+    }
+    const bool has_medium = HasMedium(spec);
+    PluginSpecNode sub_shape_spec = spec.shape_spec;
+    if (is_prototype || sub_meshes.size() > 1) {
+      sub_shape_spec.id.clear();
+    }
+    if (is_prototype) {
+      sub_shape_spec.children.erase("emitter");
+      sub_shape_spec.children.erase("sensor");
+    }
+    res.meshes.reserve(sub_meshes.size());
+    for (size_t i = 0; i < sub_meshes.size(); ++i) {
+      if (i == 1) {
+        sub_shape_spec.children.erase("sensor");
+      }
+      const auto& sub_mesh = sub_meshes[i];
+      EmitterSensorPair env;
+      if (!is_prototype) {
+        env = ResolveEmitterAndSensor(spec, sub_mesh.material_id,
+                                      /*attach_sensor=*/i == 0);
+      }
+      Object* interior_medium = ResolveInteriorMedium(sub_mesh.material_id);
+      ref<BSDF> bsdf = ResolveBsdf(
+          sub_mesh.material_id, sub_mesh.primvars,
+          has_medium || interior_medium != nullptr);
+      auto mesh = PrimTranslator::BuildMesh(
+          sub_mesh.id, sub_mesh.triangles, sub_mesh.primvars,
+          ResolveMeshAttributes(sub_mesh.material_id), bsdf.get(),
+          env.emitter_ptr, env.sensor_ptr, interior_medium, sub_shape_spec);
+      if (mesh) {
+        res.meshes.emplace_back(sub_mesh.id, std::move(mesh));
+      }
     }
   }
 
@@ -1342,7 +1740,7 @@ class SceneModel final : public SceneManager {
             "does not support emitters on instances. Ignoring emitter.",
             spec.id.GetText());
       }
-      if (shape_sensors_.contains(spec.id)) {
+      if (HasSensor(spec)) {
         TF_WARN(
             "Mesh %s is instanced but has a sensor attached. Mitsuba does "
             "not support sensors on instances. Ignoring sensor.",
@@ -1353,7 +1751,8 @@ class SceneModel final : public SceneManager {
       // Create ShapeGroup wrapping all prototype shapes.
       mitsuba::Properties group_props("shapegroup");
       for (size_t i = 0; i < res.meshes.size(); ++i) {
-        group_props.set("shape_" + std::to_string(i), res.meshes[i].get());
+        group_props.set("shape_" + std::to_string(i),
+                        res.meshes[i].second.get());
       }
       res.shapegroup =
           mitsuba::PluginManager::instance()->create_object<Shape>(group_props);
@@ -1395,15 +1794,15 @@ class SceneModel final : public SceneManager {
 
   bool MergeNonInstancedMesh(CommittedMesh& res,
                              const std::string& /*id_str*/) {
-    for (auto& mesh : res.meshes) {
-      shapes_[mesh->id()] = mesh;
+    for (auto& [key, mesh] : res.meshes) {
+      shapes_[key] = mesh;
     }
     return true;  // Rebuild scene
   }
 
   bool MergeInstancedMesh(CommittedMesh& res, const std::string& id_str) {
-    for (auto& mesh : res.meshes) {
-      shapes_[absl::StrCat(kProtoPrefix, mesh->id())] = mesh;
+    for (auto& [key, mesh] : res.meshes) {
+      shapes_[absl::StrCat(kProtoPrefix, key)] = mesh;
     }
     shapes_[absl::StrCat(kProtoGroupPrefix, id_str)] = res.shapegroup;
     for (size_t i = 0; i < res.instances.size(); ++i) {
@@ -1414,10 +1813,17 @@ class SceneModel final : public SceneManager {
 
   bool HasEmitter(const MeshSpec& spec) const {
     return spec.emitter_spec.has_value() ||
+           !spec.mitsuba_emitter_spec.plugin_type.empty() ||
+           (spec.shape_spec.children.count("emitter") > 0) ||
            std::any_of(spec.material_ids.begin(), spec.material_ids.end(),
                        [&](const SdfPath& material_id) {
                          return material_emitters_.contains(material_id);
                        });
+  }
+
+  bool HasSensor(const MeshSpec& spec) const {
+    return shape_sensors_.contains(spec.id) ||
+           (spec.shape_spec.children.count("sensor") > 0);
   }
 
   // Whether `spec` is rendered through Mitsuba instances. A mesh wrapped in an
@@ -1427,15 +1833,14 @@ class SceneModel final : public SceneManager {
   // (the same policy as for area lights).
   bool IsInstanced(const MeshSpec& spec) const {
     return !spec.instance_transforms.empty() &&
-           !(spec.motion_wrapped &&
-             (HasEmitter(spec) || shape_sensors_.contains(spec.id)));
+           !(spec.motion_wrapped && (HasEmitter(spec) || HasSensor(spec)));
   }
 
   // Returns the spec to commit for `spec`: `motion_wrapped` meshes are resolved
   // into either an instanced prototype in object space (transform updates then
   // apply to the wrapping instance) or a plain static mesh.
-  const MeshSpec& ResolveMotionWrapped(const MeshSpec& spec,
-                                       std::optional<MeshSpec>& storage) const {
+  MeshSpec& ResolveMotionWrapped(MeshSpec& spec,
+                                 std::optional<MeshSpec>& storage) const {
     if (!spec.motion_wrapped) return spec;
     MeshSpec& resolved = storage.emplace(spec);
     if (IsInstanced(spec)) {
@@ -1460,8 +1865,8 @@ class SceneModel final : public SceneManager {
     // displacement textures lock-free).
     std::vector<MeshCommitWork> work_items(pending_specs.size());
     for (size_t i = 0; i < pending_specs.size(); ++i) {
-      const MeshSpec* spec = &ResolveMotionWrapped(*pending_specs[i],
-                                                   work_items[i].resolved_spec);
+      MeshSpec* spec = &ResolveMotionWrapped(*pending_specs[i],
+                                             work_items[i].resolved_spec);
       work_items[i].spec = spec;
       work_items[i].displacements.reserve(spec->material_ids.size());
       for (const auto& material_id : spec->material_ids) {
@@ -1533,14 +1938,28 @@ class SceneModel final : public SceneManager {
         });
   }
 
+  static std::string ResolveLeafIntegratorType(const PluginSpecNode& spec) {
+    if (spec.plugin_type == "aov" || spec.plugin_type == "moment") {
+      for (const auto& [_, child] : spec.children) {
+        if (!child.plugin_type.empty() && child.plugin_type != "rgb" &&
+            child.plugin_type != "spectrum" && child.plugin_type != "vector") {
+          return ResolveLeafIntegratorType(child);
+        }
+      }
+    }
+    return spec.plugin_type;
+  }
+
   bool CommitParticleFields() {
+    const std::string leaf_integrator =
+        ResolveLeafIntegratorType(integrator_spec_);
     if (!particle_field_specs_.empty() &&
-        integrator_type_ != "volprim_rf_basic") {
+        leaf_integrator != "volprim_rf_basic") {
       TF_WARN(
           "Scene contains Gaussian splats (%zu), which require the "
           "'volprim_rf_basic' integrator for radiance field evaluation. "
           "Current integrator: '%s'.",
-          particle_field_specs_.size(), integrator_type_.c_str());
+          particle_field_specs_.size(), leaf_integrator.c_str());
     }
     return ParallelCommit<decltype(particle_field_specs_), mitsuba::ref<Shape>>(
         particle_field_specs_,
@@ -1577,23 +1996,37 @@ class SceneModel final : public SceneManager {
                           typename PrimTranslator::TranslatedLight>(
         light_specs_,
         [&](LightSpec* spec, typename PrimTranslator::TranslatedLight& res) {
+          auto build_light = [&]() {
+            try {
+              res = PrimTranslator::BuildLight(*spec);
+            } catch (const std::exception& e) {
+              TF_RUNTIME_ERROR("Failed to create light '%s': %s",
+                               spec->id.GetText(), e.what());
+            }
+          };
           if (spec->needs_rebuild) {
-            res = PrimTranslator::BuildLight(*spec);
+            build_light();
           } else if (spec->dirty_bits != 0) {
+            Object* light_obj = nullptr;
             if (spec->IsAreaLight()) {
               std::string id_str = spec->id.GetAsString();
               auto it = shapes_.find(id_str);
               if (TF_VERIFY(it != shapes_.end(), "Light shape not found: %s",
                             id_str.c_str())) {
-                PrimTranslator::UpdateLightInPlace(it->second.get(), *spec);
+                light_obj = it->second.get();
               }
             } else {
               auto it = emitters_.find(spec->id);
               if (TF_VERIFY(it != emitters_.end(),
                             "Light emitter not found: %s",
                             spec->id.GetText())) {
-                PrimTranslator::UpdateLightInPlace(it->second.get(), *spec);
+                light_obj = it->second.get();
               }
+            }
+            if (light_obj != nullptr &&
+                !PrimTranslator::TryUpdateLightInPlace(light_obj, *spec)) {
+              spec->needs_rebuild = true;
+              build_light();
             }
           }
         },
@@ -1605,6 +2038,8 @@ class SceneModel final : public SceneManager {
           } else if (trans.emitter) {
             emitters_[spec->id] = trans.emitter;
             shapes_.erase(id_str);
+          } else {
+            return shapes_.erase(id_str) > 0 || emitters_.erase(spec->id) > 0;
           }
           return true;
         });
@@ -1708,10 +2143,11 @@ class SceneModel final : public SceneManager {
   bool scene_dirty_ = true;
   ref<Scene> scene_;
   ref<Integrator> integrator_ = nullptr;
-  std::string integrator_type_ = "path";
-  VtDictionary integrator_settings_;
+  PluginSpecNode integrator_spec_{"path"};
+  PluginSpecNode sampler_spec_{"independent"};
   absl::flat_hash_map<const HdRenderPass*, RenderPassState> pass_aov_states_;
   size_t sample_count_ = kDefaultSampleCount;
+  size_t active_sample_count_ = kDefaultSampleCount;
   uint32_t seed_ = 0;
   int interactive_samples_per_pass_ = 1;
 
@@ -1746,6 +2182,7 @@ class SceneModel final : public SceneManager {
       mesh_attributes_;
   absl::flat_hash_map<SdfPath, ref<Object>, SdfPath::Hash> interior_media_;
   ref<BSDF> default_bsdf_ = nullptr;
+  ref<BSDF> null_bsdf_ = nullptr;
   absl::flat_hash_map<std::tuple<float, float, float>, ref<BSDF>> color_bsdfs_;
   absl::Mutex color_bsdfs_mutex_;
 
@@ -1852,9 +2289,16 @@ SceneManager* CreateSceneManagerImpl() {
   return new SceneModel<Float, Spectrum>();
 }
 
-SceneManager* SceneManager::CreateSceneManager(const std::string& variant) {
-  SyncMitsubaPythonVariant(variant);
+SceneManager* SceneManager::CreateSceneManager(const std::string& variant,
+                                               bool sync_python_variant) {
+  if (sync_python_variant) {
+    SyncMitsubaPythonVariant(variant);
+  }
   return MI_INVOKE_VARIANT(variant, CreateSceneManagerImpl);
+}
+
+void SceneManager::SyncPythonVariant(const std::string& variant) {
+  SyncMitsubaPythonVariant(variant);
 }
 
 SceneManager::SceneManager() {

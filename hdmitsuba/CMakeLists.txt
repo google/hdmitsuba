@@ -41,6 +41,7 @@ add_library(hdMitsuba SHARED
   scene_manager.cc
   particle_field.cc
   traversal.cc
+  plugin_builder.cc
   prim_translator.cc
   texture_cache.cc
   utils.cc
@@ -70,6 +71,7 @@ target_link_libraries(hdMitsuba
     pxOsd
     sdf
     tf
+    usd
     usdGeom
     usdImaging
     usdLux
@@ -176,9 +178,12 @@ if(HDMITSUBA_BUILD_TESTS)
       target_link_libraries(${Name} PRIVATE ${DRJIT_EXTRA_LIBRARY})
     endif()
     add_test(NAME ${Name} COMMAND ${Name})
-    set_tests_properties(${Name} PROPERTIES ENVIRONMENT "HDMITSUBA_VARIANT=scalar_rgb")
+    set_tests_properties(${Name} PROPERTIES ENVIRONMENT
+      "HDMITSUBA_VARIANT=scalar_rgb;PXR_PLUGINPATH_NAME=${CMAKE_CURRENT_BINARY_DIR}"
+    )
   endfunction()
 
+  add_hdmitsuba_test(plugin_builder_test tests/plugin_builder_test.cc)
   add_hdmitsuba_test(camera_test tests/camera_test.cc)
   add_hdmitsuba_test(mesh_test tests/mesh_test.cc)
   add_hdmitsuba_test(geometry_processor_test mesh/tests/geometry_processor_test.cc)

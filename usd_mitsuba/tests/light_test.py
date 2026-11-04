@@ -395,3 +395,71 @@ def test_light_mitsuba_visibility(light_type, default_vis, override_vis):
   emitter_dict = light.convert_light(prim)
   assert emitter_dict['visibility'] == override_vis
   mi.load_dict(emitter_dict)
+
+
+def test_rect_light_emitter_and_shape_overrides():
+  stage, prim = _create_stage_with_light(UsdLux.RectLight)
+  usd_light = UsdLux.RectLight(prim)
+  usd_light.GetColorAttr().Set(Gf.Vec3f(1.0, 0.0, 0.0))
+  usd_light.GetIntensityAttr().Set(1.0)
+  prim.CreateAttribute(
+      'mitsuba:emitter:radiance:type', Sdf.ValueTypeNames.String
+  ).Set('rgb')
+  prim.CreateAttribute(
+      'mitsuba:emitter:radiance:value', Sdf.ValueTypeNames.Color3f
+  ).Set(Gf.Vec3f(12.0, 6.0, 3.0))
+  prim.CreateAttribute(
+      'mitsuba:shape:flip_normals', Sdf.ValueTypeNames.Bool
+  ).Set(True)
+
+  emitter_dict = light.convert_light(prim)
+  assert emitter_dict['type'] == 'rectangle'
+  assert emitter_dict['flip_normals']
+  np.testing.assert_allclose(
+      emitter_dict['emitter']['radiance']['value'],
+      mi.ScalarColor3f(12.0, 6.0, 3.0),
+  )
+  assert mi.load_dict(emitter_dict) is not None
+  del stage
+
+
+def test_point_light_spot_emitter_override():
+  stage, spot_prim = _create_stage_with_light(UsdLux.SphereLight)
+  UsdLux.SphereLight(spot_prim).GetTreatAsPointAttr().Set(True)
+  spot_prim.CreateAttribute(
+      'mitsuba:emitter:type', Sdf.ValueTypeNames.String
+  ).Set('spot')
+  spot_prim.CreateAttribute(
+      'mitsuba:emitter:cutoff_angle', Sdf.ValueTypeNames.Float
+  ).Set(25.0)
+  spot_dict = light.convert_light(spot_prim)
+  assert spot_dict['type'] == 'spot'
+  assert spot_dict['cutoff_angle'] == 25.0
+  # Spot emitter should have the 180-degree X rotation applied so +Z maps to -Z.
+  np.testing.assert_allclose(
+      spot_dict['to_world'] @ mi.ScalarVector3f(0, 0, 1),
+      [0.0, 0.0, -1.0],
+      atol=1e-6,
+  )
+  assert mi.load_dict(spot_dict) is not None
+  del stage
+
+
+def test_ies_light_explicit_emitter_overrides():
+  stage, prim = _create_stage_with_light(UsdLux.DiskLight)
+  shaping = UsdLux.ShapingAPI.Apply(prim)
+  shaping.GetShapingIesFileAttr().Set(Sdf.AssetPath(_IES_PATH))
+  prim.CreateAttribute(
+      'mitsuba:emitter:type', Sdf.ValueTypeNames.String
+  ).Set('ies')
+  prim.CreateAttribute(
+      'mitsuba:emitter:angle_scale', Sdf.ValueTypeNames.Float
+  ).Set(0.8)
+
+  emitter_dict = light.convert_light(prim)
+  ies_dict = emitter_dict['emitter']
+  assert ies_dict['type'] == 'ies'
+  assert ies_dict['nested_emitter']['type'] == 'area'
+  assert ies_dict['angle_scale'] == pytest.approx(0.8)
+  assert mi.load_dict(emitter_dict) is not None
+  del stage
