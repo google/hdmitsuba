@@ -19,7 +19,6 @@
 
 #include <absl/base/no_destructor.h>
 #include <absl/container/flat_hash_map.h>
-#include <absl/strings/match.h>
 #include <pxr/base/gf/vec2f.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/tf/diagnostic.h>
@@ -102,6 +101,11 @@ HdMitsubaRenderDelegate::HdMitsubaRenderDelegate() : HdRenderDelegate() {
 HdMitsubaRenderDelegate::HdMitsubaRenderDelegate(
     const HdRenderSettingsMap& settingsMap)
     : HdRenderDelegate(settingsMap) {
+  for (const auto& [key, value] : settingsMap) {
+    if (!value.IsEmpty()) {
+      host_setting_overrides_[key] = value;
+    }
+  }
   Initialize();
 }
 
@@ -144,12 +148,26 @@ void HdMitsubaRenderDelegate::Initialize() {
                              VtValue(false)};
   _PopulateDefaultSettings(setting_descriptors_);
 
-  current_variant_ =
-      GetRenderSetting(HdMitsubaRenderSettingsTokens->variant)
-          .GetWithDefault<std::string>(HdMitsubaConfig::GetInstance().variant);
-  scene_impl_ = std::unique_ptr<SceneManager>(
-      SceneManager::CreateSceneManager(current_variant_));
-  render_param_ = std::make_unique<HdMitsubaRenderParam>(scene_impl_.get());
+  current_variant_ = HdMitsubaConfig::GetInstance().variant;
+  const VtValue variant_val =
+      GetRenderSetting(HdMitsubaRenderSettingsTokens->variant);
+  std::string configured_variant;
+  if (variant_val.IsHolding<std::string>()) {
+    configured_variant = variant_val.UncheckedGet<std::string>();
+  } else if (variant_val.IsHolding<TfToken>()) {
+    configured_variant = variant_val.UncheckedGet<TfToken>().GetString();
+  }
+  if (!configured_variant.empty()) {
+    current_variant_ = configured_variant;
+  }
+  // Defer syncing Python's global `mi.variant()` until `CommitResources()`
+  // resolves `UsdRenderSettings` (`mitsuba:variant`), avoiding a spurious
+  // `"scalar_rgb"` switch before the scene's actual variant is known.
+  scene_impl_ = std::unique_ptr<SceneManager>(SceneManager::CreateSceneManager(
+      current_variant_, /*sync_python_variant=*/false));
+  render_param_ =
+      std::make_unique<HdMitsubaRenderParam>(this, scene_impl_.get());
+  settings_dirty_ = true;
 }
 
 HdRprim* HdMitsubaRenderDelegate::CreateRprim(const TfToken& typeId,
@@ -251,44 +269,63 @@ void HdMitsubaRenderDelegate::Update() {
 void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* /*tracker*/) {
   ScopedResolverCache resolver_cache(render_param_->TakeResolverCache());
 
-  const unsigned int settings_version = GetRenderSettingsVersion();
-  if (settings_version == last_settings_version_) {
-    scene_impl_->CommitResources();
-    return;
-  }
-
-  std::string target_variant =
-      GetRenderSetting(HdMitsubaRenderSettingsTokens->variant)
-          .GetWithDefault<std::string>(HdMitsubaConfig::GetInstance().variant);
-  if (!target_variant.empty() && current_variant_ != target_variant) {
-    TF_DEBUG(HDMITSUBA_LIFECYCLE)
-        .Msg(
-            "Mitsuba variant changed from '%s' to '%s'. Recreating "
-            "SceneManager.\n",
-            current_variant_.c_str(), target_variant.c_str());
-    auto new_scene = std::unique_ptr<SceneManager>(
-        SceneManager::CreateSceneManager(target_variant));
-    if (scene_impl_) {
-      new_scene->TransferSpecsFrom(*scene_impl_);
+  if (settings_dirty_) {
+    VtDictionary effective_settings;
+    for (const HdRenderSettingDescriptor& descriptor : setting_descriptors_) {
+      if (!descriptor.defaultValue.IsEmpty()) {
+        effective_settings[descriptor.key.GetString()] =
+            descriptor.defaultValue;
+      }
     }
-    scene_impl_ = std::move(new_scene);
-    render_param_->SetScene(scene_impl_.get());
-    current_variant_ = target_variant;
-  }
-
-  VtDictionary namespaced_settings;
-  for (const auto& desc : setting_descriptors_) {
-    namespaced_settings[desc.key.GetString()] = GetRenderSetting(desc.key);
-  }
-  for (const auto& [key, val] : _settingsMap) {
-    if (absl::StartsWith(key.GetString(), "mitsuba:integrator:") &&
-        !val.IsEmpty()) {
-      namespaced_settings[key.GetString()] = val;
+    for (const auto& [key, value] : scene_render_settings_) {
+      if (!value.IsEmpty()) {
+        effective_settings[key] = value;
+      }
     }
-  }
+    for (const auto& [key, value] : host_setting_overrides_) {
+      if (!value.IsEmpty()) {
+        effective_settings[key.GetString()] = value;
+      }
+    }
 
-  scene_impl_->UpdateNamespacedSettings(namespaced_settings);
-  last_settings_version_ = settings_version;
+    std::string target_variant = HdMitsubaConfig::GetInstance().variant;
+    auto variant_it = effective_settings.find(
+        HdMitsubaRenderSettingsTokens->variant.GetString());
+    if (variant_it != effective_settings.end()) {
+      std::string candidate_variant;
+      if (variant_it->second.IsHolding<std::string>()) {
+        candidate_variant = variant_it->second.UncheckedGet<std::string>();
+      } else if (variant_it->second.IsHolding<TfToken>()) {
+        candidate_variant =
+            variant_it->second.UncheckedGet<TfToken>().GetString();
+      }
+      if (!candidate_variant.empty()) {
+        target_variant = candidate_variant;
+      }
+    }
+    if (!target_variant.empty() && current_variant_ != target_variant) {
+      TF_DEBUG(HDMITSUBA_LIFECYCLE)
+          .Msg(
+              "Mitsuba variant changed from '%s' to '%s'. Recreating "
+              "SceneManager.\n",
+              current_variant_.c_str(), target_variant.c_str());
+      auto new_scene = std::unique_ptr<SceneManager>(
+          SceneManager::CreateSceneManager(target_variant));
+      if (scene_impl_) {
+        new_scene->TransferSpecsFrom(*scene_impl_);
+      }
+      scene_impl_ = std::move(new_scene);
+      render_param_->SetScene(scene_impl_.get());
+      current_variant_ = target_variant;
+      python_variant_synced_ = true;
+    } else if (!python_variant_synced_) {
+      SceneManager::SyncPythonVariant(current_variant_);
+      python_variant_synced_ = true;
+    }
+
+    scene_impl_->UpdateNamespacedSettings(effective_settings);
+    settings_dirty_ = false;
+  }
 
   scene_impl_->CommitResources();
 }
@@ -319,6 +356,10 @@ bool HdMitsubaRenderDelegate::IsParallelSyncEnabled(
          primType == HdPrimTypeTokens->renderBuffer ||
          HdPrimTypeIsLight(primType) ||
          HdRenderDelegate::IsParallelSyncEnabled(primType);
+}
+
+TfTokenVector HdMitsubaRenderDelegate::GetRenderSettingsNamespaces() const {
+  return {TfToken("mitsuba")};
 }
 
 const MitsubaAovSpec* FindMitsubaAovSpec(const TfToken& name) {
@@ -388,9 +429,76 @@ HdAovDescriptor HdMitsubaRenderDelegate::GetDefaultAovDescriptor(
   return HdAovDescriptor();
 }
 
+void HdMitsubaRenderDelegate::SetRenderSetting(const TfToken& key,
+                                               const VtValue& value) {
+  if (value.IsEmpty()) {
+    if (host_setting_overrides_.erase(key) > 0) {
+      bool restored_default = false;
+      for (const HdRenderSettingDescriptor& descriptor : setting_descriptors_) {
+        if (descriptor.key == key) {
+          _settingsMap[key] = descriptor.defaultValue;
+          restored_default = true;
+          break;
+        }
+      }
+      if (!restored_default) {
+        _settingsMap.erase(key);
+      }
+      ++_settingsVersion;
+      settings_dirty_ = true;
+    }
+    return;
+  }
+
+  auto it = host_setting_overrides_.find(key);
+  if (it == host_setting_overrides_.end() || it->second != value) {
+    host_setting_overrides_[key] = value;
+    const auto prev_version = _settingsVersion;
+    HdRenderDelegate::SetRenderSetting(key, value);
+    if (_settingsVersion == prev_version) {
+      ++_settingsVersion;
+    }
+    settings_dirty_ = true;
+  }
+}
+
+VtValue HdMitsubaRenderDelegate::GetRenderSetting(const TfToken& key) const {
+  auto override_it = host_setting_overrides_.find(key);
+  if (override_it != host_setting_overrides_.end() &&
+      !override_it->second.IsEmpty()) {
+    return override_it->second;
+  }
+  auto scene_it = scene_render_settings_.find(key.GetString());
+  if (scene_it != scene_render_settings_.end() && !scene_it->second.IsEmpty()) {
+    return scene_it->second;
+  }
+  return HdRenderDelegate::GetRenderSetting(key);
+}
+
 HdRenderSettingDescriptorList
 HdMitsubaRenderDelegate::GetRenderSettingDescriptors() const {
   return setting_descriptors_;
+}
+
+void HdMitsubaRenderDelegate::UpdateSceneRenderSettings(
+    const SdfPath& id, const VtDictionary& settings) {
+  if (active_render_settings_id_ != id || scene_render_settings_ != settings) {
+    active_render_settings_id_ = id;
+    scene_render_settings_ = settings;
+    ++_settingsVersion;
+    settings_dirty_ = true;
+  }
+}
+
+void HdMitsubaRenderDelegate::ClearSceneRenderSettings(const SdfPath& id) {
+  if (active_render_settings_id_ == id) {
+    active_render_settings_id_ = SdfPath::EmptyPath();
+    if (!scene_render_settings_.empty()) {
+      scene_render_settings_.clear();
+      ++_settingsVersion;
+      settings_dirty_ = true;
+    }
+  }
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

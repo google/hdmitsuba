@@ -291,9 +291,8 @@ def test_variant_change_dynamic():
   engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
   results_scalar = engine.render()
 
-  # Change the variant setting dynamically on the same stage and render engine
+  # Change the variant setting dynamically without reconfiguring the engine
   settings_prim.GetAttribute("mitsuba:variant").Set("llvm_ad_rgb")
-  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
   results_llvm = engine.render()
 
   test_helpers.robust_assert_close(
@@ -529,3 +528,98 @@ def test_integrator_parameters():
     )
   finally:
     mi.detail.remove_variant_callback(_register_flat_color)
+
+
+def test_dynamic_render_settings_without_reconfigure():
+  stage = Usd.Stage.Open(f"{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda")
+  plane = UsdGeom.Plane.Define(stage, "/World/Plane")
+  plane.GetWidthAttr().Set(10)
+  plane.GetLengthAttr().Set(10)
+
+  render_settings = test_helpers.create_render_settings(stage)
+  settings_prim = render_settings.GetPrim()
+  sample_count_attr = settings_prim.CreateAttribute(
+      "mitsuba:sample_count", Sdf.ValueTypeNames.Int
+  )
+  sample_count_attr.Set(4)
+  integrator_type_attr = settings_prim.CreateAttribute(
+      "mitsuba:integrator:type", Sdf.ValueTypeNames.String
+  )
+  integrator_type_attr.Set("direct")
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  direct_color = engine.render()["color"]
+  assert engine.get_render_stats()["totalSamples"] == 4
+
+  # Modify UsdRenderSettings attributes directly and render without configure()
+  sample_count_attr.Set(8)
+  integrator_type_attr.Set("path")
+  path_color = engine.render()["color"]
+  assert engine.get_render_stats()["totalSamples"] == 8
+  assert np.max(np.abs(path_color[..., :3] - direct_color[..., :3])) > 0.02
+
+  # Removing an authored attribute falls back to the descriptor default (128)
+  settings_prim.RemoveProperty("mitsuba:sample_count")
+  engine.render()
+  assert engine.get_render_stats()["totalSamples"] == 128
+
+
+def test_switch_active_render_settings_prim():
+  stage = Usd.Stage.CreateInMemory()
+  stage.GetRootLayer().subLayerPaths.append(
+      f"{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda"
+  )
+  direct_settings = UsdRender.Settings.Define(stage, "/Render/DirectSettings")
+  direct_settings.CreateResolutionAttr().Set(Gf.Vec2i(8, 8))
+  direct_settings.GetPrim().CreateAttribute(
+      "mitsuba:sample_count", Sdf.ValueTypeNames.Int
+  ).Set(4)
+
+  path_settings = UsdRender.Settings.Define(stage, "/Render/PathSettings")
+  path_settings.CreateResolutionAttr().Set(Gf.Vec2i(16, 12))
+  path_settings.GetPrim().CreateAttribute(
+      "mitsuba:sample_count", Sdf.ValueTypeNames.Int
+  ).Set(12)
+
+  stage.SetMetadata(
+      UsdRender.Tokens.renderSettingsPrimPath, "/Render/DirectSettings"
+  )
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  first = engine.render()["color"]
+  assert first.shape[:2] == (8, 8)
+  assert engine.get_render_stats()["totalSamples"] == 4
+
+  # Switch active UsdRenderSettings via stage metadata without rebuilding
+  stage.SetMetadata(
+      UsdRender.Tokens.renderSettingsPrimPath, "/Render/PathSettings"
+  )
+  second = engine.render()["color"]
+  assert second.shape[:2] == (12, 16)
+  assert engine.get_render_stats()["totalSamples"] == 12
+
+
+def test_render_settings_precedence():
+  stage = Usd.Stage.Open(f"{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda")
+  render_settings = test_helpers.create_render_settings(
+      stage, resolution=(8, 8)
+  )
+  render_settings.GetPrim().CreateAttribute(
+      "mitsuba:sample_count", Sdf.ValueTypeNames.Int
+  ).Set(4)
+
+  engine = usd_render.RenderEngine(stage)
+  # Explicit host override takes precedence over active UsdRenderSettings
+  engine.configure(
+      hydra_delegate_id="HdMitsubaRendererPlugin",
+      overrides={"mitsuba:sample_count": 16},
+  )
+  engine.render()
+  assert engine.get_render_stats()["totalSamples"] == 16
+
+  # Clearing host overrides restores the active UsdRenderSettings value
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin", overrides={})
+  engine.render()
+  assert engine.get_render_stats()["totalSamples"] == 4

@@ -94,7 +94,9 @@ class SceneManager {
     has_pending_commits_ = true;
   }
 
-  static SceneManager* CreateSceneManager(const std::string& variant);
+  static SceneManager* CreateSceneManager(const std::string& variant,
+                                          bool sync_python_variant = true);
+  static void SyncPythonVariant(const std::string& variant);
 
  protected:
   absl::flat_hash_map<SdfPath, MaterialSpec, SdfPath::Hash> material_specs_;

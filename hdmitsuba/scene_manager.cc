@@ -1852,9 +1852,16 @@ SceneManager* CreateSceneManagerImpl() {
   return new SceneModel<Float, Spectrum>();
 }
 
-SceneManager* SceneManager::CreateSceneManager(const std::string& variant) {
-  SyncMitsubaPythonVariant(variant);
+SceneManager* SceneManager::CreateSceneManager(const std::string& variant,
+                                               bool sync_python_variant) {
+  if (sync_python_variant) {
+    SyncMitsubaPythonVariant(variant);
+  }
   return MI_INVOKE_VARIANT(variant, CreateSceneManagerImpl);
+}
+
+void SceneManager::SyncPythonVariant(const std::string& variant) {
+  SyncMitsubaPythonVariant(variant);
 }
 
 SceneManager::SceneManager() {
