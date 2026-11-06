@@ -22,6 +22,7 @@ from typing import Any
 import drjit as dr
 import mitsuba as mi
 from pxr import Gf
+from pxr import Sdf
 from pxr import Tf
 from pxr import Usd
 from pxr import UsdLux
@@ -88,16 +89,33 @@ def _area_emitter(
     time: Usd.TimeCode,
     radiance: mi.ScalarColor3f,
     to_world: mi.ScalarTransform4f,
+    texture_file: Sdf.AssetPath | None = None,
 ) -> dict[str, Any]:
   """Returns an `'area'` emitter, wrapped in `'ies'` if `prim` has shaping.
 
   `to_world` is the transform of the emitting shape, whose +Z axis is the
-  photometric axis.
+  photometric axis. A `texture_file` modulates `radiance`.
   """
+  radiance_dict: dict[str, Any] = {'type': 'rgb', 'value': radiance}
+  if texture_file:
+    if not texture_file.resolvedPath:
+      raise ValueError(
+          f'Could not resolve texture {texture_file.path!r} of'
+          f' {prim.GetPath()}.'
+      )
+    radiance_dict = {
+        'type': 'math',
+        'expr': 'in[0] * in[1]',
+        'in0': {
+            'type': 'bitmap',
+            'bitmap': mi.Bitmap(texture_file.resolvedPath),
+        },
+        'in1': {'type': 'srgb', 'color': radiance, 'unbounded': True},
+    }
   return _maybe_wrap_shaping(
       prim,
       time,
-      {'type': 'area', 'radiance': {'type': 'rgb', 'value': radiance}},
+      {'type': 'area', 'radiance': radiance_dict},
       util.remove_scale_from_transform(to_world),
   )
 
@@ -287,7 +305,11 @@ def _convert_rect_light(
       'type': 'rectangle',
       'to_world': world_transform,
       'emitter': _area_emitter(
-          prim, time, color * intensity, world_transform
+          prim,
+          time,
+          color * intensity,
+          world_transform,
+          rect_light.GetTextureFileAttr().Get(time),
       ),
   }
 

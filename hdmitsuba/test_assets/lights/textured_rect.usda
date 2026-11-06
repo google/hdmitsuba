@@ -1,0 +1,18 @@
+#usda 1.0
+(
+    doc = """area.usda with a textured RectLight."""
+    defaultPrim = "root"
+)
+
+def Xform "root" (
+    prepend references = @./area.usda@
+)
+{
+    over "Area"
+    {
+        over "Area"
+        {
+            asset inputs:texture:file = @./textures/envmap.png@
+        }
+    }
+}
