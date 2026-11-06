@@ -14,6 +14,7 @@
 
 #include "hdmitsuba/light.h"
 
+#include <algorithm>
 #include <cmath>
 #include <utility>
 
@@ -82,7 +83,9 @@ LightParams ReadLightParams(const HdContainerDataSourceHandle& container) {
   p.treat_as_point =
       GetParam<bool>(container, treat_as_point_token, false) ||
       p.radius == 0.0f;
-  p.angle = GetParam<float>(container, HdLightTokens->angle, 0.0f);
+  // Mitsuba's `directional` emitter requires angles below 180 deg.
+  p.angle = std::clamp(GetParam<float>(container, HdLightTokens->angle, 0.0f),
+                       0.0f, 179.99f);
   p.shaping_cone_angle =
       GetParam<float>(container, HdLightTokens->shapingConeAngle, 0.0f);
   p.shaping_cone_softness =
@@ -144,6 +147,20 @@ GfVec3f ComputeLightEmission(const TfToken& type_id,
                              const GfMatrix4d& transform,
                              const LightParams& params) {
   GfVec3f emission = params.base_emission;
+  if (type_id == HdPrimTypeTokens->distantLight) {
+    // USD lights give the radiance of the cone of half-angle theta, while the
+    // `directional` emitter takes the irradiance it spreads over the cone,
+    // i.e., the radiance times the cone's solid angle 2 pi (1 - cos(theta)).
+    // `normalize` divides the radiance by pi sin^2(theta), the irradiance at
+    // normal incidence.
+    if (params.angle > 0.0f) {
+      const double cos_theta = std::cos(drjit::deg_to_rad(0.5 * params.angle));
+      emission *= static_cast<float>(
+          params.normalize ? 2.0 / (1.0 + cos_theta)
+                           : drjit::TwoPi<double> * (1.0 - cos_theta));
+    }
+    return emission;
+  }
   if (!params.normalize) {
     // A point light stands in for its sphere. A sphere of radius r and radiance
     // L has radiant intensity L * pi * r^2 in every direction, pi * r^2 being
