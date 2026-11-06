@@ -83,6 +83,25 @@ def test_distant_light():
   np.testing.assert_allclose(direction, mi.ScalarVector3f(0, 1, 0), atol=1e-6)
 
 
+def test_light_diffuse_and_color_temperature():
+  stage, prim = _create_stage_with_light(UsdLux.DomeLight)
+  usd_light = UsdLux.DomeLight(prim)
+  usd_light.GetColorAttr().Set(Gf.Vec3f(1.0, 0.5, 0.25))
+  usd_light.GetIntensityAttr().Set(2.0)
+  usd_light.GetDiffuseAttr().Set(0.5)
+  usd_light.GetEnableColorTemperatureAttr().Set(True)
+  usd_light.GetColorTemperatureAttr().Set(3000.0)
+
+  emitter_dict = light.convert_light(prim)
+
+  np.testing.assert_allclose(
+      emitter_dict['radiance']['value'],
+      mi.ScalarColor3f(1.0, 0.5, 0.25)
+      * mi.ScalarColor3f(*UsdLux.BlackbodyTemperatureAsRgb(3000.0)),
+      rtol=1e-6,
+  )
+
+
 def test_dome_light_constant():
   stage, prim = _create_stage_with_light(UsdLux.DomeLight)
   usd_light = UsdLux.DomeLight(prim)
