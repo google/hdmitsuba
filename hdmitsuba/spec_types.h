@@ -147,6 +147,7 @@ struct MeshSpec : public BaseSpec {
   bool motion_wrapped = false;
   bool is_subdivided = false;
   bool double_sided = false;
+  bool left_handed = false;
 
   void FoldPendingFrom(const MeshSpec& prev) {
     if (emitter_spec.has_value() != prev.emitter_spec.has_value() ||

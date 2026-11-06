@@ -52,9 +52,10 @@ def _apply_displacement(
   sub.primvars['points'].value = Vt.Vec3fArray.FromNumpy(
       points.astype(np.float32)
   )
+  # Triangulation already wound `sub.triangles` right-handed.
   sub_topology = geom_lib.HdMeshTopology(
       mesh_data.scheme,
-      mesh_data.orientation,
+      UsdGeom.Tokens.rightHanded,
       Vt.IntArray([3] * (len(sub.triangles) // 3)),
       sub.triangles,
   )

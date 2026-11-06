@@ -76,6 +76,35 @@ def test_render(scene_name: str, time: Usd.TimeCode, expect_non_black: bool):
     assert np.max(image_usd) > 0.05
 
 
+@pytest.mark.parametrize('displacement', ['off', 'on'])
+@pytest.mark.parametrize('subdivision_scheme', ['none', 'catmullClark'])
+def test_left_handed_orientation(subdivision_scheme: str, displacement: str):
+  images = []
+  for orientation in ('rightHanded', 'leftHanded'):
+    stage = Usd.Stage.Open(
+        f'{test_helpers.TEST_ASSETS_PATH}/shapes/left_handed_plane.usda'
+    )
+    test_helpers.create_render_settings(stage, resolution=(256, 256))
+    variant_sets = stage.GetDefaultPrim().GetVariantSets()
+    variant_sets.SetSelection('orientation', orientation)
+    variant_sets.SetSelection('subdivisionScheme', subdivision_scheme)
+    variant_sets.SetSelection('displacement', displacement)
+    images.append(
+        test_helpers.assert_hydra_equal_to_offline(
+            stage,
+            output_prefix=(
+                f'test_{orientation}_{subdivision_scheme}_{displacement}'
+            ),
+            subdivision_level=2,
+            refine_level_fallback=2,
+        )
+    )
+  (ref_hd, ref_usd), (left_hd, left_usd) = images
+  assert np.max(ref_hd[..., :3]) > 0.05
+  np.testing.assert_allclose(left_hd, ref_hd, atol=1e-3)
+  np.testing.assert_allclose(left_usd, ref_usd, atol=1e-3)
+
+
 def test_modify_shape_transform():
   stage = Usd.Stage.Open(f'{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda')
   test_helpers.create_render_settings(stage, resolution=(256, 256))

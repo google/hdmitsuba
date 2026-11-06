@@ -1,0 +1,74 @@
+#usda 1.0
+(
+    doc = """Single-sided plane of displacement_preview_surface.usda without
+    authored normals. The leftHanded variant reverses the face (keeping its
+    first corner) and its face-varying primvars, so both orientations describe
+    the same surface and must render identically."""
+    defaultPrim = "root"
+)
+
+def Xform "root" (
+    prepend references = @./displacement_preview_surface.usda@
+    variants = {
+        string orientation = "rightHanded"
+        string subdivisionScheme = "catmullClark"
+        string displacement = "on"
+    }
+    prepend variantSets = ["orientation", "subdivisionScheme", "displacement"]
+)
+{
+    over "Plane"
+    {
+        over "Plane"
+        {
+            uniform bool doubleSided = 0
+        }
+    }
+
+    variantSet "orientation" = {
+        "leftHanded" {
+            over "Plane"
+            {
+                over "Plane"
+                {
+                    uniform token orientation = "leftHanded"
+                    int[] faceVertexIndices = [3, 0, 1, 2]
+                    texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+                        interpolation = "faceVarying"
+                    )
+                }
+            }
+        }
+        "rightHanded" {
+        }
+    }
+
+    variantSet "subdivisionScheme" = {
+        "catmullClark" {
+        }
+        "none" {
+            over "Plane"
+            {
+                over "Plane"
+                {
+                    uniform token subdivisionScheme = "none"
+                }
+            }
+        }
+    }
+
+    variantSet "displacement" = {
+        "off" {
+            over "_materials"
+            {
+                over "Material"
+                {
+                    token outputs:displacement.connect = None
+                    token outputs:mitsuba:displacement.connect = None
+                }
+            }
+        }
+        "on" {
+        }
+    }
+}

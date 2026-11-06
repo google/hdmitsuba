@@ -281,7 +281,8 @@ void HdMitsubaMesh::SyncTopology(HdSceneDelegate* sceneDelegate,
   if (subdiv_evaluator_.IsSubdivided()) {
     face_material_indices_ =
         subdiv_evaluator_.MapRefinedMaterialIndices(face_material_indices_);
-    topology_ = HdMeshTopology(scheme, topology.GetOrientation(),
+    // OpenSubdiv refines `leftHanded` meshes into right-handed faces.
+    topology_ = HdMeshTopology(scheme, PxOsdOpenSubdivTokens->rightHanded,
                                subdiv_evaluator_.GetRefinedFaceVertexCounts(),
                                subdiv_evaluator_.GetRefinedFaceVertexIndices());
   } else {
@@ -345,6 +346,8 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
   spec.dirty_bits = dirtyBits ? *dirtyBits : HdChangeTracker::Clean;
   spec.is_subdivided = subdiv_evaluator_.IsSubdivided();
   spec.double_sided = IsDoubleSided(sceneDelegate);
+  spec.left_handed =
+      topology_.GetOrientation() == PxOsdOpenSubdivTokens->leftHanded;
 
   spec.face_material_indices = face_material_indices_;
   if (subdiv_evaluator_.IsSubdivided()) {

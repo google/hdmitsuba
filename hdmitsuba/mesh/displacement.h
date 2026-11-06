@@ -66,7 +66,7 @@ void ApplyDisplacement(const SdfPath& mesh_id,
                        const VtIntArray& face_counts,
                        const std::vector<int>& global_face_indices,
                        const std::vector<int>& global_corner_indices,
-                       PrimvarMap& primvars) {
+                       bool left_handed, PrimvarMap& primvars) {
   TRACE_FUNCTION();
   using Texture = mitsuba::Texture<Float, Spectrum>;
   const auto* displacement_texture =
@@ -166,7 +166,7 @@ void ApplyDisplacement(const SdfPath& mesh_id,
   FloatBuffer tan_buf;
   if (displacement.is_vector) {
     auto [triangles, _] = GeometryProcessor::TriangulateWithFaceMapping(
-        face_counts, local_vertex_indices);
+        face_counts, local_vertex_indices, left_handed);
     if (triangles.empty()) return;
     mitsuba::ref<Mesh> mesh = new Mesh(
         mesh_id.GetString(),
