@@ -56,6 +56,7 @@ struct LightParams {
   float radius = 1.0f;
   float width = 1.0f;
   float height = 1.0f;
+  float length = 1.0f;
   bool normalize = false;
   bool treat_as_point = false;
   float angle = 0.0f;
@@ -77,6 +78,7 @@ LightParams ReadLightParams(const HdContainerDataSourceHandle& container) {
   p.radius = GetParam<float>(container, HdLightTokens->radius, 1.0f);
   p.width = GetParam<float>(container, HdLightTokens->width, 1.0f);
   p.height = GetParam<float>(container, HdLightTokens->height, 1.0f);
+  p.length = GetParam<float>(container, HdLightTokens->length, 1.0f);
   p.normalize = GetParam<bool>(container, HdLightTokens->normalize, false);
   // `treatAsPoint` always has a value (its schema fallback is false), so
   // zero-radius spheres must be checked explicitly.
@@ -114,6 +116,15 @@ double SphereArea(const GfMatrix4d& transform, float radius) {
                   1.0 / kP);
 }
 
+// World-space perimeter of a light-space circle of radius `radius` in the YZ
+// plane, an ellipse under non-uniform scale, approximated as in hdEmbree.
+double CylinderPerimeter(const GfMatrix4d& transform, float radius) {
+  const double a = transform.TransformDir(GfVec3d(0, radius, 0)).GetLength();
+  const double b = transform.TransformDir(GfVec3d(0, 0, radius)).GetLength();
+  return drjit::Pi<double> *
+         (3.0 * (a + b) - std::sqrt((3.0 * a + b) * (a + 3.0 * b)));
+}
+
 ScalarAffineTransform4f ComputeLightTransform(const TfToken& type_id,
                                               const GfMatrix4d& transform,
                                               const LightParams& params) {
@@ -139,6 +150,18 @@ ScalarAffineTransform4f ComputeLightTransform(const TfToken& type_id,
                UsdToMitsubaTransform(align_rotation * transform)) *
            ScalarAffineTransform4f::scale(
                mitsuba::Vector<float, 3>(world_radius));
+  }
+  if (type_id == HdPrimTypeTokens->cylinderLight) {
+    // Mitsuba's `cylinder` does not support non-uniform scale of its
+    // cross-section, so use the radius of the cylinder with the same area.
+    const float length = static_cast<float>(
+        transform.TransformDir(GfVec3d(params.length, 0, 0)).GetLength());
+    const float radius = static_cast<float>(
+        CylinderPerimeter(transform, params.radius) / drjit::TwoPi<double>);
+    return RemoveScaleFromTransform(
+               UsdToMitsubaTransform(align_rotation * transform)) *
+           ScalarAffineTransform4f::scale(
+               mitsuba::Vector<float, 3>(length, radius, radius));
   }
   // Non-area emitters (point, spot, ies, directional, envmap) do not support
   // scale or shear, and AnimatedTransform rejects keyframe matrices with shear.
@@ -198,6 +221,11 @@ GfVec3f ComputeLightEmission(const TfToken& type_id,
     if (area > 0.0) emission /= area;
   } else if (type_id == HdPrimTypeTokens->diskLight) {
     double area = DiskArea(transform, params.radius);
+    if (area > 0.0) emission /= area;
+  } else if (type_id == HdPrimTypeTokens->cylinderLight) {
+    double area =
+        CylinderPerimeter(transform, params.radius) *
+        transform.TransformDir(GfVec3d(params.length, 0, 0)).GetLength();
     if (area > 0.0) emission /= area;
   } else if (type_id == HdPrimTypeTokens->sphereLight) {
     if (params.treat_as_point) {

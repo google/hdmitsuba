@@ -125,7 +125,11 @@ def _is_area_light(prim: Usd.Prim, time: Usd.TimeCode) -> bool:
   Returns:
     True if the light is converted to a shape with an area emitter.
   """
-  if prim.IsA(UsdLux.RectLight) or prim.IsA(UsdLux.DiskLight):
+  if (
+      prim.IsA(UsdLux.RectLight)
+      or prim.IsA(UsdLux.DiskLight)
+      or prim.IsA(UsdLux.CylinderLight)
+  ):
     return True
   return prim.IsA(UsdLux.SphereLight) and not _is_point_light(
       UsdLux.SphereLight(prim), time
@@ -288,6 +292,52 @@ def _convert_disk_light(
   }
 
 
+def _cylinder_perimeter(
+    transform: mi.ScalarTransform4f, radius: float
+) -> float:
+  """Returns the perimeter of a circle of radius `radius` in the YZ plane.
+
+  Non-uniformly scaled circles are ellipses, whose perimeter under `transform`
+  is approximated as in hdEmbree.
+  """
+  a = dr.norm(transform @ mi.ScalarVector3f(0, radius, 0))
+  b = dr.norm(transform @ mi.ScalarVector3f(0, 0, radius))
+  return dr.pi * (3.0 * (a + b) - dr.sqrt((3.0 * a + b) * (a + 3.0 * b)))
+
+
+def _convert_cylinder_light(
+    prim: Usd.Prim,
+    world_transform: mi.ScalarTransform4f,
+    color: mi.ScalarColor3f,
+    intensity: float,
+    time: Usd.TimeCode,
+) -> dict[str, Any]:
+  cylinder_light = UsdLux.CylinderLight(prim)
+  length = dr.norm(
+      world_transform
+      @ mi.ScalarVector3f(cylinder_light.GetLengthAttr().Get(time), 0, 0)
+  )
+  perimeter = _cylinder_perimeter(
+      world_transform, cylinder_light.GetRadiusAttr().Get(time)
+  )
+  if cylinder_light.GetNormalizeAttr().Get(time):
+    color /= perimeter * length
+  light_frame = util.remove_scale_from_transform(
+      world_transform.rotate([1, 0, 0], 180)
+  )
+  # Mitsuba's `cylinder` spans z in [0, 1] and does not support non-uniform
+  # scale of its cross-section, so use the radius of the cylinder with the
+  # same area.
+  radius = perimeter / (2.0 * dr.pi)
+  return {
+      'type': 'cylinder',
+      'to_world': light_frame.scale([length, radius, radius])
+      .rotate([0, 1, 0], 90)
+      .translate([0, 0, -0.5]),
+      'emitter': _area_emitter(prim, time, color * intensity, light_frame),
+  }
+
+
 def _base_emission(
     prim: Usd.Prim, time: Usd.TimeCode
 ) -> tuple[mi.ScalarColor3f, float]:
@@ -346,6 +396,7 @@ _LIGHT_CONVERTERS = [
     (UsdLux.DistantLight, _convert_distant_light),
     (UsdLux.RectLight, _convert_rect_light),
     (UsdLux.DiskLight, _convert_disk_light),
+    (UsdLux.CylinderLight, _convert_cylinder_light),
 ]
 
 

@@ -79,10 +79,11 @@ const TfTokenVector& HdMitsubaRenderDelegate::GetSupportedRprimTypes() const {
 
 const TfTokenVector& HdMitsubaRenderDelegate::GetSupportedSprimTypes() const {
   static const TfTokenVector* kSupportedSprimTypes = new TfTokenVector{
-      HdPrimTypeTokens->camera,    HdPrimTypeTokens->sphereLight,
-      HdPrimTypeTokens->domeLight, HdPrimTypeTokens->distantLight,
-      HdPrimTypeTokens->rectLight, HdPrimTypeTokens->diskLight,
-      HdPrimTypeTokens->material,  HdPrimTypeTokens->extComputation,
+      HdPrimTypeTokens->camera,         HdPrimTypeTokens->sphereLight,
+      HdPrimTypeTokens->domeLight,      HdPrimTypeTokens->distantLight,
+      HdPrimTypeTokens->rectLight,      HdPrimTypeTokens->diskLight,
+      HdPrimTypeTokens->cylinderLight,  HdPrimTypeTokens->material,
+      HdPrimTypeTokens->extComputation,
   };
   return *kSupportedSprimTypes;
 }
@@ -181,7 +182,8 @@ HdSprim* HdMitsubaRenderDelegate::CreateSprim(const TfToken& typeId,
              typeId == HdPrimTypeTokens->domeLight ||
              typeId == HdPrimTypeTokens->distantLight ||
              typeId == HdPrimTypeTokens->rectLight ||
-             typeId == HdPrimTypeTokens->diskLight) {
+             typeId == HdPrimTypeTokens->diskLight ||
+             typeId == HdPrimTypeTokens->cylinderLight) {
     return new HdMitsubaLight(sprimId, typeId);
   } else if (typeId == HdPrimTypeTokens->material) {
     return new HdMitsubaMaterial(sprimId);
