@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import drjit as dr
@@ -191,12 +192,19 @@ def _convert_distant_light(
     time: Usd.TimeCode,
 ) -> dict[str, Any]:
   distant_light = UsdLux.DistantLight(prim)
-  angle = distant_light.GetAngleAttr().Get(time)
+  # Mitsuba's `directional` emitter requires angles below 180 deg.
+  angle = min(max(distant_light.GetAngleAttr().Get(time), 0.0), 179.99)
+  if angle > 0.0:
+    cos_theta = math.cos(math.radians(0.5 * angle))
+    if distant_light.GetNormalizeAttr().Get(time):
+      intensity *= 2.0 / (1.0 + cos_theta)
+    else:
+      intensity *= 2.0 * math.pi * (1.0 - cos_theta)
   return {
       'type': 'directional',
       'to_world': world_transform,
       'irradiance': {'type': 'rgb', 'value': color * intensity},
-      'angle': float(angle) if angle is not None else 0.0,
+      'angle': angle,
   }
 
 

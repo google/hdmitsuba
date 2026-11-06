@@ -68,10 +68,19 @@ def test_distant_light():
 
   assert emitter_dict['type'] == 'directional'
   assert emitter_dict['angle'] == pytest.approx(1.5)
+  # The radiance times the solid angle of the cone of half-angle 0.75 deg.
+  cos_theta = np.cos(np.radians(0.75))
   np.testing.assert_allclose(
       emitter_dict['irradiance']['value'],
-      mi.ScalarColor3f(8.0, 4.0, 2.0),
-      atol=1e-6,
+      mi.ScalarColor3f(8.0, 4.0, 2.0) * 2.0 * np.pi * (1.0 - cos_theta),
+      rtol=1e-5,
+  )
+  # `normalize` divides the radiance by pi sin^2(theta).
+  usd_light.GetNormalizeAttr().Set(True)
+  np.testing.assert_allclose(
+      light.convert_light(prim)['irradiance']['value'],
+      mi.ScalarColor3f(8.0, 4.0, 2.0) * 2.0 / (1.0 + cos_theta),
+      rtol=1e-5,
   )
 
   # Check transform: USD default direction is -Z, while Mitsuba directional

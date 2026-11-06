@@ -138,6 +138,7 @@ def test_dome_light_corrupt_texture_falls_back_to_constant():
         'color_temperature',
         'constant',
         'directional',
+        'directional_wide',
         'disk',
         'envmap',
         'envmap_1x1',

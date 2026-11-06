@@ -1,0 +1,19 @@
+#usda 1.0
+(
+    doc = """directional.usda with an unnormalized 40 degree DistantLight."""
+    defaultPrim = "root"
+)
+
+def Xform "root" (
+    prepend references = @./directional.usda@
+)
+{
+    over "Area"
+    {
+        over "Area"
+        {
+            float inputs:angle = 40
+            bool inputs:normalize = 0
+        }
+    }
+}
