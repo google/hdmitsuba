@@ -67,7 +67,7 @@ struct ShapingSpec {
   std::string ies_file_path;
   float ies_angle_scale = 0.0f;
   bool ies_normalize = false;
-  // In degrees. 180 disables the cone.
+  // In degrees. 180 disables the cone, unless `cone_softness` is positive.
   float cone_angle = 180.0f;
   float cone_softness = 0.0f;
   // 0 disables the focus.
@@ -75,7 +75,8 @@ struct ShapingSpec {
   GfVec3f focus_tint{0.0f};
 
   bool IsActive() const {
-    return !ies_file_path.empty() || cone_angle < 180.0f || focus > 0.0f;
+    return !ies_file_path.empty() || cone_angle < 180.0f ||
+           cone_softness > 0.0f || focus > 0.0f;
   }
 
   bool operator==(const ShapingSpec& o) const {
@@ -110,6 +111,18 @@ struct LightSpec : public BaseSpec {
            prim_type == HdPrimTypeTokens->diskLight ||
            prim_type == HdPrimTypeTokens->cylinderLight ||
            (prim_type == HdPrimTypeTokens->sphereLight && !treat_as_point);
+  }
+
+  // Per-channel tint of the texture of a textured dome light, i.e. `emission`
+  // normalized to a mean of 1, or 1 otherwise. Mitsuba's `envmap` only has a
+  // scalar `scale` (the mean), so the tint is baked into its texture.
+  GfVec3f TexturedDomeTint() const {
+    const float mean = (emission[0] + emission[1] + emission[2]) / 3.0f;
+    if (prim_type != HdPrimTypeTokens->domeLight || texture_file_path.empty() ||
+        mean <= 0.0f) {
+      return GfVec3f(1.0f);
+    }
+    return emission / mean;
   }
 };
 

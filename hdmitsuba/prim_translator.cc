@@ -754,6 +754,19 @@ mitsuba::ref<mitsuba::Object> CreateTexturedRadiance(
   return create(props);
 }
 
+// Returns `bitmap` in linear RGB, with each channel scaled by `tint`.
+mitsuba::ref<mitsuba::Bitmap> TintBitmap(const mitsuba::Bitmap& bitmap,
+                                         const GfVec3f& tint) {
+  mitsuba::ref<mitsuba::Bitmap> result =
+      bitmap.convert(mitsuba::Bitmap::PixelFormat::RGB,
+                     struct_jit::Type::Float32, /*srgb_gamma=*/false);
+  float* data = static_cast<float*>(result->data());
+  for (size_t i = 0; i < 3 * result->pixel_count(); ++i) {
+    data[i] *= tint[i % 3];
+  }
+  return result;
+}
+
 }  // namespace
 
 MI_VARIANT mitsuba::ref<mitsuba::Object>
@@ -819,6 +832,10 @@ PrimTranslator<Float, Spectrum>::BuildLightProperties(const LightSpec& spec) {
       try {
         mitsuba::ref<mitsuba::Bitmap> bitmap =
             ReadBitmap(spec.texture_file_path);
+        if (const GfVec3f tint = spec.TexturedDomeTint();
+            !GfIsClose(tint, GfVec3f(1.0f), 1e-6)) {
+          bitmap = TintBitmap(*bitmap, tint);
+        }
         mitsuba::Properties props = make_props("envmap");
         props.set("scale", (color[0] + color[1] + color[2]) / 3.f);
         props.set("bitmap", bitmap.get());

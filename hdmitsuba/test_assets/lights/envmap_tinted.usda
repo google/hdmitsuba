@@ -1,0 +1,15 @@
+#usda 1.0
+(
+    doc = """envmap.usda with a colored DomeLight, which tints its texture."""
+    defaultPrim = "root"
+)
+
+def Xform "root" (
+    prepend references = @./envmap.usda@
+)
+{
+    over "env_light"
+    {
+        color3f inputs:color = (1, 0.6, 0.3)
+    }
+}
