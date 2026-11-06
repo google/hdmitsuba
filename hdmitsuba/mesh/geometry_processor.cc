@@ -44,6 +44,7 @@
 #include <pxr/imaging/hd/meshTopology.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/imaging/hd/tokens.h>
+#include <pxr/imaging/pxOsd/tokens.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
 
@@ -159,8 +160,8 @@ VtValue TransformArray<GfVec2f>(const VtVec2fArray& initial_values,
 }  // namespace
 
 std::pair<VtIntArray, VtIntArray> GeometryProcessor::TriangulateWithFaceMapping(
-    const VtIntArray& face_vertex_counts,
-    const VtIntArray& face_vertex_indices) {
+    const VtIntArray& face_vertex_counts, const VtIntArray& face_vertex_indices,
+    bool left_handed) {
   TRACE_FUNCTION();
 
   int total_triangles = 0;
@@ -183,8 +184,10 @@ std::pair<VtIntArray, VtIntArray> GeometryProcessor::TriangulateWithFaceMapping(
       const int v0 = face_vertex_indices[index];
       for (int i = 0; i < count - 2; ++i) {
         tri_ptr[tri_idx * 3 + 0] = v0;
-        tri_ptr[tri_idx * 3 + 1] = face_vertex_indices[index + i + 1];
-        tri_ptr[tri_idx * 3 + 2] = face_vertex_indices[index + i + 2];
+        tri_ptr[tri_idx * 3 + 1] =
+            face_vertex_indices[index + i + (left_handed ? 2 : 1)];
+        tri_ptr[tri_idx * 3 + 2] =
+            face_vertex_indices[index + i + (left_handed ? 1 : 2)];
         param_ptr[tri_idx] = face_idx;
         ++tri_idx;
       }
@@ -196,13 +199,15 @@ std::pair<VtIntArray, VtIntArray> GeometryProcessor::TriangulateWithFaceMapping(
 
 void GeometryProcessor::ComputeNormals(PrimvarMap& primvars,
                                        const HdMeshTopology& topology) {
-  ComputeNormals(primvars, topology.GetFaceVertexIndices(),
-                 topology.GetFaceVertexCounts());
+  ComputeNormals(
+      primvars, topology.GetFaceVertexIndices(), topology.GetFaceVertexCounts(),
+      topology.GetOrientation() == PxOsdOpenSubdivTokens->leftHanded);
 }
 
 void GeometryProcessor::ComputeNormals(PrimvarMap& primvars,
                                        const VtIntArray& face_vertex_indices,
-                                       const VtIntArray& face_vertex_counts) {
+                                       const VtIntArray& face_vertex_counts,
+                                       bool left_handed) {
   if (primvars.find(HdTokens->points) == primvars.end()) {
     return;
   }
@@ -227,6 +232,7 @@ void GeometryProcessor::ComputeNormals(PrimvarMap& primvars,
                      face_vertex_indices[index + i + 2]);
         GfVec3f p[3] = {points[face[0]], points[face[1]], points[face[2]]};
         GfVec3f face_normal = GfCross(p[1] - p[0], p[2] - p[0]).GetNormalized();
+        if (left_handed) face_normal = -face_normal;
         for (int j = 0; j < 3; ++j) {
           GfVec3f d0 = (p[(j + 1) % 3] - p[j]).GetNormalized();
           GfVec3f d1 = (p[(j + 2) % 3] - p[j]).GetNormalized();

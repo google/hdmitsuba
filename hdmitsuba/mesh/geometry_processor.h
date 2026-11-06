@@ -93,19 +93,23 @@ class GeometryProcessor {
   }
 
   // Triangulates a mesh topology and returns the triangle indices and primitive
-  // parameters mapping each triangle to its parent polygon index.
+  // parameters mapping each triangle to its parent polygon index. Triangles are
+  // always wound counter-clockwise (right-handed), so the winding of
+  // `left_handed` polygons is reversed.
   static std::pair<VtIntArray, VtIntArray> TriangulateWithFaceMapping(
       const VtIntArray& face_vertex_counts,
-      const VtIntArray& face_vertex_indices);
+      const VtIntArray& face_vertex_indices, bool left_handed);
 
   // Computes smooth vertex normals for a mesh topology.
   static void ComputeNormals(PrimvarMap& primvars,
                              const HdMeshTopology& topology);
 
-  // Computes smooth vertex normals using raw topology arrays.
+  // Computes smooth vertex normals using raw topology arrays, whose polygons are
+  // wound clockwise if `left_handed`.
   static void ComputeNormals(PrimvarMap& primvars,
                              const VtIntArray& face_vertex_indices,
-                             const VtIntArray& face_vertex_counts);
+                             const VtIntArray& face_vertex_counts,
+                             bool left_handed);
 
   // Transforms all vector and normal primvars by the given matrix.
   static void TransformPrimvars(PrimvarMap& primvars,

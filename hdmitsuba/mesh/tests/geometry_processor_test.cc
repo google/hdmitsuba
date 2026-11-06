@@ -68,12 +68,40 @@ TEST(GeometryProcessorTest, TriangulateWithFaceMapping) {
   auto [triangles, primitive_params] =
       GeometryProcessor::TriangulateWithFaceMapping(
           VtIntArray{3, 4, 5},
-          VtIntArray{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11});
+          VtIntArray{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11},
+          /*left_handed=*/false);
 
   EXPECT_THAT(triangles, ElementsAre(0, 1, 2,           //
                                      3, 4, 5, 3, 5, 6,  //
                                      7, 8, 9, 7, 9, 10, 7, 10, 11));
   EXPECT_THAT(primitive_params, ElementsAre(0, 1, 1, 2, 2, 2));
+}
+
+TEST(GeometryProcessorTest, TriangulateWithFaceMappingLeftHanded) {
+  auto [triangles, primitive_params] =
+      GeometryProcessor::TriangulateWithFaceMapping(
+          VtIntArray{3, 4}, VtIntArray{0, 1, 2, 3, 4, 5, 6},
+          /*left_handed=*/true);
+
+  EXPECT_THAT(triangles, ElementsAre(0, 2, 1,  //
+                                     3, 5, 4, 3, 6, 5));
+  EXPECT_THAT(primitive_params, ElementsAre(0, 1, 1));
+}
+
+TEST(GeometryProcessorTest, ComputeNormalsFollowsOrientation) {
+  for (bool left_handed : {false, true}) {
+    PrimvarMap primvars = QuadPoints();
+    // A single counter-clockwise quad in the z = 0 plane.
+    GeometryProcessor::ComputeNormals(primvars, VtIntArray{0, 1, 2, 3},
+                                      VtIntArray{4}, left_handed);
+    const VtVec3fArray& normals =
+        GetPrimvar<VtVec3fArray>(primvars, HdTokens->normals);
+    const GfVec3f expected(0, 0, left_handed ? -1 : 1);
+    for (int i = 0; i < 4; ++i) {
+      EXPECT_TRUE(GfIsClose(normals[i], expected, 1e-6))
+          << "left_handed=" << left_handed << ", vertex " << i;
+    }
+  }
 }
 
 TEST(GeometryProcessorTest, ExpandPrimDataSplitsUniform) {

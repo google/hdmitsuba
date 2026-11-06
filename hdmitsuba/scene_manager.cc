@@ -227,8 +227,10 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
       }
     }
     if (has_displacement || spec.is_subdivided) {
-      GeometryProcessor::ComputeNormals(
-          final_primvars, spec.face_vertex_indices, spec.face_vertex_counts);
+      GeometryProcessor::ComputeNormals(final_primvars,
+                                        spec.face_vertex_indices,
+                                        spec.face_vertex_counts,
+                                        spec.left_handed);
     }
   }
   bool displaced = false;
@@ -258,7 +260,7 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
         ApplyDisplacement<Float, Spectrum>(
             spec.id, displacements[i], material_vertex_indices,
             material_face_counts, global_face_indices, global_corner_indices,
-            final_primvars);
+            spec.left_handed, final_primvars);
         displaced = true;
       }
     }
@@ -266,7 +268,8 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
   if (displaced) {
     GeometryProcessor::TransformPrimvars(final_primvars, spec.transform);
     GeometryProcessor::ComputeNormals(final_primvars, spec.face_vertex_indices,
-                                      spec.face_vertex_counts);
+                                      spec.face_vertex_counts,
+                                      spec.left_handed);
   }
 
   // Expand primvar data, triangulate and split into submeshes.
@@ -276,8 +279,8 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
     GeometryProcessor::TransformPrimvars(expanded_primvars, spec.transform);
   }
   auto [triangles, primitive_params] =
-      GeometryProcessor::TriangulateWithFaceMapping(spec.face_vertex_counts,
-                                                    face_indices);
+      GeometryProcessor::TriangulateWithFaceMapping(
+          spec.face_vertex_counts, face_indices, spec.left_handed);
   return GeometryProcessor::SplitAndCompactMeshes(
       spec.id, triangles, primitive_params, expanded_primvars,
       spec.material_ids, spec.face_material_indices);

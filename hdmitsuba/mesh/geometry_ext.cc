@@ -32,6 +32,7 @@
 #include <pxr/imaging/hd/tokens.h>
 #include <pxr/imaging/pxOsd/meshTopology.h>
 #include <pxr/imaging/pxOsd/subdivTags.h>
+#include <pxr/imaging/pxOsd/tokens.h>
 #include <pxr/usd/sdf/path.h>
 #include <pxr/usd/usd/prim.h>
 #include <pxr/usd/usd/primFlags.h>
@@ -324,7 +325,9 @@ NB_MODULE(geometry_ext, m) {
             state.value, state.descriptor.interpolation, token);
       }
 
-      refined_topology = HdMeshTopology(mesh_data.scheme, mesh_data.orientation,
+      // OpenSubdiv refines `leftHanded` meshes into right-handed faces.
+      refined_topology = HdMeshTopology(mesh_data.scheme,
+                                        PxOsdOpenSubdivTokens->rightHanded,
                                         subdiv.GetRefinedFaceVertexCounts(),
                                         subdiv.GetRefinedFaceVertexIndices());
     }
@@ -337,7 +340,9 @@ NB_MODULE(geometry_ext, m) {
         GeometryProcessor::ExpandPrimData(refined_topology, primvars);
     auto [triangles, prim_params] =
         GeometryProcessor::TriangulateWithFaceMapping(
-            refined_topology.GetFaceVertexCounts(), face_indices);
+            refined_topology.GetFaceVertexCounts(), face_indices,
+            refined_topology.GetOrientation() ==
+                PxOsdOpenSubdivTokens->leftHanded);
 
     VtIntArray mapped_material_indices =
         subdiv.MapRefinedMaterialIndices(mesh_data.face_material_indices);
