@@ -132,6 +132,32 @@ def _is_area_light(prim: Usd.Prim, time: Usd.TimeCode) -> bool:
   )
 
 
+def _disk_area(transform: mi.ScalarTransform4f, radius: float) -> float:
+  """Returns the area of a disk of radius `radius` under `transform`."""
+  return dr.pi * dr.norm(
+      dr.cross(
+          transform @ mi.ScalarVector3f(radius, 0, 0),
+          transform @ mi.ScalarVector3f(0, radius, 0),
+      )
+  )
+
+
+def _sphere_area(transform: mi.ScalarTransform4f, radius: float) -> float:
+  """Returns the area of a sphere of radius `radius` under `transform`.
+
+  Non-uniformly scaled spheres are ellipsoids, whose area is approximated as in
+  hdEmbree.
+  """
+  a, b, c = (
+      dr.norm(transform @ (radius * mi.ScalarVector3f(axis)))
+      for axis in ((1, 0, 0), (0, 1, 0), (0, 0, 1))
+  )
+  p = 1.6
+  return 4.0 * dr.pi * (((a * b) ** p + (a * c) ** p + (b * c) ** p) / 3.0) ** (
+      1.0 / p
+  )
+
+
 def _convert_sphere_light(
     prim: Usd.Prim,
     world_transform: mi.ScalarTransform4f | mi.AnimatedTransform4f,
@@ -147,13 +173,11 @@ def _convert_sphere_light(
     if normalize:
       color *= 0.25
     elif radius > 0:
-      # A point light stands in for its sphere, whose radiant intensity is
-      # L * pi * r^2. Zero-radius lights keep `intensity` as radiant intensity.
+      # A point light stands in for its sphere, whose radiant intensity is L
+      # times its average projected area, a quarter of its surface area.
+      # Zero-radius lights keep `intensity` as radiant intensity.
       # `world_transform` has its scale removed, so use the prim's.
-      radius_vec = util.get_world_transform(prim, time) @ mi.ScalarVector3f(
-          radius, 0, 0
-      )
-      color *= dr.pi * dr.squared_norm(radius_vec)
+      color *= 0.25 * _sphere_area(util.get_world_transform(prim, time), radius)
     emitter_dict: dict[str, Any] = {
         'type': 'point',
         'to_world': world_transform,
@@ -170,13 +194,15 @@ def _convert_sphere_light(
         }
     return _maybe_wrap_ies(prim, time, emitter_dict, world_transform)
 
-  world_radius = dr.norm(world_transform @ mi.ScalarVector3f(radius, 0, 0))
+  area = _sphere_area(world_transform, radius)
+  # Mitsuba's `sphere` does not support non-uniform scale, so use the radius of
+  # the sphere with the same area.
   # The rotation leaves the sphere unchanged but aligns its IES frame.
   world_transform = util.remove_scale_from_transform(
       world_transform.rotate([1, 0, 0], 180)
-  ).scale(world_radius)
+  ).scale(dr.sqrt(area / (4 * dr.pi)))
   if normalize:
-    color /= 4 * dr.pi * dr.square(world_radius)
+    color /= area
   return {
       'type': 'sphere',
       'to_world': world_transform,
@@ -248,14 +274,10 @@ def _convert_disk_light(
     time: Usd.TimeCode,
 ) -> dict[str, Any]:
   disk_light = UsdLux.DiskLight(prim)
-  world_transform = world_transform.rotate([1, 0, 0], 180).scale(
-      disk_light.GetRadiusAttr().Get(time)
-  )
+  radius = disk_light.GetRadiusAttr().Get(time)
   if disk_light.GetNormalizeAttr().Get(time):
-    area = (
-        dr.squared_norm(world_transform @ mi.ScalarVector3f(1, 0, 0)) * dr.pi
-    )
-    color /= area
+    color /= _disk_area(world_transform, radius)
+  world_transform = world_transform.rotate([1, 0, 0], 180).scale(radius)
 
   return {
       'type': 'disk',

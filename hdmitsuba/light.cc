@@ -100,6 +100,20 @@ LightParams ReadLightParams(const HdContainerDataSourceHandle& container) {
   return p;
 }
 
+// World-space area of a light-space sphere of radius `radius`, an ellipsoid
+// under non-uniform scale, approximated as in hdEmbree.
+double SphereArea(const GfMatrix4d& transform, float radius) {
+  const double a = transform.TransformDir(GfVec3d(radius, 0, 0)).GetLength();
+  const double b = transform.TransformDir(GfVec3d(0, radius, 0)).GetLength();
+  const double c = transform.TransformDir(GfVec3d(0, 0, radius)).GetLength();
+  constexpr double kP = 1.6;
+  return 4.0 * drjit::Pi<double> *
+         std::pow((std::pow(a * b, kP) + std::pow(a * c, kP) +
+                   std::pow(b * c, kP)) /
+                      3.0,
+                  1.0 / kP);
+}
+
 ScalarAffineTransform4f ComputeLightTransform(const TfToken& type_id,
                                               const GfMatrix4d& transform,
                                               const LightParams& params) {
@@ -116,8 +130,10 @@ ScalarAffineTransform4f ComputeLightTransform(const TfToken& type_id,
     return UsdToMitsubaTransform(scale * align_rotation * transform);
   }
   if (type_id == HdPrimTypeTokens->sphereLight && !params.treat_as_point) {
-    const float world_radius = static_cast<float>(
-        transform.TransformDir(GfVec3d(params.radius, 0, 0)).GetLength());
+    // Mitsuba's `sphere` does not support non-uniform scale, so use the radius
+    // of the sphere with the same area.
+    const float world_radius = static_cast<float>(std::sqrt(
+        SphereArea(transform, params.radius) / (4.0 * drjit::Pi<double>)));
     // The rotation leaves the sphere unchanged but aligns its IES frame.
     return RemoveScaleFromTransform(
                UsdToMitsubaTransform(align_rotation * transform)) *
@@ -137,10 +153,13 @@ ScalarAffineTransform4f ComputeLightTransform(const TfToken& type_id,
   return to_world;
 }
 
-// World-space area of a light-space disk of radius `radius`.
+// World-space area of a light-space disk of radius `radius`, an ellipse under
+// non-uniform scale.
 double DiskArea(const GfMatrix4d& transform, float radius) {
   return drjit::Pi<double> *
-         transform.TransformDir(GfVec3d(radius, 0, 0)).GetLengthSq();
+         GfCross(transform.TransformDir(GfVec3d(radius, 0, 0)),
+                 transform.TransformDir(GfVec3d(0, radius, 0)))
+             .GetLength();
 }
 
 GfVec3f ComputeLightEmission(const TfToken& type_id,
@@ -162,13 +181,13 @@ GfVec3f ComputeLightEmission(const TfToken& type_id,
     return emission;
   }
   if (!params.normalize) {
-    // A point light stands in for its sphere. A sphere of radius r and radiance
-    // L has radiant intensity L * pi * r^2 in every direction, pi * r^2 being
-    // its projected area: a disk of radius r. Zero-radius lights keep
-    // `intensity` as radiant intensity.
+    // A point light stands in for its sphere. A sphere of radiance L has
+    // radiant intensity L times its projected area, which on average is a
+    // quarter of its surface area (pi * r^2 for a sphere of radius r).
+    // Zero-radius lights keep `intensity` as radiant intensity.
     if (type_id == HdPrimTypeTokens->sphereLight && params.treat_as_point &&
         params.radius > 0.0f) {
-      emission *= DiskArea(transform, params.radius);
+      emission *= 0.25 * SphereArea(transform, params.radius);
     }
     return emission;
   }
@@ -184,7 +203,7 @@ GfVec3f ComputeLightEmission(const TfToken& type_id,
     if (params.treat_as_point) {
       emission *= 0.25f;  // Match Mitsuba's point light normalization (1/4)
     } else {
-      double area = 4.0 * DiskArea(transform, params.radius);
+      double area = SphereArea(transform, params.radius);
       if (area > 0.0) emission /= area;
     }
   }
