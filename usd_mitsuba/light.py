@@ -30,34 +30,56 @@ from usd_mitsuba import motion
 from usd_mitsuba import util
 
 
-def _maybe_wrap_ies(
+def _maybe_wrap_shaping(
     prim: Usd.Prim,
     time: Usd.TimeCode,
     emitter_dict: dict[str, Any],
     to_world: mi.ScalarTransform4f | mi.AnimatedTransform4f,
 ) -> dict[str, Any]:
-  """Wraps `emitter_dict` in an `'ies'` emitter if `prim` has an IES profile.
+  """Wraps `emitter_dict` in an `'ies'` emitter if `prim` has active shaping.
 
-  `to_world` is the rigid light frame of the `'ies'` emitter, whose +Z axis is
-  the photometric axis (the light's -Z axis in USD).
+  Point lights realize the cone as `'spot'` emitters, so it only applies to
+  area emitters. `to_world` is the rigid light frame of the `'ies'` emitter,
+  whose +Z axis is the photometric axis (the light's -Z axis in USD).
   """
   if not prim.HasAPI(UsdLux.ShapingAPI):
     return emitter_dict
   shaping_api = UsdLux.ShapingAPI(prim)
-  ies_file = shaping_api.GetShapingIesFileAttr().Get(time)
-  if not ies_file:
+  shaping: dict[str, Any] = {}
+  if ies_file := shaping_api.GetShapingIesFileAttr().Get(time):
+    if not ies_file.resolvedPath:
+      raise ValueError(
+          f'Could not resolve IES file {ies_file.path!r} of {prim.GetPath()}.'
+      )
+    shaping |= {
+        'filename': ies_file.resolvedPath,
+        'angle_scale': shaping_api.GetShapingIesAngleScaleAttr().Get(time),
+        'normalize': shaping_api.GetShapingIesNormalizeAttr().Get(time),
+    }
+  cone_angle = shaping_api.GetShapingConeAngleAttr().Get(time)
+  if emitter_dict['type'] == 'area' and cone_angle < 180.0:
+    softness = shaping_api.GetShapingConeSoftnessAttr().Get(time)
+    shaping |= {
+        'cone_angle': cone_angle,
+        'cone_softness': min(max(softness, 0.0), 1.0),
+    }
+  if (focus := shaping_api.GetShapingFocusAttr().Get(time)) > 0.0:
+    shaping |= {
+        'focus': focus,
+        'focus_tint': {
+            'type': 'rgb',
+            'value': mi.ScalarColor3f(
+                *shaping_api.GetShapingFocusTintAttr().Get(time)
+            ),
+        },
+    }
+  if not shaping:
     return emitter_dict
-  if not ies_file.resolvedPath:
-    raise ValueError(
-        f'Could not resolve IES file {ies_file.path!r} of {prim.GetPath()}.'
-    )
   return {
       'type': 'ies',
-      'filename': ies_file.resolvedPath,
       'nested_emitter': emitter_dict,
       'to_world': to_world,
-      'angle_scale': shaping_api.GetShapingIesAngleScaleAttr().Get(time),
-      'normalize': shaping_api.GetShapingIesNormalizeAttr().Get(time),
+      **shaping,
   }
 
 
@@ -67,12 +89,12 @@ def _area_emitter(
     radiance: mi.ScalarColor3f,
     to_world: mi.ScalarTransform4f,
 ) -> dict[str, Any]:
-  """Returns an `'area'` emitter, wrapped in `'ies'` if `prim` has a profile.
+  """Returns an `'area'` emitter, wrapped in `'ies'` if `prim` has shaping.
 
   `to_world` is the transform of the emitting shape, whose +Z axis is the
   photometric axis.
   """
-  return _maybe_wrap_ies(
+  return _maybe_wrap_shaping(
       prim,
       time,
       {'type': 'area', 'radiance': {'type': 'rgb', 'value': radiance}},
@@ -196,7 +218,7 @@ def _convert_sphere_light(
             'beam_width': cone_angle * (1.0 - softness),
             'cutoff_angle': cone_angle,
         }
-    return _maybe_wrap_ies(prim, time, emitter_dict, world_transform)
+    return _maybe_wrap_shaping(prim, time, emitter_dict, world_transform)
 
   area = _sphere_area(world_transform, radius)
   # Mitsuba's `sphere` does not support non-uniform scale, so use the radius of
@@ -372,8 +394,8 @@ def convert_mesh_light(
     world_transform: The world transform of `prim`.
 
   Returns:
-    The `'area'` emitter, wrapped in an `'ies'` emitter if `prim` has an IES
-    profile, or None if `prim` has no `MeshLightAPI`.
+    The `'area'` emitter, wrapped in an `'ies'` emitter if `prim` has active
+    shaping, or None if `prim` has no `MeshLightAPI`.
   """
   if not prim.HasAPI(UsdLux.MeshLightAPI):
     return None

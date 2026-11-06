@@ -150,6 +150,7 @@ def test_dome_light_corrupt_texture_falls_back_to_constant():
         'point_non_uniform',
         'point_unnormalized',
         'point_zero_radius',
+        'shaping',
         'sphere',
         'sphere_non_uniform',
         'spot',
