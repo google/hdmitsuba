@@ -15,7 +15,6 @@
 #include "hdmitsuba/mesh.h"
 
 #include <algorithm>
-#include <cmath>
 #include <cstddef>
 #include <iterator>
 #include <optional>
@@ -105,10 +104,7 @@ std::optional<LightSpec> GetMeshEmitterSpec(HdSceneDelegate* sceneDelegate,
   }
   LightSpec spec;
   spec.id = id;
-  spec.emission =
-      GetParam<GfVec3f>(light, HdLightTokens->color, GfVec3f(1.0f)) *
-      GetParam<float>(light, HdLightTokens->intensity, 1.0f) *
-      std::exp2(GetParam<float>(light, HdLightTokens->exposure, 0.0f));
+  spec.emission = GetLightBaseEmission(light);
   spec.ies = GetIesSpec(light, id);
   // Meshes bake their transform into the vertices, so the `ies` light frame is
   // given explicitly. USD lights emit along -Z, the `ies` emitter along +Z.

@@ -39,6 +39,7 @@
 #include <pxr/usd/sdf/pathExpression.h>
 #include <pxr/usd/usd/collectionMembershipQuery.h>
 #include <pxr/usd/usd/tokens.h>
+#include <pxr/usd/usdLux/blackbody.h>
 
 #include "hdmitsuba/motion.h"
 #include "hdmitsuba/render_param.h"
@@ -50,9 +51,7 @@ PXR_NAMESPACE_OPEN_SCOPE
 namespace {
 
 struct LightParams {
-  GfVec3f color{1.0f};
-  float intensity = 1.0f;
-  float exposure = 0.0f;
+  GfVec3f base_emission{1.0f};
   float radius = 1.0f;
   float width = 1.0f;
   float height = 1.0f;
@@ -64,9 +63,6 @@ struct LightParams {
   std::string texture_file_path;
   std::string visibility;
 
-  GfVec3f BaseEmission() const {
-    return color * intensity * std::exp2(exposure);
-  }
   float ShapingConeBeamWidth() const {
     return shaping_cone_angle * (1.0f - shaping_cone_softness);
   }
@@ -76,9 +72,7 @@ LightParams ReadLightParams(const HdContainerDataSourceHandle& container) {
   static const TfToken treat_as_point_token("treatAsPoint");
   static const TfToken visibility_token("mitsuba:visibility");
   LightParams p;
-  p.color = GetParam<GfVec3f>(container, HdLightTokens->color, GfVec3f(1.0f));
-  p.intensity = GetParam<float>(container, HdLightTokens->intensity, 1.0f);
-  p.exposure = GetParam<float>(container, HdLightTokens->exposure, 0.0f);
+  p.base_emission = GetLightBaseEmission(container);
   p.radius = GetParam<float>(container, HdLightTokens->radius, 1.0f);
   p.width = GetParam<float>(container, HdLightTokens->width, 1.0f);
   p.height = GetParam<float>(container, HdLightTokens->height, 1.0f);
@@ -149,7 +143,7 @@ double DiskArea(const GfMatrix4d& transform, float radius) {
 GfVec3f ComputeLightEmission(const TfToken& type_id,
                              const GfMatrix4d& transform,
                              const LightParams& params) {
-  GfVec3f emission = params.BaseEmission();
+  GfVec3f emission = params.base_emission;
   if (!params.normalize) {
     // A point light stands in for its sphere. A sphere of radius r and radiance
     // L has radiant intensity L * pi * r^2 in every direction, pi * r^2 being
@@ -181,6 +175,24 @@ GfVec3f ComputeLightEmission(const TfToken& type_id,
 }
 
 }  // namespace
+
+GfVec3f GetLightBaseEmission(
+    const HdContainerDataSourceHandle& light_container) {
+  GfVec3f color =
+      GetParam<GfVec3f>(light_container, HdLightTokens->color, GfVec3f(1.0f));
+  if (GetParam<bool>(light_container, HdLightTokens->enableColorTemperature,
+                     false)) {
+    color = GfCompMult(color, UsdLuxBlackbodyTemperatureAsRgb(GetParam<float>(
+                                  light_container,
+                                  HdLightTokens->colorTemperature, 6500.0f)));
+  }
+  // Like hdEmbree, `diffuse` scales all emission: Mitsuba cannot restrict it
+  // to diffuse reflection.
+  return color * GetParam<float>(light_container, HdLightTokens->diffuse, 1.0f) *
+         GetParam<float>(light_container, HdLightTokens->intensity, 1.0f) *
+         std::exp2(
+             GetParam<float>(light_container, HdLightTokens->exposure, 0.0f));
+}
 
 IesSpec GetIesSpec(const HdContainerDataSourceHandle& light_container,
                    const SdfPath& id) {

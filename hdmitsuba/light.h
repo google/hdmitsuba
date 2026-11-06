@@ -18,6 +18,7 @@
 #include <string>
 #include <tuple>
 
+#include <pxr/base/gf/vec3f.h>
 #include <pxr/base/tf/token.h>
 #include <pxr/imaging/hd/dataSource.h>
 #include <pxr/imaging/hd/light.h>
@@ -31,6 +32,12 @@
 PXR_NAMESPACE_OPEN_SCOPE
 
 class SceneManager;
+
+// Returns the unnormalized emission (`color`, tinted by `colorTemperature` if
+// enabled, times `diffuse * intensity * 2^exposure`) in the `HdLightSchema`
+// container of a light.
+GfVec3f GetLightBaseEmission(
+    const HdContainerDataSourceHandle& light_container);
 
 // Returns the UsdLuxShapingAPI IES profile (`inputs:shaping:ies:*`) in the
 // `HdLightSchema` container of light `id`, with an empty `file_path` if it is

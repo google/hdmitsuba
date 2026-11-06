@@ -1,0 +1,38 @@
+#usda 1.0
+(
+    doc = """mesh_light_api.usda with `diffuse` and `colorTemperature` on a mesh
+    light and a point light."""
+    defaultPrim = "root"
+)
+
+def Xform "root" (
+    prepend references = @./mesh_light_api.usda@
+)
+{
+    over "MeshLight"
+    {
+        over "MeshLight"
+        {
+            float inputs:colorTemperature = 3000
+            float inputs:diffuse = 0.5
+            bool inputs:enableColorTemperature = 1
+            float inputs:intensity = 10
+        }
+    }
+
+    def Xform "PointLight"
+    {
+        double3 xformOp:translate = (0.6, -0.4, 0.6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def SphereLight "PointLight"
+        {
+            float inputs:colorTemperature = 10000
+            float inputs:diffuse = 2
+            bool inputs:enableColorTemperature = 1
+            float inputs:intensity = 0.25
+            float inputs:radius = 0
+            bool treatAsPoint = 1
+        }
+    }
+}

@@ -258,6 +258,27 @@ def _convert_disk_light(
   }
 
 
+def _base_emission(
+    prim: Usd.Prim, time: Usd.TimeCode
+) -> tuple[mi.ScalarColor3f, float]:
+  """Returns the unnormalized color and intensity of the light `prim`."""
+  light_api = UsdLux.LightAPI(prim)
+  color = light_api.GetColorAttr().Get(time)
+  if light_api.GetEnableColorTemperatureAttr().Get(time):
+    color = Gf.CompMult(
+        color,
+        UsdLux.BlackbodyTemperatureAsRgb(
+            light_api.GetColorTemperatureAttr().Get(time)
+        ),
+    )
+  intensity = (
+      light_api.GetDiffuseAttr().Get(time)
+      * light_api.GetIntensityAttr().Get(time)
+      * 2.0 ** light_api.GetExposureAttr().Get(time)
+  )
+  return mi.ScalarColor3f(*color), intensity
+
+
 def convert_mesh_light(
     prim: Usd.Prim,
     time: Usd.TimeCode,
@@ -276,18 +297,14 @@ def convert_mesh_light(
   """
   if not prim.HasAPI(UsdLux.MeshLightAPI):
     return None
-  light_api = UsdLux.LightAPI(prim)
-  intensity = light_api.GetIntensityAttr().Get(time)
-  color = light_api.GetColorAttr().Get(time)
-  exposure = light_api.GetExposureAttr().Get(time)
-  radiance = mi.ScalarColor3f(*color) * intensity * (2.0**exposure)
+  color, intensity = _base_emission(prim, time)
   # Meshes bake their transform into the vertices, so the IES light frame
   # (USD lights emit along -Z) must be given explicitly.
   return mi.load_dict(
       _area_emitter(
           prim,
           time,
-          radiance,
+          color * intensity,
           util.to_mitsuba_transform(world_transform).rotate([1, 0, 0], 180),
       )
   )
@@ -348,17 +365,7 @@ def convert_light(
     The Mitsuba emitter dictionary.
   """
   world_transform = _sample_light_transform(prim, time, motion_interval)
-
-  usd_light = (
-      UsdLux.BoundableLightBase(prim)
-      if prim.IsA(UsdLux.BoundableLightBase)
-      else UsdLux.NonboundableLightBase(prim)
-  )
-  color = usd_light.GetColorAttr().Get(time)
-  intensity = usd_light.GetIntensityAttr().Get(time)
-  exposure = usd_light.GetExposureAttr().Get(time)
-  intensity = intensity * (2.0 ** exposure)
-  color = mi.ScalarColor3f(color[0], color[1], color[2])
+  color, intensity = _base_emission(prim, time)
 
   for light_class, converter in _LIGHT_CONVERTERS:
     if prim.IsA(light_class):
