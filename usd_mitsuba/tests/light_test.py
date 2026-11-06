@@ -159,12 +159,17 @@ def test_dome_light_textured_1x1():
   assert emitter is not None
 
 
+# Area of a unit sphere scaled by (2, 0.5, 1), with hdEmbree's approximation.
+_ELLIPSOID_AREA = 4.0 * np.pi * ((1.0 + 2.0**1.6 + 0.5**1.6) / 3.0) ** (1 / 1.6)
+
+
 @pytest.mark.parametrize(
     'radius, scale, expected_intensity',
     [
         (0.0, 2.0, 10.0),
         (0.1, 1.0, 10.0 * np.pi * 0.1**2),
         (0.1, 2.0, 10.0 * np.pi * 0.2**2),
+        (1.0, (2.0, 0.5, 1.0), 10.0 * 0.25 * _ELLIPSOID_AREA),
     ],
 )
 def test_sphere_light_point(radius, scale, expected_intensity):
@@ -305,6 +310,29 @@ def test_rect_light_normalized():
   np.testing.assert_allclose(
       emitter_dict['emitter']['radiance']['value'],
       mi.ScalarColor3f(0.0, 0.375, 0.0),
+  )
+
+
+@pytest.mark.parametrize(
+    'light_type, expected_area',
+    [
+        (UsdLux.DiskLight, np.pi * 2.0 * 0.5),
+        (UsdLux.SphereLight, _ELLIPSOID_AREA),
+    ],
+)
+def test_light_normalized_non_uniform_scale(light_type, expected_area):
+  stage, prim = _create_stage_with_light(light_type)
+  usd_light = light_type(prim)
+  usd_light.AddScaleOp().Set(Gf.Vec3f(2.0, 0.5, 1.0))
+  usd_light.GetRadiusAttr().Set(1.0)
+  usd_light.GetNormalizeAttr().Set(True)
+
+  emitter_dict = light.convert_light(prim)
+
+  np.testing.assert_allclose(
+      emitter_dict['emitter']['radiance']['value'],
+      mi.ScalarColor3f(1.0 / expected_area),
+      rtol=1e-5,
   )
 
 

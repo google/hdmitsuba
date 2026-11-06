@@ -1,0 +1,15 @@
+#usda 1.0
+(
+    doc = """disk.usda with a non-uniformly scaled light."""
+    defaultPrim = "root"
+)
+
+def Xform "root" (
+    prepend references = @./disk.usda@
+)
+{
+    over "Area"
+    {
+        float3 xformOp:scale = (1.6, 0.6, 1)
+    }
+}
