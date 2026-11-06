@@ -34,15 +34,21 @@ def _ies_path(name: str) -> str:
 
 
 def _si_at(theta_deg: float, phi_deg: float) -> mi.SurfaceInteraction3f:
-  """Returns an interaction seen from `(theta_deg, phi_deg)` (IES frame)."""
+  """Returns an interaction seen from `(theta_deg, phi_deg)` (IES frame).
+
+  The direction is the shading normal, so a nested `area` emitter faces it at
+  any angle.
+  """
   theta, phi = math.radians(theta_deg), math.radians(phi_deg)
   si = dr.zeros(mi.SurfaceInteraction3f)
-  si.sh_frame = mi.Frame3f(mi.Vector3f(0.0, 0.0, 1.0))
-  si.wi = mi.Vector3f(
-      -math.sin(theta) * math.cos(phi),
-      math.sin(theta) * math.sin(phi),
-      math.cos(theta),
+  si.sh_frame = mi.Frame3f(
+      mi.Vector3f(
+          -math.sin(theta) * math.cos(phi),
+          math.sin(theta) * math.sin(phi),
+          math.cos(theta),
+      )
   )
+  si.wi = mi.Vector3f(0.0, 0.0, 1.0)
   return si
 
 
@@ -315,6 +321,19 @@ def test_ies_angle_scale_and_normalize():
         [expected] * 3,
         rtol=1e-5,
         atol=1e-6,
+    )
+
+  # As OpenUSD's `PxrIESFile::eval`, angles scaled past 180 deg evaluate the
+  # last knot of a full-sphere profile (100 cd at 0 deg to 200 cd at 180 deg).
+  scaled = mi.load_dict({
+      'type': 'ies',
+      'filename': _ies_path('linear_sphere'),
+      'angle_scale': 0.5,
+      'nested_emitter': {'type': 'area'},
+  })
+  for theta_deg, expected in ((60.0, 500.0 / 3.0), (120.0, 200.0)):
+    np.testing.assert_allclose(
+        _eval_ies_at(scaled, theta_deg, 0.0), [expected] * 3, rtol=1e-5
     )
 
   # `normalize = True` on a constant 200 cd hemispherical profile:

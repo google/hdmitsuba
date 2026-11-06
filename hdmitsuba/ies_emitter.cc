@@ -485,7 +485,9 @@ class IesEmitter final : public Emitter<Float, Spectrum> {
     } else if (m_angle_scale < 0.f) {
       theta = (dr::Pi<Float> - theta) / m_angle_scale + dr::Pi<Float>;
     }
-    active &= (theta >= m_theta.front) && (theta <= m_theta.back);
+    // Like `PxrIESFile::eval`, angles scaled past pi evaluate the last knot.
+    active &= (theta >= m_theta.front) &&
+              ((theta <= m_theta.back) || (theta >= dr::Pi<Float>));
     Float phi = dr::atan2(local.y(), -local.x());
     phi = dr::select(phi < 0.f, phi + dr::TwoPi<Float>, phi);
 
