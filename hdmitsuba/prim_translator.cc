@@ -659,36 +659,45 @@ PrimTranslator<Float, Spectrum>::BuildLight(const LightSpec& spec) {
 
 namespace {
 
-// Returns `nested_props` if `spec` has no IES profile, and otherwise the
+// Returns `nested_props` if `spec` has no active shaping, and otherwise the
 // properties of an `ies` emitter wrapping the emitter they describe. Its light
 // frame is `spec.transform` without scale.
 template <typename Float, typename Spectrum>
 mitsuba::Properties MaybeWrapIesProps(mitsuba::Properties nested_props,
                                       const LightSpec& spec) {
-  if (spec.shaping.ies_file_path.empty()) {
+  const ShapingSpec& shaping = spec.shaping;
+  if (!shaping.IsActive()) {
     return nested_props;
   }
   RegisterIesEmitter();
   using Emitter = mitsuba::Emitter<Float, Spectrum>;
   mitsuba::Properties props("ies");
-  props.set("filename", spec.shaping.ies_file_path);
   props.set("nested_emitter",
             mitsuba::PluginManager::instance()->create_object(
                 nested_props, Emitter::Variant, Emitter::Type));
-  props.set("angle_scale", spec.shaping.ies_angle_scale);
-  props.set("normalize", spec.shaping.ies_normalize);
+  if (!shaping.ies_file_path.empty()) {
+    props.set("filename", shaping.ies_file_path);
+    props.set("angle_scale", shaping.ies_angle_scale);
+    props.set("normalize", shaping.ies_normalize);
+  }
+  props.set("cone_angle", shaping.cone_angle);
+  props.set("cone_softness", shaping.cone_softness);
+  props.set("focus", shaping.focus);
+  props.set("focus_tint", mitsuba::Color<float, 3>(shaping.focus_tint[0],
+                                                   shaping.focus_tint[1],
+                                                   shaping.focus_tint[2]));
   PrimTranslator<Float, Spectrum>::SetTransformProperty(
       props, spec.transform.Map(RemoveScaleFromTransform));
   return props;
 }
 
-// Updates the light frame of the `ies` emitter `emitter` if `spec` has an IES
-// profile, and returns the emitter it wraps (or `emitter` otherwise). The
-// caller must still call `emitter->parameters_changed()`.
+// Updates the light frame of the `ies` emitter `emitter` if `spec` has an
+// active shaping, and returns the emitter it wraps (or `emitter` otherwise).
+// The caller must still call `emitter->parameters_changed()`.
 template <typename Float, typename Spectrum>
 mitsuba::Emitter<Float, Spectrum>* UpdateIesFrameInPlace(
     mitsuba::Emitter<Float, Spectrum>* emitter, const LightSpec& spec) {
-  if (spec.shaping.ies_file_path.empty()) {
+  if (!spec.shaping.IsActive()) {
     return emitter;
   }
   TraversalCallback cb;

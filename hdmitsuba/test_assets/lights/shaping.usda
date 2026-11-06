@@ -1,0 +1,49 @@
+#usda 1.0
+(
+    doc = """Floor of ies_base.usda lit by a rect, sphere and mesh light with the
+    cone and focus shaping of UsdLuxShapingAPI."""
+    subLayers = [@./ies_base.usda@]
+)
+
+def RectLight "light" (
+    prepend apiSchemas = ["ShapingAPI"]
+)
+{
+    float inputs:height = 0.2
+    float inputs:intensity = 50
+    float inputs:shaping:cone:angle = 30
+    float inputs:shaping:cone:softness = 0.5
+    float inputs:shaping:focus = 3
+    color3f inputs:shaping:focusTint = (0.2, 0.5, 0.9)
+    float inputs:width = 0.2
+    double3 xformOp:translate = (-0.8, 0, 1)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+}
+
+def SphereLight "sphere" (
+    prepend apiSchemas = ["ShapingAPI"]
+)
+{
+    float inputs:intensity = 20
+    float inputs:radius = 0.05
+    float inputs:shaping:cone:angle = 60
+    double3 xformOp:translate = (0, 0.8, 0.6)
+    float xformOp:rotateX = 30
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+}
+
+def Mesh "mesh" (
+    prepend apiSchemas = ["MeshLightAPI", "ShapingAPI"]
+)
+{
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    # Clockwise seen from +Z, so that the quad emits along -Z.
+    point3f[] points = [(-0.1, -0.1, 0), (-0.1, 0.1, 0), (0.1, 0.1, 0), (0.1, -0.1, 0)]
+    uniform token subdivisionScheme = "none"
+    float inputs:intensity = 50
+    float inputs:shaping:cone:angle = 45
+    float inputs:shaping:focus = 5
+    double3 xformOp:translate = (0.8, -0.3, 1)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+}

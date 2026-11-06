@@ -42,6 +42,7 @@
 #include <mitsuba/render/fwd.h>
 #include <mitsuba/render/interaction.h>
 #include <mitsuba/render/records.h>
+#include <mitsuba/render/texture.h>
 #include <pxr/pxr.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -223,8 +224,8 @@ IesProfile LoadIesProfile(const std::string& path) {
 
 .. _emitter-ies:
 
-IES light profile (:monosp:`ies`)
----------------------------------
+IES light profile and shaping (:monosp:`ies`)
+---------------------------------------------
 
 .. pluginparameters::
 
@@ -237,7 +238,8 @@ IES light profile (:monosp:`ies`)
 
  * - filename
    - |string|
-   - Filename of the LM-63 Type C IES profile.
+   - Filename of the LM-63 Type C IES profile. (Default: none, i.e. only the
+     cone and focus shaping apply)
 
  * - angle_scale
    - |float|
@@ -250,6 +252,31 @@ IES light profile (:monosp:`ies`)
    - Divide the profile by its average intensity, as
      ``inputs:shaping:ies:normalize`` of ``UsdLuxShapingAPI``. (Default:
      |false|)
+
+ * - cone_angle
+   - |float|
+   - Angle in degrees from the Z axis beyond which there is no emission, as
+     ``inputs:shaping:cone:angle`` of ``UsdLuxShapingAPI``. (Default: 180,
+     i.e. no cone)
+   - |exposed|, |differentiable|
+
+ * - cone_softness
+   - |float|
+   - Fraction of ``cone_angle`` over which the emission falls off smoothly,
+     as ``inputs:shaping:cone:softness``. (Default: 0)
+   - |exposed|, |differentiable|
+
+ * - focus
+   - |float|
+   - Exponent of the :math:`|\cos\theta|` falloff from the Z axis towards
+     ``focus_tint``, as ``inputs:shaping:focus``. (Default: 0, i.e. no focus)
+   - |exposed|, |differentiable|
+
+ * - focus_tint
+   - |spectrum| or |texture|
+   - Emission scale far off the Z axis, as ``inputs:shaping:focusTint``.
+     (Default: 0)
+   - |exposed|, |differentiable|
 
  * - to_world
    - |transform| or |animation|
@@ -265,11 +292,12 @@ IES light profile (:monosp:`ies`)
 
 This plugin modulates the emission of a nested emitter by a Type C IES
 luminous intensity profile, bilinearly interpolated on the raw knots of the
-profile. In its local coordinate system, :math:`\theta = 0` points along the
-positive Z direction, and :math:`\phi = 0` along the negative X direction,
-increasing towards positive Y. This frame is independent of the nested emitter
-and its shape. There is no emission outside the vertical angle range of the
-profile.
+profile, and by the cone and focus shaping of ``UsdLuxShapingAPI`` as
+evaluated by hdEmbree. In its local coordinate system, :math:`\theta = 0` points
+along the positive Z direction, and :math:`\phi = 0` along the negative X
+direction, increasing towards positive Y. This frame is independent of the
+nested emitter and its shape. There is no emission outside the vertical angle
+range of the profile.
 
 A non-positive ``sampling_weight`` turns the emitter off: the scene never
 samples it, and it evaluates to 0 when it is hit. This is a performance
@@ -310,7 +338,7 @@ class IesEmitter final : public Emitter<Float, Spectrum> {
  public:
   MI_IMPORT_BASE(Emitter, m_flags, m_sampling_weight, world_transform,
                  traverse_world_transform)
-  MI_IMPORT_TYPES(Shape)
+  MI_IMPORT_TYPES(Shape, Texture)
   MI_DECLARE_CLASS(IesEmitter)
 
   using FloatStorage = mitsuba::DynamicBuffer<Float>;
@@ -324,20 +352,35 @@ class IesEmitter final : public Emitter<Float, Spectrum> {
     if (!m_nested) {
       Throw("IesEmitter requires a nested emitter (e.g. 'area' or 'point').");
     }
-    m_angle_scale = props.get<ScalarFloat>("angle_scale", 0.f);
-    IesProfile profile = LoadIesProfile(props.get<std::string>("filename"));
-    if (props.get<bool>("normalize", false)) {
-      double average_intensity = ComputeAverageIntensity(profile);
-      for (double& value : profile.values) {
-        value /= average_intensity;
+    if (props.has_property("filename")) {
+      m_angle_scale = props.get<ScalarFloat>("angle_scale", 0.f);
+      IesProfile profile = LoadIesProfile(props.get<std::string>("filename"));
+      if (props.get<bool>("normalize", false)) {
+        double average_intensity = ComputeAverageIntensity(profile);
+        for (double& value : profile.values) {
+          value /= average_intensity;
+        }
       }
+      m_theta = MakeAxis(profile.vertical_angles);
+      m_phi = MakeAxis(profile.horizontal_angles);
+      m_theta_knots = ToStorage(profile.vertical_angles);
+      m_phi_knots = ToStorage(profile.horizontal_angles);
+      size_t shape[] = {m_phi.size, m_theta.size};
+      m_ies_profile = TensorXf(ToStorage(profile.values), 2, shape);
     }
-    m_theta = MakeAxis(profile.vertical_angles);
-    m_phi = MakeAxis(profile.horizontal_angles);
-    m_theta_knots = ToStorage(profile.vertical_angles);
-    m_phi_knots = ToStorage(profile.horizontal_angles);
-    size_t shape[] = {m_phi.size, m_theta.size};
-    m_ies_profile = TensorXf(ToStorage(profile.values), 2, shape);
+    const ScalarFloat cone_angle = props.get<ScalarFloat>("cone_angle", 180.f);
+    const ScalarFloat cone_softness =
+        props.get<ScalarFloat>("cone_softness", 0.f);
+    const ScalarFloat focus = props.get<ScalarFloat>("focus", 0.f);
+    // Like Mitsuba's `principled` BSDF, only evaluate the cone and focus if
+    // they are enabled initially or later updated through `traverse`.
+    m_has_cone = cone_angle < 180.f || cone_softness > 0.f;
+    m_has_focus = focus > 0.f;
+    m_cone_angle = cone_angle;
+    m_cone_softness = cone_softness;
+    m_focus = focus;
+    m_focus_tint = props.get_texture<Texture>("focus_tint", 0.f);
+    dr::make_opaque(m_cone_angle, m_cone_softness, m_focus);
     m_flags = m_nested->flags();
   }
 
@@ -351,11 +394,27 @@ class IesEmitter final : public Emitter<Float, Spectrum> {
     Base::traverse(cb);
     traverse_world_transform(cb);
     cb->put("nested_emitter", m_nested, mitsuba::ParamFlags::Differentiable);
-    cb->put("ies_profile", m_ies_profile, mitsuba::ParamFlags::Differentiable);
+    if (m_theta.size > 0) {
+      cb->put("ies_profile", m_ies_profile,
+              mitsuba::ParamFlags::Differentiable);
+    }
+    cb->put("cone_angle", m_cone_angle, mitsuba::ParamFlags::Differentiable);
+    cb->put("cone_softness", m_cone_softness,
+            mitsuba::ParamFlags::Differentiable);
+    cb->put("focus", m_focus, mitsuba::ParamFlags::Differentiable);
+    cb->put("focus_tint", m_focus_tint, mitsuba::ParamFlags::Differentiable);
   }
 
   void parameters_changed(const std::vector<std::string>& keys) override {
     m_nested->parameters_changed();
+    if (mitsuba::string::contains(keys, "cone_angle") ||
+        mitsuba::string::contains(keys, "cone_softness")) {
+      m_has_cone = true;
+    }
+    if (mitsuba::string::contains(keys, "focus")) {
+      m_has_focus = true;
+    }
+    dr::make_opaque(m_cone_angle, m_cone_softness, m_focus);
     Base::parameters_changed(keys);
   }
 
@@ -365,7 +424,7 @@ class IesEmitter final : public Emitter<Float, Spectrum> {
       return 0.f;
     }
     return m_nested->eval(si, active) *
-           eval_profile(si.to_world(si.wi), si.time, active);
+           eval_shaping(si.to_world(si.wi), si.time, si.wavelengths, active);
   }
 
   std::pair<Ray3f, Spectrum> sample_ray(Float time, Float wavelength_sample,
@@ -375,7 +434,7 @@ class IesEmitter final : public Emitter<Float, Spectrum> {
     MI_MASKED_FUNCTION(mitsuba::ProfilerPhase::EndpointSampleRay, active);
     auto [ray, weight] =
         m_nested->sample_ray(time, wavelength_sample, sample2, sample3, active);
-    return {ray, weight * eval_profile(ray.d, time, active)};
+    return {ray, weight * eval_shaping(ray.d, time, ray.wavelengths, active)};
   }
 
   std::pair<DirectionSample3f, Spectrum> sample_direction(
@@ -384,7 +443,7 @@ class IesEmitter final : public Emitter<Float, Spectrum> {
     MI_MASKED_FUNCTION(mitsuba::ProfilerPhase::EndpointSampleDirection, active);
     auto [ds, weight] = m_nested->sample_direction(it, sample, active);
     ds.emitter = this;
-    return {ds, weight * eval_profile(-ds.d, it.time, active)};
+    return {ds, weight * eval_shaping(-ds.d, it.time, it.wavelengths, active)};
   }
 
   Float pdf_direction(const Interaction3f& it, const DirectionSample3f& ds,
@@ -399,7 +458,7 @@ class IesEmitter final : public Emitter<Float, Spectrum> {
       return 0.f;
     }
     return m_nested->eval_direction(it, ds, active) *
-           eval_profile(-ds.d, it.time, active);
+           eval_shaping(-ds.d, it.time, it.wavelengths, active);
   }
 
   std::pair<PositionSample3f, Float> sample_position(
@@ -475,9 +534,37 @@ class IesEmitter final : public Emitter<Float, Spectrum> {
             dr::select(x1 > x0, dr::clip((x - x0) / (x1 - x0), 0.f, 1.f), 1.f)};
   }
 
-  // Evaluates the profile in the world-space emission direction `w`.
-  Float eval_profile(const Vector3f& w, const Float& time, Mask active) const {
+  // Evaluates the profile, cone and focus in the world-space emission direction
+  // `w`, as hdEmbree.
+  Spectrum eval_shaping(const Vector3f& w, const Float& time,
+                        const Wavelength& wavelengths, Mask active) const {
     Vector3f local = world_transform(time).inverse() * w;
+    Float value = m_theta.size > 0 ? eval_profile(local, active) : Float(1.f);
+    if (m_has_cone) {
+      // Smooth falloff from `start` to `cutoff`, or a hard cutoff if they
+      // match.
+      Float theta = dr::safe_acos(local.z());
+      Float cutoff = dr::deg_to_rad(m_cone_angle);
+      Float start = cutoff * (1.f - m_cone_softness);
+      Float t = dr::select(
+          start < cutoff, dr::clip((theta - start) / (cutoff - start), 0.f, 1.f),
+          dr::select(theta > cutoff, 1.f, 0.f));
+      value *= 1.f - dr::square(t) * (3.f - 2.f * t);
+    }
+    UnpolarizedSpectrum result(value);
+    if (m_has_focus) {
+      SurfaceInteraction3f si = dr::zeros<SurfaceInteraction3f>();
+      si.wavelengths = wavelengths;
+      UnpolarizedSpectrum focus =
+          dr::lerp(m_focus_tint->eval(si, active), 1.f,
+                   dr::pow(dr::abs(local.z()), m_focus));
+      result *= dr::select(m_focus > 0.f, focus, 1.f);
+    }
+    return mitsuba::depolarizer<Spectrum>(result);
+  }
+
+  // Evaluates the profile in the light-space emission direction `local`.
+  Float eval_profile(const Vector3f& local, Mask active) const {
     Float theta = dr::safe_acos(local.z());
     // As OpenUSD's `PxrIESFile::eval`.
     if (m_angle_scale > 0.f) {
@@ -509,8 +596,16 @@ class IesEmitter final : public Emitter<Float, Spectrum> {
   Axis m_theta;
   Axis m_phi;
   ScalarFloat m_angle_scale = 0.f;
+  // In degrees.
+  Float m_cone_angle;
+  Float m_cone_softness;
+  Float m_focus;
+  mitsuba::ref<Texture> m_focus_tint;
+  bool m_has_cone;
+  bool m_has_focus;
 
-  MI_TRAVERSE_CB(Base, m_nested, m_ies_profile, m_theta_knots, m_phi_knots)
+  MI_TRAVERSE_CB(Base, m_nested, m_ies_profile, m_theta_knots, m_phi_knots,
+                 m_cone_angle, m_cone_softness, m_focus, m_focus_tint)
 };
 
 }  // namespace

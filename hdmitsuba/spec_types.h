@@ -67,10 +67,22 @@ struct ShapingSpec {
   std::string ies_file_path;
   float ies_angle_scale = 0.0f;
   bool ies_normalize = false;
+  // In degrees. 180 disables the cone.
+  float cone_angle = 180.0f;
+  float cone_softness = 0.0f;
+  // 0 disables the focus.
+  float focus = 0.0f;
+  GfVec3f focus_tint{0.0f};
+
+  bool IsActive() const {
+    return !ies_file_path.empty() || cone_angle < 180.0f || focus > 0.0f;
+  }
 
   bool operator==(const ShapingSpec& o) const {
-    return std::tie(ies_file_path, ies_angle_scale, ies_normalize) ==
-           std::tie(o.ies_file_path, o.ies_angle_scale, o.ies_normalize);
+    return std::tie(ies_file_path, ies_angle_scale, ies_normalize, cone_angle,
+                    cone_softness, focus, focus_tint) ==
+           std::tie(o.ies_file_path, o.ies_angle_scale, o.ies_normalize,
+                    o.cone_angle, o.cone_softness, o.focus, o.focus_tint);
   }
   bool operator!=(const ShapingSpec& o) const { return !(*this == o); }
 };

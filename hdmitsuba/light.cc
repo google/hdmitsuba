@@ -260,21 +260,33 @@ GfVec3f GetLightBaseEmission(
 
 ShapingSpec GetShapingSpec(const HdContainerDataSourceHandle& light_container,
                            const SdfPath& id) {
+  ShapingSpec shaping;
+  shaping.cone_angle = GetParam<float>(
+      light_container, HdLightTokens->shapingConeAngle, shaping.cone_angle);
+  shaping.cone_softness = std::clamp(
+      GetParam<float>(light_container, HdLightTokens->shapingConeSoftness,
+                      shaping.cone_softness),
+      0.0f, 1.0f);
+  shaping.focus = GetParam<float>(light_container, HdLightTokens->shapingFocus,
+                                  shaping.focus);
+  shaping.focus_tint = GetParam<GfVec3f>(
+      light_container, HdLightTokens->shapingFocusTint, shaping.focus_tint);
   const auto ies_file =
       GetParam<SdfAssetPath>(light_container, HdLightTokens->shapingIesFile);
   if (ies_file.GetAssetPath().empty()) {
-    return {};
+    return shaping;
   }
   if (ies_file.GetResolvedPath().empty()) {
     TF_WARN("Could not resolve IES file '%s' of light %s. Ignoring it.",
             ies_file.GetAssetPath().c_str(), id.GetText());
-    return {};
+    return shaping;
   }
-  return {ies_file.GetResolvedPath(),
-          GetParam<float>(light_container, HdLightTokens->shapingIesAngleScale,
-                          0.0f),
-          GetParam<bool>(light_container, HdLightTokens->shapingIesNormalize,
-                         false)};
+  shaping.ies_file_path = ies_file.GetResolvedPath();
+  shaping.ies_angle_scale = GetParam<float>(
+      light_container, HdLightTokens->shapingIesAngleScale, 0.0f);
+  shaping.ies_normalize = GetParam<bool>(
+      light_container, HdLightTokens->shapingIesNormalize, false);
+  return shaping;
 }
 
 HdMitsubaLight::HdMitsubaLight(const SdfPath& id, const TfToken& typeId)
@@ -337,6 +349,10 @@ void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
   // IES profiles only apply to positional lights, and are ignored otherwise.
   if (spec.IsAreaLight() || type_id_ == HdPrimTypeTokens->sphereLight) {
     spec.shaping = GetShapingSpec(light_container, id);
+    // Point lights realize the cone as `spot` emitters.
+    if (!spec.IsAreaLight()) {
+      spec.shaping.cone_angle = 180.0f;
+    }
   }
   spec.dirty_bits = *dirtyBits;
 
