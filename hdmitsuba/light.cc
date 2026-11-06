@@ -61,7 +61,7 @@ struct LightParams {
   bool treat_as_point = false;
   float angle = 0.0f;
   float shaping_cone_angle = 0.0f;
-  float shaping_cone_softness = 1.0f;
+  float shaping_cone_softness = 0.0f;
   std::string texture_file_path;
   std::string visibility;
 
@@ -91,7 +91,7 @@ LightParams ReadLightParams(const HdContainerDataSourceHandle& container) {
   p.shaping_cone_angle =
       GetParam<float>(container, HdLightTokens->shapingConeAngle, 0.0f);
   p.shaping_cone_softness =
-      GetParam<float>(container, HdLightTokens->shapingConeSoftness, 1.0f);
+      GetParam<float>(container, HdLightTokens->shapingConeSoftness, 0.0f);
   p.texture_file_path =
       GetParam<SdfAssetPath>(container, HdLightTokens->textureFile)
           .GetResolvedPath();
@@ -384,7 +384,8 @@ void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
                                spec.shaping,
                                spec.transform.IsAnimated(),
                                spec.visibility,
-                               spec.light_link_everything};
+                               spec.light_link_everything,
+                               spec.TexturedDomeTint()};
   spec.needs_rebuild = rebuild_key_ != rebuild_key;
   rebuild_key_ = rebuild_key;
 

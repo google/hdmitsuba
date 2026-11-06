@@ -246,6 +246,7 @@ IES light profile and shaping (:monosp:`ies`)
    - Scales the vertical angles of the profile, as
      ``inputs:shaping:ies:angleScale`` of ``UsdLuxShapingAPI``. (Default: 0,
      i.e. no scaling)
+   - |exposed|, |differentiable|
 
  * - normalize
    - |bool|
@@ -354,6 +355,7 @@ class IesEmitter final : public Emitter<Float, Spectrum> {
     }
     if (props.has_property("filename")) {
       m_angle_scale = props.get<ScalarFloat>("angle_scale", 0.f);
+      dr::make_opaque(m_angle_scale);
       IesProfile profile = LoadIesProfile(props.get<std::string>("filename"));
       if (props.get<bool>("normalize", false)) {
         double average_intensity = ComputeAverageIntensity(profile);
@@ -397,6 +399,8 @@ class IesEmitter final : public Emitter<Float, Spectrum> {
     if (m_theta.size > 0) {
       cb->put("ies_profile", m_ies_profile,
               mitsuba::ParamFlags::Differentiable);
+      cb->put("angle_scale", m_angle_scale,
+              mitsuba::ParamFlags::Differentiable);
     }
     cb->put("cone_angle", m_cone_angle, mitsuba::ParamFlags::Differentiable);
     cb->put("cone_softness", m_cone_softness,
@@ -414,7 +418,7 @@ class IesEmitter final : public Emitter<Float, Spectrum> {
     if (mitsuba::string::contains(keys, "focus")) {
       m_has_focus = true;
     }
-    dr::make_opaque(m_cone_angle, m_cone_softness, m_focus);
+    dr::make_opaque(m_angle_scale, m_cone_angle, m_cone_softness, m_focus);
     Base::parameters_changed(keys);
   }
 
@@ -567,11 +571,11 @@ class IesEmitter final : public Emitter<Float, Spectrum> {
   Float eval_profile(const Vector3f& local, Mask active) const {
     Float theta = dr::safe_acos(local.z());
     // As OpenUSD's `PxrIESFile::eval`.
-    if (m_angle_scale > 0.f) {
-      theta /= m_angle_scale;
-    } else if (m_angle_scale < 0.f) {
-      theta = (dr::Pi<Float> - theta) / m_angle_scale + dr::Pi<Float>;
-    }
+    theta = dr::select(
+        m_angle_scale > 0.f, theta / m_angle_scale,
+        dr::select(m_angle_scale < 0.f,
+                   (dr::Pi<Float> - theta) / m_angle_scale + dr::Pi<Float>,
+                   theta));
     // Like `PxrIESFile::eval`, angles scaled past pi evaluate the last knot.
     active &= (theta >= m_theta.front) &&
               ((theta <= m_theta.back) || (theta >= dr::Pi<Float>));
@@ -595,7 +599,7 @@ class IesEmitter final : public Emitter<Float, Spectrum> {
   FloatStorage m_phi_knots;
   Axis m_theta;
   Axis m_phi;
-  ScalarFloat m_angle_scale = 0.f;
+  Float m_angle_scale = 0.f;
   // In degrees.
   Float m_cone_angle;
   Float m_cone_softness;
@@ -605,7 +609,8 @@ class IesEmitter final : public Emitter<Float, Spectrum> {
   bool m_has_focus;
 
   MI_TRAVERSE_CB(Base, m_nested, m_ies_profile, m_theta_knots, m_phi_knots,
-                 m_cone_angle, m_cone_softness, m_focus, m_focus_tint)
+                 m_angle_scale, m_cone_angle, m_cone_softness, m_focus,
+                 m_focus_tint)
 };
 
 }  // namespace

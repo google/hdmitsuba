@@ -145,6 +145,7 @@ def test_dome_light_corrupt_texture_falls_back_to_constant():
         'emissive_material_textured',
         'envmap',
         'envmap_1x1',
+        'envmap_tinted',
         'mesh',
         'mesh_light_api',
         'point',
@@ -152,6 +153,7 @@ def test_dome_light_corrupt_texture_falls_back_to_constant():
         'point_unnormalized',
         'point_zero_radius',
         'shaping',
+        'shaping_without_api',
         'sphere',
         'sphere_non_uniform',
         'spot',
@@ -556,12 +558,10 @@ def test_ies_matches_hdembree(
   shaping.GetShapingIesNormalizeAttr().Set(normalize)
   name = f'{light_type}_{angle_scale}_{normalize}'
 
-  def normalized_luminance(image: np.ndarray) -> np.ndarray:
+  def luminance(image: np.ndarray) -> np.ndarray:
     luminance = np.array(image)[..., :3].mean(axis=-1)
-    # Average 4x4 pixel blocks to suppress hdEmbree's sampling noise, and only
-    # compare the angular distribution, not absolute intensities.
-    luminance = luminance.reshape(16, 4, 16, 4).mean(axis=(1, 3))
-    return luminance / np.median(luminance[luminance > 0])
+    # Average 4x4 pixel blocks to suppress hdEmbree's sampling noise.
+    return luminance.reshape(16, 4, 16, 4).mean(axis=(1, 3))
 
   images = {}
   for renderer, overrides in (
@@ -575,9 +575,7 @@ def test_ies_matches_hdembree(
       ),
       ('HdMitsubaRendererPlugin', None),
   ):
-    images[renderer] = normalized_luminance(
-        _render(stage, renderer, overrides)
-    )
+    images[renderer] = luminance(_render(stage, renderer, overrides))
     test_helpers.write_image(
         images[renderer] / images[renderer].max(),
         f'test_ies_matches_hdembree_{name}_{renderer}.png',

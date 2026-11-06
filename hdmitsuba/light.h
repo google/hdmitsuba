@@ -65,7 +65,7 @@ class HdMitsubaLight final : public HdLight {
   // rebuilding the light object rather than updating it in place. `lightLink`
   // changes require rebuilding the scene, as they may change the active dome.
   using RebuildKey = std::tuple<bool, bool, bool, std::string, ShapingSpec,
-                                bool, std::string, bool>;
+                                bool, std::string, bool, GfVec3f>;
 
   TfToken type_id_;
   std::optional<RebuildKey> rebuild_key_;

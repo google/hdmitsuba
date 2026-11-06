@@ -14,6 +14,8 @@ def Mesh "floor"
     int[] faceVertexCounts = [4]
     int[] faceVertexIndices = [0, 1, 2, 3]
     point3f[] points = [(-2, -2, 0), (2, -2, 0), (2, 2, 0), (-2, 2, 0)]
+    # White, which hdEmbree also defaults to, unlike Mitsuba's 50% grey.
+    color3f[] primvars:displayColor = [(1, 1, 1)]
 }
 
 def Camera "camera"

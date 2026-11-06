@@ -21,6 +21,7 @@ from typing import Any
 
 import drjit as dr
 import mitsuba as mi
+import numpy as np
 from pxr import Gf
 from pxr import Sdf
 from pxr import Tf
@@ -29,6 +30,16 @@ from pxr import UsdLux
 
 from usd_mitsuba import motion
 from usd_mitsuba import util
+
+
+def _get_or(attr: Usd.Attribute, time: Usd.TimeCode, default: Any) -> Any:
+  """Returns the value of `attr`, or `default` if it has none.
+
+  Like usdImaging, shaping attributes are read whenever the prim has them, even
+  if `UsdLux.ShapingAPI` is not applied.
+  """
+  value = attr.Get(time)
+  return default if value is None else value
 
 
 def _maybe_wrap_shaping(
@@ -43,8 +54,6 @@ def _maybe_wrap_shaping(
   area emitters. `to_world` is the rigid light frame of the `'ies'` emitter,
   whose +Z axis is the photometric axis (the light's -Z axis in USD).
   """
-  if not prim.HasAPI(UsdLux.ShapingAPI):
-    return emitter_dict
   shaping_api = UsdLux.ShapingAPI(prim)
   shaping: dict[str, Any] = {}
   if ies_file := shaping_api.GetShapingIesFileAttr().Get(time):
@@ -54,23 +63,27 @@ def _maybe_wrap_shaping(
       )
     shaping |= {
         'filename': ies_file.resolvedPath,
-        'angle_scale': shaping_api.GetShapingIesAngleScaleAttr().Get(time),
-        'normalize': shaping_api.GetShapingIesNormalizeAttr().Get(time),
+        'angle_scale': _get_or(
+            shaping_api.GetShapingIesAngleScaleAttr(), time, 0.0
+        ),
+        'normalize': _get_or(
+            shaping_api.GetShapingIesNormalizeAttr(), time, False
+        ),
     }
-  cone_angle = shaping_api.GetShapingConeAngleAttr().Get(time)
-  if emitter_dict['type'] == 'area' and cone_angle < 180.0:
-    softness = shaping_api.GetShapingConeSoftnessAttr().Get(time)
-    shaping |= {
-        'cone_angle': cone_angle,
-        'cone_softness': min(max(softness, 0.0), 1.0),
-    }
-  if (focus := shaping_api.GetShapingFocusAttr().Get(time)) > 0.0:
+  cone_angle = _get_or(shaping_api.GetShapingConeAngleAttr(), time, 180.0)
+  softness = min(
+      max(_get_or(shaping_api.GetShapingConeSoftnessAttr(), time, 0.0), 0.0),
+      1.0,
+  )
+  if emitter_dict['type'] == 'area' and (cone_angle < 180.0 or softness > 0.0):
+    shaping |= {'cone_angle': cone_angle, 'cone_softness': softness}
+  if (focus := _get_or(shaping_api.GetShapingFocusAttr(), time, 0.0)) > 0.0:
     shaping |= {
         'focus': focus,
         'focus_tint': {
             'type': 'rgb',
             'value': mi.ScalarColor3f(
-                *shaping_api.GetShapingFocusTintAttr().Get(time)
+                *_get_or(shaping_api.GetShapingFocusTintAttr(), time, (0, 0, 0))
             ),
         },
     }
@@ -130,12 +143,20 @@ def _convert_dome_light(
   dome_light = UsdLux.DomeLight(prim)
   texture_file_attr = dome_light.GetTextureFileAttr().Get(time)
   if texture_file_attr:
-    filename = texture_file_attr.resolvedPath
+    bitmap = mi.Bitmap(texture_file_attr.resolvedPath)
+    # Mitsuba's `envmap` only has a scalar `scale` (the mean of `color`), so
+    # the per-channel tint is baked into its texture.
+    mean = dr.mean(color)
+    if mean > 0.0 and not dr.allclose(color, mean):
+      linear = bitmap.convert(
+          mi.Bitmap.PixelFormat.RGB, mi.Struct.Type.Float32, srgb_gamma=False
+      )
+      bitmap = mi.Bitmap(np.array(linear) * np.array(color / mean))
     return {
         'type': 'envmap',
-        'bitmap': mi.Bitmap(filename),
+        'bitmap': bitmap,
         'to_world': world_transform,
-        'scale': intensity,
+        'scale': intensity * mean,
     }
   else:
     return {
@@ -227,15 +248,14 @@ def _convert_sphere_light(
         'to_world': world_transform,
         'intensity': {'type': 'rgb', 'value': color},
     }
-    if prim.HasAPI(UsdLux.ShapingAPI):
-      shaping = UsdLux.ShapingAPI(prim)
-      if cone_angle := shaping.GetShapingConeAngleAttr().Get(time):
-        softness = shaping.GetShapingConeSoftnessAttr().Get(time)
-        emitter_dict |= {
-            'type': 'spot',
-            'beam_width': cone_angle * (1.0 - softness),
-            'cutoff_angle': cone_angle,
-        }
+    shaping = UsdLux.ShapingAPI(prim)
+    if cone_angle := shaping.GetShapingConeAngleAttr().Get(time):
+      softness = _get_or(shaping.GetShapingConeSoftnessAttr(), time, 0.0)
+      emitter_dict |= {
+          'type': 'spot',
+          'beam_width': cone_angle * (1.0 - softness),
+          'cutoff_angle': cone_angle,
+      }
     return _maybe_wrap_shaping(prim, time, emitter_dict, world_transform)
 
   area = _sphere_area(world_transform, radius)
