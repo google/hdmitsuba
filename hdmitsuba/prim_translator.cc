@@ -721,14 +721,52 @@ MotionTransform AreaShapeTransform(const LightSpec& spec) {
   });
 }
 
+// Textured RectLights hold their emission in this input of their `math`
+// radiance texture (see `CreateTexturedRadiance`).
+constexpr std::string_view kTexturedEmissionKey = "radiance.in1";
+
+// Returns a radiance texture modulating `emission` by the texture of a
+// RectLight (`inputs:texture:file`), or by 1 if the texture fails to load.
+template <typename Float, typename Spectrum>
+mitsuba::ref<mitsuba::Object> CreateTexturedRadiance(
+    const std::string& texture_file_path,
+    const mitsuba::Color<float, 3>& emission) {
+  using Texture = mitsuba::Texture<Float, Spectrum>;
+  auto create = [](const mitsuba::Properties& props) {
+    return CreateExpandedObject(props, Texture::Variant, Texture::Type);
+  };
+  mitsuba::Properties texture_props("bitmap");
+  try {
+    texture_props.set("bitmap", ReadBitmap(texture_file_path).get());
+  } catch (const std::exception& e) {
+    TF_WARN("Failed to load light texture '%s': %s", texture_file_path.c_str(),
+            e.what());
+    texture_props = mitsuba::Properties("uniform");
+    texture_props.set("value", 1.f);
+  }
+  mitsuba::Properties emission_props("srgb");
+  emission_props.set("color", emission);
+  emission_props.set("unbounded", true);
+  mitsuba::Properties props("math");
+  props.set("expr", "in[0] * in[1]");
+  props.set("in0", create(texture_props));
+  props.set("in1", create(emission_props));
+  return create(props);
+}
+
 }  // namespace
 
 MI_VARIANT mitsuba::ref<mitsuba::Object>
 PrimTranslator<Float, Spectrum>::CreateAreaEmitter(const LightSpec& spec) {
   mitsuba::Properties emitter_props("area");
-  emitter_props.set("radiance",
-                    mitsuba::Color<float, 3>(spec.emission[0], spec.emission[1],
-                                             spec.emission[2]));
+  const mitsuba::Color<float, 3> emission(spec.emission[0], spec.emission[1],
+                                          spec.emission[2]);
+  if (spec.texture_file_path.empty()) {
+    emitter_props.set("radiance", emission);
+  } else {
+    emitter_props.set("radiance", CreateTexturedRadiance<Float, Spectrum>(
+                                      spec.texture_file_path, emission));
+  }
   return mitsuba::PluginManager::instance()->create_object(
       MaybeWrapIesProps<Float, Spectrum>(std::move(emitter_props), spec),
       mitsuba::Emitter<Float, Spectrum>::Variant,
@@ -739,7 +777,9 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateAreaEmitterInPlace(
     mitsuba::Emitter<Float, Spectrum>* emitter, const LightSpec& spec) {
   TraversalCallback cb;
   UpdateIesFrameInPlace<Float, Spectrum>(emitter, spec)->traverse(&cb);
-  SetSpectrumParameter(cb, "radiance", spec.emission);
+  SetSpectrumParameter(
+      cb, spec.texture_file_path.empty() ? "radiance" : kTexturedEmissionKey,
+      spec.emission);
   emitter->parameters_changed();
 }
 
