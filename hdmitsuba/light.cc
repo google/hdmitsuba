@@ -258,8 +258,8 @@ GfVec3f GetLightBaseEmission(
              GetParam<float>(light_container, HdLightTokens->exposure, 0.0f));
 }
 
-IesSpec GetIesSpec(const HdContainerDataSourceHandle& light_container,
-                   const SdfPath& id) {
+ShapingSpec GetShapingSpec(const HdContainerDataSourceHandle& light_container,
+                           const SdfPath& id) {
   const auto ies_file =
       GetParam<SdfAssetPath>(light_container, HdLightTokens->shapingIesFile);
   if (ies_file.GetAssetPath().empty()) {
@@ -336,7 +336,7 @@ void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
 
   // IES profiles only apply to positional lights, and are ignored otherwise.
   if (spec.IsAreaLight() || type_id_ == HdPrimTypeTokens->sphereLight) {
-    spec.ies = GetIesSpec(light_container, id);
+    spec.shaping = GetShapingSpec(light_container, id);
   }
   spec.dirty_bits = *dirtyBits;
 
@@ -365,7 +365,7 @@ void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
                                params.angle > 0.0f,
                                params.shaping_cone_angle != 0.0f,
                                params.texture_file_path,
-                               spec.ies,
+                               spec.shaping,
                                spec.transform.IsAnimated(),
                                spec.visibility,
                                spec.light_link_everything};

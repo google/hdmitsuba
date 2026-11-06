@@ -105,7 +105,7 @@ std::optional<LightSpec> GetMeshEmitterSpec(HdSceneDelegate* sceneDelegate,
   LightSpec spec;
   spec.id = id;
   spec.emission = GetLightBaseEmission(light);
-  spec.ies = GetIesSpec(light, id);
+  spec.shaping = GetShapingSpec(light, id);
   // Meshes bake their transform into the vertices, so the `ies` light frame is
   // given explicitly. USD lights emit along -Z, the `ies` emitter along +Z.
   spec.transform = MotionTransform::Static(

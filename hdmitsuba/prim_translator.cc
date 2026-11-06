@@ -665,18 +665,18 @@ namespace {
 template <typename Float, typename Spectrum>
 mitsuba::Properties MaybeWrapIesProps(mitsuba::Properties nested_props,
                                       const LightSpec& spec) {
-  if (spec.ies.file_path.empty()) {
+  if (spec.shaping.ies_file_path.empty()) {
     return nested_props;
   }
   RegisterIesEmitter();
   using Emitter = mitsuba::Emitter<Float, Spectrum>;
   mitsuba::Properties props("ies");
-  props.set("filename", spec.ies.file_path);
+  props.set("filename", spec.shaping.ies_file_path);
   props.set("nested_emitter",
             mitsuba::PluginManager::instance()->create_object(
                 nested_props, Emitter::Variant, Emitter::Type));
-  props.set("angle_scale", spec.ies.angle_scale);
-  props.set("normalize", spec.ies.normalize);
+  props.set("angle_scale", spec.shaping.ies_angle_scale);
+  props.set("normalize", spec.shaping.ies_normalize);
   PrimTranslator<Float, Spectrum>::SetTransformProperty(
       props, spec.transform.Map(RemoveScaleFromTransform));
   return props;
@@ -688,7 +688,7 @@ mitsuba::Properties MaybeWrapIesProps(mitsuba::Properties nested_props,
 template <typename Float, typename Spectrum>
 mitsuba::Emitter<Float, Spectrum>* UpdateIesFrameInPlace(
     mitsuba::Emitter<Float, Spectrum>* emitter, const LightSpec& spec) {
-  if (spec.ies.file_path.empty()) {
+  if (spec.shaping.ies_file_path.empty()) {
     return emitter;
   }
   TraversalCallback cb;

@@ -62,17 +62,17 @@ struct MaterialSpec : public BaseSpec {
   HdMaterialNetwork2 network2;
 };
 
-// UsdLuxShapingAPI IES profile of a light (`inputs:shaping:ies:*`).
-struct IesSpec {
-  std::string file_path;
-  float angle_scale = 0.0f;
-  bool normalize = false;
+// UsdLuxShapingAPI parameters of a light (`inputs:shaping:*`).
+struct ShapingSpec {
+  std::string ies_file_path;
+  float ies_angle_scale = 0.0f;
+  bool ies_normalize = false;
 
-  bool operator==(const IesSpec& o) const {
-    return std::tie(file_path, angle_scale, normalize) ==
-           std::tie(o.file_path, o.angle_scale, o.normalize);
+  bool operator==(const ShapingSpec& o) const {
+    return std::tie(ies_file_path, ies_angle_scale, ies_normalize) ==
+           std::tie(o.ies_file_path, o.ies_angle_scale, o.ies_normalize);
   }
-  bool operator!=(const IesSpec& o) const { return !(*this == o); }
+  bool operator!=(const ShapingSpec& o) const { return !(*this == o); }
 };
 
 struct LightSpec : public BaseSpec {
@@ -89,7 +89,7 @@ struct LightSpec : public BaseSpec {
   std::string visibility;
   // Whether the `lightLink` collection includes everything (the default).
   bool light_link_everything = true;
-  IesSpec ies;
+  ShapingSpec shaping;
 
   // Area lights are represented as Mitsuba shapes with an attached area
   // emitter, rather than standalone emitter objects.
@@ -152,7 +152,7 @@ struct MeshSpec : public BaseSpec {
 
   void FoldPendingFrom(const MeshSpec& prev) {
     if (emitter_spec.has_value() != prev.emitter_spec.has_value() ||
-        (emitter_spec && emitter_spec->ies != prev.emitter_spec->ies) ||
+        (emitter_spec && emitter_spec->shaping != prev.emitter_spec->shaping) ||
         material_ids != prev.material_ids ||
         double_sided != prev.double_sided ||
         !std::equal(instance_transforms.begin(), instance_transforms.end(),

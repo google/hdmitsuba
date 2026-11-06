@@ -39,11 +39,12 @@ class SceneManager;
 GfVec3f GetLightBaseEmission(
     const HdContainerDataSourceHandle& light_container);
 
-// Returns the UsdLuxShapingAPI IES profile (`inputs:shaping:ies:*`) in the
-// `HdLightSchema` container of light `id`, with an empty `file_path` if it is
-// unset or cannot be resolved (with a warning in the latter case).
-IesSpec GetIesSpec(const HdContainerDataSourceHandle& light_container,
-                   const SdfPath& id);
+// Returns the UsdLuxShapingAPI parameters (`inputs:shaping:*`) in the
+// `HdLightSchema` container of light `id`, with an empty `ies_file_path` if the
+// IES profile is unset or cannot be resolved (with a warning in the latter
+// case).
+ShapingSpec GetShapingSpec(const HdContainerDataSourceHandle& light_container,
+                           const SdfPath& id);
 
 class HdMitsubaLight final : public HdLight {
  public:
@@ -63,8 +64,8 @@ class HdMitsubaLight final : public HdLight {
   // Properties that determine the Mitsuba plugin type, whose changes require
   // rebuilding the light object rather than updating it in place. `lightLink`
   // changes require rebuilding the scene, as they may change the active dome.
-  using RebuildKey = std::tuple<bool, bool, bool, std::string, IesSpec, bool,
-                                std::string, bool>;
+  using RebuildKey = std::tuple<bool, bool, bool, std::string, ShapingSpec,
+                                bool, std::string, bool>;
 
   TfToken type_id_;
   std::optional<RebuildKey> rebuild_key_;
