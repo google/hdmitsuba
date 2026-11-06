@@ -699,6 +699,19 @@ mitsuba::Emitter<Float, Spectrum>* UpdateIesFrameInPlace(
       cb.objects.at("nested_emitter"));
 }
 
+// Returns the transform of the shape of the area light `spec`. Mitsuba's
+// `cylinder` spans z in [0, 1], while USD's CylinderLight is centered on the X
+// axis of its light frame.
+MotionTransform AreaShapeTransform(const LightSpec& spec) {
+  if (spec.prim_type != HdPrimTypeTokens->cylinderLight) {
+    return spec.transform;
+  }
+  return spec.transform.Map([](const ScalarAffineTransform4f& m) {
+    return m * ScalarAffineTransform4f::rotate(ScalarVector3f(0, 1, 0), 90) *
+           ScalarAffineTransform4f::translate(ScalarVector3f(0, 0, -0.5));
+  });
+}
+
 }  // namespace
 
 MI_VARIANT mitsuba::ref<mitsuba::Object>
@@ -731,7 +744,8 @@ PrimTranslator<Float, Spectrum>::BuildLightProperties(const LightSpec& spec) {
     return props;
   };
   auto make_area_shape_props = [&](std::string_view shape_plugin) {
-    mitsuba::Properties props = make_props(shape_plugin);
+    mitsuba::Properties props(shape_plugin);
+    SetTransformProperty(props, AreaShapeTransform(spec));
     props.set("visibility", spec.visibility);
     props.set("emitter", CreateAreaEmitter(spec));
     props.set("bsdf",
@@ -787,6 +801,10 @@ PrimTranslator<Float, Spectrum>::BuildLightProperties(const LightSpec& spec) {
     return make_area_shape_props("disk");
   }
 
+  if (spec.prim_type == HdPrimTypeTokens->cylinderLight) {
+    return make_area_shape_props("cylinder");
+  }
+
   return mitsuba::Properties("constant");
 }
 
@@ -795,7 +813,7 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateLightInPlace(
   if (auto* shape = dynamic_cast<mitsuba::Shape<Float, Spectrum>*>(light_obj)) {
     TraversalCallback cb_shape;
     shape->traverse(&cb_shape);
-    SetTransformParameter(cb_shape, spec.transform);
+    SetTransformParameter(cb_shape, AreaShapeTransform(spec));
     shape->parameters_changed();
     if (shape->is_emitter()) {
       UpdateAreaEmitterInPlace(shape->emitter(), spec);

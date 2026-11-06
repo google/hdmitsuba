@@ -137,6 +137,7 @@ def test_dome_light_corrupt_texture_falls_back_to_constant():
         'area_shadow_passthrough',
         'color_temperature',
         'constant',
+        'cylinder',
         'directional',
         'directional_wide',
         'disk',

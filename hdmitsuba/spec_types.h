@@ -96,6 +96,7 @@ struct LightSpec : public BaseSpec {
   bool IsAreaLight() const {
     return prim_type == HdPrimTypeTokens->rectLight ||
            prim_type == HdPrimTypeTokens->diskLight ||
+           prim_type == HdPrimTypeTokens->cylinderLight ||
            (prim_type == HdPrimTypeTokens->sphereLight && !treat_as_point);
   }
 };
