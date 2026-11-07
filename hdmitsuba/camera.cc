@@ -110,6 +110,11 @@ void HdMitsubaCamera::Sync(HdSceneDelegate* sceneDelegate,
             .Map(UsdToMitsubaSensorTransform);
   }
 
+  const float aperture_radius =
+      (_fStop > 0.0f && _focusDistance > 0.0f && _focalLength > 0.0f)
+          ? 0.5f * _focalLength / _fStop
+          : 0.0f;
+
   CameraSpec spec;
   spec.id = GetId();
   spec.transform = transform_;
@@ -118,6 +123,8 @@ void HdMitsubaCamera::Sync(HdSceneDelegate* sceneDelegate,
   spec.fov = GetHorizontalFieldOfView();
   spec.horizontal_aperture_offset = GetHorizontalPrincipalPointOffset();
   spec.vertical_aperture_offset = GetVerticalPrincipalPointOffset();
+  spec.aperture_radius = aperture_radius;
+  spec.focus_distance = _focusDistance;
   spec.pixel_filter_type = film_pixel_filter_type_;
   spec.near_clip = GetClippingRange().GetMin();
   spec.far_clip = GetClippingRange().GetMax();
@@ -126,12 +133,14 @@ void HdMitsubaCamera::Sync(HdSceneDelegate* sceneDelegate,
 
   spec.needs_rebuild = !is_instantiated_;
   spec.needs_rebuild |= sensor_type != sensor_type_;
-  spec.needs_rebuild |= (sensor_type != "perspective" &&
+  spec.needs_rebuild |= (aperture_radius > 0.0f) != (aperture_radius_ > 0.0f);
+  spec.needs_rebuild |= (sensor_type != "perspective" && !sensor_type.empty() &&
                          (dirty_bits_copy & HdCamera::DirtyParams));
   spec.needs_rebuild |= transform_.IsAnimated() != was_animated;
   spec.needs_rebuild |= shutter != shutter_;
   is_instantiated_ = true;
   sensor_type_ = std::move(sensor_type);
+  aperture_radius_ = aperture_radius;
   shutter_ = shutter;
 
   static_cast<HdMitsubaRenderParam*>(renderParam)

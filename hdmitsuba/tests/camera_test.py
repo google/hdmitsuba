@@ -151,13 +151,19 @@ def test_simple_render():
   )
 
 
+@pytest.mark.parametrize('depth_of_field', [False, True])
 @pytest.mark.parametrize('call_configure_twice', [False, True])
-def test_update_camera(call_configure_twice: bool):
+def test_update_camera(call_configure_twice: bool, depth_of_field: bool):
   stage = Usd.Stage.CreateInMemory()
   _setup_stage(stage)
   test_helpers.create_render_settings(stage)
 
   camera_path = '/camera'
+  camera = UsdGeom.Camera.Get(stage, camera_path)
+  suffix = '_dof' if depth_of_field else ''
+  if depth_of_field:
+    camera.GetFStopAttr().Set(8.0)
+    camera.GetFocusDistanceAttr().Set(8.0)
 
   # Render once with original camera settings.
   engine = usd_render.RenderEngine(stage)
@@ -169,11 +175,12 @@ def test_update_camera(call_configure_twice: bool):
   image_hd_original = outputs['color']
 
   test_helpers.write_image(
-      image_hd_original, 'test_update_camera_original_hd.png'
+      image_hd_original, f'test_update_camera{suffix}_original_hd.png'
   )
 
   # Modify the camera in the USD stage and render again.
-  camera = UsdGeom.Camera.Get(stage, camera_path)
+  if depth_of_field:
+    camera.GetFocusDistanceAttr().Set(6.0)
   focal_length = camera.GetFocalLengthAttr().Get()
   camera.GetFocalLengthAttr().Set(focal_length * 1.4)
   xformable = UsdGeom.Xformable.Get(stage, camera_path)
@@ -187,7 +194,7 @@ def test_update_camera(call_configure_twice: bool):
   test_helpers.assert_hydra_equal_to_offline(
       stage,
       camera_path,
-      'test_update_camera_modified',
+      f'test_update_camera{suffix}_modified',
       atol=0.05,
       engine=engine,
   )

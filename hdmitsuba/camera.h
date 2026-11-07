@@ -57,6 +57,7 @@ class HdMitsubaCamera final : public HdCamera {
   std::string film_pixel_filter_type_ = "";
   std::optional<SdfPath> target_shape_id_;
   bool is_instantiated_ = false;
+  float aperture_radius_ = 0.0f;
   MotionTransform transform_;
   GfVec2f shutter_{0.0f};
 };
