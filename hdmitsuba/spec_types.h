@@ -180,6 +180,7 @@ struct MeshSpec : public BaseSpec {
         (emitter_spec && emitter_spec->shaping != prev.emitter_spec->shaping) ||
         material_ids != prev.material_ids ||
         double_sided != prev.double_sided ||
+        left_handed != prev.left_handed ||
         !std::equal(instance_transforms.begin(), instance_transforms.end(),
                     prev.instance_transforms.begin(),
                     prev.instance_transforms.end(),

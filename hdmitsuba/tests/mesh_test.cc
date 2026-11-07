@@ -15,6 +15,7 @@
 #include "hdmitsuba/mesh.h"
 
 #include <cstddef>
+#include <tuple>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -134,6 +135,50 @@ TEST(HdMitsubaMeshTest, ComputeNormalsMatchesMitsuba) {
   ASSERT_EQ(hdmitsuba_normals.size(), mitsuba_computed_normals.size());
   EXPECT_THAT(hdmitsuba_normals,
               Pointwise(Vec3fNear(1e-3), mitsuba_computed_normals));
+}
+
+TEST(HdMitsubaMeshTest, LeftHandedReversesWindingAndNormals) {
+  VtVec3fArray points = {GfVec3f(0, 0, 0), GfVec3f(1, 0, 0), GfVec3f(0, 1, 0)};
+  VtIntArray face_vertex_counts = {3};
+  VtIntArray face_vertex_indices = {0, 1, 2};
+
+  auto [right_triangles, right_params] =
+      GeometryProcessor::TriangulateWithFaceMapping(
+          face_vertex_counts, face_vertex_indices, /*left_handed=*/false);
+  auto [left_triangles, left_params] =
+      GeometryProcessor::TriangulateWithFaceMapping(
+          face_vertex_counts, face_vertex_indices, /*left_handed=*/true);
+  EXPECT_EQ(right_triangles, VtIntArray({0, 1, 2}));
+  EXPECT_EQ(left_triangles, VtIntArray({0, 2, 1}));
+  EXPECT_EQ(left_params, right_params);
+
+  HdPrimvarDescriptor points_descriptor;
+  points_descriptor.interpolation = pxr::HdInterpolationVertex;
+  points_descriptor.role = HdPrimvarRoleTokens->point;
+  PrimvarMap right_primvars;
+  right_primvars[HdTokens->points] = {VtValue(points), points_descriptor};
+  PrimvarMap left_primvars = right_primvars;
+  GeometryProcessor::ComputeNormals(
+      right_primvars,
+      HdMeshTopology(pxr::PxOsdOpenSubdivTokens->none, HdTokens->rightHanded,
+                     face_vertex_counts, face_vertex_indices));
+  GeometryProcessor::ComputeNormals(
+      left_primvars,
+      HdMeshTopology(pxr::PxOsdOpenSubdivTokens->none, HdTokens->leftHanded,
+                     face_vertex_counts, face_vertex_indices));
+
+  const VtVec3fArray& right_normals =
+      right_primvars.at(HdTokens->normals).value.Get<VtVec3fArray>();
+  const VtVec3fArray& left_normals =
+      left_primvars.at(HdTokens->normals).value.Get<VtVec3fArray>();
+  ASSERT_EQ(right_normals.size(), points.size());
+  ASSERT_EQ(left_normals.size(), points.size());
+  for (size_t i = 0; i < points.size(); ++i) {
+    EXPECT_THAT(std::make_tuple(right_normals[i], GfVec3f(0, 0, 1)),
+                Vec3fNear(1e-5));
+    EXPECT_THAT(std::make_tuple(left_normals[i], -right_normals[i]),
+                Vec3fNear(1e-5));
+  }
 }
 
 TEST(HdMitsubaMeshTest, SubdivisionLevelAttribute) {

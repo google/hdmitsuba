@@ -240,8 +240,7 @@ MeshExtractionData ExtractMeshData(UsdStagePtr stage, const SdfPath& path,
   }
 
   int num_faces = data.face_vertex_counts.size();
-  data.face_material_indices.assign(num_faces, 0);
-  data.material_ids.push_back(SdfPath());
+  data.face_material_indices.assign(num_faces, -1);
 
   if (UsdAttribute subset_family_attr =
           prim.GetAttribute(TfToken("subsetFamily:materialBind:familyType"))) {
@@ -274,6 +273,18 @@ MeshExtractionData ExtractMeshData(UsdStagePtr stage, const SdfPath& path,
         }
       }
     }
+  }
+  // Faces not covered by any GeomSubset use the mesh's own material (an empty
+  // path). Only add this slot if it is referenced, so that meshes fully
+  // partitioned into single-material GeomSubsets are not split.
+  if (data.material_ids.empty() ||
+      std::find(data.face_material_indices.cbegin(),
+                data.face_material_indices.cend(),
+                -1) != data.face_material_indices.cend()) {
+    std::replace(data.face_material_indices.begin(),
+                 data.face_material_indices.end(), -1,
+                 static_cast<int>(data.material_ids.size()));
+    data.material_ids.push_back(SdfPath());
   }
 
   return data;

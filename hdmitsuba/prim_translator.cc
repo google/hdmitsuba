@@ -22,6 +22,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -1036,18 +1037,43 @@ bool ExtractAttributeBuffer(const std::string& name, size_t channels,
             name.c_str(), value.GetArraySize(), vertex_count);
     return false;
   }
+  // Broadcasts scalar values to all channels.
+  auto fill_scalar = [&](const auto* src) {
+    dst->assign(vertex_count * channels, 0.f);
+    float* out = dst->data();
+    for (size_t i = 0; i < vertex_count; ++i) {
+      std::fill_n(out + i * channels, channels, static_cast<float>(src[i]));
+    }
+    return true;
+  };
+  // Copies vector values, truncating or zero-padding them to `channels`.
+  auto copy_vec = [&](const auto* src) {
+    constexpr size_t dim = std::decay_t<decltype(*src)>::dimension;
+    if (channels == dim) {
+      *direct_ptr = src[0].data();
+      return true;
+    }
+    dst->assign(vertex_count * channels, 0.f);
+    float* out = dst->data();
+    const size_t copy_ch = std::min(channels, dim);
+    for (size_t i = 0; i < vertex_count; ++i) {
+      std::copy_n(src[i].data(), copy_ch, out + i * channels);
+    }
+    return true;
+  };
   if (value.IsHolding<VtFloatArray>()) {
     const float* src = value.UncheckedGet<VtFloatArray>().cdata();
     if (channels == 1) {
       *direct_ptr = src;
       return true;
     }
-    dst->assign(vertex_count * channels, 0.f);
-    float* out = dst->data();
-    for (size_t i = 0; i < vertex_count; ++i) {
-      std::fill_n(out + i * channels, channels, src[i]);
-    }
-    return true;
+    return fill_scalar(src);
+  }
+  if (value.IsHolding<VtBoolArray>()) {
+    return fill_scalar(value.UncheckedGet<VtBoolArray>().cdata());
+  }
+  if (value.IsHolding<VtIntArray>()) {
+    return fill_scalar(value.UncheckedGet<VtIntArray>().cdata());
   }
   if (value.IsHolding<VtVec2fArray>()) {
     const GfVec2f* src = value.UncheckedGet<VtVec2fArray>().cdata();
@@ -1068,18 +1094,10 @@ bool ExtractAttributeBuffer(const std::string& name, size_t channels,
     return true;
   }
   if (value.IsHolding<VtVec3fArray>()) {
-    const GfVec3f* src = value.UncheckedGet<VtVec3fArray>().cdata();
-    if (channels == 3) {
-      *direct_ptr = src[0].data();
-      return true;
-    }
-    dst->assign(vertex_count * channels, 0.f);
-    float* out = dst->data();
-    const size_t copy_ch = std::min<size_t>(channels, 3);
-    for (size_t i = 0; i < vertex_count; ++i) {
-      std::copy_n(src[i].data(), copy_ch, out + i * channels);
-    }
-    return true;
+    return copy_vec(value.UncheckedGet<VtVec3fArray>().cdata());
+  }
+  if (value.IsHolding<VtVec4fArray>()) {
+    return copy_vec(value.UncheckedGet<VtVec4fArray>().cdata());
   }
   return false;
 }
