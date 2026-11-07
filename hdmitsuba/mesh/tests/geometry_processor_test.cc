@@ -90,12 +90,10 @@ TEST(GeometryProcessorTest, TriangulateWithFaceMappingLeftHanded) {
 
 TEST(GeometryProcessorTest, ComputeNormalsFollowsOrientation) {
   for (bool left_handed : {false, true}) {
-    PrimvarMap primvars = QuadPoints();
     // A single counter-clockwise quad in the z = 0 plane.
-    GeometryProcessor::ComputeNormals(primvars, VtIntArray{0, 1, 2, 3},
-                                      VtIntArray{4}, left_handed);
-    const VtVec3fArray& normals =
-        GetPrimvar<VtVec3fArray>(primvars, HdTokens->normals);
+    const VtVec3fArray normals = GeometryProcessor::ComputeNormals(
+        GetPrimvar<VtVec3fArray>(QuadPoints(), HdTokens->points), VtIntArray{4},
+        VtIntArray{0, 1, 2, 3}, left_handed);
     const GfVec3f expected(0, 0, left_handed ? -1 : 1);
     for (int i = 0; i < 4; ++i) {
       EXPECT_TRUE(GfIsClose(normals[i], expected, 1e-6))
@@ -104,13 +102,23 @@ TEST(GeometryProcessorTest, ComputeNormalsFollowsOrientation) {
   }
 }
 
+TEST(GeometryProcessorTest, ComputeFaceNormalsFollowsOrientation) {
+  for (bool left_handed : {false, true}) {
+    // A single counter-clockwise quad in the z = 0 plane.
+    const VtVec3fArray normals = GeometryProcessor::ComputeFaceNormals(
+        GetPrimvar<VtVec3fArray>(QuadPoints(), HdTokens->points), VtIntArray{4},
+        VtIntArray{0, 1, 2, 3}, left_handed);
+    EXPECT_THAT(normals, ElementsAre(GfVec3f(0, 0, left_handed ? -1 : 1)));
+  }
+}
+
 TEST(GeometryProcessorTest, ExpandPrimDataSplitsUniform) {
   PrimvarMap primvars = QuadPoints();
   AddPrimvar(primvars, kSt, VtValue(VtFloatArray{0.25f, 0.75f}),
              HdInterpolationUniform);
 
-  auto [indices, expanded] =
-      GeometryProcessor::ExpandPrimData(kQuadIndices, kQuadCounts, primvars);
+  auto [indices, vertex_points, expanded] = GeometryProcessor::ExpandPrimData(
+      kQuadCounts, kQuadIndices, /*num_points=*/6, primvars);
 
   // Differing uniform values split the shared points.
   EXPECT_THAT(indices, ElementsAre(0, 1, 2, 3, 4, 5, 6, 7));
@@ -118,6 +126,7 @@ TEST(GeometryProcessorTest, ExpandPrimDataSplitsUniform) {
   EXPECT_THAT(
       GetPrimvar<VtFloatArray>(expanded, kSt),
       ElementsAre(0.25f, 0.25f, 0.25f, 0.25f, 0.75f, 0.75f, 0.75f, 0.75f));
+  EXPECT_THAT(vertex_points, ElementsAre(0, 1, 2, 3, 3, 2, 4, 5));
 }
 
 TEST(GeometryProcessorTest, ExpandPrimDataDeduplicatesFaceVarying) {
@@ -129,10 +138,11 @@ TEST(GeometryProcessorTest, ExpandPrimDataDeduplicatesFaceVarying) {
                                   GfVec2f(6, 6), GfVec2f(7, 7)}),
              HdInterpolationFaceVarying);
 
-  auto [indices, expanded] =
-      GeometryProcessor::ExpandPrimData(kQuadIndices, kQuadCounts, primvars);
+  auto [indices, vertex_points, expanded] = GeometryProcessor::ExpandPrimData(
+      kQuadCounts, kQuadIndices, /*num_points=*/6, primvars);
 
   EXPECT_THAT(indices, ElementsAre(0, 1, 2, 3, 3, 4, 5, 6));
+  EXPECT_THAT(vertex_points, ElementsAre(0, 1, 2, 3, 2, 4, 5));
   EXPECT_THAT(GetPrimvar<VtVec3fArray>(expanded, HdTokens->points),
               ElementsAre(GfVec3f(0, 0, 0), GfVec3f(1, 0, 0), GfVec3f(1, 1, 0),
                           GfVec3f(0, 1, 0), GfVec3f(1, 1, 0), GfVec3f(0, 2, 0),
@@ -148,8 +158,8 @@ TEST(GeometryProcessorTest, ExpandPrimDataIgnoresEmptyFaceVarying) {
   AddPrimvar(primvars, kSt, VtValue(VtVec2fArray()),
              HdInterpolationFaceVarying);
 
-  auto [indices, expanded] =
-      GeometryProcessor::ExpandPrimData(kQuadIndices, kQuadCounts, primvars);
+  auto [indices, vertex_points, expanded] = GeometryProcessor::ExpandPrimData(
+      kQuadCounts, kQuadIndices, /*num_points=*/6, primvars);
 
   EXPECT_THAT(indices, ElementsAre(0, 1, 2, 3, 3, 2, 4, 5));
   EXPECT_EQ(GetPrimvar<VtVec3fArray>(expanded, HdTokens->points).size(), 6);
