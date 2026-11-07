@@ -157,15 +157,19 @@ TextureKey::UvMatrix ExtractUsdTransform2d(const HdMaterialNetwork2& network,
 mitsuba::ref<mitsuba::Object> CreateBitmapTexture(const TextureKey& key,
                                                   const mitsuba::Bitmap& bitmap,
                                                   std::string_view variant) {
-  if (key.channel == 3 && !bitmap.has_alpha()) {
+  // A single-channel OpenEXR image with an "A" channel is loaded as a
+  // multi-channel bitmap without alpha, whose only channel is the alpha.
+  const bool single_alpha =
+      bitmap.pixel_format() == mitsuba::Bitmap::PixelFormat::MultiChannel &&
+      bitmap.channel_count() == 1 && bitmap.channel_names()[0] == "A";
+  if (key.channel == 3 && !bitmap.has_alpha() && !single_alpha) {
     mitsuba::Properties uniform_props("uniform");
     uniform_props.set("value", 1.0f);
     return CreateExpandedObject(uniform_props, variant,
                                 mitsuba::ObjectType::Texture);
   }
   mitsuba::ref<mitsuba::Bitmap> view;
-  if (key.channel >= 0 &&
-      bitmap.pixel_format() != mitsuba::Bitmap::PixelFormat::Y) {
+  if (key.channel >= 0 && bitmap.channel_count() > 1) {
     // Alpha is the last channel. Color channels missing from the image
     // (e.g. `g` of a grayscale+alpha image) read the first channel.
     const size_t color_ch = bitmap.channel_count() - bitmap.has_alpha();
@@ -193,7 +197,15 @@ mitsuba::ref<mitsuba::Object> CreateBitmapTexture(const TextureKey& key,
     // (either via Bitmap::convert() or the TensorXf constructor) and the
     // un-expanded BitmapTexture holding `view` is dropped below, so neither
     // `view` nor `bitmap` needs to outlive this function.
-    view = new mitsuba::Bitmap(bitmap.pixel_format(), bitmap.component_format(),
+    //
+    // Mitsuba rejects 1-channel multi-channel bitmaps without channel names,
+    // so these are viewed as luminance.
+    const auto pixel_format =
+        bitmap.pixel_format() == mitsuba::Bitmap::PixelFormat::MultiChannel &&
+                bitmap.channel_count() == 1
+            ? mitsuba::Bitmap::PixelFormat::Y
+            : bitmap.pixel_format();
+    view = new mitsuba::Bitmap(pixel_format, bitmap.component_format(),
                                bitmap.size(), bitmap.channel_count(), {},
                                const_cast<uint8_t*>(bitmap.uint8_data()));
     view->set_srgb_gamma(bitmap.srgb_gamma());
