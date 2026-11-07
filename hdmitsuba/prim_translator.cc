@@ -1327,8 +1327,12 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateMeshInPlace(
                                                texcoords_array.size(), 2));
       keys.push_back("texcoords");
     }
-    // The vertex count or user primvars may have changed, so remove and re-add
-    // custom attributes.
+  }
+  // The vertex count, user primvars or requested attributes may have changed,
+  // so remove and re-add custom attributes.
+  const bool update_attributes =
+      update_topology_and_uvs || !mesh_attributes.empty();
+  if (update_attributes) {
     for (const auto& [key, value] : cb.data) {
       if (absl::StartsWith(key, kVertexAttributePrefix)) {
         mesh->remove_attribute(key);
@@ -1337,7 +1341,7 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateMeshInPlace(
   }
 
   mesh->parameters_changed(keys);
-  if (update_topology_and_uvs) {
+  if (update_attributes) {
     AddMeshAttributes(mesh, primvars, mesh_attributes);
   }
 }
