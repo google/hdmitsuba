@@ -227,6 +227,8 @@ struct CameraSpec : public BaseSpec {
   float fov = 90.0f;
   float horizontal_aperture_offset = 0.0f;
   float vertical_aperture_offset = 0.0f;
+  float aperture_radius = 0.0f;
+  float focus_distance = 0.0f;
   float near_clip = 0.01f;
   float far_clip = 1000.0f;
   std::string pixel_filter_type = "";

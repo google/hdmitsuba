@@ -29,7 +29,10 @@ This document provides an overview of the USD features supported by `hdMitsuba`,
 ### Lights & Camera
 *   **Light Types**: Sphere lights, point lights, spot lights, rectangle lights, distant lights, and dome lights (for HDR environment map backgrounds). IES profiles (`UsdLuxShapingAPI` `inputs:shaping:ies:*`, Type C) are supported on sphere, point, rectangle, disk, and mesh lights. As OpenUSD doesn't define the profile orientation, it follows hdEmbree: `theta = 0` along the light's -Z axis (its emission direction), and `phi = 0` along its -X axis, increasing towards -Y. Standard USDLux area lights (`SphereLight` when not point, `RectLight`, `DiskLight`) default to `"secondary"` ray visibility (invisible to primary camera rays while still illuminating the scene and reflecting in secondary rays). Ray visibility on area lights and dome lights can be controlled by setting the `mitsuba:visibility` (string or token) attribute (`"all"`, `"primary"`, `"secondary"`, `"hidden"`).
 *   **Cameras & Custom Sensors**:
-    *   Supports standard perspective cameras with horizontal/vertical aperture offsets.
+    *   Supports standard perspective cameras with horizontal/vertical aperture
+        offsets, and thin-lens depth of field (`thinlens`) whenever both `fStop`
+        and `focusDistance` are positive (`aperture_radius = 0.5 *
+        focalLength_scene_units / fStop`).
     *   **Custom Sensor Type**: Customize the Mitsuba sensor backend by setting `mitsuba:sensor:type` (string, e.g., `perspective`, `irradiancemeter`, `radmeter`) on the Camera prim.
     *   **Pixel Filter**: Customize the film's pixel filter by setting `mitsuba:sensor:film:pixel_filter:type` (string) on the Camera prim.
     *   **Surface Sensors**: Attach a surface sensor (e.g., `irradiancemeter`) to a Mesh geometry prim by setting `mitsuba:sensor:shape` (string) on the Camera prim. This allows measuring light hitting that specific surface (e.g., for irradiance mapping). An example is provided in `test_assets/shapes`.

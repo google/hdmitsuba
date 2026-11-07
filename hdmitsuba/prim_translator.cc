@@ -910,12 +910,18 @@ PrimTranslator<Float, Spectrum>::BuildSensor(const CameraSpec& spec,
   if (spec.sensor_type == "irradiancemeter") {
     props = mitsuba::Properties("irradiancemeter");
   } else {
-    props = mitsuba::Properties("perspective");
+    const bool use_thinlens =
+        spec.aperture_radius > 0.0f && spec.focus_distance > 0.0f;
+    props = mitsuba::Properties(use_thinlens ? "thinlens" : "perspective");
     SetTransformProperty(props, spec.transform);
     props.set("fov", spec.fov);
     props.set("fov_axis", "x");
     props.set("principal_point_offset_x", spec.horizontal_aperture_offset);
     props.set("principal_point_offset_y", spec.vertical_aperture_offset);
+    if (use_thinlens) {
+      props.set("aperture_radius", spec.aperture_radius);
+      props.set("focus_distance", spec.focus_distance);
+    }
   }
   props.set("near_clip", spec.near_clip);
   props.set("far_clip", spec.far_clip);
@@ -966,6 +972,13 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateSensorInPlace(
       cb.set<Float>("principal_point_offset_x",
                     spec.horizontal_aperture_offset);
       cb.set<Float>("principal_point_offset_y", spec.vertical_aperture_offset);
+      if (spec.aperture_radius > 0.0f && spec.focus_distance > 0.0f) {
+        // Unlike `x_fov`, the thinlens sensor doesn't make these opaque in
+        // `parameters_changed()`, so do it here to avoid recompilation.
+        cb.set<Float>("aperture_radius",
+                      dr::opaque<Float>(spec.aperture_radius));
+        cb.set<Float>("focus_distance", dr::opaque<Float>(spec.focus_distance));
+      }
     }
   }
   sensor->parameters_changed();

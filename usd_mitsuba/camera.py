@@ -125,6 +125,20 @@ def usd_to_mitsuba(
         },
     }
     focal_length = camera.GetFocalLengthAttr().Get(time)
+    f_stop = camera.GetFStopAttr().Get(time)
+    focus_distance = camera.GetFocusDistanceAttr().Get(time)
+    if (
+        f_stop
+        and f_stop > 0.0
+        and focus_distance
+        and focus_distance > 0.0
+        and focal_length > 0.0
+    ):
+      sensor_dict['type'] = 'thinlens'
+      sensor_dict['aperture_radius'] = float(
+          0.5 * (focal_length * Gf.Camera.FOCAL_LENGTH_UNIT) / f_stop
+      )
+      sensor_dict['focus_distance'] = float(focus_distance)
     x_fov = 2.0 * dr.atan(aperture_x / (2.0 * focal_length))
     sensor_dict['fov'] = dr.rad2deg(x_fov)
 
