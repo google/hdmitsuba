@@ -88,6 +88,7 @@
 #include "hdmitsuba/debug_codes.h"
 #include "hdmitsuba/denoiser.h"
 #include "hdmitsuba/framebuffer.h"
+#include "hdmitsuba/ies_emitter.h"
 #include "hdmitsuba/kernel_freezing.h"
 #include "hdmitsuba/mesh/displacement.h"
 #include "hdmitsuba/mesh/geometry_processor.h"
@@ -1867,6 +1868,7 @@ SceneManager* SceneManager::CreateSceneManager(const std::string& variant) {
 }
 
 SceneManager::SceneManager() {
+  RegisterIesEmitter();
   absl::MutexLock lock(lifecycle_mutex_);
 
   // Try to determine if static initialization is already done or not.
