@@ -13,11 +13,19 @@
 // limitations under the License.
 
 #include <algorithm>
-#include <iterator>
+#include <cstdint>
+#include <set>
+#include <string>
+#include <tuple>
 #include <vector>
 
+#include <absl/container/flat_hash_set.h>
+#include <mitsuba/core/config.h>
+#include <mitsuba/core/logger.h>
+#include <mitsuba/core/object.h>
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/pair.h>
+#include <nanobind/stl/set.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/tuple.h>
 #include <nanobind/stl/unordered_map.h>
@@ -48,9 +56,12 @@
 #include <pxr/usd/usdSkel/utils.h>
 
 #include "hdmitsuba/ies_emitter.h"
+#include "hdmitsuba/mesh/displacement.h"
 #include "hdmitsuba/mesh/geometry_processor.h"
 #include "hdmitsuba/mesh/subdivision.h"
 #include "hdmitsuba/motion.h"
+#include "hdmitsuba/prim_translator.h"
+#include "hdmitsuba/utils.h"
 #include "nanobind/usd.h"
 
 NANOBIND_BOOST_CASTER(pxr::VtIntArray, "Vt.IntArray");
@@ -261,10 +272,7 @@ MeshExtractionData ExtractMeshData(UsdStagePtr stage, const SdfPath& path,
             subset.GetIndicesAttr().Get(&indices, time);
             int material_index = data.material_ids.size();
             data.material_ids.push_back(child.GetPath());
-            const int* idx_ptr = indices.cdata();
-            const size_t idx_count = indices.size();
-            for (size_t i = 0; i < idx_count; ++i) {
-              int face_idx = idx_ptr[i];
+            for (const int face_idx : indices.AsConst()) {
               if (face_idx >= 0 && face_idx < num_faces) {
                 face_mat_ptr[face_idx] = material_index;
               }
@@ -290,6 +298,96 @@ MeshExtractionData ExtractMeshData(UsdStagePtr stage, const SdfPath& path,
   return data;
 }
 
+// Returns the name of the active Mitsuba variant.
+std::string ActiveVariant() {
+  return nb::cast<std::string>(
+      nb::module_::import_("mitsuba").attr("variant")());
+}
+
+// Subdivides `mesh_data` and runs `RunGeometryPipeline` on it, see
+// `process_mesh` below.
+std::vector<SubMeshOutput> ProcessMesh(
+    const MeshExtractionData& mesh_data, int refine_level,
+    const GfMatrix4d& transform,
+    const std::vector<std::tuple<nb::object, float, bool, bool>>& displacements,
+    const std::set<std::string>& requested_attributes) {
+  SubdivisionEvaluator subdiv;
+  subdiv.Initialize(mesh_data.GetTopology().GetPxOsdMeshTopology(),
+                    refine_level, mesh_data.fvar_indices,
+                    mesh_data.id.GetNameToken());
+  PrimvarMap primvars = mesh_data.primvars;
+  VtIntArray face_vertex_counts = mesh_data.face_vertex_counts;
+  VtIntArray face_vertex_indices = mesh_data.face_vertex_indices;
+  bool left_handed = mesh_data.orientation == PxOsdOpenSubdivTokens->leftHanded;
+  const bool is_subdivided = subdiv.IsSubdivided();
+  if (is_subdivided) {
+    // Normals will be recomputed after subdivision, skip refining them here.
+    primvars.erase(HdTokens->normals);
+    for (auto& [token, state] : primvars) {
+      // FaceVarying primvars are refined on their unflattened values.
+      if (subdiv.HasFVarChannel(token)) {
+        state.value = mesh_data.unflattened_fvar_values.at(token);
+      }
+      state.value = subdiv.RefinePrimvar(state.value,
+                                         state.descriptor.interpolation, token);
+    }
+    face_vertex_counts = subdiv.GetRefinedFaceVertexCounts();
+    face_vertex_indices = subdiv.GetRefinedFaceVertexIndices();
+    // OpenSubdiv refines `leftHanded` meshes into right-handed faces.
+    left_handed = false;
+  }
+
+  std::vector<MaterialDisplacement> material_displacements;
+  material_displacements.reserve(displacements.size());
+  for (const auto& [texture, bias, requires_uv, is_vector] : displacements) {
+    MaterialDisplacement& displacement = material_displacements.emplace_back();
+    if (!texture.is_none()) {
+      displacement.texture = reinterpret_cast<mitsuba::Object*>(
+          nb::cast<uintptr_t>(texture.attr("ptr")));
+    }
+    displacement.bias = bias;
+    displacement.requires_uv = requires_uv;
+    displacement.is_vector = is_vector;
+  }
+  const absl::flat_hash_set<std::string> requested(requested_attributes.begin(),
+                                                   requested_attributes.end());
+
+  // Displacement textures are evaluated in the active Mitsuba variant.
+  using mitsuba::ClassName;
+  using mitsuba::Color;
+  using mitsuba::Error;
+  using mitsuba::Spectrum;
+  namespace dr = drjit;
+  return MI_INVOKE_VARIANT(
+      ActiveVariant(), RunGeometryPipeline, mesh_data.id, face_vertex_counts,
+      face_vertex_indices, left_handed, is_subdivided, transform,
+      mesh_data.material_ids,
+      subdiv.MapRefinedMaterialIndices(mesh_data.face_material_indices),
+      primvars, material_displacements, requested);
+}
+
+template <typename Float, typename Spectrum>
+void AttachMeshAttributes(mitsuba::Object* mesh, const PrimvarMap& primvars,
+                          const MeshAttributeRequests& mesh_attributes) {
+  PrimTranslator<Float, Spectrum>::AttachMeshAttributes(mesh, primvars,
+                                                        mesh_attributes);
+}
+
+// Adds the requested `primvars` of a sub-mesh as vertex attributes to the
+// Mitsuba mesh `mesh` of the active variant, see `add_mesh_attributes` below.
+void AddMeshAttributes(const nb::object& mesh, const PrimvarMap& primvars,
+                       const MeshAttributeRequests& mesh_attributes) {
+  using mitsuba::ClassName;
+  using mitsuba::Color;
+  using mitsuba::Error;
+  using mitsuba::Spectrum;
+  namespace dr = drjit;
+  MI_INVOKE_VARIANT(
+      ActiveVariant(), AttachMeshAttributes,
+      reinterpret_cast<mitsuba::Object*>(nb::cast<uintptr_t>(mesh.attr("ptr"))),
+      primvars, mesh_attributes);
+}
+
 NB_MODULE(geometry_ext, m) {
   PXR_NS::RegisterIesEmitter();
   m.doc() = "Python bindings for hdmitsuba geometry processing utilities.";
@@ -302,79 +400,31 @@ NB_MODULE(geometry_ext, m) {
       .def_ro("triangles", &SubMeshOutput::triangles)
       .def_rw("primvars", &SubMeshOutput::primvars);
 
-  nb::class_<HdMeshTopology>(m, "HdMeshTopology")
-      .def(nb::init<const TfToken&, const TfToken&, const VtIntArray&,
-                    const VtIntArray&>());
-
   nb::class_<MeshExtractionData>(m, "MeshExtractionData")
       .def_ro("scheme", &MeshExtractionData::scheme)
       .def_ro("orientation", &MeshExtractionData::orientation)
       .def_ro("material_ids", &MeshExtractionData::material_ids);
 
-  m.def("extract_and_process_meshes", [](UsdStagePtr stage, const SdfPath& path,
-                                         UsdTimeCode time, int refine_level,
-                                         bool has_displacement) {
-    MeshExtractionData mesh_data = ExtractMeshData(stage, path, time);
-    SubdivisionEvaluator subdiv;
-    HdMeshTopology topology = mesh_data.GetTopology();
-    subdiv.Initialize(topology.GetPxOsdMeshTopology(), refine_level,
-                      mesh_data.fvar_indices, mesh_data.id.GetNameToken());
-
-    HdMeshTopology refined_topology = topology;
-    PrimvarMap primvars = mesh_data.primvars;
-    bool is_subdivided = subdiv.IsSubdivided();
-
-    if (is_subdivided) {
-      // Normals will be recomputed after subdivision, skip refining them here.
-      primvars.erase(HdTokens->normals);
-      for (auto& [token, state] : primvars) {
-        // FaceVarying primvars are refined on their unflattened values.
-        if (subdiv.HasFVarChannel(token)) {
-          state.value = mesh_data.unflattened_fvar_values.at(token);
-        }
-        state.value = subdiv.RefinePrimvar(
-            state.value, state.descriptor.interpolation, token);
-      }
-
-      // OpenSubdiv refines `leftHanded` meshes into right-handed faces.
-      refined_topology = HdMeshTopology(mesh_data.scheme,
-                                        PxOsdOpenSubdivTokens->rightHanded,
-                                        subdiv.GetRefinedFaceVertexCounts(),
-                                        subdiv.GetRefinedFaceVertexIndices());
-    }
-    bool needs_normals = has_displacement || is_subdivided;
-    if (primvars.find(HdTokens->normals) == primvars.end() && needs_normals) {
-      GeometryProcessor::ComputeNormals(primvars, refined_topology);
-    }
-
-    auto [face_indices, expanded] =
-        GeometryProcessor::ExpandPrimData(refined_topology, primvars);
-    auto [triangles, prim_params] =
-        GeometryProcessor::TriangulateWithFaceMapping(
-            refined_topology.GetFaceVertexCounts(), face_indices,
-            refined_topology.GetOrientation() ==
-                PxOsdOpenSubdivTokens->leftHanded);
-
-    VtIntArray mapped_material_indices =
-        subdiv.MapRefinedMaterialIndices(mesh_data.face_material_indices);
-
-    auto sub_meshes = GeometryProcessor::SplitAndCompactMeshes(
-        mesh_data.id, triangles, prim_params, expanded, mesh_data.material_ids,
-        mapped_material_indices);
-
-    return std::make_pair(mesh_data, sub_meshes);
-  });
-
-  m.def("compute_normals",
-        [](PrimvarMap& primvars, const HdMeshTopology& topology) {
-          GeometryProcessor::ComputeNormals(primvars, topology);
-          return primvars;
-        });
-  m.def("transform_primvars",
-        [](PrimvarMap& primvars, const GfMatrix4d& transform) {
-          GeometryProcessor::TransformPrimvars(primvars, transform);
-          return primvars;
-        });
+  m.def("add_mesh_attributes", &AddMeshAttributes, nb::arg("mesh"),
+        nb::arg("primvars"), nb::arg("mesh_attributes"),
+        "Adds the `(primvar name, channel count)` pairs `mesh_attributes` of "
+        "the sub-mesh `primvars` that exist to the Mitsuba mesh `mesh` of the "
+        "active variant as vertex attributes, like the Hydra delegate.");
+  m.def("extract_mesh_data", &ExtractMeshData, nb::arg("stage"),
+        nb::arg("path"), nb::arg("time"),
+        "Extracts the topology, primvars and GeomSubset material assignment "
+        "of the UsdGeomMesh at `path`.");
+  m.def("process_mesh", &ProcessMesh, nb::arg("mesh_data"),
+        nb::arg("refine_level"), nb::arg("transform"), nb::arg("displacements"),
+        nb::arg("requested_attributes"),
+        "Subdivides, displaces, transforms to world space, triangulates and "
+        "splits `mesh_data` into one sub-mesh per material.\n\n"
+        "`displacements` holds one `(texture, bias, requires_uv, is_vector)` "
+        "tuple per entry of `mesh_data.material_ids`, where `texture` is a "
+        "Mitsuba texture of the active variant or None. "
+        "`requested_attributes` are the primvar names read by the materials, "
+        "which may include the intrinsic `__p_object`, `__n_object`, "
+        "`__n_disp_object` and `__n_disp_world` primvars.");
   m.def(
       "sample_world_transform",
       [](const UsdPrim& prim, UsdTimeCode time,

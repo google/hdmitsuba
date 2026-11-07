@@ -1344,6 +1344,13 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateMeshInPlace(
   }
 }
 
+MI_VARIANT void PrimTranslator<Float, Spectrum>::AttachMeshAttributes(
+    mitsuba::Object* mesh_obj, const PrimvarMap& primvars,
+    const MeshAttributeRequests& mesh_attributes) {
+  AddMeshAttributes(dynamic_cast<mitsuba::Mesh<Float, Spectrum>*>(mesh_obj),
+                    primvars, mesh_attributes);
+}
+
 MI_VARIANT mitsuba::ref<mitsuba::Shape<Float, Spectrum>>
 PrimTranslator<Float, Spectrum>::BuildCurves(const CurveSpec& spec,
                                              mitsuba::Object* bsdf) {
