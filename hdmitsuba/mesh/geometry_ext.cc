@@ -35,7 +35,6 @@
 #include <pxr/base/vt/types.h>
 #include <pxr/base/vt/value.h>
 #include <pxr/imaging/hd/enums.h>
-#include <pxr/imaging/hd/meshTopology.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/imaging/hd/tokens.h>
 #include <pxr/imaging/pxOsd/meshTopology.h>
@@ -72,24 +71,21 @@ NANOBIND_BOOST_CASTER(pxr::GfMatrix4d, "Gf.Matrix4d");
 namespace nb = nanobind;
 PXR_NAMESPACE_USING_DIRECTIVE
 
-struct MeshExtractionData {
+// The coarse mesh geometry of a UsdGeomMesh with its subdivision settings.
+// The material ids are the paths of the GeomSubsets, and the empty path for
+// the faces not covered by any subset.
+struct MeshExtractionData : public MeshGeometry {
   SdfPath id;
-  VtIntArray face_vertex_counts;
-  VtIntArray face_vertex_indices;
   TfToken scheme;
-  TfToken orientation;
   TfToken interp_boundary = PxOsdOpenSubdivTokens->edgeAndCorner;
   TfToken face_varying_interp = PxOsdOpenSubdivTokens->cornersPlus1;
-  PrimvarMap primvars;
   // Unflattened values and indices (empty if not indexed) of faceVarying
   // primvars, which are subdivided using their own face-varying topology.
   absl::flat_hash_map<TfToken, VtValue, TfToken::HashFunctor>
       unflattened_fvar_values;
   absl::flat_hash_map<TfToken, VtIntArray, TfToken::HashFunctor> fvar_indices;
-  std::vector<SdfPath> material_ids;
-  VtIntArray face_material_indices;
 
-  HdMeshTopology GetTopology() const {
+  PxOsdMeshTopology GetTopology() const {
     PxOsdSubdivTags tags(interp_boundary, face_varying_interp, TfToken(),
                          TfToken(),
                          /*creaseIndices=*/VtIntArray(),
@@ -97,9 +93,11 @@ struct MeshExtractionData {
                          /*creaseWeights=*/VtFloatArray(),
                          /*cornerIndices=*/VtIntArray(),
                          /*cornerWeights=*/VtFloatArray());
-    PxOsdMeshTopology px_osd_topo(scheme, orientation, face_vertex_counts,
-                                  face_vertex_indices, VtIntArray(), tags);
-    return HdMeshTopology(px_osd_topo, 0);
+    return PxOsdMeshTopology(scheme,
+                             left_handed ? PxOsdOpenSubdivTokens->leftHanded
+                                         : PxOsdOpenSubdivTokens->rightHanded,
+                             face_vertex_counts, face_vertex_indices,
+                             VtIntArray(), tags);
   }
 };
 
@@ -207,7 +205,9 @@ MeshExtractionData ExtractMeshData(UsdStagePtr stage, const SdfPath& path,
   mesh.GetFaceVertexCountsAttr().Get(&data.face_vertex_counts, time);
   mesh.GetFaceVertexIndicesAttr().Get(&data.face_vertex_indices, time);
   mesh.GetSubdivisionSchemeAttr().Get(&data.scheme);
-  mesh.GetOrientationAttr().Get(&data.orientation);
+  TfToken orientation;
+  mesh.GetOrientationAttr().Get(&orientation);
+  data.left_handed = orientation == UsdGeomTokens->leftHanded;
   if (UsdAttribute attr = mesh.GetInterpolateBoundaryAttr()) {
     attr.Get(&data.interp_boundary);
   }
@@ -250,15 +250,12 @@ MeshExtractionData ExtractMeshData(UsdStagePtr stage, const SdfPath& path,
     data.primvars[desc.name] = {VtValue(std::move(normals)), desc};
   }
 
-  int num_faces = data.face_vertex_counts.size();
-  data.face_material_indices.assign(num_faces, -1);
-
+  std::vector<std::pair<SdfPath, VtIntArray>> subsets;
   if (UsdAttribute subset_family_attr =
           prim.GetAttribute(TfToken("subsetFamily:materialBind:familyType"))) {
     TfToken family_type;
     subset_family_attr.Get(&family_type);
     if (family_type == TfToken("nonOverlapping")) {
-      int* face_mat_ptr = data.face_material_indices.data();
       for (const UsdPrim& child : prim.GetChildren()) {
         if (child.IsA<UsdGeomSubset>()) {
           UsdGeomSubset subset(child);
@@ -270,31 +267,13 @@ MeshExtractionData ExtractMeshData(UsdStagePtr stage, const SdfPath& path,
               elem_type == TfToken("face")) {
             VtIntArray indices;
             subset.GetIndicesAttr().Get(&indices, time);
-            int material_index = data.material_ids.size();
-            data.material_ids.push_back(child.GetPath());
-            for (const int face_idx : indices.AsConst()) {
-              if (face_idx >= 0 && face_idx < num_faces) {
-                face_mat_ptr[face_idx] = material_index;
-              }
-            }
+            subsets.emplace_back(child.GetPath(), std::move(indices));
           }
         }
       }
     }
   }
-  // Faces not covered by any GeomSubset use the mesh's own material (an empty
-  // path). Only add this slot if it is referenced, so that meshes fully
-  // partitioned into single-material GeomSubsets are not split.
-  if (data.material_ids.empty() ||
-      std::find(data.face_material_indices.cbegin(),
-                data.face_material_indices.cend(),
-                -1) != data.face_material_indices.cend()) {
-    std::replace(data.face_material_indices.begin(),
-                 data.face_material_indices.end(), -1,
-                 static_cast<int>(data.material_ids.size()));
-    data.material_ids.push_back(SdfPath());
-  }
-
+  GeometryProcessor::AssignFaceMaterials(subsets, SdfPath(), data);
   return data;
 }
 
@@ -312,18 +291,10 @@ std::vector<SubMeshOutput> ProcessMesh(
     const std::vector<std::tuple<nb::object, float, bool, bool>>& displacements,
     const std::set<std::string>& requested_attributes) {
   SubdivisionEvaluator subdiv;
-  subdiv.Initialize(mesh_data.GetTopology().GetPxOsdMeshTopology(),
-                    refine_level, mesh_data.fvar_indices,
-                    mesh_data.id.GetNameToken());
-  MeshGeometry geometry{
-      mesh_data.face_vertex_counts,
-      mesh_data.face_vertex_indices,
-      mesh_data.orientation == PxOsdOpenSubdivTokens->leftHanded,
-      subdiv.IsSubdivided(),
-      mesh_data.material_ids,
-      mesh_data.face_material_indices,
-      mesh_data.primvars};
-  if (geometry.is_subdivided) {
+  subdiv.Initialize(mesh_data.GetTopology(), refine_level,
+                    mesh_data.fvar_indices, mesh_data.id.GetNameToken());
+  MeshGeometry geometry = mesh_data;
+  if (subdiv.IsSubdivided()) {
     // Normals will be recomputed after subdivision, skip refining them here.
     geometry.primvars.erase(HdTokens->normals);
     for (auto& [token, state] : geometry.primvars) {
@@ -334,12 +305,7 @@ std::vector<SubMeshOutput> ProcessMesh(
       state.value = subdiv.RefinePrimvar(state.value,
                                          state.descriptor.interpolation, token);
     }
-    geometry.face_vertex_counts = subdiv.GetRefinedFaceVertexCounts();
-    geometry.face_vertex_indices = subdiv.GetRefinedFaceVertexIndices();
-    // OpenSubdiv refines `leftHanded` meshes into right-handed faces.
-    geometry.left_handed = false;
-    geometry.face_material_indices =
-        subdiv.MapRefinedMaterialIndices(geometry.face_material_indices);
+    subdiv.RefineTopology(geometry);
   }
 
   std::vector<MaterialDisplacement> material_displacements;
@@ -404,7 +370,6 @@ NB_MODULE(geometry_ext, m) {
 
   nb::class_<MeshExtractionData>(m, "MeshExtractionData")
       .def_ro("scheme", &MeshExtractionData::scheme)
-      .def_ro("orientation", &MeshExtractionData::orientation)
       .def_ro("material_ids", &MeshExtractionData::material_ids);
 
   m.def("add_mesh_attributes", &AddMeshAttributes, nb::arg("mesh"),
