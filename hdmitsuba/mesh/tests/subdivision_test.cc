@@ -89,7 +89,8 @@ TEST(SubdivisionEvaluatorTest, RefineUniformPrimvar) {
   ASSERT_TRUE(subdiv.IsSubdivided());
   // Each quad is refined into 4 quads.
   const VtIntArray coarse_faces = {0, 1};
-  const VtIntArray refined_faces = subdiv.MapRefinedMaterialIndices(coarse_faces);
+  const VtIntArray refined_faces =
+      subdiv.MapRefinedMaterialIndices(coarse_faces);
   ASSERT_EQ(refined_faces.size(), 8);
 
   const pxr::VtFloatArray colors = {0.25f, 0.75f};

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 #include "hdmitsuba/prim_translator.h"
-#include "hdmitsuba/debug_codes.h"
 
 #include <algorithm>
 #include <cmath>
@@ -85,6 +84,7 @@
 #include <pxr/usd/sdf/assetPath.h>
 #include <pxr/usd/sdf/path.h>
 
+#include "hdmitsuba/debug_codes.h"
 #include "hdmitsuba/ies_emitter.h"
 #include "hdmitsuba/motion.h"
 #include "hdmitsuba/spec_types.h"
