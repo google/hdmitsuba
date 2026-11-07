@@ -16,10 +16,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
-import drjit as dr
 import mitsuba as mi
 import numpy as np
 
@@ -29,7 +28,6 @@ from pxr import Tf
 from pxr import Usd
 from pxr import UsdLux
 from pxr import UsdGeom
-from pxr import Vt
 from hdmitsuba import geometry_ext as geom_lib
 from usd_mitsuba import camera
 from usd_mitsuba import light
@@ -38,33 +36,23 @@ from usd_mitsuba import motion
 from usd_mitsuba import util
 
 
-def _apply_displacement(
-    sub: Any, displacement: mi.Texture, mesh_data: Any
-) -> None:
-  """Applies a displacement texture to a sub-mesh object."""
-  uv_state = sub.primvars['st']
-  uv = np.array(uv_state.value)
-  si = dr.zeros(mi.SurfaceInteraction3f)
-  si.uv = mi.Point2f(uv[:, 0], 1.0 - uv[:, 1])
-  offset = np.array(displacement.eval_1(si))[..., None] - 0.5
-  points = np.array(sub.primvars['points'].value)
-  points += offset * np.array(sub.primvars['normals'].value)
-  sub.primvars['points'].value = Vt.Vec3fArray.FromNumpy(
-      points.astype(np.float32)
-  )
-  # Triangulation already wound `sub.triangles` right-handed.
-  sub_topology = geom_lib.HdMeshTopology(
-      mesh_data.scheme,
-      UsdGeom.Tokens.rightHanded,
-      Vt.IntArray([3] * (len(sub.triangles) // 3)),
-      sub.triangles,
-  )
-  sub.primvars = geom_lib.compute_normals(sub.primvars, sub_topology)
+def _to_mitsuba_mesh(
+    sub: Any,
+    properties: mi.Properties,
+    mesh_attributes: Iterable[tuple[str, int]],
+) -> mi.Mesh:
+  """Creates a Mitsuba mesh from a sub-mesh object and properties.
 
+  Args:
+    sub: The `geometry_ext.SubMeshOutput` to convert.
+    properties: The properties of the Mitsuba mesh.
+    mesh_attributes: `(primvar name, channel count)` pairs of the primvars that
+      are attached as vertex attributes. Primvars missing from `sub` are
+      skipped.
 
-# TODO: Add support for vertex colors and other primvars.
-def _to_mitsuba_mesh(sub: Any, properties: mi.Properties) -> mi.Mesh:
-  """Creates a Mitsuba mesh from a sub-mesh object and properties."""
+  Returns:
+    The Mitsuba mesh.
+  """
 
   vertices = np.array(sub.primvars['points'].value)
   faces = np.array(sub.triangles).reshape(-1, 3)
@@ -93,6 +81,7 @@ def _to_mitsuba_mesh(sub: Any, properties: mi.Properties) -> mi.Mesh:
       normals=normals,
       texcoords=texcoords,
   )
+  geom_lib.add_mesh_attributes(mi_mesh, sub.primvars, mesh_attributes)
   return mi_mesh
 
 
@@ -120,29 +109,20 @@ def convert_mesh(
   """
   stage = prim.GetStage()
   path = prim.GetPath()
-  has_displacement = material.has_displacement(prim)
   level_primvar = UsdGeom.PrimvarsAPI(prim).GetPrimvar(
       'mitsuba:subdivision_level'
   )
   if level_primvar and (level := level_primvar.Get()) is not None:
     subdivision_level = level
 
-  mesh_data, all_sub_meshes = geom_lib.extract_and_process_meshes(
-      stage, path, time, subdivision_level, has_displacement
-  )
-  sub_meshes = [
-      sub
-      for sub in all_sub_meshes
-      if 'points' in sub.primvars and len(sub.primvars['points'].value) > 0
-  ]
-  if len(sub_meshes) < len(all_sub_meshes):
-    Tf.Warn(f"Mesh {prim.GetPath()} has no points. Skipping translation.")
+  mesh_data = geom_lib.extract_mesh_data(stage, path, time)
+  # Faces not bound to a GeomSubset use the material of the mesh itself (an
+  # empty material path).
   subprims = [
-      stage.GetPrimAtPath(sub.material_id) if not sub.material_id.isEmpty
-      else prim
-      for sub in sub_meshes
+      prim if material_id.isEmpty else stage.GetPrimAtPath(material_id)
+      for material_id in mesh_data.material_ids
   ]
-  materials = [material.convert_material(subprim) for subprim in subprims]
+  materials = [material.convert_mesh_material(subprim) for subprim in subprims]
 
   # Emitters and sensors are only attached to top-level shapes: Mitsuba does
   # not support them on instances, so prototypes do without, and shapes
@@ -152,7 +132,7 @@ def convert_mesh(
   has_emitter_or_sensor = (
       prim.HasAPI(UsdLux.MeshLightAPI)
       or sensor_prim is not None
-      or any(emitter is not None for _, emitter, _, _ in materials)
+      or any(mat.emitter is not None for mat in materials)
   )
 
   motion_transform = None
@@ -170,18 +150,42 @@ def convert_mesh(
       world_transform = Gf.Matrix4d(1.0)
       motion_transform = motion.to_mitsuba_transform(samples)
 
+  displacements = [
+      (mat.displacement, mat.bias, mat.requires_uv, mat.is_vector)
+      for mat in materials
+  ]
+  requested_attrs = {
+      name for mat in materials for name, _ in mat.mesh_attributes
+  }
+  all_sub_meshes = geom_lib.process_mesh(
+      mesh_data,
+      subdivision_level,
+      world_transform,
+      displacements,
+      requested_attrs,
+  )
+  sub_meshes = [
+      sub
+      for sub in all_sub_meshes
+      if 'points' in sub.primvars and len(sub.primvars['points'].value) > 0
+  ]
+  if len(sub_meshes) < len(all_sub_meshes):
+    Tf.Warn(f"Mesh {prim.GetPath()} has no points. Skipping translation.")
+
+  materials_by_id = {
+      material_id: (subprim, mat)
+      for material_id, subprim, mat in zip(
+          mesh_data.material_ids, subprims, materials
+      )
+  }
   converted_meshes = {}
-  for sub, subprim, (
-      bsdf,
-      material_emitter,
-      displacement,
-      interior_medium,
-  ) in zip(sub_meshes, subprims, materials):
+  for sub in sub_meshes:
+    subprim, mat = materials_by_id[sub.material_id]
     props = mi.Properties()
-    if bsdf is not None:
-      props['bsdf'] = bsdf
-    if interior_medium is not None:
-      props['interior'] = interior_medium
+    if mat.bsdf is not None:
+      props['bsdf'] = mat.bsdf
+    if mat.interior_medium is not None:
+      props['interior'] = mat.interior_medium
 
     if custom_transform is None:
       # MeshLightAPI takes precedence over material-driven emission. Each
@@ -190,20 +194,17 @@ def convert_mesh(
       mesh_light_emitter = light.convert_mesh_light(prim, time, world_transform)
       if mesh_light_emitter is not None:
         props['emitter'] = mesh_light_emitter
-      elif material_emitter is not None:
-        props['emitter'] = material_emitter
+      elif mat.emitter is not None:
+        props['emitter'] = mat.emitter
 
       if sensor_prim is not None:
         props['sensor'] = mi.load_dict(
             camera.usd_to_mitsuba(UsdGeom.Camera(sensor_prim), time=time)
         )
 
-    if displacement is not None:
-      _apply_displacement(sub, displacement, mesh_data)
-
-    sub.primvars = geom_lib.transform_primvars(sub.primvars, world_transform)
-    converted_meshes[util.get_mitsuba_id(
-        subprim)] = _to_mitsuba_mesh(sub, props)
+    converted_meshes[util.get_mitsuba_id(subprim)] = _to_mitsuba_mesh(
+        sub, props, mat.mesh_attributes
+    )
 
   if motion_transform is not None and converted_meshes:
     return motion.wrap_in_instance(

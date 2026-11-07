@@ -22,6 +22,7 @@ of USD assets for Mitsuba rendering.
 from __future__ import annotations
 
 from typing import Any
+import dataclasses
 import os
 
 import mitsuba as mi
@@ -32,7 +33,6 @@ from pxr import Gf
 from pxr import Sdf
 from pxr import Tf
 from pxr import Usd
-from pxr import UsdGeom
 from pxr import UsdShade
 
 
@@ -471,26 +471,34 @@ def usd_preview_surface_to_mitsuba(
   return bsdf_dict, res_emitter_dict
 
 
-def has_displacement(prim: Usd.Prim) -> bool:
-  """Returns True if the bound material or any subset material has a displacement shader connected."""
-  prims_to_check = [prim] + [
-      child for child in prim.GetChildren() if child.IsA(UsdGeom.Subset)
-  ]
+@dataclasses.dataclass(frozen=True, slots=True)
+class MeshMaterial:
+  """Converted Mitsuba material objects and displacement/attribute metadata.
 
-  for p in prims_to_check:
-    material, _ = UsdShade.MaterialBindingAPI(p).ComputeBoundMaterial()
-    if material:
-      if find_shader(_get_displacement_output(material)) is not None:
-        return True
+  Attributes:
+    bsdf: The surface BSDF, if any.
+    emitter: The `area` emitter of an emissive material, if any.
+    displacement: The displacement texture, if any.
+    interior_medium: The interior medium, if any.
+    is_vector: Whether `displacement` returns a 3D vector in the (dPdu, dPdv, N)
+      tangent frame instead of a scalar offset along the normal.
+    bias: Value subtracted from scalar displacement values.
+    requires_uv: Whether evaluating `displacement` requires texture coordinates.
+    mesh_attributes: `(primvar name, channel count)` pairs of the primvars that
+      the material reads as mesh attributes.
+  """
 
-  return False
+  bsdf: mi.BSDF | None = None
+  emitter: mi.Emitter | None = None
+  displacement: mi.Texture | None = None
+  interior_medium: mi.Medium | None = None
+  is_vector: bool = False
+  bias: float = 0.5
+  requires_uv: bool = True
+  mesh_attributes: tuple[tuple[str, int], ...] = ()
 
 
-def convert_material(
-    prim: Usd.Prim,
-) -> tuple[
-    mi.BSDF | None, mi.Emitter | None, mi.Texture | None, mi.Medium | None
-]:
+def convert_mesh_material(prim: Usd.Prim) -> MeshMaterial:
   """Parses a USD geometry prim and returns Mitsuba material properties.
 
   This function will use the Mitsuba material variant if available, and
@@ -503,8 +511,7 @@ def convert_material(
     prim: The USD prim to extract the material from.
 
   Returns:
-    A tuple of the Mitsuba BSDF, emitter, displacement texture, and interior
-    medium (each may be None if not found).
+    The converted material.
   """
 
   bsdf, emitter, displacement, interior_medium = None, None, None, None
@@ -550,5 +557,30 @@ def convert_material(
           },
       })
 
-  return bsdf, emitter, displacement, interior_medium
+  return MeshMaterial(
+      bsdf=bsdf,
+      emitter=emitter,
+      displacement=displacement,
+      interior_medium=interior_medium,
+  )
+
+
+def convert_material(
+    prim: Usd.Prim,
+) -> tuple[
+    mi.BSDF | None, mi.Emitter | None, mi.Texture | None, mi.Medium | None
+]:
+  """Parses a USD prim and returns Mitsuba material properties.
+
+  See `convert_mesh_material` for details.
+
+  Args:
+    prim: The USD prim to extract the material from.
+
+  Returns:
+    A tuple of the Mitsuba BSDF, emitter, displacement texture, and interior
+    medium (each may be None if not found).
+  """
+  mat = convert_mesh_material(prim)
+  return mat.bsdf, mat.emitter, mat.displacement, mat.interior_medium
 

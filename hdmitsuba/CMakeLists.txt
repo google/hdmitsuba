@@ -149,7 +149,13 @@ target_link_libraries(geometry_ext PRIVATE
   hdMitsuba
   usd
   usdSkel
+  ${MITSUBA_LIBRARY}
+  ${DRJIT_CORE_LIBRARY}
+  ${NANOTHREAD_LIBRARY}
 )
+if(MITSUBA_HAS_AD)
+  target_link_libraries(geometry_ext PRIVATE ${DRJIT_EXTRA_LIBRARY})
+endif()
 set_target_properties(geometry_ext PROPERTIES
   INSTALL_RPATH "${PLATFORM_ORIGIN}/../../../plugin/usd;${PLATFORM_ORIGIN}/../../../lib"
 )

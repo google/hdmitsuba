@@ -144,6 +144,13 @@ class PrimTranslator {
                                 const MeshAttributeRequests& mesh_attributes,
                                 HdDirtyBits dirty_bits);
 
+  // Adds the primvars in `mesh_attributes` that exist in the expanded
+  // per-vertex `primvars` to the Mitsuba mesh `mesh_obj` as vertex attributes,
+  // like `BuildMesh`.
+  static void AttachMeshAttributes(
+      mitsuba::Object* mesh_obj, const PrimvarMap& primvars,
+      const MeshAttributeRequests& mesh_attributes);
+
   static mitsuba::ref<mitsuba::Shape<Float, Spectrum>> BuildCurves(
       const CurveSpec& spec, mitsuba::Object* bsdf);
 
