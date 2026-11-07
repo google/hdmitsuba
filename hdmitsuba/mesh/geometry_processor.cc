@@ -502,6 +502,39 @@ std::vector<SubMeshOutput> GeometryProcessor::SplitAndCompactMeshes(
   return sub_meshes;
 }
 
+void GeometryProcessor::AssignFaceMaterials(
+    absl::Span<const std::pair<SdfPath, VtIntArray>> subsets,
+    const SdfPath& mesh_material, MeshGeometry& mesh) {
+  auto find_or_add_material = [&](const SdfPath& material_id) -> int {
+    auto it = std::find(mesh.material_ids.begin(), mesh.material_ids.end(),
+                        material_id);
+    if (it != mesh.material_ids.end()) {
+      return static_cast<int>(std::distance(mesh.material_ids.begin(), it));
+    }
+    mesh.material_ids.push_back(material_id);
+    return static_cast<int>(mesh.material_ids.size()) - 1;
+  };
+  const int num_faces = static_cast<int>(mesh.face_vertex_counts.size());
+  mesh.material_ids.clear();
+  mesh.face_material_indices.assign(num_faces, -1);
+  for (const auto& [material_id, face_indices] : subsets) {
+    const int material_index = find_or_add_material(material_id);
+    for (const int face : face_indices) {
+      if (face >= 0 && face < num_faces) {
+        mesh.face_material_indices[face] = material_index;
+      }
+    }
+  }
+  if (mesh.material_ids.empty() ||
+      std::find(mesh.face_material_indices.cbegin(),
+                mesh.face_material_indices.cend(),
+                -1) != mesh.face_material_indices.cend()) {
+    std::replace(mesh.face_material_indices.begin(),
+                 mesh.face_material_indices.end(), -1,
+                 find_or_add_material(mesh_material));
+  }
+}
+
 std::string GeometryProcessor::MakeSubMeshId(const SdfPath& mesh_id,
                                              const SdfPath& material_id,
                                              size_t material_index) {

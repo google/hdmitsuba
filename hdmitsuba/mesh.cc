@@ -14,9 +14,7 @@
 
 #include "hdmitsuba/mesh.h"
 
-#include <algorithm>
 #include <cstddef>
-#include <iterator>
 #include <optional>
 #include <string>
 #include <utility>
@@ -189,7 +187,7 @@ void HdMitsubaMesh::Sync(HdSceneDelegate* sceneDelegate,
     if (topology_dirty || primvars_dirty) {
       SyncPrimvars(sceneDelegate, dirtyBits);
     }
-    UpdateScene(sceneDelegate, renderParam, primvars_, dirtyBits);
+    UpdateScene(sceneDelegate, renderParam, dirtyBits);
   }
 
   *dirtyBits = HdChangeTracker::Clean;
@@ -226,39 +224,20 @@ void HdMitsubaMesh::SyncTopology(HdSceneDelegate* sceneDelegate,
   HdMeshTopology topology =
       HdMeshTopology(GetMeshTopology(sceneDelegate), refineLevel);
 
-  const HdGeomSubsets& geom_subsets = topology.GetGeomSubsets();
-  const int num_coarse_faces = topology.GetNumFaces();
-  material_ids_.clear();
-  auto find_or_add_material = [this](const SdfPath& material_id) -> int {
-    auto it = std::find(material_ids_.begin(), material_ids_.end(),
-                        material_id);
-    if (it != material_ids_.end()) {
-      return std::distance(material_ids_.begin(), it);
-    }
-    material_ids_.push_back(material_id);
-    return material_ids_.size() - 1;
-  };
-  face_material_indices_.assign(num_coarse_faces, -1);
-  for (const auto& subset : geom_subsets) {
+  geometry_.face_vertex_counts = topology.GetFaceVertexCounts();
+  geometry_.face_vertex_indices = topology.GetFaceVertexIndices();
+  geometry_.left_handed =
+      topology.GetOrientation() == PxOsdOpenSubdivTokens->leftHanded;
+  geometry_.is_subdivided = false;
+  std::vector<std::pair<SdfPath, VtIntArray>> subsets;
+  for (const HdGeomSubset& subset : topology.GetGeomSubsets()) {
     // Faces of subsets without a material binding use the mesh's material.
-    if (subset.materialId.IsEmpty()) continue;
-    const int material_index = find_or_add_material(subset.materialId);
-    for (const int face_index : subset.indices) {
-      if (face_index >= 0 && face_index < num_coarse_faces) {
-        face_material_indices_[face_index] = material_index;
-      }
+    if (!subset.materialId.IsEmpty()) {
+      subsets.emplace_back(subset.materialId, subset.indices);
     }
   }
-  // Faces not covered by any GeomSubset use the mesh's own material. Only add
-  // this slot if it is referenced, so that meshes fully partitioned into
-  // single-material GeomSubsets hit the unsplit single-material fast path.
-  if (material_ids_.empty() ||
-      std::find(face_material_indices_.cbegin(), face_material_indices_.cend(),
-                -1) != face_material_indices_.cend()) {
-    std::replace(face_material_indices_.begin(), face_material_indices_.end(),
-                 -1,
-                 find_or_add_material(sceneDelegate->GetMaterialId(GetId())));
-  }
+  GeometryProcessor::AssignFaceMaterials(
+      subsets, sceneDelegate->GetMaterialId(GetId()), geometry_);
 
   const TfToken scheme = topology.GetScheme();
   absl::flat_hash_map<TfToken, VtIntArray, TfToken::HashFunctor> fvar_indices;
@@ -276,29 +255,19 @@ void HdMitsubaMesh::SyncTopology(HdSceneDelegate* sceneDelegate,
 
   subdiv_evaluator_.Initialize(topology.GetPxOsdMeshTopology(), refineLevel,
                                fvar_indices, TfToken(GetId().GetText()));
-
-  if (subdiv_evaluator_.IsSubdivided()) {
-    face_material_indices_ =
-        subdiv_evaluator_.MapRefinedMaterialIndices(face_material_indices_);
-    // OpenSubdiv refines `leftHanded` meshes into right-handed faces.
-    topology_ = HdMeshTopology(scheme, PxOsdOpenSubdivTokens->rightHanded,
-                               subdiv_evaluator_.GetRefinedFaceVertexCounts(),
-                               subdiv_evaluator_.GetRefinedFaceVertexIndices());
-  } else {
-    topology_ = std::move(topology);
-  }
+  subdiv_evaluator_.RefineTopology(geometry_);
 }
 
 void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
                                 HdRenderParam* renderParam,
-                                const PrimvarMap& primvars,
                                 HdDirtyBits* dirtyBits) {
   TRACE_FUNCTION();
   auto* mitsuba_render_param = static_cast<HdMitsubaRenderParam*>(renderParam);
   auto* scene = mitsuba_render_param->GetScene();
   auto id = GetId();
-  auto points_it = primvars.find(HdTokens->points);
-  if (points_it == primvars.end() || points_it->second.value.IsEmpty() ||
+  auto points_it = geometry_.primvars.find(HdTokens->points);
+  if (points_it == geometry_.primvars.end() ||
+      points_it->second.value.IsEmpty() ||
       points_it->second.value.UncheckedGet<VtVec3fArray>().empty()) {
     TF_DEBUG(HDMITSUBA_LIFECYCLE)
         .Msg("Mesh %s has no points. Removing from scene.\n", id.GetText());
@@ -334,8 +303,7 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
 
   MeshSpec spec;
   spec.id = id;
-  spec.material_ids = material_ids_;
-  spec.primvars = primvars;
+  spec.geometry = geometry_;
   spec.transform = transform;
   spec.emitter_spec = std::move(emitter_spec);
   spec.instance_transforms = std::move(instance_transforms);
@@ -343,20 +311,7 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
   spec.needs_rebuild =
       dirtyBits && (*dirtyBits & HdChangeTracker::DirtyTopology);
   spec.dirty_bits = dirtyBits ? *dirtyBits : HdChangeTracker::Clean;
-  spec.is_subdivided = subdiv_evaluator_.IsSubdivided();
   spec.double_sided = IsDoubleSided(sceneDelegate);
-  spec.left_handed =
-      topology_.GetOrientation() == PxOsdOpenSubdivTokens->leftHanded;
-
-  spec.face_material_indices = face_material_indices_;
-  if (subdiv_evaluator_.IsSubdivided()) {
-    spec.face_vertex_counts = subdiv_evaluator_.GetRefinedFaceVertexCounts();
-    spec.face_vertex_indices = subdiv_evaluator_.GetRefinedFaceVertexIndices();
-  } else {
-    spec.face_vertex_counts = topology_.GetFaceVertexCounts();
-    spec.face_vertex_indices = topology_.GetFaceVertexIndices();
-  }
-
   scene->SyncMesh(std::move(spec));
   in_scene_ = true;
 }
@@ -402,10 +357,11 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
   // Remove primvars that no longer exist from the primvar map.
   // Protect built-in geometric attributes (points, normals) from removal.
   if (*dirtyBits & HdChangeTracker::DirtyPrimvar) {
-    for (auto it = primvars_.begin(); it != primvars_.end();) {
+    for (auto it = geometry_.primvars.begin();
+         it != geometry_.primvars.end();) {
       if (it->first != HdTokens->points && it->first != HdTokens->normals &&
           !primvar_descriptors.contains(it->first)) {
-        it = primvars_.erase(it);
+        it = geometry_.primvars.erase(it);
       } else {
         ++it;
       }
@@ -414,7 +370,7 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
 
   const SdfPath& id = GetId();
   if (subdiv_evaluator_.IsSubdivided()) {
-    primvars_.erase(HdTokens->normals);
+    geometry_.primvars.erase(HdTokens->normals);
   }
 
   // Query and evaluate computed primvars.
@@ -461,7 +417,7 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
       value =
           subdiv_evaluator_.RefinePrimvar(value, desc.interpolation, desc.name);
     }
-    primvars_[name] = {std::move(value), desc};
+    geometry_.primvars[name] = {std::move(value), desc};
   };
 
   // 1. Explicitly sync points (built-in geometric attribute)
@@ -485,16 +441,16 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
         desc.role = HdPrimvarRoleTokens->normal;
       }
       size_t vertex_count = 0;
-      auto points_it = primvars_.find(HdTokens->points);
-      if (points_it != primvars_.end() &&
+      auto points_it = geometry_.primvars.find(HdTokens->points);
+      if (points_it != geometry_.primvars.end() &&
           points_it->second.value.IsHolding<VtVec3fArray>()) {
         vertex_count = points_it->second.value.UncheckedGet<VtVec3fArray>().size();
       }
-      size_t face_count = topology_.GetNumFaces();
-      size_t corner_count = topology_.GetNumFaceVaryings();
+      size_t face_count = geometry_.face_vertex_counts.size();
+      size_t corner_count = geometry_.face_vertex_indices.size();
       if (ValidatePrimvarSize(value, desc.interpolation, vertex_count,
                               face_count, corner_count)) {
-        primvars_[HdTokens->normals] = {std::move(value), desc};
+        geometry_.primvars[HdTokens->normals] = {std::move(value), desc};
       } else {
         size_t actual_size =
             value.IsHolding<VtVec3fArray>()
