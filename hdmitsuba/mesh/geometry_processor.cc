@@ -35,6 +35,7 @@
 #include <pxr/base/gf/vec2f.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/gf/vec3i.h>
+#include <pxr/base/gf/vec4f.h>
 #include <pxr/base/tf/token.h>
 #include <pxr/base/trace/trace.h>
 #include <pxr/base/vt/array.h>
@@ -56,12 +57,12 @@ namespace {
 
 constexpr bool kUseMeshCompression = true;
 
-using PrimvarArrayVariant =
-    std::variant<VtFloatArray, VtVec2fArray, VtVec3fArray>;
+using PrimvarArrayVariant = std::variant<VtFloatArray, VtIntArray, VtVec2fArray,
+                                         VtVec3fArray, VtVec4fArray>;
 
 template <typename T>
 constexpr size_t PrimvarDimension() {
-  if constexpr (std::is_same_v<T, float>) {
+  if constexpr (std::is_same_v<T, float> || std::is_same_v<T, int>) {
     return 1;
   } else {
     return T::dimension;
@@ -91,6 +92,16 @@ std::optional<PrimvarArrayVariant> ExtractPrimvarArray(const VtValue& value) {
   }
   if (value.IsHolding<VtFloatArray>()) {
     return value.UncheckedGet<VtFloatArray>();
+  }
+  if (value.IsHolding<VtVec4fArray>()) {
+    return value.UncheckedGet<VtVec4fArray>();
+  }
+  if (value.IsHolding<VtIntArray>()) {
+    return value.UncheckedGet<VtIntArray>();
+  }
+  if (value.IsHolding<VtBoolArray>()) {
+    const VtBoolArray& src = value.UncheckedGet<VtBoolArray>();
+    return VtIntArray(src.begin(), src.end());
   }
   return std::nullopt;
 }

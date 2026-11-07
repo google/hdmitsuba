@@ -76,6 +76,51 @@ TEST(SubdivisionEvaluatorTest, RefinePrimvar) {
   EXPECT_EQ(refined_scalars_val.Get<pxr::VtFloatArray>().size(), 13);
 }
 
+TEST(SubdivisionEvaluatorTest, RefineUniformPrimvar) {
+  // Two quads sharing an edge.
+  VtIntArray face_counts = {4, 4};
+  VtIntArray face_indices = {0, 1, 4, 3, 1, 2, 5, 4};
+  pxr::PxOsdMeshTopology topo(pxr::UsdGeomTokens->catmullClark,
+                              pxr::HdTokens->rightHanded, face_counts,
+                              face_indices);
+
+  SubdivisionEvaluator subdiv;
+  subdiv.Initialize(topo, 1, /*fvar_indices=*/{}, TfToken("quads"));
+  ASSERT_TRUE(subdiv.IsSubdivided());
+  // Each quad is refined into 4 quads.
+  const VtIntArray coarse_faces = {0, 1};
+  const VtIntArray refined_faces = subdiv.MapRefinedMaterialIndices(coarse_faces);
+  ASSERT_EQ(refined_faces.size(), 8);
+
+  const pxr::VtFloatArray colors = {0.25f, 0.75f};
+  VtValue refined_colors = subdiv.RefinePrimvar(
+      VtValue(colors), pxr::HdInterpolationUniform, TfToken("color"));
+  ASSERT_TRUE(refined_colors.IsHolding<pxr::VtFloatArray>());
+  const auto& refined_color_array = refined_colors.Get<pxr::VtFloatArray>();
+  ASSERT_EQ(refined_color_array.size(), refined_faces.size());
+
+  const VtVec3fArray vectors = {GfVec3f(1, 0, 0), GfVec3f(0, 1, 0)};
+  VtValue refined_vectors = subdiv.RefinePrimvar(
+      VtValue(vectors), pxr::HdInterpolationUniform, TfToken("vector"));
+  ASSERT_TRUE(refined_vectors.IsHolding<VtVec3fArray>());
+  const auto& refined_vector_array = refined_vectors.Get<VtVec3fArray>();
+  ASSERT_EQ(refined_vector_array.size(), refined_faces.size());
+
+  const pxr::VtBoolArray flags = {true, false};
+  VtValue refined_flags = subdiv.RefinePrimvar(
+      VtValue(flags), pxr::HdInterpolationUniform, TfToken("flag"));
+  ASSERT_TRUE(refined_flags.IsHolding<pxr::VtBoolArray>());
+  const auto& refined_flag_array = refined_flags.Get<pxr::VtBoolArray>();
+  ASSERT_EQ(refined_flag_array.size(), refined_faces.size());
+
+  for (size_t i = 0; i < refined_faces.size(); ++i) {
+    const int parent = refined_faces[i];
+    EXPECT_EQ(refined_color_array[i], colors[parent]);
+    EXPECT_EQ(refined_vector_array[i], vectors[parent]);
+    EXPECT_EQ(refined_flag_array[i], flags[parent]);
+  }
+}
+
 }  // namespace
 
 PXR_NAMESPACE_CLOSE_SCOPE

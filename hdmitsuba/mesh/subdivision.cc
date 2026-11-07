@@ -18,6 +18,7 @@
 #include <cstring>
 #include <memory>
 #include <numeric>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -30,6 +31,7 @@
 #include <opensubdiv/far/types.h>
 #include <pxr/base/gf/vec2f.h>
 #include <pxr/base/gf/vec3f.h>
+#include <pxr/base/gf/vec4f.h>
 #include <pxr/base/tf/diagnostic.h>
 #include <pxr/base/tf/token.h>
 #include <pxr/base/vt/array.h>
@@ -256,6 +258,39 @@ VtValue SubdivisionEvaluator::RefinePrimvar(const VtValue& value,
     return value;
   }
 
+  // Uniform primvars hold one value per face, which refined faces inherit from
+  // their parent coarse face.
+  if (interpolation == HdInterpolationUniform) {
+    auto map_to_refined = [&](const auto& src) -> VtValue {
+      if (src.empty()) return value;
+      std::decay_t<decltype(src)> dst(refined_to_coarse_map_.size());
+      auto* dst_ptr = dst.data();
+      for (size_t i = 0; i < refined_to_coarse_map_.size(); ++i) {
+        dst_ptr[i] = src[refined_to_coarse_map_[i]];
+      }
+      return VtValue(std::move(dst));
+    };
+    if (value.IsHolding<VtVec4fArray>()) {
+      return map_to_refined(value.UncheckedGet<VtVec4fArray>());
+    }
+    if (value.IsHolding<VtVec3fArray>()) {
+      return map_to_refined(value.UncheckedGet<VtVec3fArray>());
+    }
+    if (value.IsHolding<VtVec2fArray>()) {
+      return map_to_refined(value.UncheckedGet<VtVec2fArray>());
+    }
+    if (value.IsHolding<VtFloatArray>()) {
+      return map_to_refined(value.UncheckedGet<VtFloatArray>());
+    }
+    if (value.IsHolding<VtIntArray>()) {
+      return map_to_refined(value.UncheckedGet<VtIntArray>());
+    }
+    if (value.IsHolding<VtBoolArray>()) {
+      return map_to_refined(value.UncheckedGet<VtBoolArray>());
+    }
+    return value;
+  }
+
   int fvar_channel = -1;
   const OpenSubdiv::Far::StencilTable* stencil = nullptr;
   if (interpolation == HdInterpolationFaceVarying) {
@@ -277,6 +312,9 @@ VtValue SubdivisionEvaluator::RefinePrimvar(const VtValue& value,
     return value;
   }
 
+  if (value.IsHolding<VtVec4fArray>()) {
+    return RefinePrimvarImpl<VtVec4fArray>(value, stencil, fvar_channel);
+  }
   if (value.IsHolding<VtVec3fArray>()) {
     return RefinePrimvarImpl<VtVec3fArray>(value, stencil, fvar_channel);
   }
@@ -285,6 +323,18 @@ VtValue SubdivisionEvaluator::RefinePrimvar(const VtValue& value,
   }
   if (value.IsHolding<VtFloatArray>()) {
     return RefinePrimvarImpl<VtFloatArray>(value, stencil, fvar_channel);
+  }
+  // Integer and boolean primvars are interpolated as floats.
+  auto to_float = [](const auto& src) {
+    return VtValue(VtFloatArray(src.begin(), src.end()));
+  };
+  if (value.IsHolding<VtIntArray>()) {
+    return RefinePrimvarImpl<VtFloatArray>(
+        to_float(value.UncheckedGet<VtIntArray>()), stencil, fvar_channel);
+  }
+  if (value.IsHolding<VtBoolArray>()) {
+    return RefinePrimvarImpl<VtFloatArray>(
+        to_float(value.UncheckedGet<VtBoolArray>()), stencil, fvar_channel);
   }
   return value;
 }

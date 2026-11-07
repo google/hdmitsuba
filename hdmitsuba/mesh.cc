@@ -239,6 +239,8 @@ void HdMitsubaMesh::SyncTopology(HdSceneDelegate* sceneDelegate,
   };
   face_material_indices_.assign(num_coarse_faces, -1);
   for (const auto& subset : geom_subsets) {
+    // Faces of subsets without a material binding use the mesh's material.
+    if (subset.materialId.IsEmpty()) continue;
     const int material_index = find_or_add_material(subset.materialId);
     for (const int face_index : subset.indices) {
       if (face_index >= 0 && face_index < num_coarse_faces) {
