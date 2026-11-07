@@ -110,39 +110,29 @@ HdMitsubaRenderDelegate::~HdMitsubaRenderDelegate() = default;
 
 void HdMitsubaRenderDelegate::Initialize() {
   // Initialize the settings and settings descriptors.
-  setting_descriptors_.resize(10);
-  setting_descriptors_[0] = {"Variant", HdMitsubaRenderSettingsTokens->variant,
-                             VtValue(HdMitsubaConfig::GetInstance().variant)};
-  setting_descriptors_[1] = {"Samples Per Pixel",
-                             HdMitsubaRenderSettingsTokens->sample_count,
-                             VtValue(128)};
-  setting_descriptors_[2] = {"Seed", HdMitsubaRenderSettingsTokens->seed,
-                             VtValue(0)};
-  setting_descriptors_[3] = {
-      "Interactive Samples Per Pass",
-      HdMitsubaRenderSettingsTokens->interactive_samples_per_pass, VtValue(1)};
-  setting_descriptors_[4] = {"Integrator Type",
-                             HdMitsubaRenderSettingsTokens->integrator_type,
-                             VtValue(std::string("path"))};
-  setting_descriptors_[5] = {
-      "Integrator Max Depth",
-      HdMitsubaRenderSettingsTokens->integrator_max_depth, VtValue()};
-  setting_descriptors_[6] = {"Integrator Russian Roulette Depth",
-                             HdMitsubaRenderSettingsTokens->integrator_rr_depth,
-                             VtValue()};
-  setting_descriptors_[7] = {"Enable Interactive Mode",
-                             HdRenderSettingsTokens->enableInteractive,
-                             VtValue(true)};
-  bool default_freezing = false;
-  if (HdMitsubaConfig::GetInstance().use_kernel_freezing == 1) {
-    default_freezing = true;
-  }
-  setting_descriptors_[8] = {"Enable Kernel Freezing (Experimental)",
-                             HdMitsubaRenderSettingsTokens->use_kernel_freezing,
-                             VtValue(default_freezing)};
-  setting_descriptors_[9] = {"Enable Denoising (OptiX on CUDA, OIDN on CPU)",
-                             HdMitsubaRenderSettingsTokens->denoise,
-                             VtValue(false)};
+  const HdMitsubaConfig& config = HdMitsubaConfig::GetInstance();
+  setting_descriptors_ = {
+      {"Variant", HdMitsubaRenderSettingsTokens->variant,
+       VtValue(config.variant)},
+      {"Samples Per Pixel", HdMitsubaRenderSettingsTokens->sample_count,
+       VtValue(128)},
+      {"Seed", HdMitsubaRenderSettingsTokens->seed, VtValue(0)},
+      {"Interactive Samples Per Pass",
+       HdMitsubaRenderSettingsTokens->interactive_samples_per_pass, VtValue(1)},
+      {"Integrator Type", HdMitsubaRenderSettingsTokens->integrator_type,
+       VtValue(std::string("path"))},
+      {"Integrator Max Depth",
+       HdMitsubaRenderSettingsTokens->integrator_max_depth, VtValue()},
+      {"Integrator Russian Roulette Depth",
+       HdMitsubaRenderSettingsTokens->integrator_rr_depth, VtValue()},
+      {"Enable Interactive Mode", HdRenderSettingsTokens->enableInteractive,
+       VtValue(true)},
+      {"Enable Kernel Freezing (Experimental)",
+       HdMitsubaRenderSettingsTokens->use_kernel_freezing,
+       VtValue(config.use_kernel_freezing == 1)},
+      {"Enable Denoising (OptiX on CUDA, OIDN on CPU)",
+       HdMitsubaRenderSettingsTokens->denoise, VtValue(false)},
+  };
   _PopulateDefaultSettings(setting_descriptors_);
 
   current_variant_ =
