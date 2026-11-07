@@ -102,7 +102,7 @@ def _convert_plane(
     motion_interval: tuple[float, float] = (0.0, 0.0),
 ) -> dict[str, Any]:
   """Handles a plane prim and returns the Mitsuba shape dictionary."""
-  bsdf, emitter, displacement, _ = material.convert_material(prim)
+  bsdf, emitter, displacement, interior_medium = material.convert_material(prim)
   if displacement is not None:
     raise ValueError(
         'Displacement is not supported for planes. Please use a mesh.'
@@ -119,6 +119,8 @@ def _convert_plane(
   }
   if bsdf is not None:
     mi_plane['bsdf'] = bsdf
+  if interior_medium is not None:
+    mi_plane['interior'] = interior_medium
   if emitter is not None:
     mi_plane['emitter'] = emitter
   return _wrap_shape_if_animated(prim, mi_plane, time, motion_interval)

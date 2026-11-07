@@ -42,6 +42,7 @@ def _set_mitsuba_variant():
         'nodegraphs',
         'display_color',
         'mitsuba_bitmap',
+        'opacity',
         'uv_texture',
         'volumes',
     ],
@@ -214,3 +215,4 @@ def test_unsupported_diffuse_falls_back_to_display_color(render_context: str):
   diffuse.ConnectToSource(ptex.ConnectableAPI(), 'rgb')
   r, g, b = engine.render()['color'][32, 32, :3]
   assert g > 2.0 * max(r, b)
+

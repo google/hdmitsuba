@@ -24,6 +24,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -128,6 +129,11 @@ std::optional<T> GetSetting(const VtDictionary& settings,
   }
   if (it->second.IsHolding<T>()) {
     return it->second.UncheckedGet<T>();
+  }
+  if constexpr (std::is_same_v<T, std::string>) {
+    if (it->second.IsHolding<TfToken>()) {
+      return it->second.UncheckedGet<TfToken>().GetString();
+    }
   }
   TF_WARN("Type mismatch for render setting '%s': expected %s, got %s",
           key.c_str(), TfType::Find<T>().GetTypeName().c_str(),

@@ -419,10 +419,15 @@ def usd_preview_surface_to_mitsuba(
       if conn[0].GetIdAttr().Get() == 'UsdUVTexture':
         val = _convert_uv_texture(conn[0], name, conn[1])
         if val is not None and name in ('opacity', 'clearcoatRoughness'):
-          Tf.Warn(
-              f"Texture inversion for {name} is not supported. The resulting"
-              " Mitsuba material may look incorrect."
-          )
+          # Constant textures (e.g. the alpha of an image without an alpha
+          # channel) can be inverted, unlike spatially varying ones.
+          if val['type'] == 'uniform':
+            val = 1.0 - val['value']
+          else:
+            Tf.Warn(
+                f"Texture inversion for {name} is not supported. The resulting"
+                " Mitsuba material may look incorrect."
+            )
     else:
       raw_val = usd_input.GetAttr().Get()
       if raw_val is not None:

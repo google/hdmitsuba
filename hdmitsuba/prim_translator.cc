@@ -471,7 +471,14 @@ PrimTranslator<Float, Spectrum>::ParsePreviewSurface(
             std::string(mapping.mitsuba_name).c_str());
       }
     }
-    if (texture) {
+    auto* constant_tex =
+        static_cast<mitsuba::Texture<Float, Spectrum>*>(texture.get());
+    if (mapping.invert_float && constant_tex &&
+        !constant_tex->is_spatially_varying()) {
+      // Constant textures (e.g. the alpha of an image without an alpha
+      // channel) can be inverted, unlike spatially varying ones.
+      props.set(mapping.mitsuba_name, 1.0f - constant_tex->max());
+    } else if (texture) {
       props.set(mapping.mitsuba_name, texture);
       if (mapping.mitsuba_name == "spec_trans") {
         spec_trans_is_texture = true;
