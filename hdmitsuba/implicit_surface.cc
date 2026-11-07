@@ -121,12 +121,12 @@ void HdMitsubaImplicitSurface::Sync(HdSceneDelegate* sceneDelegate,
   MeshSpec spec;
   spec.id = id;
   spec.implicit_surface = surface;
-  spec.material_ids = {sceneDelegate->GetMaterialId(id)};
+  spec.geometry.material_ids = {sceneDelegate->GetMaterialId(id)};
   spec.double_sided = sceneDelegate->GetDoubleSided(id);
   for (const HdPrimvarDescriptor& descriptor :
        GetPrimvarDescriptors(sceneDelegate, HdInterpolationConstant)) {
-    spec.primvars[descriptor.name] = {GetPrimvar(sceneDelegate, descriptor.name),
-                                      descriptor};
+    spec.geometry.primvars[descriptor.name] = {
+        GetPrimvar(sceneDelegate, descriptor.name), descriptor};
   }
 
   const SdfPath& instancer_id = GetInstancerId();

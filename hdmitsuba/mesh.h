@@ -22,7 +22,6 @@
 #include <pxr/base/vt/types.h>
 #include <pxr/imaging/hd/changeTracker.h>
 #include <pxr/imaging/hd/mesh.h>
-#include <pxr/imaging/hd/meshTopology.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/imaging/hd/types.h>
@@ -62,13 +61,8 @@ class HdMitsubaMesh final : public HdMesh {
  private:
   SubdivisionEvaluator subdiv_evaluator_;
 
-  // For Multi-Material Meshes: Maps coarse face index to a material index.
-  VtIntArray face_material_indices_;
-  // Stores the SdfPath for each material index.
-  std::vector<SdfPath> material_ids_;
-
-  HdMeshTopology topology_;
-  PrimvarMap primvars_;
+  // Topology (after subdivision), face materials and (refined) primvars.
+  MeshGeometry geometry_;
 
   // Resolves the effective subdivision level from the display style and the
   // optional `mitsuba:subdivision_level` override.
@@ -77,7 +71,7 @@ class HdMitsubaMesh final : public HdMesh {
   void SyncTopology(HdSceneDelegate* sceneDelegate, int refineLevel);
   void SyncPrimvars(HdSceneDelegate* sceneDelegate, HdDirtyBits* dirtyBits);
   void UpdateScene(HdSceneDelegate* sceneDelegate, HdRenderParam* renderParam,
-                   const PrimvarMap& final_primvars, HdDirtyBits* dirtyBits);
+                   HdDirtyBits* dirtyBits);
 
   void RemoveFromScene(SceneManager* scene);
 

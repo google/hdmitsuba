@@ -113,6 +113,15 @@ class GeometryProcessor {
                                      size_t num_points,
                                      const PrimvarMap& primvars);
 
+  // Sets `mesh.material_ids` and `mesh.face_material_indices` from the
+  // (material id, face indices) pairs of the GeomSubsets of the mesh. Faces not
+  // covered by any subset use `mesh_material`, which is only added if it is
+  // referenced, so that meshes fully partitioned into single-material subsets
+  // are not split.
+  static void AssignFaceMaterials(
+      absl::Span<const std::pair<SdfPath, VtIntArray>> subsets,
+      const SdfPath& mesh_material, MeshGeometry& mesh);
+
   // Constructs the shape ID for a multi-material mesh subset. The material
   // suffix is delimited by '#', which cannot appear in an `SdfPath`, so that
   // sub-mesh IDs never collide with the paths of child prims.

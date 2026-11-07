@@ -234,15 +234,8 @@ class SceneModel final : public SceneManager {
   static std::vector<SubMeshOutput> ProcessGeometry(
       const MeshCommitWork& work) {
     const MeshSpec& spec = *work.spec;
-    const MeshGeometry geometry{spec.face_vertex_counts,
-                                spec.face_vertex_indices,
-                                spec.left_handed,
-                                spec.is_subdivided,
-                                spec.material_ids,
-                                spec.face_material_indices,
-                                spec.primvars};
     return RunGeometryPipeline<Float, Spectrum>(
-        spec.id, geometry, spec.transform, work.displacements,
+        spec.id, spec.geometry, spec.transform, work.displacements,
         work.requested_attributes);
   }
 
@@ -351,9 +344,10 @@ class SceneModel final : public SceneManager {
     TRACE_FUNCTION();
     TF_DEBUG(HDMITSUBA_SYNC)
         .Msg("SyncMesh: %s (%zu materials, first: %s)\n", spec.id.GetText(),
-             spec.material_ids.size(),
-             spec.material_ids.empty() ? "none"
-                                       : spec.material_ids[0].GetText());
+             spec.geometry.material_ids.size(),
+             spec.geometry.material_ids.empty()
+                 ? "none"
+                 : spec.geometry.material_ids[0].GetText());
     absl::MutexLock lock(state_mutex_);
     UpsertSpec(mesh_specs_, std::move(spec));
     has_pending_commits_ = true;
@@ -923,7 +917,7 @@ class SceneModel final : public SceneManager {
     for (auto& [id, spec] : specs_map) {
       bool needs_bsdf_update = false;
       if constexpr (std::is_same_v<SpecType, MeshSpec>) {
-        for (const auto& mat_id : spec.material_ids) {
+        for (const auto& mat_id : spec.geometry.material_ids) {
           apply_material_dirty(mat_id, spec, needs_bsdf_update);
         }
         if (sensor_binding_dirty_.contains(spec.id)) {
@@ -1132,30 +1126,32 @@ class SceneModel final : public SceneManager {
 
   void UpdateSubMeshesMetadataOnly(const MeshSpec& spec,
                                    std::string_view key_prefix) {
-    if (spec.material_ids.size() <= 1) {
+    if (spec.geometry.material_ids.size() <= 1) {
       std::string key = absl::StrCat(key_prefix, spec.id.GetAsString());
       auto it = shapes_.find(key);
       if (!TF_VERIFY(it != shapes_.end(), "Sub-mesh not found: %s",
                      key.c_str())) {
         return;
       }
-      const SdfPath& mat_id =
-          spec.material_ids.empty() ? SdfPath() : spec.material_ids[0];
-      UpdateSubMeshEmitterAndBsdf(it->second.get(), spec, mat_id, spec.primvars,
-                                  key_prefix);
+      const SdfPath& mat_id = spec.geometry.material_ids.empty()
+                                  ? SdfPath()
+                                  : spec.geometry.material_ids[0];
+      UpdateSubMeshEmitterAndBsdf(it->second.get(), spec, mat_id,
+                                  spec.geometry.primvars, key_prefix);
       return;
     }
-    for (size_t i = 0; i < spec.material_ids.size(); ++i) {
+    for (size_t i = 0; i < spec.geometry.material_ids.size(); ++i) {
       std::string key = absl::StrCat(
-          key_prefix,
-          GeometryProcessor::MakeSubMeshId(spec.id, spec.material_ids[i], i));
+          key_prefix, GeometryProcessor::MakeSubMeshId(
+                          spec.id, spec.geometry.material_ids[i], i));
       auto it = shapes_.find(key);
       if (it == shapes_.end()) {
         // Empty material subset was not emitted by SplitAndCompactMeshes.
         continue;
       }
-      UpdateSubMeshEmitterAndBsdf(it->second.get(), spec, spec.material_ids[i],
-                                  spec.primvars, key_prefix);
+      UpdateSubMeshEmitterAndBsdf(it->second.get(), spec,
+                                  spec.geometry.material_ids[i],
+                                  spec.geometry.primvars, key_prefix);
     }
   }
 
@@ -1173,8 +1169,8 @@ class SceneModel final : public SceneManager {
     const ImplicitSurface& surface = *spec.implicit_surface;
     const ScalarAffineTransform4f to_world =
         UsdToMitsubaTransform(spec.transform);
-    const SdfPath& material_id = spec.material_ids[0];
-    ref<BSDF> bsdf = ResolveBsdf(material_id, spec.primvars);
+    const SdfPath& material_id = spec.geometry.material_ids[0];
+    ref<BSDF> bsdf = ResolveBsdf(material_id, spec.geometry.primvars);
     const std::vector<ImplicitSurfacePart> parts =
         GetImplicitSurfaceParts(spec.id, surface, to_world);
     if (!spec.needs_rebuild) {
@@ -1352,7 +1348,8 @@ class SceneModel final : public SceneManager {
 
   bool HasEmitter(const MeshSpec& spec) const {
     return spec.emitter_spec.has_value() ||
-           std::any_of(spec.material_ids.begin(), spec.material_ids.end(),
+           std::any_of(spec.geometry.material_ids.begin(),
+                       spec.geometry.material_ids.end(),
                        [&](const SdfPath& material_id) {
                          return material_emitters_.contains(material_id);
                        });
@@ -1401,8 +1398,8 @@ class SceneModel final : public SceneManager {
       const MeshSpec* spec = &ResolveMotionWrapped(*pending_specs[i],
                                                    work_items[i].resolved_spec);
       work_items[i].spec = spec;
-      work_items[i].displacements.reserve(spec->material_ids.size());
-      for (const auto& material_id : spec->material_ids) {
+      work_items[i].displacements.reserve(spec->geometry.material_ids.size());
+      for (const auto& material_id : spec->geometry.material_ids) {
         auto disp_it = displacements_.find(material_id);
         if (disp_it != displacements_.end()) {
           work_items[i].displacements.push_back(disp_it->second);
