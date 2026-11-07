@@ -153,12 +153,7 @@ struct ImplicitSurface {
   }
 };
 
-struct MeshSpec : public BaseSpec {
-  std::vector<SdfPath> material_ids;
-  VtIntArray face_material_indices;
-  VtIntArray face_vertex_counts;
-  VtIntArray face_vertex_indices;
-  PrimvarMap primvars;
+struct MeshSpec : public BaseSpec, public MeshGeometry {
   GfMatrix4d transform;
   std::optional<LightSpec> emitter_spec = std::nullopt;
   // If set, the shape is rendered as this native Mitsuba shape with a single
@@ -171,9 +166,7 @@ struct MeshSpec : public BaseSpec {
   // transform at frame time so the SceneManager can fall back to it.
   std::vector<MotionTransform> instance_transforms;
   bool motion_wrapped = false;
-  bool is_subdivided = false;
   bool double_sided = false;
-  bool left_handed = false;
 
   void FoldPendingFrom(const MeshSpec& prev) {
     if (emitter_spec.has_value() != prev.emitter_spec.has_value() ||

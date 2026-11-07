@@ -234,11 +234,9 @@ class SceneModel final : public SceneManager {
   static std::vector<SubMeshOutput> ProcessGeometry(
       const MeshCommitWork& work) {
     const MeshSpec& spec = *work.spec;
-    return RunGeometryPipeline<Float, Spectrum>(
-        spec.id, spec.face_vertex_counts, spec.face_vertex_indices,
-        spec.left_handed, spec.is_subdivided, spec.transform, spec.material_ids,
-        spec.face_material_indices, spec.primvars, work.displacements,
-        work.requested_attributes);
+    return RunGeometryPipeline<Float, Spectrum>(spec.id, spec, spec.transform,
+                                                work.displacements,
+                                                work.requested_attributes);
   }
 
   SceneModel() {

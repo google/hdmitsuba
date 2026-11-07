@@ -157,19 +157,14 @@ def convert_mesh(
   requested_attrs = {
       name for mat in materials for name, _ in mat.mesh_attributes
   }
-  all_sub_meshes = geom_lib.process_mesh(
+  sub_meshes = geom_lib.process_mesh(
       mesh_data,
       subdivision_level,
       world_transform,
       displacements,
       requested_attrs,
   )
-  sub_meshes = [
-      sub
-      for sub in all_sub_meshes
-      if 'points' in sub.primvars and len(sub.primvars['points'].value) > 0
-  ]
-  if len(sub_meshes) < len(all_sub_meshes):
+  if not sub_meshes:
     Tf.Warn(f"Mesh {prim.GetPath()} has no points. Skipping translation.")
 
   materials_by_id = {

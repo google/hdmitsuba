@@ -14,7 +14,6 @@
 
 #pragma once
 
-#include <functional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -27,7 +26,6 @@
 #include <pxr/base/vt/types.h>
 #include <pxr/base/vt/value.h>
 #include <pxr/imaging/hd/enums.h>
-#include <pxr/imaging/hd/meshTopology.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
@@ -49,48 +47,36 @@ struct SubMeshOutput {
   PrimvarMap primvars;
 };
 
+// Polygon mesh (after subdivision) processed by `RunGeometryPipeline`.
+struct MeshGeometry {
+  VtIntArray face_vertex_counts;
+  // Point index of each face corner.
+  VtIntArray face_vertex_indices;
+  // Whether the polygons are wound clockwise.
+  bool left_handed = false;
+  // Whether the mesh was refined by subdivision, which requires smooth normals.
+  bool is_subdivided = false;
+  // Materials of the faces, indexed by `face_material_indices`.
+  std::vector<SdfPath> material_ids;
+  VtIntArray face_material_indices;
+  PrimvarMap primvars;
+};
+
+// Polygon mesh whose primvars were expanded to per-vertex arrays, where a
+// vertex is a unique combination of a point and the values of the
+// face-varying and uniform primvars at it.
+struct ExpandedMesh {
+  // Vertex index of each face corner.
+  VtIntArray face_vertices;
+  // Point index of each vertex.
+  std::vector<int> vertex_points;
+  PrimvarMap primvars;
+};
+
 class GeometryProcessor {
  public:
   GeometryProcessor() = delete;
   ~GeometryProcessor() = delete;
-
-  template <typename T>
-  using Interpolator =
-      std::function<T(int global_face, int local_corner, int global_corner,
-                      const VtIntArray& vertex_indices)>;
-
-  // Returns an interpolation function for the given primvar data and
-  // interpolation method.
-  template <typename T>
-  static Interpolator<T> GetInterpolator(const VtArray<T>& data,
-                                         HdInterpolation interpolation) {
-    if (data.empty()) {
-      return [](int, int, int, const VtIntArray&) { return T(0.f); };
-    }
-    const T* raw_data = data.cdata();
-    switch (interpolation) {
-      case HdInterpolationConstant: {
-        const T val = raw_data[0];
-        return [val](int, int, int, const VtIntArray&) { return val; };
-      }
-      case HdInterpolationUniform:
-        return [raw_data](int global_face, int, int, const VtIntArray&) {
-          return raw_data[global_face];
-        };
-      case HdInterpolationVertex:
-      case HdInterpolationVarying:
-        return [raw_data](int, int local_corner, int,
-                          const VtIntArray& vertex_indices) {
-          return raw_data[vertex_indices[local_corner]];
-        };
-      case HdInterpolationFaceVarying:
-        return [raw_data](int, int, int global_corner, const VtIntArray&) {
-          return raw_data[global_corner];
-        };
-      default:
-        return [](int, int, int, const VtIntArray&) { return T(0.f); };
-    }
-  }
 
   // Triangulates a mesh topology and returns the triangle indices and primitive
   // parameters mapping each triangle to its parent polygon index. Triangles are
@@ -100,30 +86,41 @@ class GeometryProcessor {
       const VtIntArray& face_vertex_counts,
       const VtIntArray& face_vertex_indices, bool left_handed);
 
-  // Computes smooth vertex normals for a mesh topology.
-  static void ComputeNormals(PrimvarMap& primvars,
-                             const HdMeshTopology& topology);
+  // Returns the smooth (angle-weighted) normal of each point of a polygon mesh,
+  // whose polygons are wound clockwise if `left_handed`.
+  static VtVec3fArray ComputeNormals(const VtVec3fArray& points,
+                                     const VtIntArray& face_vertex_counts,
+                                     const VtIntArray& face_vertex_indices,
+                                     bool left_handed);
 
-  // Computes smooth vertex normals using raw topology arrays, whose polygons are
+  // Returns the normal of each face of a polygon mesh, whose polygons are
   // wound clockwise if `left_handed`.
-  static void ComputeNormals(PrimvarMap& primvars,
-                             const VtIntArray& face_vertex_indices,
-                             const VtIntArray& face_vertex_counts,
-                             bool left_handed);
+  static VtVec3fArray ComputeFaceNormals(const VtVec3fArray& points,
+                                         const VtIntArray& face_vertex_counts,
+                                         const VtIntArray& face_vertex_indices,
+                                         bool left_handed);
 
-  // Transforms all vector and normal primvars by the given matrix.
+  // Transforms the point and normal primvars by the given matrix, and flips
+  // the V coordinate of texture coordinate primvars to Mitsuba's convention.
   static void TransformPrimvars(PrimvarMap& primvars,
                                 const GfMatrix4d& transform);
 
-  // Expands indexed and uniform primvars into per-vertex arrays, removing
-  // duplicate vertices using a compression key if configured.
-  static std::pair<VtIntArray, PrimvarMap> ExpandPrimData(
-      const HdMeshTopology& topology, const PrimvarMap& primvars);
+  // Expands the primvars of a polygon mesh with `num_points` points into
+  // per-vertex arrays, merging the corners of each point whose face-varying
+  // and uniform primvars agree into one vertex.
+  static ExpandedMesh ExpandPrimData(const VtIntArray& face_vertex_counts,
+                                     const VtIntArray& face_vertex_indices,
+                                     size_t num_points,
+                                     const PrimvarMap& primvars);
 
-  // Expands indexed and uniform primvars using raw topology arrays.
-  static std::pair<VtIntArray, PrimvarMap> ExpandPrimData(
-      const VtIntArray& face_vertex_indices,
-      const VtIntArray& face_vertex_counts, const PrimvarMap& primvars);
+  // Sets `mesh.material_ids` and `mesh.face_material_indices` from the
+  // (material id, face indices) pairs of the GeomSubsets of the mesh. Faces not
+  // covered by any subset use `mesh_material`, which is only added if it is
+  // referenced, so that meshes fully partitioned into single-material subsets
+  // are not split.
+  static void AssignFaceMaterials(
+      absl::Span<const std::pair<SdfPath, VtIntArray>> subsets,
+      const SdfPath& mesh_material, MeshGeometry& mesh);
 
   // Constructs the shape ID for a multi-material mesh subset. The material
   // suffix is delimited by '#', which cannot appear in an `SdfPath`, so that

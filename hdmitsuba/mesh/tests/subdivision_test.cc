@@ -88,9 +88,14 @@ TEST(SubdivisionEvaluatorTest, RefineUniformPrimvar) {
   subdiv.Initialize(topo, 1, /*fvar_indices=*/{}, TfToken("quads"));
   ASSERT_TRUE(subdiv.IsSubdivided());
   // Each quad is refined into 4 quads.
-  const VtIntArray coarse_faces = {0, 1};
-  const VtIntArray refined_faces =
-      subdiv.MapRefinedMaterialIndices(coarse_faces);
+  MeshGeometry mesh;
+  mesh.face_vertex_counts = face_counts;
+  mesh.face_vertex_indices = face_indices;
+  mesh.face_material_indices = {0, 1};
+  subdiv.RefineTopology(mesh);
+  EXPECT_TRUE(mesh.is_subdivided);
+  EXPECT_EQ(mesh.face_vertex_counts.size(), 8);
+  const VtIntArray& refined_faces = mesh.face_material_indices;
   ASSERT_EQ(refined_faces.size(), 8);
 
   const pxr::VtFloatArray colors = {0.25f, 0.75f};

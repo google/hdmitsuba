@@ -207,16 +207,20 @@ void SubdivisionEvaluator::Clear() {
   refined_face_vertex_indices_.clear();
 }
 
-VtIntArray SubdivisionEvaluator::MapRefinedMaterialIndices(
-    const VtIntArray& coarse_material_indices) const {
-  if (!IsSubdivided()) return coarse_material_indices;
+void SubdivisionEvaluator::RefineTopology(MeshGeometry& mesh) const {
+  if (!IsSubdivided()) return;
+  mesh.face_vertex_counts = refined_face_vertex_counts_;
+  mesh.face_vertex_indices = refined_face_vertex_indices_;
+  // OpenSubdiv refines `leftHanded` meshes into right-handed faces.
+  mesh.left_handed = false;
+  mesh.is_subdivided = true;
   const size_t num_refined = refined_to_coarse_map_.size();
   VtIntArray mapped(num_refined);
   int* dst_ptr = mapped.data();
   for (size_t i = 0; i < num_refined; ++i) {
-    dst_ptr[i] = coarse_material_indices[refined_to_coarse_map_[i]];
+    dst_ptr[i] = mesh.face_material_indices[refined_to_coarse_map_[i]];
   }
-  return mapped;
+  mesh.face_material_indices = std::move(mapped);
 }
 
 template <typename T>

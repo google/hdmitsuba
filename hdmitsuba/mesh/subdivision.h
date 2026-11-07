@@ -29,6 +29,8 @@
 #include <pxr/imaging/pxOsd/subdivTags.h>
 #include <pxr/pxr.h>
 
+#include "hdmitsuba/mesh/geometry_processor.h"
+
 PXR_NAMESPACE_OPEN_SCOPE
 
 class SubdivisionEvaluator {
@@ -61,16 +63,10 @@ class SubdivisionEvaluator {
   VtValue RefinePrimvar(const VtValue& value, HdInterpolation interpolation,
                         const TfToken& token) const;
 
-  const VtIntArray& GetRefinedFaceVertexCounts() const {
-    return refined_face_vertex_counts_;
-  }
-
-  const VtIntArray& GetRefinedFaceVertexIndices() const {
-    return refined_face_vertex_indices_;
-  }
-
-  VtIntArray MapRefinedMaterialIndices(
-      const VtIntArray& coarse_material_indices) const;
+  // Replaces the topology of `mesh` by the refined topology (if subdivided),
+  // and maps its face materials to the refined faces. The primvars are left
+  // unchanged.
+  void RefineTopology(MeshGeometry& mesh) const;
 
  private:
   template <typename T>

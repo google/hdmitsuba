@@ -95,19 +95,8 @@ TEST(HdMitsubaMeshTest, ComputeNormalsMatchesMitsuba) {
     face_vertex_counts.push_back(3);
   }
 
-  PrimvarMap primvars;
-  HdPrimvarDescriptor points_descriptor;
-  points_descriptor.interpolation = pxr::HdInterpolationVertex;
-  points_descriptor.role = HdPrimvarRoleTokens->point;
-  primvars[HdTokens->points] = {VtValue(points), points_descriptor};
-  HdMeshTopology topology(pxr::PxOsdOpenSubdivTokens->none,
-                          pxr::HdTokens->rightHanded, face_vertex_counts,
-                          face_vertex_indices);
-  GeometryProcessor::ComputeNormals(primvars, topology);
-
-  ASSERT_TRUE(primvars.find(HdTokens->normals) != primvars.end());
-  const VtVec3fArray& hdmitsuba_normals =
-      primvars.at(HdTokens->normals).value.Get<VtVec3fArray>();
+  const VtVec3fArray hdmitsuba_normals = GeometryProcessor::ComputeNormals(
+      points, face_vertex_counts, face_vertex_indices, /*left_handed=*/false);
 
   // Compute the normals using Mitsuba too.
   size_t vertex_count = points.size();
@@ -152,25 +141,10 @@ TEST(HdMitsubaMeshTest, LeftHandedReversesWindingAndNormals) {
   EXPECT_EQ(left_triangles, VtIntArray({0, 2, 1}));
   EXPECT_EQ(left_params, right_params);
 
-  HdPrimvarDescriptor points_descriptor;
-  points_descriptor.interpolation = pxr::HdInterpolationVertex;
-  points_descriptor.role = HdPrimvarRoleTokens->point;
-  PrimvarMap right_primvars;
-  right_primvars[HdTokens->points] = {VtValue(points), points_descriptor};
-  PrimvarMap left_primvars = right_primvars;
-  GeometryProcessor::ComputeNormals(
-      right_primvars,
-      HdMeshTopology(pxr::PxOsdOpenSubdivTokens->none, HdTokens->rightHanded,
-                     face_vertex_counts, face_vertex_indices));
-  GeometryProcessor::ComputeNormals(
-      left_primvars,
-      HdMeshTopology(pxr::PxOsdOpenSubdivTokens->none, HdTokens->leftHanded,
-                     face_vertex_counts, face_vertex_indices));
-
-  const VtVec3fArray& right_normals =
-      right_primvars.at(HdTokens->normals).value.Get<VtVec3fArray>();
-  const VtVec3fArray& left_normals =
-      left_primvars.at(HdTokens->normals).value.Get<VtVec3fArray>();
+  const VtVec3fArray right_normals = GeometryProcessor::ComputeNormals(
+      points, face_vertex_counts, face_vertex_indices, /*left_handed=*/false);
+  const VtVec3fArray left_normals = GeometryProcessor::ComputeNormals(
+      points, face_vertex_counts, face_vertex_indices, /*left_handed=*/true);
   ASSERT_EQ(right_normals.size(), points.size());
   ASSERT_EQ(left_normals.size(), points.size());
   for (size_t i = 0; i < points.size(); ++i) {
