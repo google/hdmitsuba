@@ -214,3 +214,36 @@ def test_mesh_attributes_use_usd_texture_coordinates():
   mi_mesh = mesh_lib._to_mitsuba_mesh(sub, mi.Properties(), [('st', 2)])
   attribute = np.array(mi_mesh.attribute('vertex_st_2')).reshape(-1, 2)
   np.testing.assert_allclose(attribute, _get(sub, 'points')[:, :2])
+
+
+def test_points_shared_by_displaced_subsets_are_displaced_once():
+  stage = Usd.Stage.CreateInMemory()
+  mesh = UsdGeom.Mesh.Define(stage, '/Mesh')
+  mesh.CreatePointsAttr(_POINTS)
+  mesh.CreateFaceVertexCountsAttr(_COUNTS)
+  mesh.CreateFaceVertexIndicesAttr(_INDICES)
+  mesh.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
+  for i in range(2):
+    subset = UsdGeom.Subset.Define(stage, f'/Mesh/subset{i}')
+    subset.CreateElementTypeAttr(UsdGeom.Tokens.face)
+    subset.CreateFamilyNameAttr('materialBind')
+    subset.CreateIndicesAttr([i])
+  UsdGeom.Subset.SetFamilyType(
+      mesh, 'materialBind', UsdGeom.Tokens.nonOverlapping
+  )
+  mesh_data = geom_lib.extract_mesh_data(
+      stage, mesh.GetPath(), Usd.TimeCode.Default()
+  )
+  sub_meshes = geom_lib.process_mesh(
+      mesh_data,
+      0,
+      Gf.Matrix4d(1.0),
+      [_uniform(1.0, bias=0.0), _uniform(2.0, bias=0.0)],
+      set(),
+  )
+  # The first subset displaces the points on the shared edge (x = 1).
+  for sub, offset in zip(sub_meshes, [1.0, 2.0]):
+    points = _get(sub, 'points')
+    on_edge = np.isclose(points[:, 0], 1.0)
+    np.testing.assert_allclose(points[on_edge, 2], 1.0)
+    np.testing.assert_allclose(points[~on_edge, 2], offset)

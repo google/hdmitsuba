@@ -67,7 +67,10 @@ PXR_NAMESPACE_OPEN_SCOPE
 // subset face/corner back to the full mesh topology so uniform and face-varying
 // `st` / `normals` primvars are sampled at the original mesh indices. On JIT
 // variants, all unique vertices in the subset are evaluated in a single
-// vectorized Dr.Jit pass and migrated back to host memory.
+// vectorized Dr.Jit pass and migrated back to host memory. Vertices whose
+// `displaced_points` entry is set (as they are shared with the faces of a
+// previously displaced material) are not displaced again, and the entries of
+// the displaced vertices are set.
 template <typename Float, typename Spectrum>
 void ApplyDisplacement(const SdfPath& mesh_id,
                        const MaterialDisplacement& displacement,
@@ -76,6 +79,7 @@ void ApplyDisplacement(const SdfPath& mesh_id,
                        const std::vector<int>& global_face_indices,
                        const std::vector<int>& global_corner_indices,
                        const GfMatrix4d& transform, bool left_handed,
+                       std::vector<bool>& displaced_points,
                        PrimvarMap& primvars) {
   TRACE_FUNCTION();
   using Texture = mitsuba::Texture<Float, Spectrum>;
@@ -324,7 +328,10 @@ void ApplyDisplacement(const SdfPath& mesh_id,
   const float* offset_ptr = host_offset.data();
   GfVec3f* points_ptr = points.data();
   for (size_t i = 0; i < n_vertices; ++i) {
-    points_ptr[target_vertex_indices[i]] += GfVec3f(
+    const int vertex_index = target_vertex_indices[i];
+    if (displaced_points[vertex_index]) continue;
+    displaced_points[vertex_index] = true;
+    points_ptr[vertex_index] += GfVec3f(
         offset_ptr[3 * i + 0], offset_ptr[3 * i + 1], offset_ptr[3 * i + 2]);
   }
   primvars[HdTokens->points].value = VtValue(std::move(points));
@@ -442,6 +449,13 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
   }
 
   bool displaced = false;
+  // Points shared by several displaced materials are displaced only once, by
+  // the first material.
+  std::vector<bool> displaced_points;
+  if (auto it = final_primvars.find(HdTokens->points);
+      has_displacement && it != final_primvars.end()) {
+    displaced_points.resize(it->second.value.GetArraySize());
+  }
   for (size_t i = 0; i < material_ids.size(); ++i) {
     if (!displacements[i].texture) continue;
     VtIntArray material_vertex_indices;
@@ -468,7 +482,7 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
       ApplyDisplacement<Float, Spectrum>(
           id, displacements[i], material_vertex_indices, material_face_counts,
           global_face_indices, global_corner_indices, transform, left_handed,
-          final_primvars);
+          displaced_points, final_primvars);
       displaced = true;
     }
   }
