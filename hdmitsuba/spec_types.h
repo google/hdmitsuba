@@ -179,8 +179,10 @@ struct MeshSpec : public BaseSpec {
     if (emitter_spec.has_value() != prev.emitter_spec.has_value() ||
         (emitter_spec && emitter_spec->shaping != prev.emitter_spec->shaping) ||
         material_ids != prev.material_ids ||
-        double_sided != prev.double_sided ||
-        left_handed != prev.left_handed ||
+        double_sided != prev.double_sided || left_handed != prev.left_handed ||
+        // A mirroring transform flips the triangle winding.
+        (transform.GetDeterminant() < 0.0) !=
+            (prev.transform.GetDeterminant() < 0.0) ||
         !std::equal(instance_transforms.begin(), instance_transforms.end(),
                     prev.instance_transforms.begin(),
                     prev.instance_transforms.end(),

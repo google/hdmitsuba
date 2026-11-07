@@ -377,6 +377,9 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
   const TfToken& kNormals = HdTokens->normals;
   const TfToken& kNoRole = HdPrimvarRoleTokens->none;
 
+  // A mirroring transform flips the winding of the transformed polygons.
+  const bool effective_left_handed =
+      left_handed ^ (transform.GetDeterminant() < 0.0);
   const bool want_n_obj = requested_attributes.contains(kNObject.GetString());
   const bool has_displacement =
       std::any_of(displacements.begin(), displacements.end(),
@@ -532,7 +535,8 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
     GeometryProcessor::TransformPrimvars(final_primvars, transform);
     if (transform != GfMatrix4d(1.0) && !restored_authored_normals) {
       GeometryProcessor::ComputeNormals(final_primvars, face_vertex_indices,
-                                        face_vertex_counts, left_handed);
+                                        face_vertex_counts,
+                                        effective_left_handed);
     }
   }
 
@@ -544,7 +548,7 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
   }
   auto [triangles, primitive_params] =
       GeometryProcessor::TriangulateWithFaceMapping(
-          face_vertex_counts, face_indices, left_handed);
+          face_vertex_counts, face_indices, effective_left_handed);
   return GeometryProcessor::SplitAndCompactMeshes(
       id, triangles, primitive_params, expanded_primvars, material_ids,
       face_material_indices);
