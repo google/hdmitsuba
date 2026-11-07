@@ -111,6 +111,22 @@ def test_scalar_displacement_is_applied_in_object_space():
   )
 
 
+@pytest.mark.parametrize('displaced', [False, True])
+def test_mirrored_transform_keeps_outward_winding(displaced: bool):
+  sub = _process(
+      _uniform(1.0, bias=0.0) if displaced else None,
+      Gf.Matrix4d().SetScale(Gf.Vec3d(-1, 1, 1)),
+  )
+  points = _get(sub, 'points')
+  tri = points[np.array(sub.triangles).reshape(-1, 3)]
+  normals = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+  assert np.all(normals[:, 2] > 0)
+  if displaced:
+    np.testing.assert_allclose(
+        _get(sub, 'normals'), [[0, 0, 1]] * len(points), atol=1e-5
+    )
+
+
 def test_authored_face_varying_normals_are_preserved():
   # Fold the second quad up by 90 degrees around the shared edge, with a hard
   # edge: each face uses its own face normal.
