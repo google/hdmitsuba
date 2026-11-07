@@ -315,15 +315,18 @@ std::vector<SubMeshOutput> ProcessMesh(
   subdiv.Initialize(mesh_data.GetTopology().GetPxOsdMeshTopology(),
                     refine_level, mesh_data.fvar_indices,
                     mesh_data.id.GetNameToken());
-  PrimvarMap primvars = mesh_data.primvars;
-  VtIntArray face_vertex_counts = mesh_data.face_vertex_counts;
-  VtIntArray face_vertex_indices = mesh_data.face_vertex_indices;
-  bool left_handed = mesh_data.orientation == PxOsdOpenSubdivTokens->leftHanded;
-  const bool is_subdivided = subdiv.IsSubdivided();
-  if (is_subdivided) {
+  MeshGeometry geometry{
+      mesh_data.face_vertex_counts,
+      mesh_data.face_vertex_indices,
+      mesh_data.orientation == PxOsdOpenSubdivTokens->leftHanded,
+      subdiv.IsSubdivided(),
+      mesh_data.material_ids,
+      mesh_data.face_material_indices,
+      mesh_data.primvars};
+  if (geometry.is_subdivided) {
     // Normals will be recomputed after subdivision, skip refining them here.
-    primvars.erase(HdTokens->normals);
-    for (auto& [token, state] : primvars) {
+    geometry.primvars.erase(HdTokens->normals);
+    for (auto& [token, state] : geometry.primvars) {
       // FaceVarying primvars are refined on their unflattened values.
       if (subdiv.HasFVarChannel(token)) {
         state.value = mesh_data.unflattened_fvar_values.at(token);
@@ -331,10 +334,12 @@ std::vector<SubMeshOutput> ProcessMesh(
       state.value = subdiv.RefinePrimvar(state.value,
                                          state.descriptor.interpolation, token);
     }
-    face_vertex_counts = subdiv.GetRefinedFaceVertexCounts();
-    face_vertex_indices = subdiv.GetRefinedFaceVertexIndices();
+    geometry.face_vertex_counts = subdiv.GetRefinedFaceVertexCounts();
+    geometry.face_vertex_indices = subdiv.GetRefinedFaceVertexIndices();
     // OpenSubdiv refines `leftHanded` meshes into right-handed faces.
-    left_handed = false;
+    geometry.left_handed = false;
+    geometry.face_material_indices =
+        subdiv.MapRefinedMaterialIndices(geometry.face_material_indices);
   }
 
   std::vector<MaterialDisplacement> material_displacements;
@@ -358,12 +363,9 @@ std::vector<SubMeshOutput> ProcessMesh(
   using mitsuba::Error;
   using mitsuba::Spectrum;
   namespace dr = drjit;
-  return MI_INVOKE_VARIANT(
-      ActiveVariant(), RunGeometryPipeline, mesh_data.id, face_vertex_counts,
-      face_vertex_indices, left_handed, is_subdivided, transform,
-      mesh_data.material_ids,
-      subdiv.MapRefinedMaterialIndices(mesh_data.face_material_indices),
-      primvars, material_displacements, requested);
+  return MI_INVOKE_VARIANT(ActiveVariant(), RunGeometryPipeline, mesh_data.id,
+                           geometry, transform, material_displacements,
+                           requested);
 }
 
 template <typename Float, typename Spectrum>
