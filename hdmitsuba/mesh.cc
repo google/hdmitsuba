@@ -157,8 +157,9 @@ void HdMitsubaMesh::Sync(HdSceneDelegate* sceneDelegate,
   // Update topology and/or primvars if the corresponding bits are set.
   int refine_level = refine_level_;
   if (refine_level_ < 0 ||
-      (*dirtyBits & (HdChangeTracker::DirtyDisplayStyle |
-                     HdChangeTracker::DirtyPrimvar)) != 0) {
+      (*dirtyBits &
+       (HdChangeTracker::DirtyDisplayStyle | HdChangeTracker::DirtyPrimvar |
+        HdChangeTracker::DirtyTopology)) != 0) {
     refine_level = ResolveRefineLevel(sceneDelegate);
   }
   const bool topology_dirty =
