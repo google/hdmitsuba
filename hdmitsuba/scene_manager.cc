@@ -206,93 +206,6 @@ std::vector<ImplicitSurfacePart> GetImplicitSurfaceParts(
   };
 }
 
-// Runs the full post-subdivision mesh preparation pipeline on `spec` to produce
-// triangle sub-meshes ready for `PrimTranslator::BuildMesh` /
-// `UpdateMeshInPlace`:
-//   1. Computes smooth vertex normals if missing and needed by subdivision or
-//      displacement.
-//   2. Applies per-material displacements (`displacements[i]` corresponds to
-//      `spec.material_ids[i]`) in object space via `ApplyDisplacement`.
-//   3. If any displacement occurred, transforms points and normals by
-//      `spec.transform` and recomputes smooth vertex normals.
-//   4. Expands face-varying/uniform primvars into vertex-indexed buffers (and,
-//      for non-displaced meshes, transforms the deduplicated primvars),
-//      triangulates polygons, and splits/compacts the mesh into one
-//      `SubMeshOutput` per assigned material.
-template <typename Float, typename Spectrum>
-std::vector<SubMeshOutput> RunGeometryPipeline(
-    const MeshSpec& spec,
-    const std::vector<MaterialDisplacement>& displacements) {
-  TRACE_FUNCTION();
-  PrimvarMap final_primvars = spec.primvars;
-  if (final_primvars.find(HdTokens->normals) == final_primvars.end()) {
-    bool has_displacement = false;
-    for (const auto& displacement : displacements) {
-      if (displacement.texture) {
-        has_displacement = true;
-        break;
-      }
-    }
-    if (has_displacement || spec.is_subdivided) {
-      GeometryProcessor::ComputeNormals(final_primvars,
-                                        spec.face_vertex_indices,
-                                        spec.face_vertex_counts,
-                                        spec.left_handed);
-    }
-  }
-  bool displaced = false;
-  for (size_t i = 0; i < spec.material_ids.size(); ++i) {
-    if (displacements[i].texture) {
-      VtIntArray material_vertex_indices;
-      VtIntArray material_face_counts;
-      std::vector<int> global_face_indices;
-      std::vector<int> global_corner_indices;
-      int corner_index = 0;
-      for (size_t face_index = 0; face_index < spec.face_vertex_counts.size();
-           ++face_index) {
-        int material_index = spec.face_material_indices[face_index];
-        int vertex_count = spec.face_vertex_counts[face_index];
-        if (static_cast<size_t>(material_index) == i) {
-          global_face_indices.push_back(face_index);
-          for (int j = 0; j < vertex_count; ++j) {
-            global_corner_indices.push_back(corner_index + j);
-            material_vertex_indices.push_back(
-                spec.face_vertex_indices[corner_index + j]);
-          }
-          material_face_counts.push_back(vertex_count);
-        }
-        corner_index += vertex_count;
-      }
-      if (!material_vertex_indices.empty()) {
-        ApplyDisplacement<Float, Spectrum>(
-            spec.id, displacements[i], material_vertex_indices,
-            material_face_counts, global_face_indices, global_corner_indices,
-            spec.left_handed, final_primvars);
-        displaced = true;
-      }
-    }
-  }
-  if (displaced) {
-    GeometryProcessor::TransformPrimvars(final_primvars, spec.transform);
-    GeometryProcessor::ComputeNormals(final_primvars, spec.face_vertex_indices,
-                                      spec.face_vertex_counts,
-                                      spec.left_handed);
-  }
-
-  // Expand primvar data, triangulate and split into submeshes.
-  auto [face_indices, expanded_primvars] = GeometryProcessor::ExpandPrimData(
-      spec.face_vertex_indices, spec.face_vertex_counts, final_primvars);
-  if (!displaced) {
-    GeometryProcessor::TransformPrimvars(expanded_primvars, spec.transform);
-  }
-  auto [triangles, primitive_params] =
-      GeometryProcessor::TriangulateWithFaceMapping(
-          spec.face_vertex_counts, face_indices, spec.left_handed);
-  return GeometryProcessor::SplitAndCompactMeshes(
-      spec.id, triangles, primitive_params, expanded_primvars,
-      spec.material_ids, spec.face_material_indices);
-}
-
 }  // namespace
 
 template <typename Float, typename Spectrum>
@@ -314,7 +227,19 @@ class SceneModel final : public SceneManager {
     // `ResolveMotionWrapped`.
     std::optional<MeshSpec> resolved_spec;
     std::vector<MaterialDisplacement> displacements;
+    // Primvars read by the materials of the mesh.
+    absl::flat_hash_set<std::string> requested_attributes;
   };
+
+  static std::vector<SubMeshOutput> ProcessGeometry(
+      const MeshCommitWork& work) {
+    const MeshSpec& spec = *work.spec;
+    return RunGeometryPipeline<Float, Spectrum>(
+        spec.id, spec.face_vertex_counts, spec.face_vertex_indices,
+        spec.left_handed, spec.is_subdivided, spec.transform, spec.material_ids,
+        spec.face_material_indices, spec.primvars, work.displacements,
+        work.requested_attributes);
+  }
 
   SceneModel() {
     if constexpr (dr::is_jit_v<Float>) {
@@ -1314,8 +1239,7 @@ class SceneModel final : public SceneManager {
       return;
     }
     if (spec.needs_rebuild) {
-      auto sub_meshes =
-          RunGeometryPipeline<Float, Spectrum>(spec, work->displacements);
+      auto sub_meshes = ProcessGeometry(*work);
       res.meshes.reserve(sub_meshes.size());
       for (const auto& sub_mesh : sub_meshes) {
         EmitterSensorPair env;
@@ -1334,8 +1258,7 @@ class SceneModel final : public SceneManager {
         }
       }
     } else if ((spec.dirty_bits & kMeshGeometryDirty) != 0) {
-      auto sub_meshes =
-          RunGeometryPipeline<Float, Spectrum>(spec, work->displacements);
+      auto sub_meshes = ProcessGeometry(*work);
       UpdateSubMeshesInPlace(spec, sub_meshes, key_prefix);
     } else {
       UpdateSubMeshesMetadataOnly(spec, key_prefix);
@@ -1480,6 +1403,10 @@ class SceneModel final : public SceneManager {
           work_items[i].displacements.push_back(disp_it->second);
         } else {
           work_items[i].displacements.emplace_back();
+        }
+        for (const auto& [name, channels] :
+             ResolveMeshAttributes(material_id)) {
+          work_items[i].requested_attributes.insert(name);
         }
       }
     }

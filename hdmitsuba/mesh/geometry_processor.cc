@@ -33,6 +33,7 @@
 #include <drjit/math.h>
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/vec2f.h>
+#include <pxr/base/gf/vec3d.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/gf/vec3i.h>
 #include <pxr/base/gf/vec4f.h>
@@ -262,9 +263,24 @@ void GeometryProcessor::ComputeNormals(PrimvarMap& primvars,
 
 void GeometryProcessor::TransformPrimvars(PrimvarMap& primvars,
                                           const GfMatrix4d& transform) {
+  static const TfToken kDispWorldNormal("__n_disp_world");
   for (auto& [token, state] : primvars) {
     const auto& value = state.value;
-    if (value.IsHolding<VtVec3fArray>() && !value.Get<VtVec3fArray>().empty()) {
+    if (token == kDispWorldNormal && value.IsHolding<VtVec3fArray>()) {
+      // Store the world-space normal `u / |u|` scaled by the normal-to-world
+      // scale factor `1 / |u|`, i.e. `u / |u|^2`.
+      const VtVec3fArray& src = value.UncheckedGet<VtVec3fArray>();
+      VtVec3fArray values(src.size());
+      GfVec3f* dst = values.data();
+      const GfMatrix4d normal_transform = transform.GetInverse().GetTranspose();
+      for (size_t i = 0; i < src.size(); ++i) {
+        const GfVec3d u =
+            normal_transform.TransformDir(GfVec3d(src[i].GetNormalized()));
+        dst[i] = GfVec3f(u / u.GetLengthSq());
+      }
+      state.value = VtValue(std::move(values));
+    } else if (value.IsHolding<VtVec3fArray>() &&
+               !value.Get<VtVec3fArray>().empty()) {
       state.value = TransformArray<GfVec3f>(value.Get<VtVec3fArray>(),
                                             state.descriptor, transform);
     } else if (value.IsHolding<VtVec2fArray>() &&
