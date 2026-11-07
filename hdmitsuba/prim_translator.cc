@@ -31,7 +31,6 @@
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
-#include <absl/strings/str_replace.h>
 #include <absl/strings/strip.h>
 #include <drjit/matrix.h>
 #include <drjit/tensor.h>
@@ -120,8 +119,8 @@ bool IsScalarOnlyPrincipledInput(const TfToken& input_name) {
          input_name == TfToken("eta");
 }
 
-// Returns the connection of the `mitsuba:<terminal>` terminal, falling back to
-// `<terminal>`, or nullptr if neither is connected.
+}  // namespace
+
 const HdMaterialConnection2* FindTerminalConnection(
     const HdMaterialNetwork2& network, const TfToken& terminal) {
   auto it = network.terminals.find(
@@ -132,14 +131,6 @@ const HdMaterialConnection2* FindTerminalConnection(
   return (it != network.terminals.end() && !it->second.upstreamNode.IsEmpty())
              ? &it->second
              : nullptr;
-}
-
-}  // namespace
-
-std::string MeshAttributeName(std::string_view primvar, int channels) {
-  return absl::StrCat(kVertexAttributePrefix,
-                      absl::StrReplaceAll(primvar, {{"color", "Color"}}), "_",
-                      channels);
 }
 
 void SetMitsubaPropertyFromValue(mitsuba::Properties& props,
