@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -46,6 +47,20 @@
 #include <pxr/usd/sdf/path.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
+
+// Prefix used for Mitsuba mesh vertex attributes created from USD primvars.
+inline constexpr std::string_view kVertexAttributePrefix = "vertex_";
+
+// Primvars that a material reads as mesh attributes, paired with the number of
+// channels read (1 or 3). A primvar read with both channel counts appears
+// twice.
+using MeshAttributeRequests = std::set<std::pair<std::string, int>>;
+
+// Returns the name of the Mitsuba vertex attribute holding `primvar` with
+// `channels` channels. Mitsuba stores 3-channel attributes whose name contains
+// "color" as rgb2spec coefficients in spectral variants, so "color" is
+// capitalized to keep the raw values.
+std::string MeshAttributeName(std::string_view primvar, int channels);
 
 template <typename T>
 T GetParam(const HdContainerDataSourceHandle& container, const TfToken& name,

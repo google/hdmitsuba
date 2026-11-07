@@ -18,6 +18,8 @@
 #include <string_view>
 #include <vector>
 
+#include <absl/strings/str_cat.h>
+#include <absl/strings/str_replace.h>
 #include <mitsuba/core/object.h>
 #include <mitsuba/core/plugin.h>
 #include <mitsuba/core/properties.h>
@@ -26,6 +28,12 @@
 #include <pxr/usd/sdf/assetPath.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
+
+std::string MeshAttributeName(std::string_view primvar, int channels) {
+  return absl::StrCat(kVertexAttributePrefix,
+                      absl::StrReplaceAll(primvar, {{"color", "Color"}}), "_",
+                      channels);
+}
 
 std::string ResolvePathFromValue(const VtValue& value) {
   if (value.IsHolding<SdfAssetPath>()) {
