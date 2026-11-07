@@ -1078,6 +1078,7 @@ bool ExtractAttributeBuffer(const std::string& name, size_t channels,
   if (value.IsHolding<VtVec2fArray>()) {
     const GfVec2f* src = value.UncheckedGet<VtVec2fArray>().cdata();
     const bool flip =
+        channels == 2 &&
         state.descriptor.role == HdPrimvarRoleTokens->textureCoordinate;
     if (channels == 2 && !flip) {
       *direct_ptr = src[0].data();
