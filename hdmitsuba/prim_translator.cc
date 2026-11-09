@@ -108,6 +108,20 @@ bool IsTextureNode(const HdMaterialNode2& node) {
          node.nodeTypeId == TfToken("mitsuba_bitmap");
 }
 
+// Returns the number of channels of the mesh attribute read by a
+// `UsdPrimvarReader_*` node (1 for scalars and 3 for vectors, which Mitsuba
+// evaluates as colors), or 0 if `node` is not a supported primvar reader.
+int PrimvarReaderChannels(const HdMaterialNode2& node) {
+  std::string_view type = node.nodeTypeId.GetString();
+  if (!absl::ConsumePrefix(&type, "UsdPrimvarReader_")) return 0;
+  if (type == "float" || type == "int") return 1;
+  if (type == "float2" || type == "float3" || type == "float4" ||
+      type == "normal" || type == "point" || type == "vector") {
+    return 3;
+  }
+  return 0;
+}
+
 bool IsPrincipledNode(const HdMaterialNode2& node) {
   return node.nodeTypeId == TfToken("UsdPreviewSurface") ||
          node.nodeTypeId == TfToken("mitsuba_principled");
@@ -302,11 +316,44 @@ mitsuba::ref<mitsuba::Object> GetTexture(
       mitsuba::Texture<Float, Spectrum>::Type);
 }
 
+// Translates the primvar reader `node`, which reads `channels` channels (see
+// `PrimvarReaderChannels`), into a Mitsuba `mesh_attribute` texture and adds
+// the primvar to `mesh_attributes`. Primvars are only available on surfaces, so
+// a null `mesh_attributes` rejects the reader. The `fallback` input is not
+// supported: missing primvars read as zero.
+template <typename Float, typename Spectrum>
+mitsuba::ref<mitsuba::Object> CreatePrimvarReaderTexture(
+    const HdMaterialNode2& node, int channels,
+    MeshAttributeRequests* mesh_attributes) {
+  if (!mesh_attributes) {
+    TF_WARN("Primvar readers are only supported in surface shaders.");
+    return nullptr;
+  }
+  std::string varname;
+  if (auto it = node.parameters.find(TfToken("varname"));
+      it != node.parameters.end()) {
+    varname = it->second.IsHolding<TfToken>()
+                  ? it->second.UncheckedGet<TfToken>().GetString()
+                  : it->second.GetWithDefault<std::string>();
+  }
+  if (varname.empty()) {
+    TF_WARN("Ignoring %s without a varname.", node.nodeTypeId.GetText());
+    return nullptr;
+  }
+  mesh_attributes->emplace(varname, channels);
+  mitsuba::Properties props("mesh_attribute");
+  props.set("name", MeshAttributeName(varname, channels));
+  return mitsuba::PluginManager::instance()->create_object(
+      props, mitsuba::Texture<Float, Spectrum>::Variant,
+      mitsuba::Texture<Float, Spectrum>::Type);
+}
+
 template <typename Float, typename Spectrum>
 mitsuba::ref<mitsuba::Object> ResolveConnectedTexture(
     const HdMaterialNetwork2& network2, const HdMaterialNode2& downstream_node,
     const TfToken& input_name,
-    const TextureCache<Float, Spectrum>& texture_cache) {
+    const TextureCache<Float, Spectrum>& texture_cache,
+    MeshAttributeRequests* mesh_attributes) {
   auto conn_it = downstream_node.inputConnections.find(input_name);
   if (conn_it == downstream_node.inputConnections.end() ||
       conn_it->second.empty()) {
@@ -322,6 +369,10 @@ mitsuba::ref<mitsuba::Object> ResolveConnectedTexture(
     return GetTexture<Float, Spectrum>(network2, upstream_node, input_name,
                                        conn.upstreamOutputName, texture_cache);
   }
+  if (const int channels = PrimvarReaderChannels(upstream_node)) {
+    return CreatePrimvarReaderTexture<Float, Spectrum>(upstream_node, channels,
+                                                       mesh_attributes);
+  }
   return nullptr;
 }
 
@@ -331,7 +382,8 @@ mitsuba::ref<mitsuba::Object> ParseNodeRecursive(
     absl::flat_hash_map<SdfPath, mitsuba::ref<mitsuba::Object>, SdfPath::Hash>&
         cache,
     const TfToken& input_name,
-    const TextureCache<Float, Spectrum>& texture_cache) {
+    const TextureCache<Float, Spectrum>& texture_cache,
+    MeshAttributeRequests* mesh_attributes) {
   const SdfPath& nodePath = conn.upstreamNode;
   auto it = network.nodes.find(nodePath);
   if (it == network.nodes.end()) {
@@ -347,6 +399,10 @@ mitsuba::ref<mitsuba::Object> ParseNodeRecursive(
   if (IsTextureNode(node)) {
     return GetTexture<Float, Spectrum>(network, node, input_name,
                                        conn.upstreamOutputName, texture_cache);
+  }
+  if (const int channels = PrimvarReaderChannels(node)) {
+    return CreatePrimvarReaderTexture<Float, Spectrum>(node, channels,
+                                                       mesh_attributes);
   }
 
   if (auto cache_it = cache.find(nodePath); cache_it != cache.end()) {
@@ -386,7 +442,8 @@ mitsuba::ref<mitsuba::Object> ParseNodeRecursive(
     }
     mitsuba::ref<mitsuba::Object> upstream_object =
         ParseNodeRecursive<Float, Spectrum>(connections[0], network, cache,
-                                            input_token, texture_cache);
+                                            input_token, texture_cache,
+                                            mesh_attributes);
     if (upstream_object) {
       props.set(input_token.GetString(), upstream_object);
     }
@@ -426,7 +483,9 @@ PrimTranslator<Float, Spectrum>::ParsePreviewSurface(
       it != preview_surface_node.inputConnections.end() &&
       !it->second.empty()) {
     auto node_it = network2.nodes.find(it->second[0].upstreamNode);
-    if (node_it == network2.nodes.end() || !IsTextureNode(node_it->second)) {
+    if (node_it == network2.nodes.end() ||
+        !(IsTextureNode(node_it->second) ||
+          PrimvarReaderChannels(node_it->second))) {
       return res;
     }
   }
@@ -453,7 +512,8 @@ PrimTranslator<Float, Spectrum>::ParsePreviewSurface(
     mitsuba::ref<mitsuba::Object> texture = nullptr;
     if (!is_scalar_only) {
       texture = ResolveConnectedTexture<Float, Spectrum>(
-          network2, preview_surface_node, mapping.usd_name, texture_cache);
+          network2, preview_surface_node, mapping.usd_name, texture_cache,
+          &res.mesh_attributes);
     } else {
       if (preview_surface_node.inputConnections.count(mapping.usd_name) > 0) {
         TF_WARN(
@@ -495,7 +555,8 @@ PrimTranslator<Float, Spectrum>::ParsePreviewSurface(
   const TfToken emissive_token("emissiveColor");
   mitsuba::ref<mitsuba::Object> emissive_texture =
       ResolveConnectedTexture<Float, Spectrum>(network2, preview_surface_node,
-                                               emissive_token, texture_cache);
+                                               emissive_token, texture_cache,
+                                               &res.mesh_attributes);
   if (emissive_texture) {
     mitsuba::Properties emitter_props("area");
     emitter_props.set("radiance", emissive_texture);
@@ -521,7 +582,8 @@ PrimTranslator<Float, Spectrum>::ParsePreviewSurface(
   TfToken normal_token("normal");
   mitsuba::ref<mitsuba::Object> texture =
       ResolveConnectedTexture<Float, Spectrum>(network2, preview_surface_node,
-                                               normal_token, texture_cache);
+                                               normal_token, texture_cache,
+                                               &res.mesh_attributes);
   if (texture) {
     mitsuba::Properties normal_props("normalmap");
     normal_props.set("normalmap", texture);
@@ -547,14 +609,14 @@ PrimTranslator<Float, Spectrum>::BuildMaterial(
           network2, HdMaterialTerminalTokens->displacement)) {
     res.displacement.texture = ParseNodeRecursive<Float, Spectrum>(
         *disp_conn, network2, cache, HdMaterialTerminalTokens->displacement,
-        texture_cache);
+        texture_cache, /*mesh_attributes=*/nullptr);
   }
   if (const auto* vol_conn =
           FindTerminalConnection(network2, HdMaterialTerminalTokens->volume)) {
     cache.clear();
     res.interior_medium = ParseNodeRecursive<Float, Spectrum>(
         *vol_conn, network2, cache, HdMaterialTerminalTokens->volume,
-        texture_cache);
+        texture_cache, /*mesh_attributes=*/nullptr);
     if (res.interior_medium) {
       if (res.interior_medium->type() != mitsuba::ObjectType::Medium) {
         TF_WARN("Volume shader on material '%s' is not a Mitsuba medium.",
@@ -581,7 +643,7 @@ PrimTranslator<Float, Spectrum>::BuildMaterial(
         cache.clear();
         res.bsdf = ParseNodeRecursive<Float, Spectrum>(
             *surf_conn, network2, cache, HdMaterialTerminalTokens->surface,
-            texture_cache);
+            texture_cache, &res.mesh_attributes);
       }
       if (res.bsdf) {
         res.bsdf->set_id(id_str);

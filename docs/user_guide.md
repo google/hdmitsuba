@@ -24,6 +24,7 @@ This document provides an overview of the USD features supported by `hdMitsuba`,
     *   `ior` (Index of refraction)
     *   `normal` (Normal mapping)
 *   **Native Mitsuba BSDFs & Textures**: We support embedding native Mitsuba BSDFs and textures as custom USD shader prims. This allows accessing all of Mitsuba's built-in BSDFs. Examples for this are provided in `test_assets/materials`. Note that USD natively allows specifying both a generic preview surface and a renderer-specific material. hdMitsuba will automatically use the shader that is connected to `outputs:mitsuba:surface`, if available. 
+*   **Primvar Readers**: `UsdPrimvarReader_*` shaders (`float`, `int`, `float2`, `float3`, `float4`, `normal`, `point`, and `vector`) connected to UsdPreviewSurface inputs or native Mitsuba shaders read mesh primvars of any interpolation as Mitsuba `mesh_attribute` textures. They return the authored primvar values, in object space. Their `fallback` input is not supported (missing primvars read as zero), and they are not supported in displacement and volume shaders.
 *   **Fallback Shading (displayColor)**: If a mesh has no bound material, the delegate automatically maps the USD `displayColor` attribute to a fallback `diffuse` BSDF with its `reflectance` bound to the color.
 
 ### Lights & Camera

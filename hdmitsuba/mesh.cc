@@ -304,17 +304,21 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
   }
 
   static const TfToken kSt("st");
-  auto has_primvar = [&](const TfToken& name, auto type_tag) {
+  auto has_primvar = [&](const TfToken& name, auto elem_tag) {
+    using Elem = decltype(elem_tag);
     auto it = geometry_.primvars.find(name);
-    return it != geometry_.primvars.end() &&
-           it->second.value.IsHolding<decltype(type_tag)>() &&
-           !it->second.value.UncheckedGet<decltype(type_tag)>().empty();
+    if (it == geometry_.primvars.end()) return false;
+    const VtValue& val = it->second.value;
+    if (val.IsHolding<VtArray<Elem>>()) {
+      return !val.UncheckedGet<VtArray<Elem>>().empty();
+    }
+    return it->second.interpolation == HdInterpolationConstant &&
+           val.IsHolding<Elem>();
   };
   // Mitsuba's mesh layout (normals and texcoords presence) is fixed at
   // creation.
-  const uint8_t layout =
-      (has_primvar(HdTokens->normals, VtVec3fArray()) ? 1 : 0) |
-      (has_primvar(kSt, VtVec2fArray()) ? 2 : 0);
+  const uint8_t layout = (has_primvar(HdTokens->normals, GfVec3f()) ? 1 : 0) |
+                         (has_primvar(kSt, GfVec2f()) ? 2 : 0);
 
   MeshSpec spec;
   spec.id = id;
