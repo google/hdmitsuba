@@ -143,6 +143,30 @@ std::optional<T> GetSetting(const VtDictionary& settings,
   return std::nullopt;
 }
 
+std::optional<int64_t> GetIntSetting(const VtDictionary& settings,
+                                     const std::string& key) {
+  auto it = settings.find(key);
+  if (it == settings.end() || it->second.IsEmpty()) {
+    return std::nullopt;
+  }
+  const VtValue& value = it->second;
+  if (value.IsHolding<int>()) {
+    return static_cast<int64_t>(value.UncheckedGet<int>());
+  }
+  if (value.IsHolding<int64_t>()) {
+    return value.UncheckedGet<int64_t>();
+  }
+  if (value.IsHolding<uint32_t>()) {
+    return static_cast<int64_t>(value.UncheckedGet<uint32_t>());
+  }
+  if (value.IsHolding<uint64_t>()) {
+    return static_cast<int64_t>(value.UncheckedGet<uint64_t>());
+  }
+  TF_WARN("Type mismatch for integer render setting '%s': got %s", key.c_str(),
+          value.GetTypeName().c_str());
+  return std::nullopt;
+}
+
 bool ExtractHideEmitters(const PluginSpecNode& spec) {
   auto it = spec.params.find("hide_emitters");
   if (it == spec.params.end()) {
@@ -786,10 +810,10 @@ class SceneModel final : public SceneManager {
       const VtDictionary& namespaced_settings) override {
     absl::MutexLock state_lock(state_mutex_);
     absl::MutexLock aov_lock(aov_states_mutex_);
-    const int new_samples_per_pass = std::max(
-        1, GetSetting<int>(namespaced_settings,
-                           "mitsuba:interactive_samples_per_pass")
-               .value_or(1));
+    const int new_samples_per_pass = static_cast<int>(std::max<int64_t>(
+        1, GetIntSetting(namespaced_settings,
+                         "mitsuba:interactive_samples_per_pass")
+               .value_or(1)));
     if (new_samples_per_pass != interactive_samples_per_pass_) {
       interactive_samples_per_pass_ = new_samples_per_pass;
       reset_progressive_ = true;
@@ -813,15 +837,34 @@ class SceneModel final : public SceneManager {
       if (frozen_render_) frozen_render_->Clear();
       reset_progressive_ = true;
     }
-    const size_t clamped_samples = static_cast<size_t>(std::max(
-        1, GetSetting<int>(namespaced_settings, "mitsuba:sample_count")
-               .value_or(static_cast<int>(kDefaultSampleCount))));
+    PluginSpecNode sampler_spec =
+        ParsePluginSpec(namespaced_settings, "mitsuba:sampler:",
+                        /*default_type=*/"independent");
+    if (sampler_spec.plugin_type.empty()) {
+      sampler_spec.plugin_type = "independent";
+    }
+    // sample_count is managed via sample_count_ and passed per-render pass,
+    // so omit it from sampler_spec_ to avoid rebuilding sensors when only
+    // mitsuba:sample_count changes.
+    sampler_spec.params.erase("sample_count");
+    if (sampler_spec != sampler_spec_) {
+      TF_DEBUG(HDMITSUBA_LIFECYCLE)
+          .Msg("Updating sampler spec, type: %s (was: %s)\n",
+               sampler_spec.plugin_type.c_str(),
+               sampler_spec_.plugin_type.c_str());
+      sampler_spec_ = std::move(sampler_spec);
+      MarkSensorsForRebuild();
+      reset_progressive_ = true;
+    }
+    const size_t clamped_samples = static_cast<size_t>(std::max<int64_t>(
+        1, GetIntSetting(namespaced_settings, "mitsuba:sample_count")
+               .value_or(static_cast<int64_t>(kDefaultSampleCount))));
     if (clamped_samples != sample_count_) {
       sample_count_ = clamped_samples;
       reset_progressive_ = true;
     }
     const uint32_t new_seed = static_cast<uint32_t>(
-        GetSetting<int>(namespaced_settings, "mitsuba:seed").value_or(0));
+        GetIntSetting(namespaced_settings, "mitsuba:seed").value_or(0));
     if (new_seed != seed_) {
       seed_ = new_seed;
       reset_progressive_ = true;
@@ -1018,9 +1061,18 @@ class SceneModel final : public SceneManager {
             return;
           }
           if (spec->needs_rebuild) {
-            // Denoisers require the uncorrelated pixel noise of the box filter.
+            // Denoisers require the uncorrelated pixel noise of the box filter,
+            // and progressive multi-pass accumulation requires `independent`
+            // so structured samplers (`stratified`, `multijitter`,
+            // `orthogonal`) do not collapse per-pass small sample counts into
+            // biased grids.
             const bool use_box_filter = progressive_rendering_ || denoise_;
-            res = PrimTranslator::BuildSensor(*spec, use_box_filter);
+            const PluginSpecNode effective_sampler =
+                progressive_rendering_
+                    ? PluginSpecNode("independent")
+                    : sampler_spec_;
+            res = PrimTranslator::BuildSensor(*spec, use_box_filter,
+                                              effective_sampler);
           } else if (spec->dirty_bits != 0) {
             auto it = sensors_.find(spec->id);
             if (!TF_VERIFY(it != sensors_.end(), "Camera sensor not found: %s",
@@ -1076,9 +1128,12 @@ class SceneModel final : public SceneManager {
     // emitter above, every (re)built mesh gets a fresh one.
     auto sens_it = shape_sensors_.find(shape_id);
     if (sens_it != shape_sensors_.end()) {
+      const PluginSpecNode effective_sampler =
+          progressive_rendering_ ? PluginSpecNode("independent")
+                                 : sampler_spec_;
       pair.mesh_sensor = PrimTranslator::BuildSensor(
           camera_specs_.at(sens_it->second),
-          progressive_rendering_ || denoise_);
+          progressive_rendering_ || denoise_, effective_sampler);
       pair.sensor_ptr = pair.mesh_sensor.get();
     }
     return pair;
@@ -1672,6 +1727,7 @@ class SceneModel final : public SceneManager {
   ref<Integrator> integrator_ = nullptr;
   PluginSpecNode integrator_spec_{"path"};
   bool hide_emitters_ = false;
+  PluginSpecNode sampler_spec_{"independent"};
   absl::flat_hash_map<const HdRenderPass*, RenderPassState> pass_aov_states_;
   size_t sample_count_ = kDefaultSampleCount;
   uint32_t seed_ = 0;

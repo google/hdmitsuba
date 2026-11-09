@@ -27,6 +27,7 @@
 #include <pxr/imaging/hd/material.h>
 #include <pxr/pxr.h>
 
+#include "hdmitsuba/plugin_builder.h"
 #include "hdmitsuba/spec_types.h"
 #include "hdmitsuba/texture_cache.h"
 #include "hdmitsuba/traversal.h"
@@ -119,7 +120,8 @@ class PrimTranslator {
                                  const LightSpec& spec);
 
   static mitsuba::ref<mitsuba::Sensor<Float, Spectrum>> BuildSensor(
-      const CameraSpec& spec, bool is_interactive = false);
+      const CameraSpec& spec, bool is_interactive = false,
+      const PluginSpecNode& sampler_spec = {});
 
   static void UpdateSensorInPlace(mitsuba::Object* sensor_obj,
                                   const CameraSpec& spec);

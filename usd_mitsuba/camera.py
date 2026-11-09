@@ -39,6 +39,7 @@ def _to_sensor_transform(world_transform: Gf.Matrix4d) -> mi.ScalarTransform4f:
 
 
 SENSOR_SHAPE_ATTR = 'mitsuba:sensor:shape'
+_DEFAULT_SAMPLE_COUNT = 128
 
 
 def get_target_shape_path(prim: Usd.Prim) -> Sdf.Path | None:
@@ -189,17 +190,19 @@ def usd_to_mitsuba(
         film_dict['crop_offset_x'] = crop_offset_x
         film_dict['crop_offset_y'] = crop_offset_y
 
-  # TODO: Modify this to also support specifying 'mitsuba:sampler:sample_count'.
-  sample_count = 1
+  sampler_dict: dict[str, Any] = {}
   if render_settings:
-    sample_count_attr = render_settings.GetPrim().GetAttribute('mitsuba:sample_count')
-    if sample_count_attr.HasAuthoredValue():
-      sample_count = sample_count_attr.Get(time)
-
-  sensor_dict['sampler'] = {
-      'type': 'independent',
-      'sample_count': sample_count,
-  }
+    settings_prim = render_settings.GetPrim()
+    sampler_dict = util.extract_nested_dict(
+        settings_prim, 'mitsuba:sampler:', time
+    )
+    sample_count_attr = settings_prim.GetAttribute('mitsuba:sample_count')
+    if sample_count_attr and sample_count_attr.HasAuthoredValue():
+      sampler_dict.setdefault('sample_count', sample_count_attr.Get(time))
+  if not sampler_dict.get('type'):
+    sampler_dict['type'] = 'independent'
+  sampler_dict.setdefault('sample_count', _DEFAULT_SAMPLE_COUNT)
+  sensor_dict['sampler'] = sampler_dict
 
   if reconstruction_filter is not None:
     film_dict['pixel_filter'] = (
