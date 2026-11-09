@@ -1,0 +1,22 @@
+#usda 1.0
+(
+    doc = """constant.usda with its plane as a mesh light without a material,
+    which absorbs the dome light instead of reflecting it."""
+    defaultPrim = "root"
+)
+
+def Xform "root" (
+    prepend references = @./constant.usda@
+)
+{
+    over "Plane"
+    {
+        over "Plane" (
+            prepend apiSchemas = ["MeshLightAPI"]
+        )
+        {
+            float inputs:intensity = 0.2
+            rel material:binding = None
+        }
+    }
+}

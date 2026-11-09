@@ -149,6 +149,7 @@ def test_dome_light_corrupt_texture_falls_back_to_constant():
         'envmap_tinted',
         'mesh',
         'mesh_light_api',
+        'mesh_light_unbound',
         'point',
         'point_non_uniform',
         'point_unnormalized',
@@ -404,6 +405,26 @@ def test_update_mesh_light_intensity():
   UsdLux.MeshLightAPI.Apply(mesh_light_prim)
   UsdLux.LightAPI(mesh_light_prim).CreateIntensityAttr().Set(5.0)
   assert np.max(engine.render()['color'][..., :3]) > 0.1
+
+
+def test_update_unbound_mesh_light_intensity():
+  """An unbound mesh light still absorbs light after an in-place update."""
+  stage = Usd.Stage.Open(
+      f'{test_helpers.TEST_ASSETS_PATH}/lights/mesh_light_unbound.usda'
+  )
+  test_helpers.create_render_settings(stage, resolution=_RENDER_RESOLUTION)
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin')
+  engine.render()
+
+  plane = stage.GetPrimAtPath('/root/Plane/Plane')
+  UsdLux.LightAPI(plane).GetIntensityAttr().Set(0.4)
+  test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      output_prefix='test_update_unbound_mesh_light_intensity',
+      atol=0.1,
+      engine=engine,
+  )
 
 
 def test_area_light_primary_visibility():
