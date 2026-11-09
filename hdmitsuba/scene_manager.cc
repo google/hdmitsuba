@@ -247,6 +247,10 @@ class SceneModel final : public SceneManager {
     default_bsdf_ = mitsuba::PluginManager::instance()
                         ->create_object<mitsuba::BSDF<Float, Spectrum>>(
                             Properties("diffuse"));
+    Properties emitter_bsdf_props("diffuse");
+    emitter_bsdf_props.set("reflectance", 0.0f);
+    emitter_default_bsdf_ =
+        PluginManager::instance()->create_object<BSDF>(emitter_bsdf_props);
   }
 
   ref<BSDF> DefaultBsdf() { return default_bsdf_; }
@@ -255,7 +259,8 @@ class SceneModel final : public SceneManager {
   static const VtValue& PrimvarValue(const PrimvarState& s) { return s.value; }
 
   template <typename Map>
-  ref<BSDF> ResolveBsdf(const SdfPath& material_id, const Map& primvars) {
+  ref<BSDF> ResolveBsdf(const SdfPath& material_id, const Map& primvars,
+                        bool is_emitter = false) {
     auto bsdf_it = bsdfs_.find(material_id);
     if (bsdf_it != bsdfs_.end()) {
       return bsdf_it->second;
@@ -295,7 +300,7 @@ class SceneModel final : public SceneManager {
         return inserted_it->second;
       }
     }
-    return DefaultBsdf();
+    return is_emitter ? emitter_default_bsdf_ : DefaultBsdf();
   }
 
   // Returns the primvars that `material_id` reads as mesh attributes.
@@ -1097,7 +1102,7 @@ class SceneModel final : public SceneManager {
                                    const SdfPath& material_id,
                                    const Map& primvars,
                                    std::string_view key_prefix) {
-    ref<BSDF> bsdf = ResolveBsdf(material_id, primvars);
+    ref<BSDF> bsdf = ResolveBsdf(material_id, primvars, shape->is_emitter());
     if (key_prefix.empty() && spec.dirty_bits != 0 && shape->is_emitter() &&
         spec.emitter_spec.has_value()) {
       // Update emissive mesh radiance (and IES light frame) in-place
@@ -1252,7 +1257,8 @@ class SceneModel final : public SceneManager {
           env = ResolveEmitterAndSensor(spec.emitter_spec, sub_mesh.material_id,
                                         spec.id, spec.double_sided);
         }
-        ref<BSDF> bsdf = ResolveBsdf(sub_mesh.material_id, sub_mesh.primvars);
+        ref<BSDF> bsdf = ResolveBsdf(sub_mesh.material_id, sub_mesh.primvars,
+                                     env.emitter_ptr != nullptr);
         Object* interior_medium = ResolveInteriorMedium(sub_mesh.material_id);
         auto mesh = PrimTranslator::BuildMesh(
             sub_mesh.id, sub_mesh.triangles, sub_mesh.primvars,
@@ -1690,6 +1696,7 @@ class SceneModel final : public SceneManager {
       mesh_attributes_;
   absl::flat_hash_map<SdfPath, ref<Object>, SdfPath::Hash> interior_media_;
   ref<BSDF> default_bsdf_ = nullptr;
+  ref<BSDF> emitter_default_bsdf_ = nullptr;
   absl::flat_hash_map<std::tuple<float, float, float>, ref<BSDF>> color_bsdfs_;
   absl::Mutex color_bsdfs_mutex_;
 
