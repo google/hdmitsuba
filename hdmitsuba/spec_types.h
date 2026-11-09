@@ -36,6 +36,7 @@
 
 #include "hdmitsuba/mesh/geometry_processor.h"
 #include "hdmitsuba/motion.h"
+#include "hdmitsuba/plugin_builder.h"
 #include "hdmitsuba/utils.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -242,8 +243,19 @@ struct CameraSpec : public BaseSpec {
   float focus_distance = 0.0f;
   float near_clip = 0.01f;
   float far_clip = 1000.0f;
-  std::string pixel_filter_type = "";
   std::optional<SdfPath> target_shape_id = std::nullopt;
+  PluginSpecNode sensor_spec;
+  std::optional<PluginSpecNode> committed_sensor_spec = std::nullopt;
+
+  void FoldPendingFrom(const CameraSpec& prev) {
+    committed_sensor_spec = prev.committed_sensor_spec;
+    BaseSpec::FoldPendingFrom(prev);
+  }
+
+  void MarkClean() {
+    BaseSpec::MarkClean();
+    committed_sensor_spec = sensor_spec;
+  }
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

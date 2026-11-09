@@ -421,7 +421,7 @@ def convert_to_mitsuba(
   )
 
   prototype_paths = instancing.get_prototype_paths(stage)
-  sensor_bindings = camera.get_surface_sensor_bindings(stage)
+  sensor_bindings = camera.get_surface_sensor_bindings(stage, time)
   # Shapes and lights are sampled over the union of all camera shutters.
   motion_interval = motion.get_motion_interval(stage, time)
   # Traverse the stage using TraverseInstanceProxies. This flattens native USD
@@ -473,9 +473,15 @@ def convert_to_mitsuba(
       )
     elif prim.IsA(UsdGeom.Camera):
       # A sensor bound to a shape is emitted as part of that shape.
-      if camera.get_target_shape_path(prim) is None:
-        mi_scene_dict[mi_id] = camera.usd_to_mitsuba(
-            UsdGeom.Camera(prim), time=time)
+      if camera.get_target_shape_path(prim, time) is None:
+        sensor_dict = camera.usd_to_mitsuba(UsdGeom.Camera(prim), time=time)
+        if sensor_dict.get('type') == 'irradiancemeter':
+          Tf.Warn(
+              f"Camera {prim.GetPath()} has mitsuba:sensor:type ="
+              " 'irradiancemeter' without mitsuba:sensor:shape; skipping."
+          )
+        else:
+          mi_scene_dict[mi_id] = sensor_dict
     elif prim.IsA(UsdLux.NonboundableLightBase) or prim.IsA(
         UsdLux.BoundableLightBase
     ):

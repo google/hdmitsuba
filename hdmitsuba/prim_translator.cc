@@ -17,11 +17,16 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <typeinfo>
 #include <utility>
 #include <vector>
 
@@ -64,8 +69,12 @@
 #include <pxr/base/gf/matrix4f.h>
 #include <pxr/base/gf/quatf.h>
 #include <pxr/base/gf/rotation.h>
+#include <pxr/base/gf/vec2d.h>
+#include <pxr/base/gf/vec2f.h>
+#include <pxr/base/gf/vec2i.h>
 #include <pxr/base/gf/vec3d.h>
 #include <pxr/base/gf/vec3f.h>
+#include <pxr/base/gf/vec4d.h>
 #include <pxr/base/gf/vec4f.h>
 #include <pxr/base/plug/plugin.h>
 #include <pxr/base/plug/registry.h>
@@ -731,12 +740,644 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::SetTransformParameter(
 MI_VARIANT void PrimTranslator<Float, Spectrum>::SetSpectrumParameter(
     TraversalCallback& cb, std::string_view name, const GfVec3f& rgb) {
   using Color3f = mitsuba::Color<Float, 3>;
-  cb.set<Color3f>(absl::StrCat(name, ".value"), Color3f(rgb[0], rgb[1], rgb[2]));
+  using ScalarFloat = dr::scalar_t<Float>;
+  auto make_val = [](ScalarFloat v) -> Float {
+    if constexpr (dr::is_jit_v<Float>) {
+      return dr::opaque<Float>(v);
+    } else {
+      return Float(v);
+    }
+  };
+  cb.set<Color3f>(
+      absl::StrCat(name, ".value"),
+      Color3f(make_val(rgb[0]), make_val(rgb[1]), make_val(rgb[2])));
   auto it = cb.objects.find(name);
   if (TF_VERIFY(it != cb.objects.end(), "No spectrum object found for %.*s",
                 static_cast<int>(name.size()), name.data())) {
     it->second->parameters_changed();
   }
+}
+
+namespace {
+
+enum class PluginLeafRole { kPlain, kRgb, kVector, kSpectrum };
+
+struct ChangedPluginLeaf {
+  std::string path;
+  PluginLeafRole role;
+  VtValue value;
+};
+
+template <typename T>
+bool TypeMatches(const std::type_info& info) {
+  return info == typeid(T) || std::string_view(info.name()) == typeid(T).name();
+}
+
+template <typename Float>
+Float MakeOpaqueFloat(dr::scalar_t<Float> scalar) {
+  if constexpr (dr::is_jit_v<Float>) {
+    return dr::opaque<Float>(scalar);
+  } else {
+    return Float(scalar);
+  }
+}
+
+std::optional<double> ExtractDoubleValue(const VtValue& value) {
+  if (value.IsHolding<float>()) return value.UncheckedGet<float>();
+  if (value.IsHolding<double>()) return value.UncheckedGet<double>();
+  if (value.IsHolding<int>()) return value.UncheckedGet<int>();
+  if (value.IsHolding<int64_t>()) {
+    return static_cast<double>(value.UncheckedGet<int64_t>());
+  }
+  if (value.IsHolding<uint32_t>()) return value.UncheckedGet<uint32_t>();
+  if (value.IsHolding<uint64_t>()) {
+    return static_cast<double>(value.UncheckedGet<uint64_t>());
+  }
+  return std::nullopt;
+}
+
+std::optional<int64_t> ExtractInt64Value(const VtValue& value) {
+  if (value.IsHolding<int>()) return value.UncheckedGet<int>();
+  if (value.IsHolding<int64_t>()) return value.UncheckedGet<int64_t>();
+  if (value.IsHolding<uint32_t>()) return value.UncheckedGet<uint32_t>();
+  if (value.IsHolding<uint64_t>()) {
+    uint64_t raw = value.UncheckedGet<uint64_t>();
+    if (raw <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+      return static_cast<int64_t>(raw);
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<GfVec3d> ExtractRgb3Value(const VtValue& value) {
+  if (value.IsHolding<GfVec3f>()) {
+    const GfVec3f& c = value.UncheckedGet<GfVec3f>();
+    return GfVec3d(c[0], c[1], c[2]);
+  }
+  if (value.IsHolding<GfVec3d>()) return value.UncheckedGet<GfVec3d>();
+  if (value.IsHolding<GfVec4f>()) {
+    const GfVec4f& c = value.UncheckedGet<GfVec4f>();
+    return GfVec3d(c[0], c[1], c[2]);
+  }
+  if (value.IsHolding<GfVec4d>()) {
+    const GfVec4d& c = value.UncheckedGet<GfVec4d>();
+    return GfVec3d(c[0], c[1], c[2]);
+  }
+  if (std::optional<double> scalar = ExtractDoubleValue(value)) {
+    return GfVec3d(*scalar);
+  }
+  return std::nullopt;
+}
+
+std::optional<GfVec3d> ExtractVec3Value(const VtValue& value) {
+  if (value.IsHolding<GfVec3f>()) {
+    const GfVec3f& v = value.UncheckedGet<GfVec3f>();
+    return GfVec3d(v[0], v[1], v[2]);
+  }
+  if (value.IsHolding<GfVec3d>()) return value.UncheckedGet<GfVec3d>();
+  return std::nullopt;
+}
+
+std::optional<GfVec2d> ExtractVec2Value(const VtValue& value) {
+  if (value.IsHolding<GfVec2f>()) {
+    const GfVec2f& v = value.UncheckedGet<GfVec2f>();
+    return GfVec2d(v[0], v[1]);
+  }
+  if (value.IsHolding<GfVec2d>()) return value.UncheckedGet<GfVec2d>();
+  return std::nullopt;
+}
+
+bool CollectChangedPluginLeaves(const std::string& prefix,
+                                const PluginSpecNode& old_node,
+                                const PluginSpecNode& new_node,
+                                std::vector<ChangedPluginLeaf>* leaves) {
+  for (const auto& [param_key, new_val] : new_node.params) {
+    if (new_node.children.find(param_key) != new_node.children.end()) {
+      continue;
+    }
+    auto old_it = old_node.params.find(param_key);
+    if (old_it == old_node.params.end() || old_it->second != new_val) {
+      std::string path =
+          prefix.empty() ? param_key : absl::StrCat(prefix, ".", param_key);
+      leaves->push_back({std::move(path), PluginLeafRole::kPlain, new_val});
+    }
+  }
+  for (const auto& [child_key, new_child] : new_node.children) {
+    auto old_it = old_node.children.find(child_key);
+    if (old_it == old_node.children.end()) return false;
+    const PluginSpecNode& old_child = old_it->second;
+    if (old_child == new_child) continue;
+    std::string child_path =
+        prefix.empty() ? child_key : absl::StrCat(prefix, ".", child_key);
+    if (new_child.plugin_type == "rgb" || new_child.plugin_type == "vector" ||
+        new_child.plugin_type == "spectrum") {
+      auto val_it = new_child.params.find("value");
+      if (val_it == new_child.params.end() || new_child.params.size() != 1) {
+        return false;
+      }
+      PluginLeafRole role = PluginLeafRole::kSpectrum;
+      if (new_child.plugin_type == "rgb") {
+        role = PluginLeafRole::kRgb;
+      } else if (new_child.plugin_type == "vector") {
+        role = PluginLeafRole::kVector;
+      }
+      leaves->push_back({std::move(child_path), role, val_it->second});
+      continue;
+    }
+    if (!CollectChangedPluginLeaves(child_path, old_child, new_child, leaves)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+template <typename Float>
+bool StageTypedPluginWrite(const TraversalCallback::ValueEntry& entry,
+                           PluginLeafRole role, const VtValue& value,
+                           std::vector<std::function<void()>>* staged_writes,
+                           bool* is_host_scalar) {
+  using ScalarFloat = dr::scalar_t<Float>;
+  if constexpr (dr::is_jit_v<Float>) {
+    using Color3f = mitsuba::Color<Float, 3>;
+    using Vector3f = mitsuba::Vector<Float, 3>;
+    using Point3f = mitsuba::Point<Float, 3>;
+    using Normal3f = mitsuba::Normal<Float, 3>;
+    using Vector2f = mitsuba::Vector<Float, 2>;
+    using Point2f = mitsuba::Point<Float, 2>;
+    using AffineTransform4f =
+        mitsuba::Transform<mitsuba::Point<Float, 4>, true>;
+    using AffineTransform3f =
+        mitsuba::Transform<mitsuba::Point<Float, 3>, true>;
+
+    if (TypeMatches<Float>(entry.type)) {
+      if (role != PluginLeafRole::kPlain && role != PluginLeafRole::kSpectrum) {
+        return false;
+      }
+      std::optional<double> scalar = ExtractDoubleValue(value);
+      if (!scalar.has_value()) return false;
+      const ScalarFloat v = static_cast<ScalarFloat>(*scalar);
+      auto* dst = static_cast<Float*>(entry.ptr);
+      staged_writes->push_back([dst, v]() { *dst = dr::opaque<Float>(v); });
+      return true;
+    }
+    if (TypeMatches<Color3f>(entry.type)) {
+      if (role == PluginLeafRole::kVector) return false;
+      std::optional<GfVec3d> rgb = ExtractRgb3Value(value);
+      if (!rgb.has_value()) return false;
+      const GfVec3d c = *rgb;
+      auto* dst = static_cast<Color3f*>(entry.ptr);
+      staged_writes->push_back([dst, c]() {
+        *dst = Color3f(dr::opaque<Float>(static_cast<ScalarFloat>(c[0])),
+                       dr::opaque<Float>(static_cast<ScalarFloat>(c[1])),
+                       dr::opaque<Float>(static_cast<ScalarFloat>(c[2])));
+      });
+      return true;
+    }
+    auto stage_jit_vec3 = [&](auto* dst) -> bool {
+      using VecT = std::remove_pointer_t<decltype(dst)>;
+      if (role != PluginLeafRole::kPlain && role != PluginLeafRole::kVector) {
+        return false;
+      }
+      std::optional<GfVec3d> vec = ExtractVec3Value(value);
+      if (!vec.has_value()) return false;
+      const GfVec3d v = *vec;
+      staged_writes->push_back([dst, v]() {
+        *dst = VecT(dr::opaque<Float>(static_cast<ScalarFloat>(v[0])),
+                    dr::opaque<Float>(static_cast<ScalarFloat>(v[1])),
+                    dr::opaque<Float>(static_cast<ScalarFloat>(v[2])));
+      });
+      return true;
+    };
+    if (TypeMatches<Vector3f>(entry.type)) {
+      return stage_jit_vec3(static_cast<Vector3f*>(entry.ptr));
+    }
+    if (TypeMatches<Point3f>(entry.type)) {
+      return stage_jit_vec3(static_cast<Point3f*>(entry.ptr));
+    }
+    if (TypeMatches<Normal3f>(entry.type)) {
+      return stage_jit_vec3(static_cast<Normal3f*>(entry.ptr));
+    }
+    auto stage_jit_vec2 = [&](auto* dst) -> bool {
+      using VecT = std::remove_pointer_t<decltype(dst)>;
+      if (role != PluginLeafRole::kPlain) return false;
+      std::optional<GfVec2d> vec = ExtractVec2Value(value);
+      if (!vec.has_value()) return false;
+      const GfVec2d v = *vec;
+      staged_writes->push_back([dst, v]() {
+        *dst = VecT(dr::opaque<Float>(static_cast<ScalarFloat>(v[0])),
+                    dr::opaque<Float>(static_cast<ScalarFloat>(v[1])));
+      });
+      return true;
+    };
+    if (TypeMatches<Vector2f>(entry.type)) {
+      return stage_jit_vec2(static_cast<Vector2f*>(entry.ptr));
+    }
+    if (TypeMatches<Point2f>(entry.type)) {
+      return stage_jit_vec2(static_cast<Point2f*>(entry.ptr));
+    }
+    if (TypeMatches<AffineTransform4f>(entry.type)) {
+      if (role != PluginLeafRole::kPlain) return false;
+      std::optional<ScalarAffineTransform4f> xform = ExtractTransform4f(value);
+      if (!xform.has_value()) return false;
+      const ScalarAffineTransform4f xf = *xform;
+      auto* dst = static_cast<AffineTransform4f*>(entry.ptr);
+      staged_writes->push_back([dst, xf]() {
+        AffineTransform4f dev_xf(xf);
+        dr::make_opaque(dev_xf);
+        *dst = std::move(dev_xf);
+      });
+      return true;
+    }
+    if (TypeMatches<AffineTransform3f>(entry.type)) {
+      if (role != PluginLeafRole::kPlain) return false;
+      std::optional<ScalarAffineTransform3f> xform = ExtractTransform3f(value);
+      if (!xform.has_value()) return false;
+      const ScalarAffineTransform3f xf = *xform;
+      auto* dst = static_cast<AffineTransform3f*>(entry.ptr);
+      staged_writes->push_back([dst, xf]() {
+        AffineTransform3f dev_xf(xf);
+        dr::make_opaque(dev_xf);
+        *dst = std::move(dev_xf);
+      });
+      return true;
+    }
+  }
+
+  const size_t prev_writes = staged_writes->size();
+  const bool matched_host_scalar = [&]() -> bool {
+    if (TypeMatches<float>(entry.type)) {
+    if (role != PluginLeafRole::kPlain && role != PluginLeafRole::kSpectrum) {
+      return false;
+    }
+    std::optional<double> scalar = ExtractDoubleValue(value);
+    if (!scalar.has_value()) return false;
+    const float v = static_cast<float>(*scalar);
+    auto* dst = static_cast<float*>(entry.ptr);
+    staged_writes->push_back([dst, v]() { *dst = v; });
+    return true;
+  }
+  if (TypeMatches<double>(entry.type)) {
+    if (role != PluginLeafRole::kPlain && role != PluginLeafRole::kSpectrum) {
+      return false;
+    }
+    std::optional<double> scalar = ExtractDoubleValue(value);
+    if (!scalar.has_value()) return false;
+    const double v = *scalar;
+    auto* dst = static_cast<double*>(entry.ptr);
+    staged_writes->push_back([dst, v]() { *dst = v; });
+    return true;
+  }
+  auto stage_scalar_rgb = [&](auto* dst) -> bool {
+    using ColorT = std::remove_pointer_t<decltype(dst)>;
+    using CompT = dr::scalar_t<ColorT>;
+    if (role == PluginLeafRole::kVector) return false;
+    std::optional<GfVec3d> rgb = ExtractRgb3Value(value);
+    if (!rgb.has_value()) return false;
+    const GfVec3d c = *rgb;
+    staged_writes->push_back([dst, c]() {
+      *dst = ColorT(static_cast<CompT>(c[0]), static_cast<CompT>(c[1]),
+                    static_cast<CompT>(c[2]));
+    });
+    return true;
+  };
+  if (TypeMatches<mitsuba::Color<float, 3>>(entry.type)) {
+    return stage_scalar_rgb(static_cast<mitsuba::Color<float, 3>*>(entry.ptr));
+  }
+  if (TypeMatches<mitsuba::Color<double, 3>>(entry.type)) {
+    return stage_scalar_rgb(static_cast<mitsuba::Color<double, 3>*>(entry.ptr));
+  }
+  auto stage_scalar_vec3 = [&](auto* dst) -> bool {
+    using VecT = std::remove_pointer_t<decltype(dst)>;
+    using CompT = dr::scalar_t<VecT>;
+    if (role != PluginLeafRole::kPlain && role != PluginLeafRole::kVector) {
+      return false;
+    }
+    std::optional<GfVec3d> vec = ExtractVec3Value(value);
+    if (!vec.has_value()) return false;
+    const GfVec3d v = *vec;
+    staged_writes->push_back([dst, v]() {
+      *dst = VecT(static_cast<CompT>(v[0]), static_cast<CompT>(v[1]),
+                  static_cast<CompT>(v[2]));
+    });
+    return true;
+  };
+  if (TypeMatches<mitsuba::Vector<float, 3>>(entry.type)) {
+    return stage_scalar_vec3(
+        static_cast<mitsuba::Vector<float, 3>*>(entry.ptr));
+  }
+  if (TypeMatches<mitsuba::Vector<double, 3>>(entry.type)) {
+    return stage_scalar_vec3(
+        static_cast<mitsuba::Vector<double, 3>*>(entry.ptr));
+  }
+  if (TypeMatches<mitsuba::Point<float, 3>>(entry.type)) {
+    return stage_scalar_vec3(static_cast<mitsuba::Point<float, 3>*>(entry.ptr));
+  }
+  if (TypeMatches<mitsuba::Point<double, 3>>(entry.type)) {
+    return stage_scalar_vec3(
+        static_cast<mitsuba::Point<double, 3>*>(entry.ptr));
+  }
+  if (TypeMatches<mitsuba::Normal<float, 3>>(entry.type)) {
+    return stage_scalar_vec3(
+        static_cast<mitsuba::Normal<float, 3>*>(entry.ptr));
+  }
+  if (TypeMatches<mitsuba::Normal<double, 3>>(entry.type)) {
+    return stage_scalar_vec3(
+        static_cast<mitsuba::Normal<double, 3>*>(entry.ptr));
+  }
+  auto stage_scalar_vec2 = [&](auto* dst) -> bool {
+    using VecT = std::remove_pointer_t<decltype(dst)>;
+    using CompT = dr::scalar_t<VecT>;
+    if (role != PluginLeafRole::kPlain) return false;
+    std::optional<GfVec2d> vec = ExtractVec2Value(value);
+    if (!vec.has_value()) return false;
+    const GfVec2d v = *vec;
+    staged_writes->push_back([dst, v]() {
+      *dst = VecT(static_cast<CompT>(v[0]), static_cast<CompT>(v[1]));
+    });
+    return true;
+  };
+  if (TypeMatches<mitsuba::Vector<float, 2>>(entry.type)) {
+    return stage_scalar_vec2(
+        static_cast<mitsuba::Vector<float, 2>*>(entry.ptr));
+  }
+  if (TypeMatches<mitsuba::Vector<double, 2>>(entry.type)) {
+    return stage_scalar_vec2(
+        static_cast<mitsuba::Vector<double, 2>*>(entry.ptr));
+  }
+  if (TypeMatches<mitsuba::Point<float, 2>>(entry.type)) {
+    return stage_scalar_vec2(static_cast<mitsuba::Point<float, 2>*>(entry.ptr));
+  }
+  if (TypeMatches<mitsuba::Point<double, 2>>(entry.type)) {
+    return stage_scalar_vec2(
+        static_cast<mitsuba::Point<double, 2>*>(entry.ptr));
+  }
+  if (TypeMatches<mitsuba::Vector<int32_t, 2>>(entry.type)) {
+    if (role != PluginLeafRole::kPlain || !value.IsHolding<GfVec2i>()) {
+      return false;
+    }
+    const GfVec2i v = value.UncheckedGet<GfVec2i>();
+    auto* dst = static_cast<mitsuba::Vector<int32_t, 2>*>(entry.ptr);
+    staged_writes->push_back(
+        [dst, v]() { *dst = mitsuba::Vector<int32_t, 2>(v[0], v[1]); });
+    return true;
+  }
+  if (TypeMatches<mitsuba::Point<int32_t, 2>>(entry.type)) {
+    if (role != PluginLeafRole::kPlain || !value.IsHolding<GfVec2i>()) {
+      return false;
+    }
+    const GfVec2i v = value.UncheckedGet<GfVec2i>();
+    auto* dst = static_cast<mitsuba::Point<int32_t, 2>*>(entry.ptr);
+    staged_writes->push_back(
+        [dst, v]() { *dst = mitsuba::Point<int32_t, 2>(v[0], v[1]); });
+    return true;
+  }
+  if (TypeMatches<mitsuba::Vector<uint32_t, 2>>(entry.type)) {
+    if (role != PluginLeafRole::kPlain || !value.IsHolding<GfVec2i>()) {
+      return false;
+    }
+    const GfVec2i v = value.UncheckedGet<GfVec2i>();
+    if (v[0] < 0 || v[1] < 0) return false;
+    auto* dst = static_cast<mitsuba::Vector<uint32_t, 2>*>(entry.ptr);
+    staged_writes->push_back([dst, v]() {
+      *dst = mitsuba::Vector<uint32_t, 2>(static_cast<uint32_t>(v[0]),
+                                          static_cast<uint32_t>(v[1]));
+    });
+    return true;
+  }
+  if (TypeMatches<mitsuba::Point<uint32_t, 2>>(entry.type)) {
+    if (role != PluginLeafRole::kPlain || !value.IsHolding<GfVec2i>()) {
+      return false;
+    }
+    const GfVec2i v = value.UncheckedGet<GfVec2i>();
+    if (v[0] < 0 || v[1] < 0) return false;
+    auto* dst = static_cast<mitsuba::Point<uint32_t, 2>*>(entry.ptr);
+    staged_writes->push_back([dst, v]() {
+      *dst = mitsuba::Point<uint32_t, 2>(static_cast<uint32_t>(v[0]),
+                                         static_cast<uint32_t>(v[1]));
+    });
+    return true;
+  }
+  if (TypeMatches<bool>(entry.type)) {
+    if (role != PluginLeafRole::kPlain || !value.IsHolding<bool>()) {
+      return false;
+    }
+    const bool b = value.UncheckedGet<bool>();
+    auto* dst = static_cast<bool*>(entry.ptr);
+    staged_writes->push_back([dst, b]() { *dst = b; });
+    return true;
+  }
+  if (TypeMatches<int32_t>(entry.type)) {
+    if (role != PluginLeafRole::kPlain) return false;
+    std::optional<int64_t> i = ExtractInt64Value(value);
+    if (!i.has_value() || *i < std::numeric_limits<int32_t>::min() ||
+        *i > std::numeric_limits<int32_t>::max()) {
+      return false;
+    }
+    const int32_t v = static_cast<int32_t>(*i);
+    auto* dst = static_cast<int32_t*>(entry.ptr);
+    staged_writes->push_back([dst, v]() { *dst = v; });
+    return true;
+  }
+  if (TypeMatches<uint32_t>(entry.type)) {
+    if (role != PluginLeafRole::kPlain) return false;
+    std::optional<int64_t> i = ExtractInt64Value(value);
+    if (!i.has_value() || *i < 0 ||
+        *i > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+      return false;
+    }
+    const uint32_t v = static_cast<uint32_t>(*i);
+    auto* dst = static_cast<uint32_t*>(entry.ptr);
+    staged_writes->push_back([dst, v]() { *dst = v; });
+    return true;
+  }
+  if (TypeMatches<int64_t>(entry.type)) {
+    if (role != PluginLeafRole::kPlain) return false;
+    std::optional<int64_t> i = ExtractInt64Value(value);
+    if (!i.has_value()) return false;
+    const int64_t v = *i;
+    auto* dst = static_cast<int64_t*>(entry.ptr);
+    staged_writes->push_back([dst, v]() { *dst = v; });
+    return true;
+  }
+  if (TypeMatches<uint64_t>(entry.type)) {
+    if (role != PluginLeafRole::kPlain) return false;
+    if (value.IsHolding<uint64_t>()) {
+      const uint64_t v = value.UncheckedGet<uint64_t>();
+      auto* dst = static_cast<uint64_t*>(entry.ptr);
+      staged_writes->push_back([dst, v]() { *dst = v; });
+      return true;
+    }
+    std::optional<int64_t> i = ExtractInt64Value(value);
+    if (!i.has_value() || *i < 0) return false;
+    const uint64_t v = static_cast<uint64_t>(*i);
+    auto* dst = static_cast<uint64_t*>(entry.ptr);
+    staged_writes->push_back([dst, v]() { *dst = v; });
+    return true;
+  }
+  if (TypeMatches<ScalarAffineTransform4f>(entry.type)) {
+    if (role != PluginLeafRole::kPlain) return false;
+    std::optional<ScalarAffineTransform4f> xform = ExtractTransform4f(value);
+    if (!xform.has_value()) return false;
+    const ScalarAffineTransform4f xf = *xform;
+    auto* dst = static_cast<ScalarAffineTransform4f*>(entry.ptr);
+    staged_writes->push_back([dst, xf]() { *dst = xf; });
+    return true;
+  }
+  if (TypeMatches<ScalarAffineTransform3f>(entry.type)) {
+    if (role != PluginLeafRole::kPlain) return false;
+    std::optional<ScalarAffineTransform3f> xform = ExtractTransform3f(value);
+    if (!xform.has_value()) return false;
+    const ScalarAffineTransform3f xf = *xform;
+    auto* dst = static_cast<ScalarAffineTransform3f*>(entry.ptr);
+    staged_writes->push_back([dst, xf]() { *dst = xf; });
+    return true;
+  }
+  return false;
+  }();
+  if (matched_host_scalar && staged_writes->size() > prev_writes &&
+      is_host_scalar != nullptr) {
+    *is_host_scalar = true;
+  }
+  return matched_host_scalar;
+}
+
+void AppendUniqueKey(std::vector<std::string>* keys, std::string_view key) {
+  for (const std::string& existing : *keys) {
+    if (existing == key) return;
+  }
+  keys->emplace_back(key);
+}
+
+std::optional<double> ComputePerspectiveXFov(const CameraSpec& spec,
+                                             double aspect) {
+  const std::string& sensor_type = spec.sensor_spec.plugin_type.empty()
+                                       ? spec.sensor_type
+                                       : spec.sensor_spec.plugin_type;
+  if (!spec.sensor_spec.HasProperty("fov") &&
+      !spec.sensor_spec.HasProperty("focal_length") &&
+      !spec.sensor_spec.HasProperty("fov_axis")) {
+    return static_cast<double>(spec.fov);
+  }
+  mitsuba::Properties fov_props(sensor_type);
+  if (!spec.sensor_spec.HasProperty("focal_length")) {
+    fov_props.set("fov", spec.fov);
+    fov_props.set("fov_axis", "x");
+  }
+  for (const char* key : {"fov", "focal_length", "fov_axis"}) {
+    if (auto it = spec.sensor_spec.params.find(key);
+        it != spec.sensor_spec.params.end()) {
+      SetMitsubaPropertyFromValue(fov_props, key, it->second,
+                                  /*invert_float=*/false,
+                                  /*raise_if_exists=*/false);
+    }
+  }
+  try {
+    return mitsuba::parse_fov(fov_props, aspect > 0.0 ? aspect : 1.0);
+  } catch (const std::exception& e) {
+    TF_RUNTIME_ERROR("Failed to parse FOV for sensor '%s': %s",
+                     spec.id.GetText(), e.what());
+    return std::nullopt;
+  }
+}
+
+}  // namespace
+
+MI_VARIANT bool PrimTranslator<Float, Spectrum>::TryUpdatePluginInPlace(
+    mitsuba::Object* root_obj, const PluginSpecNode& old_spec,
+    const PluginSpecNode& new_spec, bool* wrote_host_scalar) {
+  if (root_obj == nullptr) return false;
+  if (old_spec == new_spec) return true;
+  if (!CanUpdatePluginStructureInPlace(old_spec, new_spec)) return false;
+
+  std::vector<ChangedPluginLeaf> leaves;
+  if (!CollectChangedPluginLeaves("", old_spec, new_spec, &leaves)) {
+    return false;
+  }
+  if (leaves.empty()) return true;
+
+  TraversalCallback cb;
+  root_obj->traverse(&cb);
+
+  std::vector<std::function<void()>> staged_writes;
+  staged_writes.reserve(leaves.size());
+  bool staged_host_scalar = false;
+  std::vector<std::string> root_keys;
+  absl::flat_hash_map<std::string, std::vector<std::string>>
+      touched_object_keys;
+
+  for (const ChangedPluginLeaf& leaf : leaves) {
+    std::string resolved_path = leaf.path;
+    auto data_it = cb.data.find(resolved_path);
+    if (data_it == cb.data.end() && cb.objects.contains(leaf.path)) {
+      std::string value_path = absl::StrCat(leaf.path, ".value");
+      data_it = cb.data.find(value_path);
+      if (data_it != cb.data.end()) {
+        resolved_path = std::move(value_path);
+      }
+    }
+    if (data_it == cb.data.end()) {
+      return false;
+    }
+    const TraversalCallback::ValueEntry& entry = data_it->second;
+    if ((entry.flags &
+         static_cast<uint32_t>(mitsuba::ParamFlags::ReadOnly)) != 0) {
+      return false;
+    }
+    if (!StageTypedPluginWrite<Float>(entry, leaf.role, leaf.value,
+                                      &staged_writes, &staged_host_scalar)) {
+      return false;
+    }
+
+    size_t first_dot = resolved_path.find('.');
+    if (first_dot == std::string::npos) {
+      AppendUniqueKey(&root_keys, resolved_path);
+    } else {
+      AppendUniqueKey(&root_keys,
+                      std::string_view(resolved_path).substr(0, first_dot));
+      size_t dot_pos = first_dot;
+      while (dot_pos != std::string::npos) {
+        std::string obj_path = resolved_path.substr(0, dot_pos);
+        size_t next_dot = resolved_path.find('.', dot_pos + 1);
+        std::string_view child_key =
+            next_dot == std::string::npos
+                ? std::string_view(resolved_path).substr(dot_pos + 1)
+                : std::string_view(resolved_path)
+                      .substr(dot_pos + 1, next_dot - dot_pos - 1);
+        if (cb.objects.contains(obj_path)) {
+          AppendUniqueKey(&touched_object_keys[obj_path], child_key);
+        }
+        dot_pos = next_dot;
+      }
+    }
+  }
+
+  for (const auto& write_fn : staged_writes) {
+    write_fn();
+  }
+
+  std::vector<std::pair<std::string, std::vector<std::string>>> ordered_objects(
+      touched_object_keys.begin(), touched_object_keys.end());
+  std::sort(ordered_objects.begin(), ordered_objects.end(),
+            [](const auto& lhs, const auto& rhs) {
+              auto depth_lhs =
+                  std::count(lhs.first.begin(), lhs.first.end(), '.');
+              auto depth_rhs =
+                  std::count(rhs.first.begin(), rhs.first.end(), '.');
+              if (depth_lhs != depth_rhs) return depth_lhs > depth_rhs;
+              return lhs.first > rhs.first;
+            });
+  try {
+    for (const auto& [obj_path, child_keys] : ordered_objects) {
+      cb.objects.at(obj_path)->parameters_changed(child_keys);
+    }
+    root_obj->parameters_changed(root_keys);
+  } catch (const std::exception&) {
+    return false;
+  }
+  if (staged_host_scalar && wrote_host_scalar != nullptr) {
+    *wrote_host_scalar = true;
+  }
+  return true;
 }
 
 MI_VARIANT typename PrimTranslator<Float, Spectrum>::TranslatedLight
@@ -1019,54 +1660,99 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateLightInPlace(
   }
 }
 
+namespace {
+
+void EraseFilmCropParams(PluginSpecNode* film_spec) {
+  film_spec->params.erase("crop_offset_x");
+  film_spec->params.erase("crop_offset_y");
+  film_spec->params.erase("crop_width");
+  film_spec->params.erase("crop_height");
+}
+
+}  // namespace
+
 MI_VARIANT mitsuba::ref<mitsuba::Sensor<Float, Spectrum>> PrimTranslator<
-    Float, Spectrum>::BuildSensor(const CameraSpec& spec, bool is_interactive,
-                                  const PluginSpecNode& sampler_spec) {
-  mitsuba::Properties props;
-  if (spec.sensor_type == "irradiancemeter") {
-    props = mitsuba::Properties("irradiancemeter");
-  } else {
-    const bool use_thinlens =
-        spec.aperture_radius > 0.0f && spec.focus_distance > 0.0f;
-    props = mitsuba::Properties(use_thinlens ? "thinlens" : "perspective");
+    Float, Spectrum>::BuildSensor(const CameraSpec& spec, bool use_box_filter,
+                                  const PluginSpecNode& sampler_spec,
+                                  bool force_independent_sampler) {
+  const std::string& sensor_type = spec.sensor_spec.plugin_type.empty()
+                                       ? spec.sensor_type
+                                       : spec.sensor_spec.plugin_type;
+  mitsuba::Properties props(sensor_type);
+  const bool has_explicit_ray_frame =
+      spec.sensor_spec.HasProperty("to_world") ||
+      spec.sensor_spec.HasProperty("direction") ||
+      spec.sensor_spec.HasProperty("origin");
+  if (sensor_type != "irradiancemeter" &&
+      !spec.target_shape_id.has_value() && !has_explicit_ray_frame) {
     SetTransformProperty(props, spec.transform);
-    props.set("fov", spec.fov);
-    props.set("fov_axis", "x");
+  }
+  if (sensor_type == "perspective" || sensor_type == "thinlens") {
+    if (!spec.sensor_spec.HasProperty("focal_length")) {
+      props.set("fov", spec.fov);
+      props.set("fov_axis", "x");
+    }
     props.set("principal_point_offset_x", spec.horizontal_aperture_offset);
     props.set("principal_point_offset_y", spec.vertical_aperture_offset);
-    if (use_thinlens) {
+    if (sensor_type == "thinlens") {
       props.set("aperture_radius", spec.aperture_radius);
-      props.set("focus_distance", spec.focus_distance);
+      if (spec.aperture_radius > 0.0f && spec.focus_distance > 0.0f) {
+        props.set("focus_distance", spec.focus_distance);
+      }
     }
   }
-  props.set("near_clip", spec.near_clip);
-  props.set("far_clip", spec.far_clip);
+  if (sensor_type == "perspective" || sensor_type == "thinlens" ||
+      sensor_type == "orthographic") {
+    props.set("near_clip", spec.near_clip);
+    props.set("far_clip", spec.far_clip);
+  }
   props.set("shutter_open", spec.shutter[0]);
   props.set("shutter_close", spec.shutter[1]);
 
-  std::string filter_type = is_interactive ? "box" : spec.pixel_filter_type;
-  if (!filter_type.empty()) {
-    mitsuba::Properties film_props("hdrfilm");
-    film_props.set(
-        "pixel_filter",
-        static_cast<mitsuba::Object*>(
-            mitsuba::PluginManager::instance()
-                ->create_object<mitsuba::ReconstructionFilter<Float, Spectrum>>(
-                    mitsuba::Properties(filter_type))
-                .get()));
-    props.set(
-        "film",
-        static_cast<mitsuba::Object*>(
-            mitsuba::PluginManager::instance()
-                ->create_object<mitsuba::Film<Float, Spectrum>>(film_props)
-                .get()));
+  PluginSpecNode effective_spec = spec.sensor_spec;
+  effective_spec.plugin_type = sensor_type;
+
+  if (auto film_it = effective_spec.children.find("film");
+      film_it != effective_spec.children.end()) {
+    EraseFilmCropParams(&film_it->second);
   }
-  if (!sampler_spec.Empty()) {
+  const bool is_signal_sensor =
+      sensor_type == "radiancemeter" || sensor_type == "distant";
+  if (effective_spec.children.find("film") != effective_spec.children.end() ||
+      use_box_filter || is_signal_sensor) {
+    PluginSpecNode& film_spec = effective_spec.children["film"];
+    if (film_spec.plugin_type.empty()) {
+      film_spec.plugin_type = "hdrfilm";
+    }
+    if (is_signal_sensor) {
+      film_spec.params.try_emplace("width", VtValue(1));
+      film_spec.params.try_emplace("height", VtValue(1));
+    }
+    if (use_box_filter) {
+      film_spec.children.erase("reconstruction_filter");
+      film_spec.children.erase("rfilter");
+      film_spec.children["pixel_filter"] = PluginSpecNode("box");
+    }
+  }
+
+  if (auto cam_sampler_it = effective_spec.children.find("sampler");
+      cam_sampler_it != effective_spec.children.end()) {
+    if (force_independent_sampler) {
+      cam_sampler_it->second = PluginSpecNode("independent");
+    } else if (cam_sampler_it->second.plugin_type.empty()) {
+      cam_sampler_it->second.plugin_type = "independent";
+    }
+  }
+
+  MergePluginProperties(&props, effective_spec,
+                        mitsuba::Sensor<Float, Spectrum>::Variant);
+
+  if (!sampler_spec.Empty() && !props.has_property("sampler")) {
     try {
       mitsuba::ref<mitsuba::Sampler<Float, Spectrum>> sampler =
           BuildPluginObject<mitsuba::Sampler<Float, Spectrum>>(sampler_spec);
       if (sampler) {
-        props.set("sampler", static_cast<mitsuba::Object*>(sampler.get()));
+        props.set("sampler", sampler.get(), /*raise_if_exists=*/false);
       }
     } catch (const std::exception& e) {
       TF_RUNTIME_ERROR("Failed to create sampler '%s' for sensor '%s': %s",
@@ -1074,43 +1760,229 @@ MI_VARIANT mitsuba::ref<mitsuba::Sensor<Float, Spectrum>> PrimTranslator<
                        e.what());
     }
   }
-  mitsuba::ref<mitsuba::Sensor<Float, Spectrum>> sensor =
-      mitsuba::PluginManager::instance()
-          ->create_object<mitsuba::Sensor<Float, Spectrum>>(props);
+  mitsuba::ref<mitsuba::Object> expanded = CreateExpandedObject(
+      props, mitsuba::Sensor<Float, Spectrum>::Variant,
+      mitsuba::ObjectType::Sensor);
+  auto* typed_sensor =
+      dynamic_cast<mitsuba::Sensor<Float, Spectrum>*>(expanded.get());
+  if (typed_sensor == nullptr) {
+    throw std::runtime_error("Mitsuba plugin '" + sensor_type +
+                             "' is not a valid Sensor.");
+  }
+  mitsuba::ref<mitsuba::Sensor<Float, Spectrum>> sensor(typed_sensor);
   sensor->set_id(spec.id.GetAsString());
   return sensor;
 }
 
+MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateSensorAspectRatio(
+    mitsuba::Object* sensor_obj, const CameraSpec& spec, double aspect) {
+  if (aspect <= 0.0) return;
+  const std::string& sensor_type = spec.sensor_spec.plugin_type.empty()
+                                       ? spec.sensor_type
+                                       : spec.sensor_spec.plugin_type;
+  if (sensor_type != "perspective" && sensor_type != "thinlens") {
+    return;
+  }
+  if (!spec.sensor_spec.HasProperty("focal_length") &&
+      !spec.sensor_spec.HasProperty("fov_axis")) {
+    return;
+  }
+  auto* sensor = dynamic_cast<mitsuba::Sensor<Float, Spectrum>*>(sensor_obj);
+  if (!sensor) return;
+
+  std::optional<double> x_fov = ComputePerspectiveXFov(spec, aspect);
+  if (!x_fov.has_value()) return;
+  TraversalCallback cb;
+  sensor->traverse(&cb);
+  if (cb.data.contains("x_fov")) {
+    cb.set<Float>(
+        "x_fov",
+        MakeOpaqueFloat<Float>(static_cast<dr::scalar_t<Float>>(*x_fov)));
+    sensor->parameters_changed({"x_fov"});
+  }
+}
+
 MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateSensorInPlace(
-    mitsuba::Object* sensor_obj, const CameraSpec& spec) {
-  using ScalarFloat = float;
+    mitsuba::Object* sensor_obj, const CameraSpec& spec,
+    bool* wrote_host_scalar) {
+  using ScalarFloat = dr::scalar_t<Float>;
   auto* sensor = dynamic_cast<mitsuba::Sensor<Float, Spectrum>*>(sensor_obj);
   if (!sensor) return;
 
   TraversalCallback cb;
   sensor->traverse(&cb);
 
-  if (spec.dirty_bits & HdCamera::DirtyBits::DirtyTransform) {
+  const std::string& sensor_type = spec.sensor_spec.plugin_type.empty()
+                                       ? spec.sensor_type
+                                       : spec.sensor_spec.plugin_type;
+  double aspect = 1.0;
+  if (const auto* film = sensor->film(); film && film->size().y() > 0) {
+    aspect = static_cast<double>(film->size().x()) /
+             static_cast<double>(film->size().y());
+  }
+
+  std::vector<std::string> changed_keys;
+  if ((spec.dirty_bits & HdCamera::DirtyBits::DirtyTransform) &&
+      !spec.sensor_spec.HasProperty("to_world") &&
+      !spec.sensor_spec.HasProperty("direction") &&
+      !spec.sensor_spec.HasProperty("origin") &&
+      (cb.data.contains("to_world") || cb.objects.contains("to_world"))) {
     SetTransformParameter(cb, spec.transform);
+    changed_keys.push_back("to_world");
   }
   if (spec.dirty_bits & HdCamera::DirtyBits::DirtyParams) {
-    cb.set<ScalarFloat>("near_clip", spec.near_clip);
-    cb.set<ScalarFloat>("far_clip", spec.far_clip);
-    if (spec.sensor_type == "perspective" || spec.sensor_type.empty()) {
-      cb.set<Float>("x_fov", spec.fov);
-      cb.set<Float>("principal_point_offset_x",
-                    spec.horizontal_aperture_offset);
-      cb.set<Float>("principal_point_offset_y", spec.vertical_aperture_offset);
-      if (spec.aperture_radius > 0.0f && spec.focus_distance > 0.0f) {
+    if (!spec.sensor_spec.HasProperty("near_clip") &&
+        cb.data.contains("near_clip")) {
+      const ScalarFloat new_near = static_cast<ScalarFloat>(spec.near_clip);
+      ScalarFloat* near_ptr = cb.get<ScalarFloat>("near_clip");
+      if (near_ptr != nullptr && *near_ptr != new_near) {
+        *near_ptr = new_near;
+        changed_keys.push_back("near_clip");
+        if (wrote_host_scalar != nullptr) *wrote_host_scalar = true;
+      }
+    }
+    if (!spec.sensor_spec.HasProperty("far_clip") &&
+        cb.data.contains("far_clip")) {
+      const ScalarFloat new_far = static_cast<ScalarFloat>(spec.far_clip);
+      ScalarFloat* far_ptr = cb.get<ScalarFloat>("far_clip");
+      if (far_ptr != nullptr && *far_ptr != new_far) {
+        *far_ptr = new_far;
+        changed_keys.push_back("far_clip");
+        if (wrote_host_scalar != nullptr) *wrote_host_scalar = true;
+      }
+    }
+    if (sensor_type == "perspective" || sensor_type == "thinlens" ||
+        sensor_type.empty()) {
+      if (!spec.sensor_spec.HasProperty("fov") &&
+          !spec.sensor_spec.HasProperty("focal_length") &&
+          cb.data.contains("x_fov")) {
+        if (std::optional<double> x_fov = ComputePerspectiveXFov(spec, aspect);
+            x_fov.has_value()) {
+          cb.set<Float>(
+              "x_fov",
+              MakeOpaqueFloat<Float>(static_cast<ScalarFloat>(*x_fov)));
+          changed_keys.push_back("x_fov");
+        }
+      }
+      if (!spec.sensor_spec.HasProperty("principal_point_offset_x") &&
+          cb.data.contains("principal_point_offset_x")) {
+        cb.set<Float>("principal_point_offset_x",
+                      MakeOpaqueFloat<Float>(spec.horizontal_aperture_offset));
+        changed_keys.push_back("principal_point_offset_x");
+      }
+      if (!spec.sensor_spec.HasProperty("principal_point_offset_y") &&
+          cb.data.contains("principal_point_offset_y")) {
+        cb.set<Float>("principal_point_offset_y",
+                      MakeOpaqueFloat<Float>(spec.vertical_aperture_offset));
+        changed_keys.push_back("principal_point_offset_y");
+      }
+      if (sensor_type == "thinlens") {
         // Unlike `x_fov`, the thinlens sensor doesn't make these opaque in
         // `parameters_changed()`, so do it here to avoid recompilation.
-        cb.set<Float>("aperture_radius",
-                      dr::opaque<Float>(spec.aperture_radius));
-        cb.set<Float>("focus_distance", dr::opaque<Float>(spec.focus_distance));
+        if (!spec.sensor_spec.HasProperty("aperture_radius") &&
+            cb.data.contains("aperture_radius")) {
+          cb.set<Float>("aperture_radius",
+                        MakeOpaqueFloat<Float>(spec.aperture_radius));
+          changed_keys.push_back("aperture_radius");
+        }
+        if (!spec.sensor_spec.HasProperty("focus_distance") &&
+            spec.aperture_radius > 0.0f && spec.focus_distance > 0.0f &&
+            cb.data.contains("focus_distance")) {
+          cb.set<Float>("focus_distance",
+                        MakeOpaqueFloat<Float>(spec.focus_distance));
+          changed_keys.push_back("focus_distance");
+        }
       }
     }
   }
-  sensor->parameters_changed();
+  if (!changed_keys.empty()) {
+    sensor->parameters_changed(changed_keys);
+  }
+}
+
+MI_VARIANT bool PrimTranslator<Float, Spectrum>::TryUpdateSensorInPlace(
+    mitsuba::Object* sensor_obj, const CameraSpec& spec,
+    bool* wrote_host_scalar) {
+  using ScalarFloat = dr::scalar_t<Float>;
+  auto* sensor = dynamic_cast<mitsuba::Sensor<Float, Spectrum>*>(sensor_obj);
+  if (!sensor || !spec.committed_sensor_spec.has_value()) {
+    return false;
+  }
+
+  const std::string& sensor_type = spec.sensor_spec.plugin_type.empty()
+                                       ? spec.sensor_type
+                                       : spec.sensor_spec.plugin_type;
+  const bool has_explicit_ray_frame =
+      spec.sensor_spec.HasProperty("to_world") ||
+      spec.sensor_spec.HasProperty("direction") ||
+      spec.sensor_spec.HasProperty("origin");
+  if ((spec.dirty_bits & HdCamera::DirtyBits::DirtyTransform) != 0 &&
+      sensor_type != "irradiancemeter" &&
+      !spec.target_shape_id.has_value() && !has_explicit_ray_frame) {
+    TraversalCallback cb("", nullptr, /*recurse_objects=*/false);
+    sensor->traverse(&cb);
+    if (!cb.data.contains("to_world") && !cb.objects.contains("to_world")) {
+      return false;
+    }
+  }
+
+  PluginSpecNode old_filtered = *spec.committed_sensor_spec;
+  PluginSpecNode new_filtered = spec.sensor_spec;
+  if (auto film_it = old_filtered.children.find("film");
+      film_it != old_filtered.children.end()) {
+    EraseFilmCropParams(&film_it->second);
+  }
+  if (auto film_it = new_filtered.children.find("film");
+      film_it != new_filtered.children.end()) {
+    EraseFilmCropParams(&film_it->second);
+  }
+  bool fov_spec_changed = false;
+  if (sensor_type == "perspective" || sensor_type == "thinlens") {
+    for (const char* key : {"fov", "focal_length", "fov_axis"}) {
+      auto old_it = old_filtered.params.find(key);
+      auto new_it = new_filtered.params.find(key);
+      const bool had_old = (old_it != old_filtered.params.end());
+      const bool has_new = (new_it != new_filtered.params.end());
+      if (had_old != has_new || (had_old && old_it->second != new_it->second)) {
+        fov_spec_changed = true;
+      }
+      if (had_old) old_filtered.params.erase(old_it);
+      if (has_new) new_filtered.params.erase(new_it);
+    }
+  }
+
+  double aspect = 1.0;
+  if (const auto* film = sensor->film(); film && film->size().y() > 0) {
+    aspect = static_cast<double>(film->size().x()) /
+             static_cast<double>(film->size().y());
+  }
+  std::optional<double> updated_x_fov;
+  if (fov_spec_changed) {
+    updated_x_fov = ComputePerspectiveXFov(spec, aspect);
+    if (!updated_x_fov.has_value()) {
+      return false;
+    }
+  }
+
+  if (!TryUpdatePluginInPlace(sensor, old_filtered, new_filtered,
+                              wrote_host_scalar)) {
+    return false;
+  }
+
+  if (updated_x_fov.has_value()) {
+    TraversalCallback cb;
+    sensor->traverse(&cb);
+    if (!cb.data.contains("x_fov")) {
+      return false;
+    }
+    cb.set<Float>(
+        "x_fov",
+        MakeOpaqueFloat<Float>(static_cast<ScalarFloat>(*updated_x_fov)));
+    sensor->parameters_changed({"x_fov"});
+  }
+
+  UpdateSensorInPlace(sensor, spec, wrote_host_scalar);
+  return true;
 }
 
 namespace {

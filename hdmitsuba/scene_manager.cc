@@ -51,7 +51,6 @@
 #include <mitsuba/core/plugin.h>
 #include <mitsuba/core/properties.h>
 #include <mitsuba/core/random.h>
-#include <mitsuba/core/rfilter.h>
 #include <mitsuba/core/thread.h>
 #include <mitsuba/core/util.h>
 #include <mitsuba/render/film.h>
@@ -143,13 +142,7 @@ std::optional<T> GetSetting(const VtDictionary& settings,
   return std::nullopt;
 }
 
-std::optional<int64_t> GetIntSetting(const VtDictionary& settings,
-                                     const std::string& key) {
-  auto it = settings.find(key);
-  if (it == settings.end() || it->second.IsEmpty()) {
-    return std::nullopt;
-  }
-  const VtValue& value = it->second;
+std::optional<int64_t> ExtractIntValue(const VtValue& value) {
   if (value.IsHolding<int>()) {
     return static_cast<int64_t>(value.UncheckedGet<int>());
   }
@@ -162,8 +155,20 @@ std::optional<int64_t> GetIntSetting(const VtDictionary& settings,
   if (value.IsHolding<uint64_t>()) {
     return static_cast<int64_t>(value.UncheckedGet<uint64_t>());
   }
+  return std::nullopt;
+}
+
+std::optional<int64_t> GetIntSetting(const VtDictionary& settings,
+                                     const std::string& key) {
+  auto it = settings.find(key);
+  if (it == settings.end() || it->second.IsEmpty()) {
+    return std::nullopt;
+  }
+  if (std::optional<int64_t> parsed = ExtractIntValue(it->second)) {
+    return parsed;
+  }
   TF_WARN("Type mismatch for integer render setting '%s': got %s", key.c_str(),
-          value.GetTypeName().c_str());
+          it->second.GetTypeName().c_str());
   return std::nullopt;
 }
 
@@ -253,8 +258,8 @@ std::vector<ImplicitSurfacePart> GetImplicitSurfaceParts(
 template <typename Float, typename Spectrum>
 class SceneModel final : public SceneManager {
  public:
-  MI_IMPORT_TYPES(BSDF, Emitter, Film, Integrator, Mesh, ReconstructionFilter,
-                  Scene, Sensor, Shape, Texture);
+  MI_IMPORT_TYPES(BSDF, Emitter, Film, Integrator, Mesh, Scene, Sensor, Shape,
+                  Texture);
   using PrimTranslator = PrimTranslator<Float, Spectrum>;
 
   struct CommittedMesh {
@@ -368,10 +373,6 @@ class SceneModel final : public SceneManager {
     TF_DEBUG(HDMITSUBA_SYNC).Msg("SyncCamera: %s\n", spec.id.GetText());
     absl::MutexLock lock(state_mutex_);
     auto prev_it = camera_specs_.find(spec.id);
-    if (prev_it != camera_specs_.end() &&
-        prev_it->second.pixel_filter_type != spec.pixel_filter_type) {
-      spec.needs_rebuild = true;
-    }
     std::optional<SdfPath> prev_target =
         prev_it == camera_specs_.end() ? std::nullopt
                                        : SurfaceSensorTarget(prev_it->second);
@@ -603,6 +604,40 @@ class SceneModel final : public SceneManager {
       }
     }
 
+    SdfPath sensor_id;
+    if (camera == nullptr) {
+      if (std::string sensor_path(sensor->id());
+          SdfPath::IsValidPathString(sensor_path)) {
+        sensor_id = SdfPath(sensor_path);
+      }
+    } else {
+      sensor_id = camera->GetId();
+    }
+    auto active_camera_it = camera_specs_.find(sensor_id);
+    size_t effective_sample_count = sample_count_;
+    if (active_camera_it != camera_specs_.end()) {
+      if (auto sampler_it =
+              active_camera_it->second.sensor_spec.children.find("sampler");
+          sampler_it != active_camera_it->second.sensor_spec.children.end()) {
+        effective_sample_count = 4;
+        if (auto spp_it = sampler_it->second.params.find("sample_count");
+            spp_it != sampler_it->second.params.end()) {
+          if (std::optional<int64_t> cam_spp =
+                  ExtractIntValue(spp_it->second)) {
+            effective_sample_count =
+                static_cast<size_t>(std::max<int64_t>(1, *cam_spp));
+          }
+        }
+      }
+    }
+    if (effective_sample_count != active_sample_count_) {
+      active_sample_count_ = effective_sample_count;
+      reset_progressive_ = true;
+    }
+
+    const bool is_signal_sensor =
+        sensor->class_name() == "RadianceMeter" ||
+        absl::StartsWith(sensor->class_name(), "DistantSensor");
     Film* film = sensor->film();
     bool film_changed = false;
     // Only output alpha if a 4-channel color buffer requests it, since the
@@ -611,29 +646,126 @@ class SceneModel final : public SceneManager {
       const bool want_alpha =
           pass_state.color_buffer &&
           HdGetComponentCount(pass_state.color_buffer->GetFormat()) == 4;
-      if (want_alpha != (film->base_channels().size() == 4)) {
-        Properties film_props("hdrfilm");
-        film_props.set("pixel_format", want_alpha ? "rgba" : "rgb");
-        film_props.set("rfilter", static_cast<Object*>(const_cast<
-                                      ReconstructionFilter*>(film->rfilter())));
-        sensor->set_film(
-            PluginManager::instance()->create_object<Film>(film_props).get());
-        film = sensor->film();
-        film_changed = true;
+      if (want_alpha != (film->base_channels().size() == 4) &&
+          film->class_name() == "HDRFilm" && !film->base_channels().empty() &&
+          film->base_channels()[0] == "R") {
+        const PluginSpecNode* film_spec = nullptr;
+        if (active_camera_it != camera_specs_.end()) {
+          if (auto film_it =
+                  active_camera_it->second.sensor_spec.children.find("film");
+              film_it != active_camera_it->second.sensor_spec.children.end()) {
+            film_spec = &film_it->second;
+          }
+        }
+        bool supports_alpha_format = true;
+        if (film_spec != nullptr) {
+          if (film_spec->HasProperty("pixel_format")) {
+            supports_alpha_format = false;
+          } else if (auto fmt_it = film_spec->params.find("file_format");
+                     fmt_it != film_spec->params.end()) {
+            std::string file_format;
+            if (fmt_it->second.IsHolding<std::string>()) {
+              file_format = fmt_it->second.UncheckedGet<std::string>();
+            } else if (fmt_it->second.IsHolding<TfToken>()) {
+              file_format =
+                  fmt_it->second.UncheckedGet<TfToken>().GetString();
+            }
+            if (!file_format.empty() && file_format != "openexr") {
+              supports_alpha_format = false;
+            }
+          }
+        }
+        if (supports_alpha_format) {
+          PluginSpecNode rebuilt_film =
+              film_spec == nullptr ? PluginSpecNode{} : *film_spec;
+          rebuilt_film.plugin_type = "hdrfilm";
+          rebuilt_film.params.erase("crop_offset_x");
+          rebuilt_film.params.erase("crop_offset_y");
+          rebuilt_film.params.erase("crop_width");
+          rebuilt_film.params.erase("crop_height");
+          if (is_signal_sensor) {
+            rebuilt_film.params["width"] = VtValue(1);
+            rebuilt_film.params["height"] = VtValue(1);
+          }
+          rebuilt_film.params["pixel_format"] =
+              VtValue(std::string(want_alpha ? "rgba" : "rgb"));
+          if (progressive_rendering_ || denoise_) {
+            rebuilt_film.children.erase("reconstruction_filter");
+            rebuilt_film.children.erase("rfilter");
+            rebuilt_film.children["pixel_filter"] =
+                PluginSpecNode("box");
+          }
+          sensor->set_film(BuildPluginObject<Film>(rebuilt_film).get());
+          film = sensor->film();
+          film_changed = true;
+        }
       }
     }
     auto film_size = film->size();
-    // If necessary, resize film to match USD buffer size.
-    if (film_size.x() != buffer_width || film_size.y() != buffer_height) {
+    // Signal sensors (`radiancemeter`, `distant`) only support 1x1 films; keep
+    // their native 1x1 size and tile the output pixel across larger buffers.
+    if (!is_signal_sensor &&
+        (film_size.x() != buffer_width || film_size.y() != buffer_height)) {
       film->set_size(ScalarPoint2u(buffer_width, buffer_height));
+      if (active_camera_it != camera_specs_.end() && buffer_height > 0) {
+        PrimTranslator::UpdateSensorAspectRatio(
+            sensor, active_camera_it->second,
+            static_cast<double>(buffer_width) /
+                static_cast<double>(buffer_height));
+      }
       film_changed = true;
+    }
+
+    const bool has_hydra_crop =
+        crop_window.has_value() &&
+        (crop_window->GetMinX() != 0 || crop_window->GetMinY() != 0 ||
+         crop_window->GetWidth() != static_cast<int>(buffer_width) ||
+         crop_window->GetHeight() != static_cast<int>(buffer_height));
+    std::optional<GfRect2i> effective_crop_window;
+    if (!is_signal_sensor && has_hydra_crop) {
+      effective_crop_window = crop_window;
+    } else if (!is_signal_sensor && active_camera_it != camera_specs_.end() &&
+               buffer_width > 0 && buffer_height > 0) {
+      if (auto film_it =
+              active_camera_it->second.sensor_spec.children.find("film");
+          film_it != active_camera_it->second.sensor_spec.children.end()) {
+        const auto& film_params = film_it->second.params;
+        auto read_crop_int = [&](const char* key) -> std::optional<int64_t> {
+          auto it = film_params.find(key);
+          return it != film_params.end() ? ExtractIntValue(it->second)
+                                         : std::nullopt;
+        };
+        const auto ox_opt = read_crop_int("crop_offset_x");
+        const auto oy_opt = read_crop_int("crop_offset_y");
+        const auto cw_opt = read_crop_int("crop_width");
+        const auto ch_opt = read_crop_int("crop_height");
+        if (ox_opt.has_value() || oy_opt.has_value() || cw_opt.has_value() ||
+            ch_opt.has_value()) {
+          const int64_t w = static_cast<int64_t>(buffer_width);
+          const int64_t h = static_cast<int64_t>(buffer_height);
+          const int ox = static_cast<int>(
+              std::clamp<int64_t>(ox_opt.value_or(0), 0, w - 1));
+          const int oy = static_cast<int>(
+              std::clamp<int64_t>(oy_opt.value_or(0), 0, h - 1));
+          const int cw = static_cast<int>(
+              std::clamp<int64_t>(cw_opt.value_or(w - ox), 1, w - ox));
+          const int ch = static_cast<int>(
+              std::clamp<int64_t>(ch_opt.value_or(h - oy), 1, h - oy));
+          if (ox != 0 || oy != 0 || cw != static_cast<int>(buffer_width) ||
+              ch != static_cast<int>(buffer_height)) {
+            effective_crop_window = GfRect2i(GfVec2i(ox, oy), cw, ch);
+          }
+        }
+      }
     }
 
     ScalarPoint2u new_crop_offset(0, 0);
     ScalarVector2u new_crop_size = film->size();
-    if (crop_window.has_value()) {
-      new_crop_offset = ScalarPoint2u(crop_window->GetMinX(), crop_window->GetMinY());
-      new_crop_size = ScalarVector2u(crop_window->GetWidth(), crop_window->GetHeight());
+    if (effective_crop_window.has_value()) {
+      new_crop_offset = ScalarPoint2u(effective_crop_window->GetMinX(),
+                                      effective_crop_window->GetMinY());
+      new_crop_size = ScalarVector2u(effective_crop_window->GetWidth(),
+                                     effective_crop_window->GetHeight());
     }
 
     if (dr::any(film->crop_offset() != new_crop_offset) || dr::any(film->crop_size() != new_crop_size)) {
@@ -667,10 +799,10 @@ class SceneModel final : public SceneManager {
       reset_progressive_ = false;
     }
 
-    int samples_to_render = sample_count_;
+    int samples_to_render = active_sample_count_;
     if (progressive_rendering_) {
       int remaining =
-          static_cast<int>(sample_count_) - current_progressive_sample_;
+          static_cast<int>(active_sample_count_) - current_progressive_sample_;
       samples_to_render =
           std::max(0, std::min(interactive_samples_per_pass_, remaining));
     }
@@ -693,8 +825,16 @@ class SceneModel final : public SceneManager {
             scene_.get(), sensor, pass_seed,
             static_cast<uint32_t>(samples_to_render), true, true);
       }
-      size_t expected_width = crop_window.has_value() ? crop_window->GetWidth() : buffer_width;
-      size_t expected_height = crop_window.has_value() ? crop_window->GetHeight() : buffer_height;
+      size_t expected_width =
+          is_signal_sensor ? 1
+                           : (effective_crop_window.has_value()
+                                  ? effective_crop_window->GetWidth()
+                                  : buffer_width);
+      size_t expected_height =
+          is_signal_sensor ? 1
+                           : (effective_crop_window.has_value()
+                                  ? effective_crop_window->GetHeight()
+                                  : buffer_height);
       if (expected_width != result.shape()[1] ||
           expected_height != result.shape()[0]) {
         TF_RUNTIME_ERROR("Buffer size mismatch: %lu x %lu vs %lu x %lu",
@@ -752,11 +892,22 @@ class SceneModel final : public SceneManager {
     size_t aov_start_channel =
         base_channels +
         (integrator_ ? integrator_->aov_names(sensor->film()).size() : 0);
-    if (denoise_ && pass_state.color_buffer && base_channels >= 3) {
+    if (!is_signal_sensor && denoise_ && pass_state.color_buffer &&
+        base_channels >= 3) {
       denoiser_.Denoise(display_result, sensor, pass_state.aov_requests,
                         base_channels, aov_start_channel);
     }
     size_t total_channels = display_result.shape()[2];
+    if (is_signal_sensor && display_result.shape()[0] == 1 &&
+        display_result.shape()[1] == 1 &&
+        (buffer_width != 1 || buffer_height != 1)) {
+      const size_t tiled_shape[3] = {buffer_height, buffer_width,
+                                     total_channels};
+      display_result = TensorXf(
+          dr::tile(display_result.array(),
+                   static_cast<size_t>(buffer_width) * buffer_height),
+          3, tiled_shape);
+    }
     destinations_.clear();
     destinations_.reserve(1 + pass_state.aov_requests.size());
 
@@ -777,12 +928,13 @@ class SceneModel final : public SceneManager {
       destinations_.push_back({req.buffer, static_cast<int>(current_offset), req.channel_count, is_int});
       current_offset += req.channel_count;
     }
-    PerformBatchedCopy<Float>(display_result, destinations_, crop_window);
+    PerformBatchedCopy<Float>(display_result, destinations_,
+                              effective_crop_window);
 
     // 6. Set convergence status
     bool converged =
         !progressive_rendering_ ||
-        (current_progressive_sample_ >= static_cast<int>(sample_count_));
+        (current_progressive_sample_ >= static_cast<int>(active_sample_count_));
     if (pass_state.color_buffer) {
       pass_state.color_buffer->SetConverged(converged);
     }
@@ -793,17 +945,17 @@ class SceneModel final : public SceneManager {
 
   bool IsConverged() const override {
     return !progressive_rendering_ ||
-           (!denoise_dirty_ &&
-            (current_progressive_sample_ >= static_cast<int>(sample_count_)));
+           (!denoise_dirty_ && (current_progressive_sample_ >=
+                                static_cast<int>(active_sample_count_)));
   }
 
   int GetCurrentSampleCount() const override {
     return progressive_rendering_ ? current_progressive_sample_
-                                  : static_cast<int>(sample_count_);
+                                  : static_cast<int>(active_sample_count_);
   }
 
   int GetTargetSampleCount() const override {
-    return static_cast<int>(sample_count_);
+    return static_cast<int>(active_sample_count_);
   }
 
   void UpdateNamespacedSettings(
@@ -861,6 +1013,7 @@ class SceneModel final : public SceneManager {
                .value_or(static_cast<int64_t>(kDefaultSampleCount))));
     if (clamped_samples != sample_count_) {
       sample_count_ = clamped_samples;
+      active_sample_count_ = clamped_samples;
       reset_progressive_ = true;
     }
     const uint32_t new_seed = static_cast<uint32_t>(
@@ -1030,9 +1183,6 @@ class SceneModel final : public SceneManager {
   }
 
   static std::optional<SdfPath> SurfaceSensorTarget(const CameraSpec& spec) {
-    if (spec.sensor_type != "irradiancemeter") {
-      return std::nullopt;
-    }
     return spec.target_shape_id;
   }
 
@@ -1052,15 +1202,23 @@ class SceneModel final : public SceneManager {
     }
   }
 
-  bool CommitCameras() {
+  bool CommitCameras(std::atomic<bool>* host_scalars_changed) {
     bool rebuild = ParallelCommit<decltype(camera_specs_), mitsuba::ref<Sensor>>(
         camera_specs_,
         [&](CameraSpec* spec, mitsuba::ref<Sensor>& res) {
-          // Surface sensors are built together with their target mesh.
-          if (spec->sensor_type == "irradiancemeter") {
+          // Surface sensors are built together with their target shape.
+          if (spec->target_shape_id.has_value() ||
+              spec->sensor_type == "irradiancemeter") {
+            if (spec->sensor_type == "irradiancemeter" &&
+                !spec->target_shape_id.has_value()) {
+              TF_WARN(
+                  "Camera %s has mitsuba:sensor:type = 'irradiancemeter' "
+                  "without mitsuba:sensor:shape; skipping.",
+                  spec->id.GetText());
+            }
             return;
           }
-          if (spec->needs_rebuild) {
+          auto build_sensor = [&]() {
             // Denoisers require the uncorrelated pixel noise of the box filter,
             // and progressive multi-pass accumulation requires `independent`
             // so structured samplers (`stratified`, `multijitter`,
@@ -1071,20 +1229,37 @@ class SceneModel final : public SceneManager {
                 progressive_rendering_
                     ? PluginSpecNode("independent")
                     : sampler_spec_;
-            res = PrimTranslator::BuildSensor(*spec, use_box_filter,
-                                              effective_sampler);
+            try {
+              res = PrimTranslator::BuildSensor(
+                  *spec, use_box_filter, effective_sampler,
+                  /*force_independent_sampler=*/progressive_rendering_);
+            } catch (const std::exception& e) {
+              TF_RUNTIME_ERROR("Failed to create sensor '%s': %s",
+                               spec->id.GetText(), e.what());
+            }
+          };
+          if (spec->needs_rebuild) {
+            build_sensor();
           } else if (spec->dirty_bits != 0) {
             auto it = sensors_.find(spec->id);
             if (!TF_VERIFY(it != sensors_.end(), "Camera sensor not found: %s",
                            spec->id.GetText())) {
               return;
             }
-            PrimTranslator::UpdateSensorInPlace(it->second.get(), *spec);
+            bool wrote_host_scalar = false;
+            if (!PrimTranslator::TryUpdateSensorInPlace(
+                    it->second.get(), *spec, &wrote_host_scalar)) {
+              spec->needs_rebuild = true;
+              build_sensor();
+            } else if (wrote_host_scalar) {
+              host_scalars_changed->store(true, std::memory_order_relaxed);
+            }
           }
         },
         [&](CameraSpec* spec, mitsuba::ref<Sensor>& res) {
-          if (spec->sensor_type == "irradiancemeter") {
-            return false;
+          if (spec->target_shape_id.has_value() ||
+              spec->sensor_type == "irradiancemeter" || !res) {
+            return sensors_.erase(spec->id) > 0;
           }
           sensors_[spec->id] = res;
           return true;
@@ -1131,10 +1306,16 @@ class SceneModel final : public SceneManager {
       const PluginSpecNode effective_sampler =
           progressive_rendering_ ? PluginSpecNode("independent")
                                  : sampler_spec_;
-      pair.mesh_sensor = PrimTranslator::BuildSensor(
-          camera_specs_.at(sens_it->second),
-          progressive_rendering_ || denoise_, effective_sampler);
-      pair.sensor_ptr = pair.mesh_sensor.get();
+      try {
+        pair.mesh_sensor = PrimTranslator::BuildSensor(
+            camera_specs_.at(sens_it->second),
+            progressive_rendering_ || denoise_, effective_sampler,
+            /*force_independent_sampler=*/progressive_rendering_);
+        pair.sensor_ptr = pair.mesh_sensor.get();
+      } catch (const std::exception& e) {
+        TF_RUNTIME_ERROR("Failed to create surface sensor '%s': %s",
+                         sens_it->second.GetText(), e.what());
+      }
     }
     return pair;
   }
@@ -1629,8 +1810,9 @@ class SceneModel final : public SceneManager {
     NewJitScope<Float>();
 
     bool rebuild_scene = scene_dirty_;
+    std::atomic<bool> host_scalars_changed{false};
     CommitMaterials();
-    rebuild_scene |= CommitCameras();
+    rebuild_scene |= CommitCameras(&host_scalars_changed);
     rebuild_scene |= CommitMeshes();
     rebuild_scene |= CommitCurves();
     rebuild_scene |= CommitParticleFields();
@@ -1642,10 +1824,12 @@ class SceneModel final : public SceneManager {
       rebuild_scene = true;
     }
 
-    if (rebuild_scene || materials_changed) {
+    if (rebuild_scene || materials_changed ||
+        host_scalars_changed.load(std::memory_order_relaxed)) {
       // In-place material updates swap BSDF/Texture objects whose JIT class
-      // pointers may be baked into a frozen kernel, so it must be invalidated
-      // even when the Scene itself is not rebuilt.
+      // pointers may be baked into a frozen kernel, and C++ host scalar plugin
+      // parameters are baked as trace-time constants, so both require clearing
+      // the frozen kernel even when the Scene itself is not rebuilt.
       if constexpr (dr::is_jit_v<Float>) {
         if (frozen_render_) {
           frozen_render_->Clear();
@@ -1700,7 +1884,24 @@ class SceneModel final : public SceneManager {
       scene_ = new Scene(props);
       scene_dirty_ = false;
     } else if (scene_) {
+      const auto previous_bbox = scene_->bbox();
       scene_->parameters_changed();
+      if (scene_->bbox() != previous_bbox) {
+        bool host_bsphere_updated = false;
+        for (auto& sensor : scene_->sensors()) {
+          sensor->set_scene(scene_.get());
+          if (absl::StartsWith(sensor->class_name(), "DistantSensor")) {
+            host_bsphere_updated = true;
+          }
+        }
+        if (host_bsphere_updated) {
+          if constexpr (dr::is_jit_v<Float>) {
+            if (frozen_render_) {
+              frozen_render_->Clear();
+            }
+          }
+        }
+      }
     }
 
     // Run Garbage Collection after all resources are committed, ensuring
@@ -1730,6 +1931,7 @@ class SceneModel final : public SceneManager {
   PluginSpecNode sampler_spec_{"independent"};
   absl::flat_hash_map<const HdRenderPass*, RenderPassState> pass_aov_states_;
   size_t sample_count_ = kDefaultSampleCount;
+  size_t active_sample_count_ = kDefaultSampleCount;
   uint32_t seed_ = 0;
   int interactive_samples_per_pass_ = 1;
 

@@ -96,6 +96,18 @@ class PrimTranslator {
   static void SetSpectrumParameter(TraversalCallback& cb, std::string_view name,
                                    const GfVec3f& rgb);
 
+  // Attempts to apply leaf parameter changes from `old_spec` to `new_spec`
+  // onto `root_obj` via `TraversalCallback` and bottom-up
+  // `parameters_changed()` notifications. Sets `*wrote_host_scalar` to true if
+  // any host C++ scalar parameter (not tracked by Dr.Jit kernel freezing) was
+  // updated. Returns false without mutating `root_obj` if the plugin structure
+  // changed or any modified parameter is not exposed as a writable compatible
+  // entry in `traverse()`.
+  static bool TryUpdatePluginInPlace(mitsuba::Object* root_obj,
+                                     const PluginSpecNode& old_spec,
+                                     const PluginSpecNode& new_spec,
+                                     bool* wrote_host_scalar = nullptr);
+
   static TranslatedMaterial BuildMaterial(
       const MaterialSpec& spec,
       const TextureCache<Float, Spectrum>& texture_cache);
@@ -120,11 +132,23 @@ class PrimTranslator {
                                  const LightSpec& spec);
 
   static mitsuba::ref<mitsuba::Sensor<Float, Spectrum>> BuildSensor(
-      const CameraSpec& spec, bool is_interactive = false,
-      const PluginSpecNode& sampler_spec = {});
+      const CameraSpec& spec, bool use_box_filter = false,
+      const PluginSpecNode& sampler_spec = {},
+      bool force_independent_sampler = false);
+
+  static void UpdateSensorAspectRatio(mitsuba::Object* sensor_obj,
+                                      const CameraSpec& spec, double aspect);
 
   static void UpdateSensorInPlace(mitsuba::Object* sensor_obj,
-                                  const CameraSpec& spec);
+                                  const CameraSpec& spec,
+                                  bool* wrote_host_scalar = nullptr);
+
+  // Attempts to update `sensor_obj` in place for both `mitsuba:sensor:*` leaf
+  // parameter diffs and USD camera parameter/transform changes. Returns false
+  // if `sensor_obj` must be rebuilt instead.
+  static bool TryUpdateSensorInPlace(mitsuba::Object* sensor_obj,
+                                     const CameraSpec& spec,
+                                     bool* wrote_host_scalar = nullptr);
 
   // Builds a mesh from expanded per-vertex `primvars`. The primvars listed in
   // `mesh_attributes` are uploaded as vertex attributes named by

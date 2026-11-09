@@ -22,9 +22,6 @@
 #include <drjit/math.h>
 #include <drjit/sphere.h>
 #include <pxr/base/gf/vec2f.h>
-#include <pxr/base/tf/token.h>
-#include <pxr/base/vt/types.h>
-#include <pxr/base/tf/staticTokens.h>
 #include <pxr/imaging/hd/camera.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
@@ -34,6 +31,7 @@
 
 #include "hdmitsuba/debug_codes.h"
 #include "hdmitsuba/motion.h"
+#include "hdmitsuba/plugin_builder.h"
 #include "hdmitsuba/render_param.h"
 #include "hdmitsuba/spec_types.h"
 #include "hdmitsuba/utils.h"
@@ -41,8 +39,6 @@
 PXR_NAMESPACE_OPEN_SCOPE
 
 namespace dr = drjit;
-
-TF_DEFINE_PUBLIC_TOKENS(HdMitsubaCameraTokens, HDMITSUBA_CAMERA_TOKENS);
 
 namespace {
 
@@ -55,20 +51,30 @@ ScalarAffineTransform4f UsdToMitsubaSensorTransform(
          ScalarAffineTransform4f::rotate(ScalarVector3f(0, 1, 0), 180);
 }
 
-std::optional<SdfPath> GetTargetShapeId(HdSceneDelegate* sceneDelegate,
-                                        const SdfPath& id) {
-  VtValue value = sceneDelegate->GetCameraParamValue(
-      id, HdMitsubaCameraTokens->sensorShape);
-  if (!value.IsHolding<std::string>()) {
+std::optional<SdfPath> ExtractTargetShapeId(PluginSpecNode* sensor_spec,
+                                            const SdfPath& camera_id) {
+  auto shape_it = sensor_spec->params.find("shape");
+  if (shape_it == sensor_spec->params.end()) {
     return std::nullopt;
   }
-  const std::string& path = value.UncheckedGet<std::string>();
+  VtValue value = std::move(shape_it->second);
+  sensor_spec->params.erase(shape_it);
+  std::string path;
+  if (value.IsHolding<std::string>()) {
+    path = value.UncheckedGet<std::string>();
+  } else if (value.IsHolding<TfToken>()) {
+    path = value.UncheckedGet<TfToken>().GetString();
+  } else if (value.IsHolding<SdfAssetPath>()) {
+    path = ResolvePathFromValue(value);
+  } else {
+    return std::nullopt;
+  }
   if (path.empty()) {
     return std::nullopt;
   }
   if (!SdfPath::IsValidPathString(path)) {
     TF_WARN("Camera %s: mitsuba:sensor:shape is not a valid path: %s",
-            id.GetText(), path.c_str());
+            camera_id.GetText(), path.c_str());
     return std::nullopt;
   }
   return SdfPath(path);
@@ -85,62 +91,82 @@ void HdMitsubaCamera::Sync(HdSceneDelegate* sceneDelegate,
       .Msg("HdMitsubaCamera::Sync: %s\n", GetId().GetText());
   HdCamera::Sync(sceneDelegate, renderParam, dirtyBits);  // Clears dirty bits.
 
-  std::string sensor_type = sensor_type_;
-  if (!is_instantiated_ || (dirty_bits_copy & HdCamera::DirtyParams)) {
-    sensor_type =
-        sceneDelegate
-            ->GetCameraParamValue(GetId(), HdMitsubaCameraTokens->sensorType)
-            .GetWithDefault<std::string>("perspective");
-    film_pixel_filter_type_ =
-        sceneDelegate
-            ->GetCameraParamValue(
-                GetId(), HdMitsubaCameraTokens->sensorPixelFilterType)
-            .GetWithDefault<std::string>("");
-    target_shape_id_ = GetTargetShapeId(sceneDelegate, GetId());
-  }
-
   const GfVec2f shutter = GetShutterClose() > GetShutterOpen()
                               ? GfVec2f(GetShutterOpen(), GetShutterClose())
                               : GfVec2f(0.0f);
-  const bool was_animated = transform_.IsAnimated();
-  if (!is_instantiated_ || (dirty_bits_copy & HdCamera::DirtyTransform) ||
-      shutter != shutter_) {
-    transform_ =
-        SampleTransform(GetPrimDataSource(sceneDelegate, GetId()), shutter)
-            .Map(UsdToMitsubaSensorTransform);
-  }
-
   const float aperture_radius =
       (_fStop > 0.0f && _focusDistance > 0.0f && _focalLength > 0.0f)
           ? 0.5f * _focalLength / _fStop
           : 0.0f;
+  const bool need_sensor_spec =
+      !is_instantiated_ || (dirty_bits_copy & HdCamera::DirtyParams);
+  const bool need_transform = !is_instantiated_ ||
+                              (dirty_bits_copy & HdCamera::DirtyTransform) ||
+                              shutter != shutter_;
+  HdContainerDataSourceHandle prim_ds =
+      (need_sensor_spec || need_transform)
+          ? GetPrimDataSource(sceneDelegate, GetId())
+          : nullptr;
+
+  bool sensor_structure_changed = false;
+  bool sensor_leaf_changed = false;
+  if (need_sensor_spec) {
+    HdContainerDataSourceHandle mitsuba_source = GetMitsubaDataSource(prim_ds);
+    PluginSpecNode parsed_spec =
+        ParsePluginSpec(mitsuba_source, kMitsubaSensorNamespace,
+                        aperture_radius > 0.0f ? "thinlens" : "perspective");
+    std::optional<SdfPath> parsed_target_shape_id =
+        ExtractTargetShapeId(&parsed_spec, GetId());
+    sensor_structure_changed =
+        (parsed_target_shape_id != target_shape_id_) ||
+        !CanUpdatePluginStructureInPlace(sensor_spec_, parsed_spec) ||
+        (parsed_spec != sensor_spec_ &&
+         (parsed_spec.plugin_type == "irradiancemeter" ||
+          parsed_target_shape_id.has_value()));
+    sensor_leaf_changed = (parsed_spec != sensor_spec_);
+    sensor_spec_ = std::move(parsed_spec);
+    target_shape_id_ = std::move(parsed_target_shape_id);
+  }
+
+  const bool was_animated = transform_.IsAnimated();
+  if (need_transform) {
+    transform_ =
+        SampleTransform(prim_ds, shutter).Map(UsdToMitsubaSensorTransform);
+  }
 
   CameraSpec spec;
   spec.id = GetId();
   spec.transform = transform_;
   spec.shutter = shutter;
-  spec.sensor_type = sensor_type;
+  spec.sensor_type = sensor_spec_.plugin_type;
+  spec.sensor_spec = sensor_spec_;
   spec.fov = GetHorizontalFieldOfView();
   spec.horizontal_aperture_offset = GetHorizontalPrincipalPointOffset();
   spec.vertical_aperture_offset = GetVerticalPrincipalPointOffset();
   spec.aperture_radius = aperture_radius;
   spec.focus_distance = _focusDistance;
-  spec.pixel_filter_type = film_pixel_filter_type_;
   spec.near_clip = GetClippingRange().GetMin();
   spec.far_clip = GetClippingRange().GetMax();
-  spec.dirty_bits = dirty_bits_copy;
+  spec.dirty_bits =
+      dirty_bits_copy |
+      (sensor_leaf_changed ? HdCamera::DirtyParams : HdChangeTracker::Clean);
   spec.target_shape_id = target_shape_id_;
 
-  spec.needs_rebuild = !is_instantiated_;
-  spec.needs_rebuild |= sensor_type != sensor_type_;
-  spec.needs_rebuild |= (aperture_radius > 0.0f) != (aperture_radius_ > 0.0f);
-  spec.needs_rebuild |= (sensor_type != "perspective" && !sensor_type.empty() &&
-                         (dirty_bits_copy & HdCamera::DirtyParams));
-  spec.needs_rebuild |= transform_.IsAnimated() != was_animated;
-  spec.needs_rebuild |= shutter != shutter_;
+  const auto usd_params =
+      std::make_tuple(spec.fov, spec.horizontal_aperture_offset,
+                      spec.vertical_aperture_offset, spec.near_clip,
+                      spec.far_clip, spec.aperture_radius, spec.focus_distance);
+  const bool usd_params_changed = (usd_params != usd_params_);
+  usd_params_ = usd_params;
+
+  const bool supports_usd_params_in_place =
+      spec.sensor_type == "perspective" || spec.sensor_type == "thinlens" ||
+      spec.sensor_type == "orthographic";
+  spec.needs_rebuild = !is_instantiated_ || sensor_structure_changed ||
+                       (!supports_usd_params_in_place && usd_params_changed) ||
+                       transform_.IsAnimated() != was_animated ||
+                       shutter != shutter_;
   is_instantiated_ = true;
-  sensor_type_ = std::move(sensor_type);
-  aperture_radius_ = aperture_radius;
   shutter_ = shutter;
 
   static_cast<HdMitsubaRenderParam*>(renderParam)

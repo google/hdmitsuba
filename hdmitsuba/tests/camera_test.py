@@ -320,3 +320,372 @@ def test_irradiancemeter_target_mesh_rebuild():
   test_helpers.robust_assert_close(
       image_initial[..., :3], image_rebuilt[..., :3], atol=0.05
   )
+
+
+def test_thinlens_sensor_and_dynamic_update():
+  """Tests thinlens sensor parameters and dynamic Hydra 2.0 invalidation."""
+  stage = Usd.Stage.CreateInMemory()
+  _setup_stage(stage)
+  test_helpers.create_render_settings(stage, resolution=(32, 32), spp=32)
+
+  camera_prim = stage.GetPrimAtPath('/camera')
+  camera_prim.CreateAttribute(
+      'mitsuba:sensor:type', Sdf.ValueTypeNames.String
+  ).Set('thinlens')
+  aperture_attr = camera_prim.CreateAttribute(
+      'mitsuba:sensor:aperture_radius', Sdf.ValueTypeNames.Float
+  )
+  aperture_attr.Set(0.0)
+  focus_attr = camera_prim.CreateAttribute(
+      'mitsuba:sensor:focus_distance', Sdf.ValueTypeNames.Float
+  )
+  focus_attr.Set(1.5)
+  fov_attr = camera_prim.CreateAttribute(
+      'mitsuba:sensor:fov', Sdf.ValueTypeNames.Float
+  )
+  fov_attr.Set(45.0)
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      camera_path='/camera',
+  )
+  image_sharp = engine.render()['color']
+
+  # Dynamically update traversable thinlens leaves in-place.
+  aperture_attr.Set(1.2)
+  focus_attr.Set(2.5)
+  fov_attr.Set(60.0)
+  image_blurred = engine.render()['color']
+
+  assert not np.allclose(
+      image_sharp[..., :3], image_blurred[..., :3], atol=0.02
+  )
+  test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      '/camera',
+      'test_thinlens_sensor_and_dynamic_update',
+      atol=0.05,
+      engine=engine,
+      spp=32,
+  )
+
+  # Removing an authored override falls back to the USD camera FOV cleanly.
+  camera_prim.RemoveProperty('mitsuba:sensor:fov')
+  test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      '/camera',
+      'test_thinlens_sensor_removed_fov_fallback',
+      atol=0.05,
+      engine=engine,
+      spp=32,
+  )
+
+
+def test_nested_sensor_film_pixel_filter():
+  """Tests nested `mitsuba:sensor:film:pixel_filter:*` parameters and parity."""
+  stage = Usd.Stage.CreateInMemory()
+  _setup_stage(stage)
+  test_helpers.create_render_settings(stage, resolution=(32, 32), spp=32)
+
+  camera_prim = stage.GetPrimAtPath('/camera')
+  camera_prim.CreateAttribute(
+      'mitsuba:sensor:film:pixel_filter:type', Sdf.ValueTypeNames.String
+  ).Set('gaussian')
+  stddev_attr = camera_prim.CreateAttribute(
+      'mitsuba:sensor:film:pixel_filter:stddev', Sdf.ValueTypeNames.Float
+  )
+  stddev_attr.Set(0.25)
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      camera_path='/camera',
+  )
+  image_narrow = engine.render()['color']
+
+  # Dynamically widen the Gaussian reconstruction filter stddev.
+  stddev_attr.Set(2.5)
+  image_wide = engine.render()['color']
+
+  assert not np.allclose(image_narrow[..., :3], image_wide[..., :3], atol=0.01)
+
+  scene = mi.load_dict(usd_mitsuba.convert_to_mitsuba(stage))
+  image_offline = np.array(mi.render(scene, spp=32))
+  test_helpers.robust_assert_close(
+      image_wide[..., :3], image_offline, atol=0.05
+  )
+
+
+def test_sensor_film_overrides_with_alpha_and_pixel_format():
+  """Tests film overrides across RGBA buffer toggles and explicit formats."""
+  stage = Usd.Stage.CreateInMemory()
+  UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+  sphere = UsdGeom.Sphere.Define(stage, '/sphere')
+  material = UsdShade.Material.Define(stage, '/sphere/material')
+  shader = UsdShade.Shader.Define(stage, '/sphere/material/surface')
+  shader.CreateIdAttr('UsdPreviewSurface')
+  shader.CreateInput('diffuseColor', Sdf.ValueTypeNames.Color3f).Set(
+      (0.9, 0.05, 0.05)
+  )
+  material.CreateSurfaceOutput().ConnectToSource(
+      shader.CreateOutput('surface', Sdf.ValueTypeNames.Token)
+  )
+  UsdShade.MaterialBindingAPI.Apply(sphere.GetPrim()).Bind(material)
+  UsdGeom.Camera.Define(stage, '/camera').AddTranslateOp().Set((0, 0, 5))
+  distant = UsdLux.DistantLight.Define(stage, '/light')
+  distant.CreateIntensityAttr(2.0)
+  distant.CreateNormalizeAttr(True)
+  test_helpers.create_render_settings(
+      stage, resolution=(32, 32), spp=32, color_data_type='color4f'
+  )
+
+  camera_prim = stage.GetPrimAtPath('/camera')
+  camera_prim.CreateAttribute(
+      'mitsuba:sensor:film:sample_border', Sdf.ValueTypeNames.Bool
+  ).Set(True)
+  camera_prim.CreateAttribute(
+      'mitsuba:sensor:film:pixel_filter:type', Sdf.ValueTypeNames.String
+  ).Set('gaussian')
+  camera_prim.CreateAttribute(
+      'mitsuba:sensor:film:pixel_filter:stddev', Sdf.ValueTypeNames.Float
+  ).Set(1.0)
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin', camera_path='/camera'
+  )
+  rgba_image = engine.render()['color']
+  assert rgba_image.shape == (32, 32, 4)
+  np.testing.assert_allclose(rgba_image[0, 0, 3], 0.0, atol=1e-5)
+  np.testing.assert_allclose(rgba_image[16, 16, 3], 1.0, atol=1e-5)
+
+  scene_dict = usd_mitsuba.convert_to_mitsuba(stage)
+  scene_dict['_camera']['film']['pixel_format'] = 'rgba'
+  offline_rgba = np.array(mi.render(mi.load_dict(scene_dict), spp=32))
+  test_helpers.robust_assert_close(rgba_image, offline_rgba, atol=0.05)
+
+  # Explicit pixel_format must not be overwritten by 3/4-channel AOV toggles.
+  pixel_format_attr = camera_prim.CreateAttribute(
+      'mitsuba:sensor:film:pixel_format', Sdf.ValueTypeNames.String
+  )
+  pixel_format_attr.Set('xyz')
+  xyz_image = engine.render()['color']
+  offline_xyz = np.array(
+      mi.render(mi.load_dict(usd_mitsuba.convert_to_mitsuba(stage)), spp=32)
+  )
+  test_helpers.robust_assert_close(xyz_image[..., :3], offline_xyz, atol=0.05)
+  assert not np.allclose(
+      xyz_image[16, 16, :3], rgba_image[16, 16, :3], atol=0.05
+  )
+
+  UsdRender.Var.Get(stage, '/Render/Vars/color').GetDataTypeAttr().Set(
+      'color3f'
+  )
+  pixel_format_attr.Set('xyza')
+  xyza_rgb_image = engine.render()['color']
+  test_helpers.robust_assert_close(xyza_rgb_image, offline_xyz, atol=0.05)
+
+
+def test_camera_sampler_override_and_radiancemeter():
+  """Tests camera-local sampler precedence, fov_axis, and radiancemeter."""
+  stage = Usd.Stage.CreateInMemory()
+  _setup_stage(stage)
+  settings = test_helpers.create_render_settings(
+      stage, resolution=(64, 32), spp=4
+  )
+  settings.CreateCameraRel().SetTargets(['/camera'])
+
+  camera_prim = stage.GetPrimAtPath('/camera')
+  camera_prim.CreateAttribute(
+      'mitsuba:sensor:fov_axis', Sdf.ValueTypeNames.String
+  ).Set('y')
+  camera_prim.CreateAttribute(
+      'mitsuba:sensor:fov', Sdf.ValueTypeNames.Float
+  ).Set(35.0)
+  camera_prim.CreateAttribute(
+      'mitsuba:sensor:sampler:type', Sdf.ValueTypeNames.String
+  ).Set('stratified')
+  camera_prim.CreateAttribute(
+      'mitsuba:sensor:sampler:jitter', Sdf.ValueTypeNames.Bool
+  ).Set(False)
+  camera_prim.CreateAttribute(
+      'mitsuba:sensor:sampler:sample_count', Sdf.ValueTypeNames.Int
+  ).Set(16)
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin')
+  image_hydra = engine.render()['color']
+  assert engine.get_render_stats()['totalSamples'] == 16
+
+  scene = mi.load_dict(usd_mitsuba.convert_to_mitsuba(stage))
+  image_offline = np.array(mi.render(scene))
+  test_helpers.robust_assert_close(
+      image_hydra[..., :3], image_offline, atol=0.05
+  )
+
+  # Switch to a 1x1 radiancemeter using spatial Point3f/Vector3f attributes.
+  test_helpers.create_render_settings(stage, resolution=(1, 1), spp=4)
+  meter_cam = UsdGeom.Camera.Define(stage, '/meter')
+  meter_prim = meter_cam.GetPrim()
+  meter_prim.CreateAttribute(
+      'mitsuba:sensor:type', Sdf.ValueTypeNames.String
+  ).Set('radiancemeter')
+  meter_prim.CreateAttribute(
+      'mitsuba:sensor:origin', Sdf.ValueTypeNames.Point3f
+  ).Set((0.0, 0.0, 5.0))
+  meter_prim.CreateAttribute(
+      'mitsuba:sensor:direction', Sdf.ValueTypeNames.Vector3f
+  ).Set((0.0, 0.0, -1.0))
+
+  settings.GetCameraRel().SetTargets(['/meter'])
+  meter_hydra = engine.render()['color']
+  assert meter_hydra.shape[:2] == (1, 1)
+
+  meter_scene = mi.load_dict(usd_mitsuba.convert_to_mitsuba(stage))
+  meter_sensor = next(s for s in meter_scene.sensors() if s.id() == '_meter')
+  meter_offline = np.array(mi.render(meter_scene, sensor=meter_sensor, spp=4))
+  test_helpers.robust_assert_close(
+      meter_hydra[..., :3], meter_offline, atol=0.05
+  )
+
+
+def test_rgbe_film_with_rgba_aov_converges():
+  """Tests that 3-channel RGBE film with color4f AOV converges progressively."""
+  stage = Usd.Stage.CreateInMemory()
+  _setup_stage(stage)
+  settings = test_helpers.create_render_settings(
+      stage, resolution=(16, 16), spp=4, color_data_type='color4f'
+  )
+  settings.GetPrim().CreateAttribute(
+      'mitsuba:interactive_samples_per_pass', Sdf.ValueTypeNames.Int
+  ).Set(2)
+  stage.GetPrimAtPath('/camera').CreateAttribute(
+      'mitsuba:sensor:film:file_format', Sdf.ValueTypeNames.String
+  ).Set('rgbe')
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      camera_path='/camera',
+      overrides={'enableInteractive': True},
+  )
+  engine.render()
+  assert not engine.is_converged()
+  engine.render()
+  assert engine.is_converged()
+
+
+def test_per_camera_sampler_convergence_and_standalone_defaults():
+  """Tests per-camera sampler SPP convergence and standalone default SPP."""
+  stage = Usd.Stage.CreateInMemory()
+  _setup_stage(stage)
+  settings = test_helpers.create_render_settings(
+      stage, resolution=(16, 16), spp=2
+  )
+  settings_prim = settings.GetPrim()
+  settings_prim.CreateAttribute(
+      'mitsuba:sampler:type', Sdf.ValueTypeNames.String
+  ).Set('stratified')
+  settings_prim.CreateAttribute(
+      'mitsuba:sampler:jitter', Sdf.ValueTypeNames.Bool
+  ).Set(False)
+  settings_prim.CreateAttribute(
+      'mitsuba:interactive_samples_per_pass', Sdf.ValueTypeNames.Int
+  ).Set(2)
+
+  camera_prim = stage.GetPrimAtPath('/camera')
+  camera_prim.CreateAttribute(
+      'mitsuba:sensor:sampler:sample_count', Sdf.ValueTypeNames.Int
+  ).Set(4)
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      camera_path='/camera',
+      overrides={'enableInteractive': True},
+  )
+  # Pass 1 renders 2 of 4 camera samples (exceeding RenderSettings spp=2) and
+  # must remain unconverged until pass 2 reaches active_sample_count=4.
+  engine.render()
+  assert not engine.is_converged()
+  engine.render()
+  assert engine.is_converged()
+  assert engine.get_render_stats()['totalSamples'] == 4
+
+  # A camera specifying only `mitsuba:sensor:sampler:type` uses Mitsuba's
+  # default sample_count=4 rather than inheriting RenderSettings spp=32.
+  settings_prim.GetAttribute('mitsuba:sample_count').Set(32)
+  mj_cam = UsdGeom.Camera.Define(stage, '/cam_mj')
+  mj_cam.AddTranslateOp().Set((0, 0, 5))
+  mj_cam.GetPrim().CreateAttribute(
+      'mitsuba:sensor:sampler:type', Sdf.ValueTypeNames.String
+  ).Set('multijitter')
+
+  batch_engine = usd_render.RenderEngine(stage)
+  batch_engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin', camera_path='/cam_mj'
+  )
+  mj_hydra = batch_engine.render()['color']
+  assert batch_engine.get_render_stats()['totalSamples'] == 4
+  mj_scene = mi.load_dict(usd_mitsuba.convert_to_mitsuba(stage))
+  mj_sensor = next(s for s in mj_scene.sensors() if s.id() == '_cam_mj')
+  mj_offline = np.array(mi.render(mj_scene, sensor=mj_sensor))
+  test_helpers.robust_assert_close(mj_hydra[..., :3], mj_offline, atol=0.05)
+
+
+def test_sensor_film_crop_window_and_unattached_irradiancemeter():
+  """Tests authored `mitsuba:sensor:film:crop_*` and unattached irradiancemeter."""
+  stage = Usd.Stage.CreateInMemory()
+  _setup_stage(stage)
+  test_helpers.create_render_settings(stage, resolution=(32, 32), spp=8)
+
+  # An unattached `irradiancemeter` without `mitsuba:sensor:shape` must be
+  # skipped cleanly in both Hydra and offline translation.
+  orphan = UsdGeom.Camera.Define(stage, '/orphan_meter')
+  orphan.GetPrim().CreateAttribute(
+      'mitsuba:sensor:type', Sdf.ValueTypeNames.String
+  ).Set('irradiancemeter')
+
+  camera_prim = stage.GetPrimAtPath('/camera')
+  camera_prim.CreateAttribute(
+      'mitsuba:sensor:film:crop_offset_x', Sdf.ValueTypeNames.Int
+  ).Set(8)
+  camera_prim.CreateAttribute(
+      'mitsuba:sensor:film:crop_offset_y', Sdf.ValueTypeNames.Int
+  ).Set(4)
+  crop_w_attr = camera_prim.CreateAttribute(
+      'mitsuba:sensor:film:crop_width', Sdf.ValueTypeNames.Int
+  )
+  crop_w_attr.Set(16)
+  camera_prim.CreateAttribute(
+      'mitsuba:sensor:film:crop_height', Sdf.ValueTypeNames.Int
+  ).Set(12)
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin', camera_path='/camera'
+  )
+  image_hydra = engine.render()['color']
+  scene_dict = usd_mitsuba.convert_to_mitsuba(stage)
+  assert '_orphan_meter' not in scene_dict
+  image_offline = np.array(mi.render(mi.load_dict(scene_dict), spp=8))
+  assert image_offline.shape == (12, 16, 3)
+  test_helpers.robust_assert_close(
+      image_hydra[4:16, 8:24, :3], image_offline, atol=0.05
+  )
+  mask = np.ones((32, 32), dtype=bool)
+  mask[4:16, 8:24] = False
+  np.testing.assert_array_equal(image_hydra[..., :3][mask], 0.0)
+
+  # Dynamic in-place crop update without rebuilding the sensor.
+  crop_w_attr.Set(20)
+  image_hydra_wider = engine.render()['color']
+  image_offline_wider = np.array(
+      mi.render(mi.load_dict(usd_mitsuba.convert_to_mitsuba(stage)), spp=8)
+  )
+  assert image_offline_wider.shape == (12, 20, 3)
+  test_helpers.robust_assert_close(
+      image_hydra_wider[4:16, 8:28, :3], image_offline_wider, atol=0.05
+  )
+  np.testing.assert_array_equal(image_hydra_wider[:, 28:, :3], 0.0)

@@ -82,6 +82,12 @@ PluginSpecNode ParsePluginSpec(const HdContainerDataSourceHandle& container,
                                std::string_view prefix,
                                std::string_view default_type = "");
 
+// Returns whether `new_spec` preserves the plugin hierarchy of `old_spec`
+// (`plugin_type`, `id`, nested child plugins, and no removed parameter
+// overrides) so leaf parameter diffs can be attempted in place.
+bool CanUpdatePluginStructureInPlace(const PluginSpecNode& old_spec,
+                                     const PluginSpecNode& new_spec);
+
 // Merges scalar parameters and instantiated child plugins from `spec` onto an
 // existing `mitsuba::Properties` object, overriding existing keys when present.
 void MergePluginProperties(mitsuba::Properties* props,
