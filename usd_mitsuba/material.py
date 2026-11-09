@@ -34,6 +34,7 @@ from pxr import Sdf
 from pxr import Tf
 from pxr import Usd
 from pxr import UsdShade
+from hdmitsuba import geometry_ext as geom_lib
 
 
 USD_TO_MI_PRINCIPLED_RENAMING = {
@@ -93,6 +94,20 @@ _SUPPORTED_IMAGE_EXTENSIONS = frozenset({
 })
 
 _MI_PREFIX = 'mitsuba_'
+
+_PRIMVAR_READER_PREFIX = 'UsdPrimvarReader_'
+# Number of mesh attribute channels read by each `UsdPrimvarReader_*` type:
+# Mitsuba evaluates mesh attributes as scalars or colors.
+_PRIMVAR_READER_CHANNELS = {
+    'float': 1,
+    'int': 1,
+    'float2': 3,
+    'float3': 3,
+    'float4': 3,
+    'normal': 3,
+    'point': 3,
+    'vector': 3,
+}
 
 
 def _get_surface_output(material: UsdShade.Material) -> UsdShade.Output | None:
@@ -312,10 +327,47 @@ def _convert_uv_texture(
   return {'type': 'rgb', 'value': fb[:3]}
 
 
+def _convert_primvar_reader(
+    shader: UsdShade.Shader,
+    mesh_attributes: set[tuple[str, int]] | None,
+) -> dict[str, Any] | None:
+  """Converts a UsdPrimvarReader shader to a Mitsuba mesh_attribute texture.
+
+  The `fallback` input is not supported: missing primvars read as zero.
+
+  Args:
+    shader: The `UsdPrimvarReader_*` shader to convert.
+    mesh_attributes: The `(primvar name, channel count)` pairs read by the
+      material, to which the primvar is added. None if the shader is not
+      evaluated on a mesh surface, which rejects the primvar reader.
+
+  Returns:
+    The Mitsuba texture dictionary, or None if the shader is rejected.
+  """
+  shader_id = shader.GetShaderId()
+  channels = _PRIMVAR_READER_CHANNELS.get(
+      shader_id.removeprefix(_PRIMVAR_READER_PREFIX)
+  )
+  varname_attrs = shader.GetInput('varname').GetValueProducingAttributes()
+  varname = varname_attrs[0].Get() if varname_attrs else None
+  if channels is None or not varname:
+    Tf.Warn(f'Ignoring unsupported primvar reader {shader.GetPath()}.')
+    return None
+  if mesh_attributes is None:
+    Tf.Warn('Primvar readers are only supported in surface shaders.')
+    return None
+  mesh_attributes.add((str(varname), channels))
+  return {
+      'type': 'mesh_attribute',
+      'name': geom_lib.mesh_attribute_name(str(varname), channels),
+  }
+
+
 def usd_mitsuba_material_to_dict(
     shader: UsdShade.Shader,
     input_name: str | None = None,
     output_name: str | None = None,
+    mesh_attributes: set[tuple[str, int]] | None = None,
 ) -> dict[str, Any]:
   """Converts a USD shader to a Mitsuba BSDF dictionary.
 
@@ -323,6 +375,8 @@ def usd_mitsuba_material_to_dict(
     shader: The USD shader to convert.
     input_name: Optional downstream input name used for color-space heuristics.
     output_name: Optional output channel name on `shader` (e.g. 'r', 'rgb').
+    mesh_attributes: The `(primvar name, channel count)` pairs read by primvar
+      readers are added to this set. If None, primvar readers are rejected.
 
   Returns:
     The Mitsuba dictionary representation of the shader, or an empty dictionary
@@ -337,6 +391,8 @@ def usd_mitsuba_material_to_dict(
     shader_id = shader.GetIdAttr().Get()
     if shader_id == 'UsdUVTexture':
       return _convert_uv_texture(shader, input_name, output_name)
+    if shader_id.startswith(_PRIMVAR_READER_PREFIX):
+      return _convert_primvar_reader(shader, mesh_attributes)
 
     if not shader_id.startswith(_MI_PREFIX):
       raise ValueError(f'The shader {shader_id} is not a Mitsuba shader.')
@@ -344,7 +400,18 @@ def usd_mitsuba_material_to_dict(
     result = {'type': shader_id.removeprefix(_MI_PREFIX)}
     for usd_input in shader.GetInputs():
       name = usd_input.GetBaseName()
-      if conn := _find_shader_output(usd_input):
+      conn = _find_shader_output(usd_input)
+      if (
+          conn
+          and result['type'] == 'principled'
+          and name in ('specular', 'ior', 'eta')
+      ):
+        Tf.Warn(
+            "Mitsuba's principled BSDF does not support texture connection for"
+            f" '{name}'. Ignoring connection."
+        )
+        conn = None
+      if conn:
         if (child := _traverse(conn[0], name, conn[1])) is not None:
           result[name] = child
       else:
@@ -387,11 +454,14 @@ def usd_mitsuba_material_to_dict(
 
 def usd_preview_surface_to_mitsuba(
     shader: UsdShade.Shader,
+    mesh_attributes: set[tuple[str, int]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
   """Converts a USD preview surface to a Mitsuba principled BSDF.
 
   Args:
     shader: The UsdPreviewSurface shader to convert.
+    mesh_attributes: The `(primvar name, channel count)` pairs read by primvar
+      readers are added to this set. If None, primvar readers are rejected.
 
   Returns:
     A tuple containing:
@@ -415,19 +485,29 @@ def usd_preview_surface_to_mitsuba(
   for usd_input in shader.GetInputs():
     name = usd_input.GetBaseName()
     val = None
-    if conn := _find_shader_output(usd_input):
-      if conn[0].GetIdAttr().Get() == 'UsdUVTexture':
+    conn = _find_shader_output(usd_input)
+    if conn and name in ('ior', 'specular'):
+      Tf.Warn(
+          "Mitsuba's principled BSDF does not support texture for"
+          f" '{renaming[name]}'. Using constant value instead."
+      )
+      conn = None
+    if conn:
+      conn_id = conn[0].GetShaderId()
+      if conn_id == 'UsdUVTexture':
         val = _convert_uv_texture(conn[0], name, conn[1])
-        if val is not None and name in ('opacity', 'clearcoatRoughness'):
-          # Constant textures (e.g. the alpha of an image without an alpha
-          # channel) can be inverted, unlike spatially varying ones.
-          if val['type'] == 'uniform':
-            val = 1.0 - val['value']
-          else:
-            Tf.Warn(
-                f"Texture inversion for {name} is not supported. The resulting"
-                " Mitsuba material may look incorrect."
-            )
+      elif conn_id.startswith(_PRIMVAR_READER_PREFIX):
+        val = _convert_primvar_reader(conn[0], mesh_attributes)
+      if val is not None and name in ('opacity', 'clearcoatRoughness'):
+        # Constant textures (e.g. the alpha of an image without an alpha
+        # channel) can be inverted, unlike spatially varying ones.
+        if val['type'] == 'uniform':
+          val = 1.0 - val['value']
+        else:
+          Tf.Warn(
+              f"Texture inversion for {name} is not supported. The resulting"
+              " Mitsuba material may look incorrect."
+          )
     else:
       raw_val = usd_input.GetAttr().Get()
       if raw_val is not None:
@@ -515,15 +595,20 @@ def convert_mesh_material(prim: Usd.Prim) -> MeshMaterial:
   """
 
   bsdf, emitter, displacement, interior_medium = None, None, None, None
+  mesh_attributes = set()
   material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
   if material:
     if shader := find_shader(_get_surface_output(material)):
       if shader.GetShaderId() == 'UsdPreviewSurface':
-        bsdf_dict, emitter_dict = usd_preview_surface_to_mitsuba(shader)
+        bsdf_dict, emitter_dict = usd_preview_surface_to_mitsuba(
+            shader, mesh_attributes
+        )
         bsdf = mi.load_dict(bsdf_dict)
         emitter = mi.load_dict(emitter_dict) if emitter_dict else None
       elif shader.GetShaderId().startswith(_MI_PREFIX):
-        if bsdf_dict := usd_mitsuba_material_to_dict(shader):
+        if bsdf_dict := usd_mitsuba_material_to_dict(
+            shader, mesh_attributes=mesh_attributes
+        ):
           bsdf = mi.load_dict(bsdf_dict)
 
     if shader := _get_volume_shader(material):
@@ -539,13 +624,15 @@ def convert_mesh_material(prim: Usd.Prim) -> MeshMaterial:
         bsdf = mi.load_dict({'type': 'null'})
 
     if conn := _find_shader_output(_get_displacement_output(material)):
-      bsdf_dict = usd_mitsuba_material_to_dict(conn[0], 'displacement', conn[1])
-      displacement = mi.load_dict(bsdf_dict)
-      if not isinstance(displacement, mi.Texture):
-        raise ValueError(
-            'Displacement texture is not a Mitsuba texture. Please use a'
-            ' Mitsuba texture.'
-        )
+      if disp_dict := usd_mitsuba_material_to_dict(
+          conn[0], 'displacement', conn[1]
+      ):
+        displacement = mi.load_dict(disp_dict)
+        if not isinstance(displacement, mi.Texture):
+          raise ValueError(
+              'Displacement texture is not a Mitsuba texture. Please use a'
+              ' Mitsuba texture.'
+          )
 
   elif display_color_attr := prim.GetAttribute('primvars:displayColor'):
     if colors := display_color_attr.Get():
@@ -562,6 +649,7 @@ def convert_mesh_material(prim: Usd.Prim) -> MeshMaterial:
       emitter=emitter,
       displacement=displacement,
       interior_medium=interior_medium,
+      mesh_attributes=tuple(sorted(mesh_attributes)),
   )
 
 

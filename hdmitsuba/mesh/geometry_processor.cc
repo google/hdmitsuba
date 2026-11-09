@@ -78,7 +78,8 @@ struct VaryingChannelView {
   size_t dim = 0;
 };
 
-std::optional<PrimvarArrayVariant> ExtractPrimvarArray(const VtValue& value) {
+std::optional<PrimvarArrayVariant> ExtractPrimvarArray(
+    const VtValue& value, bool allow_scalar = false) {
   if (value.IsHolding<VtVec3fArray>()) {
     return value.UncheckedGet<VtVec3fArray>();
   }
@@ -97,6 +98,25 @@ std::optional<PrimvarArrayVariant> ExtractPrimvarArray(const VtValue& value) {
   if (value.IsHolding<VtBoolArray>()) {
     const VtBoolArray& src = value.UncheckedGet<VtBoolArray>();
     return VtIntArray(src.begin(), src.end());
+  }
+  if (!allow_scalar) return std::nullopt;
+  if (value.IsHolding<GfVec3f>()) {
+    return VtVec3fArray{value.UncheckedGet<GfVec3f>()};
+  }
+  if (value.IsHolding<GfVec2f>()) {
+    return VtVec2fArray{value.UncheckedGet<GfVec2f>()};
+  }
+  if (value.IsHolding<float>()) {
+    return VtFloatArray{value.UncheckedGet<float>()};
+  }
+  if (value.IsHolding<GfVec4f>()) {
+    return VtVec4fArray{value.UncheckedGet<GfVec4f>()};
+  }
+  if (value.IsHolding<int>()) {
+    return VtIntArray{value.UncheckedGet<int>()};
+  }
+  if (value.IsHolding<bool>()) {
+    return VtIntArray{static_cast<int>(value.UncheckedGet<bool>())};
   }
   return std::nullopt;
 }
@@ -250,7 +270,8 @@ ExpandedMesh GeometryProcessor::ExpandPrimData(
   std::vector<ExpandChannel> channels;
   channels.reserve(primvars.size());
   for (const auto& [token, state] : primvars) {
-    auto src_opt = ExtractPrimvarArray(state.value);
+    auto src_opt = ExtractPrimvarArray(
+        state.value, state.interpolation == HdInterpolationConstant);
     if (!src_opt) continue;
     channels.push_back({token, state.interpolation, std::move(*src_opt)});
   }

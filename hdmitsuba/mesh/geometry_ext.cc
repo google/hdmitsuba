@@ -26,6 +26,7 @@
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/set.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/string_view.h>
 #include <nanobind/stl/tuple.h>
 #include <nanobind/stl/unordered_map.h>
 #include <nanobind/stl/vector.h>
@@ -370,6 +371,10 @@ NB_MODULE(geometry_ext, m) {
         "Adds the `(primvar name, channel count)` pairs `mesh_attributes` of "
         "the sub-mesh `sub` that exist to the Mitsuba mesh `mesh` of the "
         "active variant as vertex attributes, like the Hydra delegate.");
+  m.def("mesh_attribute_name", &MeshAttributeName, nb::arg("primvar"),
+        nb::arg("channels"),
+        "Returns the name of the Mitsuba vertex attribute holding `primvar` "
+        "with `channels` channels, as read by a `mesh_attribute` texture.");
   m.def("extract_mesh_data", &ExtractMeshData, nb::arg("stage"),
         nb::arg("path"), nb::arg("time"),
         "Extracts the topology, primvars and GeomSubset material assignment "
