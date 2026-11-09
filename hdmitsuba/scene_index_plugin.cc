@@ -12,16 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 // Scene-index plugins for HdMitsuba.
 //
 // Contents:
-// - A scene index converting implicit surfaces without a native Mitsuba
-//   equivalent to meshes. Spheres and cylinders are kept as implicit surfaces
-//   (see implicit_surface.h).
+// - Scene indices converting implicit surfaces without a native Mitsuba
+//   equivalent to meshes (keeping spheres and cylinders as implicit surfaces;
+//   see implicit_surface.h), filtering mitsuba: render settings, and
+//   forwarding scene-index dependencies.
 // - A scene index publishing the motion interval (the union of all camera
 //   shutter intervals) on the absolute root prim, and invalidating light
-//   transforms when it changes. This is the only data source contributed here.
+//   transforms when it changes.
 // - A keyless API-schema adapter fixing *invalidation*: every other value
 //   hdMitsuba reads is a schema property or a primvar UsdImaging already
 //   surfaces, but UsdImagingStageSceneIndex drops a property change unless
@@ -34,13 +34,11 @@
 // UsdImagingStageSceneIndex. A separate plugin library without the Mitsuba
 // dependency would avoid both.
 
-#include <algorithm>
-
-#include <absl/container/flat_hash_map.h>
-#include <absl/strings/match.h>
 #include <pxr/base/gf/vec2f.h>
 #include <pxr/base/tf/registryManager.h>
+#include <pxr/base/tf/staticTokens.h>
 #include <pxr/base/tf/type.h>
+#include <pxr/base/vt/array.h>
 #include <pxr/imaging/hd/cameraSchema.h>
 #include <pxr/imaging/hd/dependencyForwardingSceneIndex.h>
 #include <pxr/imaging/hd/dirtyBitsTranslator.h>
@@ -56,6 +54,7 @@
 #include <pxr/imaging/hd/tokens.h>
 #include <pxr/imaging/hd/xformSchema.h>
 #include <pxr/imaging/hdsi/implicitSurfaceSceneIndex.h>
+#include <pxr/imaging/hdsi/renderSettingsFilteringSceneIndex.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/usdGeom/camera.h>
 #include <pxr/usd/usdLux/lightAPI.h>
@@ -65,16 +64,23 @@
 #include <pxr/usdImaging/usdImaging/apiSchemaAdapter.h>
 #include <pxr/usdImaging/usdImaging/types.h>
 
+#include <algorithm>
+
 #include "hdmitsuba/camera.h"
 #include "hdmitsuba/config.h"
 #include "hdmitsuba/mesh.h"
 #include "hdmitsuba/motion.h"
+#include <absl/container/flat_hash_map.h>
+#include <absl/strings/match.h>
 
 #if PXR_VERSION < 2605
 #error "hdmitsuba requires OpenUSD 26.05 or newer."
 #endif
 
 PXR_NAMESPACE_OPEN_SCOPE
+
+TF_DEFINE_PRIVATE_TOKENS(HdMitsubaPluginTokens,
+                         ((mitsubaNamespacePrefix, "mitsuba:")));
 
 // Publishes the motion interval, i.e., the union of the shutter intervals of
 // all cameras, on the absolute root prim (see motion.h), and dirties shape,
@@ -231,23 +237,34 @@ class HdMitsuba_SceneIndexPlugin : public HdSceneIndexPlugin {
             HdsiImplicitSurfaceSceneIndexTokens->toMesh);
     const bool tessellate_all =
         HdMitsubaConfig::GetInstance().tessellate_implicit_surfaces;
-    return HdMitsuba_MotionIntervalSceneIndex::New(
-        HdsiImplicitSurfaceSceneIndex::New(
-            // Forwards dirtiness along declared dependencies, e.g., from
-            // USD RenderSettings attributes to the flattened `renderSettings`
-            // prim, so that RenderSettings edits trigger a re-sync.
-            HdDependencyForwardingSceneIndex::New(input_scene),
-            HdRetainedContainerDataSource::New(
-                HdPrimTypeTokens->sphere,
-                tessellate_all ? to_mesh : HdDataSourceBaseHandle(),
-                HdPrimTypeTokens->cube, to_mesh, HdPrimTypeTokens->cone,
-                to_mesh, HdPrimTypeTokens->cylinder,
-                tessellate_all ? to_mesh
-                               : HdRetainedTypedSampledDataSource<TfToken>::New(
-                                     HdsiImplicitSurfaceSceneIndexTokens
-                                         ->axisToTransform),
-                HdPrimTypeTokens->capsule, to_mesh, HdPrimTypeTokens->plane,
-                to_mesh)));
+    HdSceneIndexBaseRefPtr scene_index =
+        HdMitsuba_MotionIntervalSceneIndex::New(
+            HdsiImplicitSurfaceSceneIndex::New(
+                input_scene,
+                HdRetainedContainerDataSource::New(
+                    HdPrimTypeTokens->sphere,
+                    tessellate_all ? to_mesh : HdDataSourceBaseHandle(),
+                    HdPrimTypeTokens->cube, to_mesh, HdPrimTypeTokens->cone,
+                    to_mesh, HdPrimTypeTokens->cylinder,
+                    tessellate_all
+                        ? to_mesh
+                        : HdRetainedTypedSampledDataSource<TfToken>::New(
+                              HdsiImplicitSurfaceSceneIndexTokens
+                                  ->axisToTransform),
+                    HdPrimTypeTokens->capsule, to_mesh, HdPrimTypeTokens->plane,
+                    to_mesh)));
+    scene_index = HdsiRenderSettingsFilteringSceneIndex::New(
+        scene_index,
+        HdRetainedContainerDataSource::New(
+            HdsiRenderSettingsFilteringSceneIndexTokens->namespacePrefixes,
+            HdRetainedTypedSampledDataSource<VtArray<TfToken>>::New(
+                VtArray<TfToken>{
+                    HdMitsubaPluginTokens->mitsubaNamespacePrefix})));
+    // Forwards dirtiness along declared dependencies (both flattened USD
+    // RenderSettings attributes and active renderSettingsPrimPath in
+    // sceneGlobals) so RenderSettings edits trigger a re-sync.
+    scene_index = HdDependencyForwardingSceneIndex::New(scene_index);
+    return scene_index;
   }
 };
 
@@ -311,9 +328,12 @@ TF_REGISTRY_FUNCTION(TfType) {
 }
 
 TF_REGISTRY_FUNCTION(HdSceneIndexPlugin) {
+  // Phase 1 runs after application scene indices (such as
+  // UsdImagingGLEngine's HdsiSceneGlobalsSceneIndex at phase 0) so
+  // HdsiRenderSettingsFilteringSceneIndex can query sceneGlobals.
   HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(
       "Mitsuba", TfToken("HdMitsuba_SceneIndexPlugin"),
-      /* inputArgs = */ nullptr, /* insertionPhase = */ 0,
+      /* inputArgs = */ nullptr, /* insertionPhase = */ 1,
       HdSceneIndexPluginRegistry::InsertionOrderAtStart);
 }
 

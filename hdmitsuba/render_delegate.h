@@ -96,14 +96,19 @@ class HdMitsubaRenderDelegate final : public HdRenderDelegate {
   TfToken GetMaterialBindingPurpose() const override;
   TfTokenVector GetMaterialRenderContexts() const override;
   bool IsParallelSyncEnabled(const TfToken& primType) const override;
+  TfTokenVector GetRenderSettingsNamespaces() const override;
 
   HdAovDescriptor GetDefaultAovDescriptor(const TfToken& name) const override;
 
+  void SetRenderSetting(const TfToken& key, const VtValue& value) override;
+  VtValue GetRenderSetting(const TfToken& key) const override;
   HdRenderSettingDescriptorList GetRenderSettingDescriptors() const override;
 
-  bool HasPendingSettings() const {
-    return GetRenderSettingsVersion() != last_settings_version_;
-  }
+  bool HasPendingSettings() const { return settings_dirty_; }
+
+  void UpdateSceneRenderSettings(const SdfPath& id,
+                                 const VtDictionary& settings);
+  void ClearSceneRenderSettings(const SdfPath& id);
 
  private:
   void Initialize();
@@ -115,9 +120,13 @@ class HdMitsubaRenderDelegate final : public HdRenderDelegate {
   std::unique_ptr<SceneManager> scene_impl_;
   std::unique_ptr<HdMitsubaRenderParam> render_param_;
   std::string current_variant_;
-  unsigned int last_settings_version_ = 0;
+  bool python_variant_synced_ = false;
 
   HdRenderSettingDescriptorList setting_descriptors_;
+  HdRenderSettingsMap host_setting_overrides_;
+  VtDictionary scene_render_settings_;
+  SdfPath active_render_settings_id_;
+  bool settings_dirty_ = true;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

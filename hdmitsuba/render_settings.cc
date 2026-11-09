@@ -34,11 +34,22 @@ void HdMitsubaRenderSettings::_Sync(HdSceneDelegate* /*sceneDelegate*/,
                                     HdRenderParam* renderParam,
                                     const HdDirtyBits* dirtyBits) {
   TF_DEBUG(HDMITSUBA_SYNC).Msg("HdMitsubaRenderSettings::_Sync\n");
-  if (*dirtyBits & HdRenderSettings::DirtyNamespacedSettings) {
-    static_cast<HdMitsubaRenderParam*>(renderParam)
-        ->GetScene()
-        ->UpdateNamespacedSettings(GetNamespacedSettings());
+  if (*dirtyBits & (HdRenderSettings::DirtyActive |
+                    HdRenderSettings::DirtyNamespacedSettings)) {
+    auto* mitsuba_param = static_cast<HdMitsubaRenderParam*>(renderParam);
+    if (IsActive()) {
+      mitsuba_param->GetDelegate()->UpdateSceneRenderSettings(
+          GetId(), GetNamespacedSettings());
+    } else {
+      mitsuba_param->GetDelegate()->ClearSceneRenderSettings(GetId());
+    }
   }
+}
+
+void HdMitsubaRenderSettings::Finalize(HdRenderParam* renderParam) {
+  auto* mitsuba_param = static_cast<HdMitsubaRenderParam*>(renderParam);
+  mitsuba_param->GetDelegate()->ClearSceneRenderSettings(GetId());
+  HdRenderSettings::Finalize(renderParam);
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

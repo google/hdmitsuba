@@ -27,6 +27,8 @@ class HdMitsubaRenderSettings final : public HdRenderSettings {
   explicit HdMitsubaRenderSettings(SdfPath const& id);
   ~HdMitsubaRenderSettings() override = default;
 
+  void Finalize(HdRenderParam* renderParam) override;
+
  protected:
   void _Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderParam,
              const HdDirtyBits* dirtyBits) override;
