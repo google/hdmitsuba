@@ -151,7 +151,7 @@ def convert_mesh(
       motion_transform = motion.to_mitsuba_transform(samples)
 
   displacements = [
-      (mat.displacement, mat.bias, mat.requires_uv, mat.is_vector)
+      (mat.displacement, mat.requires_uv, mat.is_vector)
       for mat in materials
   ]
   requested_attrs = {

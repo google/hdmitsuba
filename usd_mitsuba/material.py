@@ -115,16 +115,6 @@ def _get_surface_output(material: UsdShade.Material) -> UsdShade.Output | None:
   return material.GetSurfaceOutput('mitsuba') or material.GetSurfaceOutput()
 
 
-def _get_displacement_output(
-    material: UsdShade.Material,
-) -> UsdShade.Output | None:
-  """Gets the Mitsuba-specific displacement output or falls back to default."""
-  return (
-      material.GetDisplacementOutput('mitsuba')
-      or material.GetDisplacementOutput()
-  )
-
-
 def _find_shader_output(
     prop: UsdShade.Input | UsdShade.Output | None,
 ) -> tuple[UsdShade.Shader, str] | None:
@@ -283,7 +273,7 @@ def _convert_uv_texture(
   filename = asset_path.resolvedPath if asset_path else None
   if filename and (texture := _load_uv_texture_image(filename, ch_idx)):
     if texture['type'] != 'bitmap':
-      return texture
+      return _apply_uv_texture_scale_bias(shader, input_name, ch_idx, texture)
     # Like UsdImaging, only consider the `colorSpace` metadata of the file
     # attribute itself if `sourceColorSpace` is unset or 'auto'.
     cs = shader.GetInput('sourceColorSpace').Get()
@@ -307,7 +297,7 @@ def _convert_uv_texture(
 
     if to_uv := _extract_usd_transform2d(shader):
       texture['to_uv'] = to_uv
-    return texture
+    return _apply_uv_texture_scale_bias(shader, input_name, ch_idx, texture)
 
   if input_name in ('normal', 'bump'):
     return None
@@ -320,15 +310,23 @@ def _convert_uv_texture(
   fb = shader.GetInput('fallback').Get()
   fb = tuple(fb) if fb is not None else (1.0, 0.0, 1.0, 1.0)
   if ch_idx >= 0:
-    return {
+    fallback = {
         'type': 'uniform',
         'value': float(fb[ch_idx]) if ch_idx < len(fb) else 1.0,
     }
-  return {'type': 'rgb', 'value': fb[:3]}
+  else:
+    fallback = {
+        'type': 'srgb',
+        'color': tuple(float(c) for c in fb[:3]),
+        'unbounded': True,
+    }
+  # A UsdUVTexture applies its `scale` and `bias` to the fallback, too.
+  return _apply_uv_texture_scale_bias(shader, input_name, ch_idx, fallback)
 
 
 def _convert_primvar_reader(
     shader: UsdShade.Shader,
+    input_name: str | None,
     mesh_attributes: set[tuple[str, int]] | None,
 ) -> dict[str, Any] | None:
   """Converts a UsdPrimvarReader shader to a Mitsuba mesh_attribute texture.
@@ -337,6 +335,7 @@ def _convert_primvar_reader(
 
   Args:
     shader: The `UsdPrimvarReader_*` shader to convert.
+    input_name: Optional downstream input name.
     mesh_attributes: The `(primvar name, channel count)` pairs read by the
       material, to which the primvar is added. None if the shader is not
       evaluated on a mesh surface, which rejects the primvar reader.
@@ -356,11 +355,20 @@ def _convert_primvar_reader(
   if mesh_attributes is None:
     Tf.Warn('Primvar readers are only supported in surface shaders.')
     return None
+  if input_name in ('normal', 'normalmap') and channels < 3:
+    Tf.Warn(
+        f"Normal map input '{input_name}' requires at least 3 channels;"
+        f' ignoring {shader.GetPath()}.'
+    )
+    return None
   mesh_attributes.add((str(varname), channels))
-  return {
+  tex: dict[str, Any] = {
       'type': 'mesh_attribute',
       'name': geom_lib.mesh_attribute_name(str(varname), channels),
   }
+  if input_name == 'normal':
+    return {'type': 'math', 'expr': 'fma(in[0], 0.5, 0.5)', 'in0': tex}
+  return tex
 
 
 def usd_mitsuba_material_to_dict(
@@ -392,7 +400,7 @@ def usd_mitsuba_material_to_dict(
     if shader_id == 'UsdUVTexture':
       return _convert_uv_texture(shader, input_name, output_name)
     if shader_id.startswith(_PRIMVAR_READER_PREFIX):
-      return _convert_primvar_reader(shader, mesh_attributes)
+      return _convert_primvar_reader(shader, input_name, mesh_attributes)
 
     if not shader_id.startswith(_MI_PREFIX):
       raise ValueError(f'The shader {shader_id} is not a Mitsuba shader.')
@@ -484,6 +492,8 @@ def usd_preview_surface_to_mitsuba(
   emitter_dict: dict[str, Any] = {'type': 'area'}
   for usd_input in shader.GetInputs():
     name = usd_input.GetBaseName()
+    if name == 'displacement':  # Handled by convert_mesh_material().
+      continue
     val = None
     conn = _find_shader_output(usd_input)
     if conn and name in ('ior', 'specular'):
@@ -497,7 +507,7 @@ def usd_preview_surface_to_mitsuba(
       if conn_id == 'UsdUVTexture':
         val = _convert_uv_texture(conn[0], name, conn[1])
       elif conn_id.startswith(_PRIMVAR_READER_PREFIX):
-        val = _convert_primvar_reader(conn[0], mesh_attributes)
+        val = _convert_primvar_reader(conn[0], name, mesh_attributes)
       if val is not None and name in ('opacity', 'clearcoatRoughness'):
         # Constant textures (e.g. the alpha of an image without an alpha
         # channel) can be inverted, unlike spatially varying ones.
@@ -508,7 +518,7 @@ def usd_preview_surface_to_mitsuba(
               f"Texture inversion for {name} is not supported. The resulting"
               " Mitsuba material may look incorrect."
           )
-    else:
+    elif name not in ('normal', 'bump'):  # Like hdMitsuba.
       raw_val = usd_input.GetAttr().Get()
       if raw_val is not None:
         if name == 'emissiveColor' and (raw_val == Gf.Vec3f(0) or raw_val == 0):
@@ -562,7 +572,6 @@ class MeshMaterial:
     interior_medium: The interior medium, if any.
     is_vector: Whether `displacement` returns a 3D vector in the (dPdu, dPdv, N)
       tangent frame instead of a scalar offset along the normal.
-    bias: Value subtracted from scalar displacement values.
     requires_uv: Whether evaluating `displacement` requires texture coordinates.
     mesh_attributes: `(primvar name, channel count)` pairs of the primvars that
       the material reads as mesh attributes.
@@ -573,7 +582,6 @@ class MeshMaterial:
   displacement: mi.Texture | None = None
   interior_medium: mi.Medium | None = None
   is_vector: bool = False
-  bias: float = 0.5
   requires_uv: bool = True
   mesh_attributes: tuple[tuple[str, int], ...] = ()
 
@@ -623,7 +631,7 @@ def convert_mesh_material(prim: Usd.Prim) -> MeshMaterial:
       if bsdf is None:
         bsdf = mi.load_dict({'type': 'null'})
 
-    if conn := _find_shader_output(_get_displacement_output(material)):
+    if conn := _find_displacement_connection(material):
       if disp_dict := usd_mitsuba_material_to_dict(
           conn[0], 'displacement', conn[1]
       ):
@@ -672,3 +680,65 @@ def convert_material(
   mat = convert_mesh_material(prim)
   return mat.bsdf, mat.emitter, mat.displacement, mat.interior_medium
 
+
+def _find_displacement_connection(
+    material: UsdShade.Material,
+) -> tuple[UsdShade.Shader, str] | None:
+  """Returns the `(shader, output)` driving `material`'s displacement."""
+  conn = _find_shader_output(
+      material.GetDisplacementOutput('mitsuba')
+  ) or _find_shader_output(material.GetDisplacementOutput())
+  if conn is not None and conn[0].GetShaderId() == 'UsdPreviewSurface':
+    conn = _find_shader_output(conn[0].GetInput('displacement'))
+  # Like hdMitsuba, ignore displacement from unsupported shaders.
+  if conn is None:
+    return None
+  shader_id = conn[0].GetShaderId()
+  if shader_id == 'UsdUVTexture' or shader_id.startswith(
+      (_MI_PREFIX, _PRIMVAR_READER_PREFIX)
+  ):
+    return conn
+  return None
+
+
+def _apply_uv_texture_scale_bias(
+    shader: UsdShade.Shader,
+    input_name: str | None,
+    ch_idx: int,
+    texture: dict[str, Any],
+) -> dict[str, Any]:
+  """Applies the UsdUVTexture `scale` and `bias` inputs to a texture dict."""
+  raw_scale = shader.GetInput('scale').Get()
+  raw_bias = shader.GetInput('bias').Get()
+  channels = [ch_idx] * 3 if ch_idx >= 0 else [0, 1, 2]
+  scale = [raw_scale[c] if raw_scale is not None else 1.0 for c in channels]
+  bias = [raw_bias[c] if raw_bias is not None else 0.0 for c in channels]
+  if input_name == 'normal':
+    # UsdPreviewSurface expects `inputs:normal` in `[-1, 1]`
+    # (https://openusd.org/release/spec_usdpreviewsurface.html#preview-surface),
+    # whereas Mitsuba's `normalmap` decodes its texture `t` as `2 * t - 1`.
+    scale = [0.5 * s for s in scale]
+    bias = [0.5 * b + 0.5 for b in bias]
+  if scale == [1.0] * 3 and bias == [0.0] * 3:
+    return texture
+  if texture['type'] == 'uniform':
+    return {'type': 'uniform', 'value': texture['value'] * scale[0] + bias[0]}
+  if texture['type'] == 'srgb':
+    return {
+        'type': 'srgb',
+        'color': tuple(
+            c * s + b for c, s, b in zip(texture['color'], scale, bias)
+        ),
+        'unbounded': True,
+    }
+  # Scale and bias are expression literals, which (unlike `srgb` constants) are
+  # not clamped to `[0, 1]` in spectral variants. Per-channel values need the
+  # `rgb()` color op, which is only reached by full images.
+  if len(set(scale)) == 1 and len(set(bias)) == 1:
+    expr = f'fma(in[0], {scale[0]!r}, {bias[0]!r})'
+  else:
+    terms = ', '.join(
+        f'fma(in[0].{c}, {s!r}, {b!r})' for c, s, b in zip('rgb', scale, bias)
+    )
+    expr = f'rgb({terms})'
+  return {'type': 'math', 'expr': expr, 'in0': texture}

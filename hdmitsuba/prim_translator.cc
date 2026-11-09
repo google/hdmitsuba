@@ -142,9 +142,23 @@ const HdMaterialConnection2* FindTerminalConnection(
   if (it == network.terminals.end() || it->second.upstreamNode.IsEmpty()) {
     it = network.terminals.find(terminal);
   }
-  return (it != network.terminals.end() && !it->second.upstreamNode.IsEmpty())
-             ? &it->second
-             : nullptr;
+  if (it == network.terminals.end() || it->second.upstreamNode.IsEmpty()) {
+    return nullptr;
+  }
+  if (terminal == HdMaterialTerminalTokens->displacement) {
+    auto node_it = network.nodes.find(it->second.upstreamNode);
+    if (node_it != network.nodes.end() &&
+        node_it->second.nodeTypeId == TfToken("UsdPreviewSurface")) {
+      auto conn_it =
+          node_it->second.inputConnections.find(TfToken("displacement"));
+      if (conn_it == node_it->second.inputConnections.end() ||
+          conn_it->second.empty()) {
+        return nullptr;
+      }
+      return &conn_it->second[0];
+    }
+  }
+  return &it->second;
 }
 
 void SetMitsubaPropertyFromValue(mitsuba::Properties& props,
@@ -215,6 +229,12 @@ void DiscoverTextures(
             continue;
           }
           if (is_principled && IsScalarOnlyPrincipledInput(conn_input)) {
+            continue;
+          }
+          // A UsdPreviewSurface's displacement is only consumed through the
+          // displacement terminal.
+          if (node.nodeTypeId == TfToken("UsdPreviewSurface") &&
+              conn_input == HdMaterialTerminalTokens->displacement) {
             continue;
           }
           visit(connections[0], conn_input);
@@ -299,6 +319,12 @@ mitsuba::ref<mitsuba::Object> GetTexture(
   const int ch = (node.nodeTypeId == TfToken("UsdUVTexture"))
                      ? UsdUVTextureChannel(output_name)
                      : -1;
+  // A UsdUVTexture applies its `scale` and `bias` to the fallback, too.
+  TextureKey::Rgb scale = {1, 1, 1};
+  TextureKey::Rgb bias = {0, 0, 0};
+  if (node.nodeTypeId == TfToken("UsdUVTexture")) {
+    std::tie(scale, bias) = UsdUVTextureScaleBias(node, input_name, ch);
+  }
   mitsuba::Properties fallback_props("srgb");
   if (input_name == TfToken("normalmap")) {
     fallback_props.set("color", mitsuba::Color<float, 3>(0.5f, 0.5f, 1.0f));
@@ -307,9 +333,13 @@ mitsuba::ref<mitsuba::Object> GetTexture(
     fallback_props.set("value", 0.0f);
   } else if (ch >= 0) {
     fallback_props = mitsuba::Properties("uniform");
-    fallback_props.set("value", fb[ch]);
+    fallback_props.set("value", fb[ch] * scale[0] + bias[0]);
   } else {
-    fallback_props.set("color", mitsuba::Color<float, 3>(fb[0], fb[1], fb[2]));
+    fallback_props.set("color",
+                       mitsuba::Color<float, 3>(fb[0] * scale[0] + bias[0],
+                                                fb[1] * scale[1] + bias[1],
+                                                fb[2] * scale[2] + bias[2]));
+    fallback_props.set("unbounded", true);
   }
   return mitsuba::PluginManager::instance()->create_object(
       fallback_props, mitsuba::Texture<Float, Spectrum>::Variant,
@@ -323,10 +353,16 @@ mitsuba::ref<mitsuba::Object> GetTexture(
 // supported: missing primvars read as zero.
 template <typename Float, typename Spectrum>
 mitsuba::ref<mitsuba::Object> CreatePrimvarReaderTexture(
-    const HdMaterialNode2& node, int channels,
+    const HdMaterialNode2& node, const TfToken& input_name, int channels,
     MeshAttributeRequests* mesh_attributes) {
   if (!mesh_attributes) {
     TF_WARN("Primvar readers are only supported in surface shaders.");
+    return nullptr;
+  }
+  if ((input_name == TfToken("normal") || input_name == TfToken("normalmap")) &&
+      channels < 3) {
+    TF_WARN("Normal map input '%s' requires at least 3 channels; ignoring %s.",
+            input_name.GetText(), node.nodeTypeId.GetText());
     return nullptr;
   }
   std::string varname;
@@ -343,9 +379,18 @@ mitsuba::ref<mitsuba::Object> CreatePrimvarReaderTexture(
   mesh_attributes->emplace(varname, channels);
   mitsuba::Properties props("mesh_attribute");
   props.set("name", MeshAttributeName(varname, channels));
-  return mitsuba::PluginManager::instance()->create_object(
+  auto tex = mitsuba::PluginManager::instance()->create_object(
       props, mitsuba::Texture<Float, Spectrum>::Variant,
       mitsuba::Texture<Float, Spectrum>::Type);
+  if (input_name == TfToken("normal")) {
+    mitsuba::Properties math_props("math");
+    math_props.set("expr", "fma(in[0], 0.5, 0.5)");
+    math_props.set("in0", tex);
+    return mitsuba::PluginManager::instance()->create_object(
+        math_props, mitsuba::Texture<Float, Spectrum>::Variant,
+        mitsuba::Texture<Float, Spectrum>::Type);
+  }
+  return tex;
 }
 
 template <typename Float, typename Spectrum>
@@ -370,8 +415,8 @@ mitsuba::ref<mitsuba::Object> ResolveConnectedTexture(
                                        conn.upstreamOutputName, texture_cache);
   }
   if (const int channels = PrimvarReaderChannels(upstream_node)) {
-    return CreatePrimvarReaderTexture<Float, Spectrum>(upstream_node, channels,
-                                                       mesh_attributes);
+    return CreatePrimvarReaderTexture<Float, Spectrum>(
+        upstream_node, input_name, channels, mesh_attributes);
   }
   return nullptr;
 }
@@ -401,8 +446,8 @@ mitsuba::ref<mitsuba::Object> ParseNodeRecursive(
                                        conn.upstreamOutputName, texture_cache);
   }
   if (const int channels = PrimvarReaderChannels(node)) {
-    return CreatePrimvarReaderTexture<Float, Spectrum>(node, channels,
-                                                       mesh_attributes);
+    return CreatePrimvarReaderTexture<Float, Spectrum>(
+        node, input_name, channels, mesh_attributes);
   }
 
   if (auto cache_it = cache.find(nodePath); cache_it != cache.end()) {
@@ -610,6 +655,12 @@ PrimTranslator<Float, Spectrum>::BuildMaterial(
     res.displacement.texture = ParseNodeRecursive<Float, Spectrum>(
         *disp_conn, network2, cache, HdMaterialTerminalTokens->displacement,
         texture_cache, /*mesh_attributes=*/nullptr);
+    if (res.displacement.texture &&
+        res.displacement.texture->type() != mitsuba::ObjectType::Texture) {
+      TF_WARN("Displacement shader on material '%s' is not a Mitsuba texture.",
+              id_str.c_str());
+      res.displacement.texture = nullptr;
+    }
   }
   if (const auto* vol_conn =
           FindTerminalConnection(network2, HdMaterialTerminalTokens->volume)) {

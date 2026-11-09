@@ -52,7 +52,7 @@ PXR_NAMESPACE_OPEN_SCOPE
 // and offsets these object-space `points` (which supersede the "points"
 // primvar of `mesh`) in place and sets their entries.
 // Scalar displacement offsets the points along `normals` (one per point):
-//   p' = p + (texture.eval_1(si) - displacement.bias) * n
+//   p' = p + texture.eval_1(si) * n
 // Vector displacement (`displacement.is_vector`) offsets the points by the 3D
 // vector `texture.eval_3(si)` expressed in the tangent frame computed by
 // `mitsuba::Mesh::tangents()`, or in an arbitrary orthonormal frame around the
@@ -220,7 +220,6 @@ void ApplyDisplacement(const SdfPath& mesh_id, const MeshGeometry& mesh,
   // in world space.
   using mitsuba::detail::deinterleave;
   using mitsuba::detail::interleaved;
-  const float bias = displacement.bias;
   FloatBuffer offsets =
       interleaved<3, FloatBuffer>(n_targets, [&](const auto& i) -> Vector3f {
         Vector2f uv(deinterleave<2>(uv_buf, i));
@@ -233,7 +232,7 @@ void ApplyDisplacement(const SdfPath& mesh_id, const MeshGeometry& mesh,
         si.prim_index = i;
         si.sh_frame = Frame(n_world);
         if (!displacement.is_vector) {
-          return (displacement_texture->eval_1(si) - bias) * n_obj;
+          return displacement_texture->eval_1(si) * n_obj;
         }
         si.dp_du = si.sh_frame.s;
         si.dp_dv = si.sh_frame.t;
