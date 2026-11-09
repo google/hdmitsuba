@@ -91,14 +91,13 @@ void ApplyDisplacement(const SdfPath& mesh_id, const MeshGeometry& mesh,
   if (!displacement_texture) return;
   auto uv_it = uv_mesh.primvars.find(TfToken("st"));
   const bool has_uv = uv_it != uv_mesh.primvars.end() &&
-                      uv_it->second.value.IsHolding<VtVec2fArray>();
+                      uv_it->second.IsHolding<VtVec2fArray>();
   if (displacement.requires_uv && !has_uv) {
     TF_RUNTIME_ERROR("Missing UVs for displacement on %s", mesh_id.GetText());
     return;
   }
   const VtVec2fArray& st =
-      has_uv ? uv_it->second.value.UncheckedGet<VtVec2fArray>()
-             : VtVec2fArray();
+      has_uv ? uv_it->second.UncheckedGet<VtVec2fArray>() : VtVec2fArray();
   // Vector displacement is expressed in the UV tangent frame if possible.
   const bool build_tangent_mesh = displacement.is_vector && has_uv;
 
@@ -319,9 +318,7 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
   auto add_intrinsic = [&](const TfToken& name, VtValue value,
                            HdInterpolation interpolation) {
     if (requested_attributes.contains(name.GetString())) {
-      primvars[name] = {
-          std::move(value),
-          HdPrimvarDescriptor(name, interpolation, HdPrimvarRoleTokens->none)};
+      primvars[name] = {std::move(value), interpolation};
     }
   };
   auto compute_normals = [&] {
@@ -329,9 +326,7 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
                                              mesh.left_handed);
   };
   auto set_smooth_normals = [&] {
-    primvars[kNormals] = {VtValue(compute_normals()),
-                          HdPrimvarDescriptor(kNormals, HdInterpolationVertex,
-                                              HdPrimvarRoleTokens->normal)};
+    primvars[kNormals] = {VtValue(compute_normals()), HdInterpolationVertex};
   };
   add_intrinsic(kPObject, VtValue(points), HdInterpolationVertex);
 
@@ -346,9 +341,9 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
                     return displacements[material].texture != nullptr;
                   })) {
     const VtVec3fArray geo_normals = compute_normals();
-    const HdInterpolation interp =
-        authored_normals ? authored_normals->descriptor.interpolation
-                         : HdInterpolationConstant;
+    const HdInterpolation interp = authored_normals
+                                       ? authored_normals->interpolation
+                                       : HdInterpolationConstant;
     const bool authored_per_point =
         (interp == HdInterpolationVertex || interp == HdInterpolationVarying) &&
         authored_normals->value.GetArraySize() == points.size();
@@ -408,7 +403,6 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
                              .GetNormalized();
       }
       authored_normals->value = VtValue(std::move(normals));
-      authored_normals->descriptor.role = HdPrimvarRoleTokens->normal;
     } else {
       set_smooth_normals();
     }
@@ -417,8 +411,7 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
   }
 
   if (auto it = primvars.find(kNormals); it != primvars.end()) {
-    add_intrinsic(kNObject, it->second.value,
-                  it->second.descriptor.interpolation);
+    add_intrinsic(kNObject, it->second.value, it->second.interpolation);
   } else if (requested_attributes.contains(kNObject.GetString())) {
     // Flat-shaded mesh: Provide the face normals as a uniform primvar, but
     // keep the mesh itself without normals.

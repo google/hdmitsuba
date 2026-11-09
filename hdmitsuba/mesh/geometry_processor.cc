@@ -42,7 +42,6 @@
 #include <pxr/base/vt/types.h>
 #include <pxr/base/vt/value.h>
 #include <pxr/imaging/hd/enums.h>
-#include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/imaging/hd/tokens.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
@@ -67,7 +66,7 @@ constexpr size_t PrimvarDimension() {
 
 struct ExpandChannel {
   TfToken name;
-  HdPrimvarDescriptor descriptor;
+  HdInterpolation interpolation;
   PrimvarArrayVariant src;
 };
 
@@ -111,57 +110,6 @@ VtValue GatherVertices(const VtArray<T>& src,
     dst_ptr[i] = src[unique_old_vertices[i]];
   }
   return VtValue(std::move(out));
-}
-
-template <typename T>
-VtValue TransformArray(const VtArray<T>& initial_values,
-                       const HdPrimvarDescriptor& descriptor,
-                       const GfMatrix4d& transform);
-
-template <>
-VtValue TransformArray<GfVec3f>(const VtVec3fArray& initial_values,
-                                const HdPrimvarDescriptor& descriptor,
-                                const GfMatrix4d& transform) {
-  const size_t n = initial_values.size();
-  if (descriptor.role == HdPrimvarRoleTokens->point) {
-    if (transform == GfMatrix4d(1.0)) {
-      return VtValue(initial_values);
-    }
-    VtVec3fArray values(n);
-    GfVec3f* dst = values.data();
-    for (size_t i = 0; i < n; ++i) {
-      dst[i] = GfVec3f(transform.TransformAffine(initial_values[i]));
-    }
-    return VtValue(std::move(values));
-  } else if (descriptor.role == HdPrimvarRoleTokens->normal) {
-    VtVec3fArray values(n);
-    GfVec3f* dst = values.data();
-    const GfMatrix4d normal_transform = transform.GetInverse().GetTranspose();
-    for (size_t i = 0; i < n; ++i) {
-      dst[i] = GfVec3f(
-          normal_transform.TransformDir(initial_values[i]).GetNormalized());
-    }
-    return VtValue(std::move(values));
-  } else {
-    return VtValue(initial_values);
-  }
-}
-
-template <>
-VtValue TransformArray<GfVec2f>(const VtVec2fArray& initial_values,
-                                const HdPrimvarDescriptor& descriptor,
-                                const GfMatrix4d& /*transform*/) {
-  if (descriptor.role == HdPrimvarRoleTokens->textureCoordinate) {
-    const size_t n = initial_values.size();
-    VtVec2fArray values(n);
-    GfVec2f* dst = values.data();
-    for (size_t i = 0; i < n; ++i) {
-      dst[i] = GfVec2f(initial_values[i][0], 1.0f - initial_values[i][1]);
-    }
-    return VtValue(std::move(values));
-  } else {
-    return VtValue(initial_values);
-  }
 }
 
 }  // namespace
@@ -254,19 +202,27 @@ VtVec3fArray GeometryProcessor::ComputeFaceNormals(
   return face_normals;
 }
 
-void GeometryProcessor::TransformPrimvars(PrimvarMap& primvars,
+void GeometryProcessor::TransformPrimvars(VertexPrimvarMap& primvars,
                                           const GfMatrix4d& transform) {
-  for (auto& [token, state] : primvars) {
-    const auto& value = state.value;
-    if (value.IsHolding<VtVec3fArray>() && !value.Get<VtVec3fArray>().empty()) {
-      state.value = TransformArray<GfVec3f>(value.Get<VtVec3fArray>(),
-                                            state.descriptor, transform);
-    } else if (value.IsHolding<VtVec2fArray>() &&
-               !value.Get<VtVec2fArray>().empty()) {
-      state.value = TransformArray<GfVec2f>(value.Get<VtVec2fArray>(),
-                                            state.descriptor, transform);
+  // Replaces each value of the vec3 primvar `name` (if any) by `fn(value)`.
+  auto transform_primvar = [&](const TfToken& name, auto fn) {
+    auto it = primvars.find(name);
+    if (it == primvars.end() || !it->second.IsHolding<VtVec3fArray>()) {
+      return;
     }
+    VtVec3fArray values = it->second.UncheckedGet<VtVec3fArray>();
+    for (GfVec3f& value : values) value = fn(value);
+    it->second = VtValue(std::move(values));
+  };
+  if (transform != GfMatrix4d(1.0)) {
+    transform_primvar(HdTokens->points, [&](const GfVec3f& p) {
+      return GfVec3f(transform.TransformAffine(p));
+    });
   }
+  const GfMatrix4d normal_transform = transform.GetInverse().GetTranspose();
+  transform_primvar(HdTokens->normals, [&](const GfVec3f& n) {
+    return GfVec3f(normal_transform.TransformDir(n).GetNormalized());
+  });
 }
 
 ExpandedMesh GeometryProcessor::ExpandPrimData(
@@ -280,7 +236,7 @@ ExpandedMesh GeometryProcessor::ExpandPrimData(
   for (const auto& [token, state] : primvars) {
     auto src_opt = ExtractPrimvarArray(state.value);
     if (!src_opt) continue;
-    channels.push_back({token, state.descriptor, std::move(*src_opt)});
+    channels.push_back({token, state.interpolation, std::move(*src_opt)});
   }
 
   // The vertex of a corner is determined by its point and the values of the
@@ -288,7 +244,7 @@ ExpandedMesh GeometryProcessor::ExpandPrimData(
   std::vector<VaryingChannelView> varying_channels;
   size_t key_stride = 0;
   for (const auto& channel : channels) {
-    const HdInterpolation interp = channel.descriptor.interpolation;
+    const HdInterpolation interp = channel.interpolation;
     if (interp == HdInterpolationUniform) {
       varying_channels.push_back({nullptr, 1});
       key_stride += 1;
@@ -372,7 +328,7 @@ ExpandedMesh GeometryProcessor::ExpandPrimData(
 
   const size_t num_unique = unique_locs.size();
   for (auto& channel : channels) {
-    const HdInterpolation interp = channel.descriptor.interpolation;
+    const HdInterpolation interp = channel.interpolation;
     std::visit(
         [&](const auto& src) {
           using ArrayType = std::decay_t<decltype(src)>;
@@ -402,8 +358,7 @@ ExpandedMesh GeometryProcessor::ExpandPrimData(
             default:
               break;
           }
-          mesh.primvars[channel.name] = {VtValue(std::move(dst_array)),
-                                         channel.descriptor};
+          mesh.primvars[channel.name] = VtValue(std::move(dst_array));
         },
         channel.src);
   }
@@ -412,7 +367,7 @@ ExpandedMesh GeometryProcessor::ExpandPrimData(
 
 std::vector<SubMeshOutput> GeometryProcessor::SplitAndCompactMeshes(
     const SdfPath& id, const VtIntArray& triangles,
-    const VtIntArray& primitive_params, const PrimvarMap& final_primvars,
+    const VtIntArray& primitive_params, const VertexPrimvarMap& final_primvars,
     absl::Span<const SdfPath> material_ids,
     const VtIntArray& face_material_indices) {
   TRACE_FUNCTION();
@@ -443,7 +398,7 @@ std::vector<SubMeshOutput> GeometryProcessor::SplitAndCompactMeshes(
   auto points_it = final_primvars.find(HdTokens->points);
   const size_t total_source_vertices =
       points_it != final_primvars.end()
-          ? points_it->second.value.Get<VtVec3fArray>().size()
+          ? points_it->second.Get<VtVec3fArray>().size()
           : 0;
 
   std::vector<int> old_to_new_vertex_map(total_source_vertices, -1);
@@ -479,15 +434,14 @@ std::vector<SubMeshOutput> GeometryProcessor::SplitAndCompactMeshes(
       old_to_new_vertex_map[old_v] = -1;
     }
 
-    PrimvarMap primvars;
-    for (const auto& [token, state] : final_primvars) {
-      if (auto src_opt = ExtractPrimvarArray(state.value)) {
-        VtValue compacted = std::visit(
+    VertexPrimvarMap primvars;
+    for (const auto& [token, value] : final_primvars) {
+      if (auto src_opt = ExtractPrimvarArray(value)) {
+        primvars[token] = std::visit(
             [&](const auto& src) {
               return GatherVertices(src, unique_old_vertices);
             },
             *src_opt);
-        primvars[token] = {std::move(compacted), state.descriptor};
       }
     }
 

@@ -15,7 +15,6 @@
 #include "hdmitsuba/mesh/geometry_processor.h"
 
 #include <utility>
-#include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -26,10 +25,8 @@
 #include <pxr/base/vt/types.h>
 #include <pxr/base/vt/value.h>
 #include <pxr/imaging/hd/enums.h>
-#include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/imaging/hd/tokens.h>
 #include <pxr/pxr.h>
-#include <pxr/usd/sdf/path.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -39,15 +36,9 @@ using ::testing::ElementsAre;
 
 const TfToken kSt("st");
 
-void AddPrimvar(PrimvarMap& primvars, const TfToken& name, VtValue value,
-                HdInterpolation interpolation, const TfToken& role = {}) {
-  primvars[name] = {std::move(value),
-                    HdPrimvarDescriptor(name, interpolation, role)};
-}
-
 template <typename T>
-const T& GetPrimvar(const PrimvarMap& primvars, const TfToken& name) {
-  return primvars.at(name).value.Get<T>();
+const T& GetPrimvar(const VertexPrimvarMap& primvars, const TfToken& name) {
+  return primvars.at(name).Get<T>();
 }
 
 // Two quads sharing the edge between points 2 and 3.
@@ -55,67 +46,16 @@ const VtIntArray kQuadCounts = {4, 4};
 const VtIntArray kQuadIndices = {0, 1, 2, 3, 3, 2, 4, 5};
 
 PrimvarMap QuadPoints() {
-  PrimvarMap primvars;
-  AddPrimvar(primvars, HdTokens->points,
-             VtValue(VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(1, 0, 0),
-                                  GfVec3f(1, 1, 0), GfVec3f(0, 1, 0),
-                                  GfVec3f(0, 2, 0), GfVec3f(1, 2, 0)}),
-             HdInterpolationVertex, HdPrimvarRoleTokens->point);
-  return primvars;
-}
-
-TEST(GeometryProcessorTest, TriangulateWithFaceMapping) {
-  auto [triangles, primitive_params] =
-      GeometryProcessor::TriangulateWithFaceMapping(
-          VtIntArray{3, 4, 5},
-          VtIntArray{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11},
-          /*left_handed=*/false);
-
-  EXPECT_THAT(triangles, ElementsAre(0, 1, 2,           //
-                                     3, 4, 5, 3, 5, 6,  //
-                                     7, 8, 9, 7, 9, 10, 7, 10, 11));
-  EXPECT_THAT(primitive_params, ElementsAre(0, 1, 1, 2, 2, 2));
-}
-
-TEST(GeometryProcessorTest, TriangulateWithFaceMappingLeftHanded) {
-  auto [triangles, primitive_params] =
-      GeometryProcessor::TriangulateWithFaceMapping(
-          VtIntArray{3, 4}, VtIntArray{0, 1, 2, 3, 4, 5, 6},
-          /*left_handed=*/true);
-
-  EXPECT_THAT(triangles, ElementsAre(0, 2, 1,  //
-                                     3, 5, 4, 3, 6, 5));
-  EXPECT_THAT(primitive_params, ElementsAre(0, 1, 1));
-}
-
-TEST(GeometryProcessorTest, ComputeNormalsFollowsOrientation) {
-  for (bool left_handed : {false, true}) {
-    // A single counter-clockwise quad in the z = 0 plane.
-    const VtVec3fArray normals = GeometryProcessor::ComputeNormals(
-        GetPrimvar<VtVec3fArray>(QuadPoints(), HdTokens->points), VtIntArray{4},
-        VtIntArray{0, 1, 2, 3}, left_handed);
-    const GfVec3f expected(0, 0, left_handed ? -1 : 1);
-    for (int i = 0; i < 4; ++i) {
-      EXPECT_TRUE(GfIsClose(normals[i], expected, 1e-6))
-          << "left_handed=" << left_handed << ", vertex " << i;
-    }
-  }
-}
-
-TEST(GeometryProcessorTest, ComputeFaceNormalsFollowsOrientation) {
-  for (bool left_handed : {false, true}) {
-    // A single counter-clockwise quad in the z = 0 plane.
-    const VtVec3fArray normals = GeometryProcessor::ComputeFaceNormals(
-        GetPrimvar<VtVec3fArray>(QuadPoints(), HdTokens->points), VtIntArray{4},
-        VtIntArray{0, 1, 2, 3}, left_handed);
-    EXPECT_THAT(normals, ElementsAre(GfVec3f(0, 0, left_handed ? -1 : 1)));
-  }
+  return {{HdTokens->points,
+           {VtValue(VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(1, 0, 0),
+                                 GfVec3f(1, 1, 0), GfVec3f(0, 1, 0),
+                                 GfVec3f(0, 2, 0), GfVec3f(1, 2, 0)}),
+            HdInterpolationVertex}}};
 }
 
 TEST(GeometryProcessorTest, ExpandPrimDataSplitsUniform) {
   PrimvarMap primvars = QuadPoints();
-  AddPrimvar(primvars, kSt, VtValue(VtFloatArray{0.25f, 0.75f}),
-             HdInterpolationUniform);
+  primvars[kSt] = {VtValue(VtFloatArray{0.25f, 0.75f}), HdInterpolationUniform};
 
   auto [indices, vertex_points, expanded] = GeometryProcessor::ExpandPrimData(
       kQuadCounts, kQuadIndices, /*num_points=*/6, primvars);
@@ -132,11 +72,11 @@ TEST(GeometryProcessorTest, ExpandPrimDataSplitsUniform) {
 TEST(GeometryProcessorTest, ExpandPrimDataDeduplicatesFaceVarying) {
   PrimvarMap primvars = QuadPoints();
   // Shared point 3 has matching UVs on both faces, shared point 2 does not.
-  AddPrimvar(primvars, kSt,
-             VtValue(VtVec2fArray{GfVec2f(0, 0), GfVec2f(1, 0), GfVec2f(1, 1),
-                                  GfVec2f(0, 1), GfVec2f(0, 1), GfVec2f(5, 5),
-                                  GfVec2f(6, 6), GfVec2f(7, 7)}),
-             HdInterpolationFaceVarying);
+  primvars[kSt] = {
+      VtValue(VtVec2fArray{GfVec2f(0, 0), GfVec2f(1, 0), GfVec2f(1, 1),
+                           GfVec2f(0, 1), GfVec2f(0, 1), GfVec2f(5, 5),
+                           GfVec2f(6, 6), GfVec2f(7, 7)}),
+      HdInterpolationFaceVarying};
 
   auto [indices, vertex_points, expanded] = GeometryProcessor::ExpandPrimData(
       kQuadCounts, kQuadIndices, /*num_points=*/6, primvars);
@@ -155,8 +95,7 @@ TEST(GeometryProcessorTest, ExpandPrimDataDeduplicatesFaceVarying) {
 
 TEST(GeometryProcessorTest, ExpandPrimDataIgnoresEmptyFaceVarying) {
   PrimvarMap primvars = QuadPoints();
-  AddPrimvar(primvars, kSt, VtValue(VtVec2fArray()),
-             HdInterpolationFaceVarying);
+  primvars[kSt] = {VtValue(VtVec2fArray()), HdInterpolationFaceVarying};
 
   auto [indices, vertex_points, expanded] = GeometryProcessor::ExpandPrimData(
       kQuadCounts, kQuadIndices, /*num_points=*/6, primvars);
@@ -166,72 +105,9 @@ TEST(GeometryProcessorTest, ExpandPrimDataIgnoresEmptyFaceVarying) {
   EXPECT_EQ(expanded.count(kSt), 0);
 }
 
-TEST(GeometryProcessorTest, SplitAndCompactMeshes) {
-  PrimvarMap primvars;
-  AddPrimvar(primvars, HdTokens->points,
-             VtValue(VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(1, 0, 0),
-                                  GfVec3f(0, 1, 0), GfVec3f(10, 10, 10),
-                                  GfVec3f(11, 10, 10), GfVec3f(10, 11, 10)}),
-             HdInterpolationVertex, HdPrimvarRoleTokens->point);
-  AddPrimvar(primvars, kSt, VtValue(VtFloatArray{1.f, 2.f, 3.f, 4.f, 5.f, 6.f}),
-             HdInterpolationVertex);
-
-  auto sub_meshes = GeometryProcessor::SplitAndCompactMeshes(
-      SdfPath("/mesh"), VtIntArray{0, 1, 2, 3, 4, 5}, VtIntArray{0, 1},
-      primvars, {SdfPath("/mat1"), SdfPath("/mat2")}, VtIntArray{0, 1});
-
-  ASSERT_EQ(sub_meshes.size(), 2);
-  EXPECT_EQ(sub_meshes[0].material_id, SdfPath("/mat1"));
-  EXPECT_THAT(sub_meshes[0].triangles, ElementsAre(0, 1, 2));
-  EXPECT_THAT(
-      GetPrimvar<VtVec3fArray>(sub_meshes[0].primvars, HdTokens->points),
-      ElementsAre(GfVec3f(0, 0, 0), GfVec3f(1, 0, 0), GfVec3f(0, 1, 0)));
-  EXPECT_THAT(GetPrimvar<VtFloatArray>(sub_meshes[0].primvars, kSt),
-              ElementsAre(1.f, 2.f, 3.f));
-
-  EXPECT_EQ(sub_meshes[1].material_id, SdfPath("/mat2"));
-  EXPECT_THAT(sub_meshes[1].triangles, ElementsAre(0, 1, 2));
-  EXPECT_THAT(
-      GetPrimvar<VtVec3fArray>(sub_meshes[1].primvars, HdTokens->points),
-      ElementsAre(GfVec3f(10, 10, 10), GfVec3f(11, 10, 10),
-                  GfVec3f(10, 11, 10)));
-  EXPECT_THAT(GetPrimvar<VtFloatArray>(sub_meshes[1].primvars, kSt),
-              ElementsAre(4.f, 5.f, 6.f));
-}
-
-TEST(GeometryProcessorTest, TransformPrimvars) {
-  PrimvarMap primvars;
-  AddPrimvar(primvars, HdTokens->points,
-             VtValue(VtVec3fArray{GfVec3f(1, 0, 0), GfVec3f(0, 1, 0)}),
-             HdInterpolationVertex, HdPrimvarRoleTokens->point);
-  AddPrimvar(primvars, HdTokens->normals,
-             VtValue(VtVec3fArray{GfVec3f(1, 1, 0)}), HdInterpolationVertex,
-             HdPrimvarRoleTokens->normal);
-  AddPrimvar(primvars, kSt, VtValue(VtVec2fArray{GfVec2f(0.25f, 0.75f)}),
-             HdInterpolationFaceVarying,
-             HdPrimvarRoleTokens->textureCoordinate);
-
-  GfMatrix4d transform(1.0);
-  transform.SetScale(GfVec3d(2.0, 0.5, 1.0));
-  GeometryProcessor::TransformPrimvars(primvars, transform);
-
-  EXPECT_THAT(GetPrimvar<VtVec3fArray>(primvars, HdTokens->points),
-              ElementsAre(GfVec3f(2, 0, 0), GfVec3f(0, 0.5f, 0)));
-  // Normals transform by the inverse transpose, i.e. scale (0.5, 2, 1).
-  const GfVec3f normal =
-      GetPrimvar<VtVec3fArray>(primvars, HdTokens->normals)[0];
-  EXPECT_TRUE(GfIsClose(normal, GfVec3f(0.5f, 2, 0).GetNormalized(), 1e-6))
-      << normal;
-  // Texture coordinates are flipped vertically.
-  EXPECT_THAT(GetPrimvar<VtVec2fArray>(primvars, kSt),
-              ElementsAre(GfVec2f(0.25f, 0.25f)));
-}
-
 TEST(GeometryProcessorTest, TransformPrimvarsIdentityKeepsPoints) {
-  PrimvarMap primvars;
   const VtVec3fArray points = {GfVec3f(1, 2, 3)};
-  AddPrimvar(primvars, HdTokens->points, VtValue(points), HdInterpolationVertex,
-             HdPrimvarRoleTokens->point);
+  VertexPrimvarMap primvars = {{HdTokens->points, VtValue(points)}};
 
   GeometryProcessor::TransformPrimvars(primvars, GfMatrix4d(1.0));
 

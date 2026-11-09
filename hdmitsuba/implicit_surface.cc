@@ -126,7 +126,7 @@ void HdMitsubaImplicitSurface::Sync(HdSceneDelegate* sceneDelegate,
   for (const HdPrimvarDescriptor& descriptor :
        GetPrimvarDescriptors(sceneDelegate, HdInterpolationConstant)) {
     spec.geometry.primvars[descriptor.name] = {
-        GetPrimvar(sceneDelegate, descriptor.name), descriptor};
+        GetPrimvar(sceneDelegate, descriptor.name), HdInterpolationConstant};
   }
 
   const SdfPath& instancer_id = GetInstancerId();

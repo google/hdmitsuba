@@ -85,7 +85,7 @@ def _process(
 
 
 def _get(sub: Any, name: str) -> np.ndarray:
-  return np.array(sub.primvars[name].value)
+  return np.array(sub.primvars[name])
 
 
 def test_scalar_displacement_is_applied_in_object_space():

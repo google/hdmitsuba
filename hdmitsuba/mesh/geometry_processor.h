@@ -26,7 +26,6 @@
 #include <pxr/base/vt/types.h>
 #include <pxr/base/vt/value.h>
 #include <pxr/imaging/hd/enums.h>
-#include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
 
@@ -34,17 +33,19 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 struct PrimvarState {
   VtValue value;
-  HdPrimvarDescriptor descriptor;
+  HdInterpolation interpolation = HdInterpolationVertex;
 };
 
 using PrimvarMap =
     std::unordered_map<TfToken, PrimvarState, TfToken::HashFunctor>;
+using VertexPrimvarMap =
+    std::unordered_map<TfToken, VtValue, TfToken::HashFunctor>;
 
 struct SubMeshOutput {
   std::string id;
   SdfPath material_id;
   VtIntArray triangles;
-  PrimvarMap primvars;
+  VertexPrimvarMap primvars;
 };
 
 // Polygon mesh (after subdivision) processed by `RunGeometryPipeline`.
@@ -70,7 +71,7 @@ struct ExpandedMesh {
   VtIntArray face_vertices;
   // Point index of each vertex.
   std::vector<int> vertex_points;
-  PrimvarMap primvars;
+  VertexPrimvarMap primvars;
 };
 
 class GeometryProcessor {
@@ -100,9 +101,9 @@ class GeometryProcessor {
                                          const VtIntArray& face_vertex_indices,
                                          bool left_handed);
 
-  // Transforms the point and normal primvars by the given matrix, and flips
-  // the V coordinate of texture coordinate primvars to Mitsuba's convention.
-  static void TransformPrimvars(PrimvarMap& primvars,
+  // Transforms the `points` and `normals` primvars by the given matrix. Other
+  // primvars keep their authored values, which materials read.
+  static void TransformPrimvars(VertexPrimvarMap& primvars,
                                 const GfMatrix4d& transform);
 
   // Expands the primvars of a polygon mesh with `num_points` points into
@@ -133,7 +134,8 @@ class GeometryProcessor {
   // compacts unused vertices from the primvar buffers.
   static std::vector<SubMeshOutput> SplitAndCompactMeshes(
       const SdfPath& id, const VtIntArray& triangles,
-      const VtIntArray& primitive_params, const PrimvarMap& final_primvars,
+      const VtIntArray& primitive_params,
+      const VertexPrimvarMap& final_primvars,
       absl::Span<const SdfPath> material_ids,
       const VtIntArray& face_material_indices);
 };
