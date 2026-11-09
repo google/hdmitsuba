@@ -161,19 +161,12 @@ void SubdivisionEvaluator::Initialize(
                                                          stencil_options)));
   }
 
-  OpenSubdiv::Far::PatchTableFactory::Options patch_options(refine_level);
-  if (num_fvar_channels > 0) {
-    patch_options.generateFVarTables = true;
-  }
-  patch_table_ = std::unique_ptr<OpenSubdiv::Far::PatchTable const>(
-      OpenSubdiv::Far::PatchTableFactory::Create(*refiner_, patch_options));
-
   // The patch table holds one patch per refined face that is not a hole.
   const int max_level = refiner_->GetMaxLevel();
   const OpenSubdiv::Far::TopologyLevel& last_level =
       refiner_->GetLevel(max_level);
   refined_to_coarse_map_.clear();
-  refined_to_coarse_map_.reserve(patch_table_->GetNumPatchesTotal());
+  refined_to_coarse_map_.reserve(last_level.GetNumFaces());
   for (int face = 0; face < last_level.GetNumFaces(); ++face) {
     if (last_level.IsFaceHole(face)) continue;
     int parent_face_index = face;
@@ -183,6 +176,20 @@ void SubdivisionEvaluator::Initialize(
     }
     refined_to_coarse_map_.push_back(parent_face_index);
   }
+
+  // If all faces are holes, there are no patches. OpenSubdiv's patch table
+  // construction does not support this case, so skip subdivision entirely.
+  if (refined_to_coarse_map_.empty()) {
+    Clear();
+    return;
+  }
+
+  OpenSubdiv::Far::PatchTableFactory::Options patch_options(refine_level);
+  if (num_fvar_channels > 0) {
+    patch_options.generateFVarTables = true;
+  }
+  patch_table_ = std::unique_ptr<OpenSubdiv::Far::PatchTable const>(
+      OpenSubdiv::Far::PatchTableFactory::Create(*refiner_, patch_options));
 
   const OpenSubdiv::Far::Index* refined_indices_ptr =
       patch_table_->GetPatchControlVerticesTable().data();
