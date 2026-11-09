@@ -117,6 +117,7 @@ void SubdivisionEvaluator::Initialize(
       refine_level <= 0) {
     return;
   }
+  fvar_indices_ = fvar_indices;
 
   // Non-indexed primvars have one value per face corner.
   VtIntArray identity(topology.GetFaceVertexIndices().size());
@@ -167,16 +168,20 @@ void SubdivisionEvaluator::Initialize(
   patch_table_ = std::unique_ptr<OpenSubdiv::Far::PatchTable const>(
       OpenSubdiv::Far::PatchTableFactory::Create(*refiner_, patch_options));
 
+  // The patch table holds one patch per refined face that is not a hole.
   const int max_level = refiner_->GetMaxLevel();
-  const int num_refined_faces = patch_table_->GetNumPatchesTotal();
-  refined_to_coarse_map_.resize(num_refined_faces);
-  for (int i = 0; i < num_refined_faces; ++i) {
-    int parent_face_index = i;
+  const OpenSubdiv::Far::TopologyLevel& last_level =
+      refiner_->GetLevel(max_level);
+  refined_to_coarse_map_.clear();
+  refined_to_coarse_map_.reserve(patch_table_->GetNumPatchesTotal());
+  for (int face = 0; face < last_level.GetNumFaces(); ++face) {
+    if (last_level.IsFaceHole(face)) continue;
+    int parent_face_index = face;
     for (int level = max_level; level > 0; --level) {
       parent_face_index =
           refiner_->GetLevel(level).GetFaceParentFace(parent_face_index);
     }
-    refined_to_coarse_map_[i] = parent_face_index;
+    refined_to_coarse_map_.push_back(parent_face_index);
   }
 
   const OpenSubdiv::Far::Index* refined_indices_ptr =
@@ -203,6 +208,7 @@ void SubdivisionEvaluator::Clear() {
   patch_table_.reset();
   refined_to_coarse_map_.clear();
   fvar_primvar_to_channel_.clear();
+  fvar_indices_.clear();
   refined_face_vertex_counts_.clear();
   refined_face_vertex_indices_.clear();
 }
@@ -214,6 +220,7 @@ void SubdivisionEvaluator::RefineTopology(MeshGeometry& mesh) const {
   // OpenSubdiv refines `leftHanded` meshes into right-handed faces.
   mesh.left_handed = false;
   mesh.is_subdivided = true;
+  mesh.hole_indices = {};
   const size_t num_refined = refined_to_coarse_map_.size();
   VtIntArray mapped(num_refined);
   int* dst_ptr = mapped.data();

@@ -77,9 +77,12 @@ class HdMitsubaMesh final : public HdMesh {
 
   absl::flat_hash_map<TfToken, HdPrimvarDescriptor, TfToken::HashFunctor>
   GetAllPrimvarDescriptors(HdSceneDelegate* sceneDelegate);
+  SubdivisionEvaluator::FVarIndicesMap GetFVarIndices(
+      HdSceneDelegate* sceneDelegate);
 
   bool in_scene_ = false;
-  int refine_level_ = -1; // -1 means "not yet synced"
+  int refine_level_ = -1;  // -1 means "not yet synced"
+  uint8_t primvar_layout_ = 0;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

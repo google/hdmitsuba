@@ -112,18 +112,29 @@ VtValue GatherVertices(const VtArray<T>& src,
   return VtValue(std::move(out));
 }
 
+std::vector<bool> HoleMask(int num_faces, absl::Span<const int> hole_indices) {
+  std::vector<bool> is_hole(num_faces);
+  for (const int face : hole_indices) {
+    if (face >= 0 && face < num_faces) is_hole[face] = true;
+  }
+  return is_hole;
+}
+
 }  // namespace
 
 std::pair<VtIntArray, VtIntArray> GeometryProcessor::TriangulateWithFaceMapping(
     const VtIntArray& face_vertex_counts, const VtIntArray& face_vertex_indices,
-    bool left_handed) {
+    bool left_handed, absl::Span<const int> hole_indices) {
   TRACE_FUNCTION();
+  const int num_faces = static_cast<int>(face_vertex_counts.size());
+  const std::vector<bool> is_hole = HoleMask(num_faces, hole_indices);
+  auto num_triangles = [&](int face) {
+    return is_hole[face] ? 0 : std::max(face_vertex_counts[face] - 2, 0);
+  };
 
   int total_triangles = 0;
-  for (int count : face_vertex_counts) {
-    if (count >= 3) {
-      total_triangles += count - 2;
-    }
+  for (int face = 0; face < num_faces; ++face) {
+    total_triangles += num_triangles(face);
   }
   VtIntArray triangles(total_triangles * 3);
   VtIntArray primitive_params(total_triangles);
@@ -132,10 +143,9 @@ std::pair<VtIntArray, VtIntArray> GeometryProcessor::TriangulateWithFaceMapping(
 
   int index = 0;
   int tri_idx = 0;
-  const int num_faces = static_cast<int>(face_vertex_counts.size());
   for (int face_idx = 0; face_idx < num_faces; ++face_idx) {
     const int count = face_vertex_counts[face_idx];
-    if (count >= 3) {
+    if (num_triangles(face_idx) > 0) {
       const int v0 = face_vertex_indices[index];
       for (int i = 0; i < count - 2; ++i) {
         tri_ptr[tri_idx * 3 + 0] = v0;
@@ -154,24 +164,30 @@ std::pair<VtIntArray, VtIntArray> GeometryProcessor::TriangulateWithFaceMapping(
 
 VtVec3fArray GeometryProcessor::ComputeNormals(
     const VtVec3fArray& points, const VtIntArray& face_vertex_counts,
-    const VtIntArray& face_vertex_indices, bool left_handed) {
+    const VtIntArray& face_vertex_indices, bool left_handed,
+    absl::Span<const int> hole_indices) {
   TRACE_FUNCTION();
+  const int num_faces = static_cast<int>(face_vertex_counts.size());
+  const std::vector<bool> is_hole = HoleMask(num_faces, hole_indices);
   VtVec3fArray normals(points.size(), GfVec3f(0.0f, 0.0f, 0.0f));
   GfVec3f* normals_ptr = normals.data();
   int index = 0;
-  for (int count : face_vertex_counts) {
-    for (int i = 0; i + 2 < count; ++i) {
-      GfVec3i face(face_vertex_indices[index],
-                   face_vertex_indices[index + i + 1],
-                   face_vertex_indices[index + i + 2]);
-      GfVec3f p[3] = {points[face[0]], points[face[1]], points[face[2]]};
-      GfVec3f face_normal = GfCross(p[1] - p[0], p[2] - p[0]).GetNormalized();
-      if (left_handed) face_normal = -face_normal;
-      for (int j = 0; j < 3; ++j) {
-        GfVec3f d0 = (p[(j + 1) % 3] - p[j]).GetNormalized();
-        GfVec3f d1 = (p[(j + 2) % 3] - p[j]).GetNormalized();
-        float face_angle = drjit::safe_acos(GfDot(d0, d1));
-        normals_ptr[face[j]] += face_normal * face_angle;
+  for (int face_idx = 0; face_idx < num_faces; ++face_idx) {
+    const int count = face_vertex_counts[face_idx];
+    if (!is_hole[face_idx]) {
+      for (int i = 0; i + 2 < count; ++i) {
+        GfVec3i face(face_vertex_indices[index],
+                     face_vertex_indices[index + i + 1],
+                     face_vertex_indices[index + i + 2]);
+        GfVec3f p[3] = {points[face[0]], points[face[1]], points[face[2]]};
+        GfVec3f face_normal = GfCross(p[1] - p[0], p[2] - p[0]).GetNormalized();
+        if (left_handed) face_normal = -face_normal;
+        for (int j = 0; j < 3; ++j) {
+          GfVec3f d0 = (p[(j + 1) % 3] - p[j]).GetNormalized();
+          GfVec3f d1 = (p[(j + 2) % 3] - p[j]).GetNormalized();
+          float face_angle = drjit::safe_acos(GfDot(d0, d1));
+          normals_ptr[face[j]] += face_normal * face_angle;
+        }
       }
     }
     index += count;
@@ -372,6 +388,7 @@ std::vector<SubMeshOutput> GeometryProcessor::SplitAndCompactMeshes(
     const VtIntArray& face_material_indices) {
   TRACE_FUNCTION();
   std::vector<SubMeshOutput> sub_meshes;
+  if (triangles.empty()) return sub_meshes;
 
   // The single material case is trivial.
   if (material_ids.size() == 1) {

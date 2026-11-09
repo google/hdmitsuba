@@ -57,6 +57,8 @@ struct MeshGeometry {
   bool left_handed = false;
   // Whether the mesh was refined by subdivision, which requires smooth normals.
   bool is_subdivided = false;
+  // Faces that are not rendered. Subdivision removes them from the topology.
+  VtIntArray hole_indices;
   // Materials of the faces, indexed by `face_material_indices`.
   std::vector<SdfPath> material_ids;
   VtIntArray face_material_indices;
@@ -82,17 +84,20 @@ class GeometryProcessor {
   // Triangulates a mesh topology and returns the triangle indices and primitive
   // parameters mapping each triangle to its parent polygon index. Triangles are
   // always wound counter-clockwise (right-handed), so the winding of
-  // `left_handed` polygons is reversed.
+  // `left_handed` polygons is reversed. The faces `hole_indices` are skipped.
   static std::pair<VtIntArray, VtIntArray> TriangulateWithFaceMapping(
       const VtIntArray& face_vertex_counts,
-      const VtIntArray& face_vertex_indices, bool left_handed);
+      const VtIntArray& face_vertex_indices, bool left_handed,
+      absl::Span<const int> hole_indices = {});
 
   // Returns the smooth (angle-weighted) normal of each point of a polygon mesh,
-  // whose polygons are wound clockwise if `left_handed`.
+  // whose polygons are wound clockwise if `left_handed`. The faces
+  // `hole_indices` are skipped.
   static VtVec3fArray ComputeNormals(const VtVec3fArray& points,
                                      const VtIntArray& face_vertex_counts,
                                      const VtIntArray& face_vertex_indices,
-                                     bool left_handed);
+                                     bool left_handed,
+                                     absl::Span<const int> hole_indices = {});
 
   // Returns the normal of each face of a polygon mesh, whose polygons are
   // wound clockwise if `left_handed`.

@@ -35,6 +35,9 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 class SubdivisionEvaluator {
  public:
+  using FVarIndicesMap =
+      absl::flat_hash_map<TfToken, VtIntArray, TfToken::HashFunctor>;
+
   SubdivisionEvaluator() = default;
   ~SubdivisionEvaluator() = default;
 
@@ -42,11 +45,8 @@ class SubdivisionEvaluator {
   // topology. `fvar_indices` maps each faceVarying primvar to its value
   // indices, or to an empty array if it is not indexed. Primvars with identical
   // indices share an OpenSubdiv face-varying channel.
-  void Initialize(
-      const PxOsdMeshTopology& topology, int refine_level,
-      const absl::flat_hash_map<TfToken, VtIntArray, TfToken::HashFunctor>&
-          fvar_indices,
-      const TfToken& mesh_name);
+  void Initialize(const PxOsdMeshTopology& topology, int refine_level,
+                  const FVarIndicesMap& fvar_indices, const TfToken& mesh_name);
 
   // Clears all OpenSubdiv data structures.
   void Clear();
@@ -58,6 +58,9 @@ class SubdivisionEvaluator {
   bool HasFVarChannel(const TfToken& token) const {
     return fvar_primvar_to_channel_.contains(token);
   }
+
+  // Returns the face-varying primvar index maps used to initialize the refiner.
+  const FVarIndicesMap& FVarIndices() const { return fvar_indices_; }
 
   // Refines a primvar using the evaluated subdivision stencils.
   VtValue RefinePrimvar(const VtValue& value, HdInterpolation interpolation,
@@ -88,6 +91,7 @@ class SubdivisionEvaluator {
   // OpenSubdiv topology.
   absl::flat_hash_map<TfToken, int, TfToken::HashFunctor>
       fvar_primvar_to_channel_;
+  FVarIndicesMap fvar_indices_;
 
   VtIntArray refined_face_vertex_counts_;
   VtIntArray refined_face_vertex_indices_;
