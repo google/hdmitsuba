@@ -147,7 +147,8 @@ NB_MODULE(usd_render, m) {
              std::optional<int> width, std::optional<std::string> camera_path,
              std::optional<int> refine_level_fallback,
              std::optional<std::unordered_map<std::string, pxr::VtValue>>
-                 overrides) {
+                 overrides,
+             const std::optional<pxr::TfTokenVector>& purposes) {
             std::optional<pxr::SdfPath> camera_sdf_path;
             if (camera_path.has_value()) {
               camera_sdf_path = pxr::SdfPath(camera_path.value());
@@ -165,13 +166,14 @@ NB_MODULE(usd_render, m) {
             }
             engine.Configure(pxr::TfToken(hydra_delegate_id),
                              render_settings_sdf_path, width, camera_sdf_path,
-                             refine_level_fallback, overrides_map);
+                             refine_level_fallback, overrides_map, purposes);
           },
           nb::arg("hydra_delegate_id"),
           nb::arg("render_settings_path") = nb::none(),
           nb::arg("width") = nb::none(), nb::arg("camera_path") = nb::none(),
           nb::arg("refine_level_fallback") = nb::none(),
           nb::arg("overrides") = nb::none(),
+          nb::arg("purposes") = nb::none(),
           "Configures the Hydra rendering pipeline.")
       .def(
           "render",
