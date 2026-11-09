@@ -44,6 +44,7 @@ def _set_mitsuba_variant():
         'mitsuba_bitmap',
         'opacity',
         'uv_texture',
+        'uv_texture_scale_bias',
         'volumes',
     ],
 )

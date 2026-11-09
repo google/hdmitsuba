@@ -35,6 +35,7 @@
 #include <mitsuba/core/mstream.h>
 #include <mitsuba/core/plugin.h>
 #include <mitsuba/core/properties.h>
+#include <mitsuba/core/string.h>
 #include <mitsuba/render/texture.h>
 #include <nanothread/nanothread.h>
 #include <pxr/base/gf/matrix3d.h>
@@ -42,6 +43,7 @@
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/matrix4f.h>
 #include <pxr/base/gf/vec2f.h>
+#include <pxr/base/gf/vec4f.h>
 #include <pxr/base/tf/diagnostic.h>
 #include <pxr/imaging/hd/material.h>
 #include <pxr/usd/ar/asset.h>
@@ -154,6 +156,31 @@ TextureKey::UvMatrix ExtractUsdTransform2d(const HdMaterialNetwork2& network,
   return ToUvMatrix(flip * m_usd * flip);
 }
 
+// Wraps `texture` in a Mitsuba `math` texture computing
+// `texture * key.scale + key.bias`, unless that is the identity.
+mitsuba::ref<mitsuba::Object> ApplyScaleBias(
+    const TextureKey& key, mitsuba::ref<mitsuba::Object> texture,
+    std::string_view variant) {
+  const TextureKey::Rgb& s = key.scale;
+  const TextureKey::Rgb& b = key.bias;
+  if (s == TextureKey::Rgb{1, 1, 1} && b == TextureKey::Rgb{0, 0, 0}) {
+    return texture;
+  }
+  // Scale and bias are expression literals, which (unlike `srgb` constants)
+  // are not clamped to `[0, 1]` in spectral variants. Per-channel values need
+  // the `rgb()` color op, which is only reached by full images.
+  mitsuba::Properties props("math");
+  props.set("expr",
+            s[0] == s[1] && s[1] == s[2] && b[0] == b[1] && b[1] == b[2]
+                ? tfm::format("fma(in[0], %.9g, %.9g)", s[0], b[0])
+                : tfm::format("rgb(fma(in[0].r, %.9g, %.9g), "
+                              "fma(in[0].g, %.9g, %.9g), "
+                              "fma(in[0].b, %.9g, %.9g))",
+                              s[0], b[0], s[1], b[1], s[2], b[2]));
+  props.set("in0", texture);
+  return CreateExpandedObject(props, variant, mitsuba::ObjectType::Texture);
+}
+
 mitsuba::ref<mitsuba::Object> CreateBitmapTexture(const TextureKey& key,
                                                   const mitsuba::Bitmap& bitmap,
                                                   std::string_view variant) {
@@ -164,7 +191,7 @@ mitsuba::ref<mitsuba::Object> CreateBitmapTexture(const TextureKey& key,
       bitmap.channel_count() == 1 && bitmap.channel_names()[0] == "A";
   if (key.channel == 3 && !bitmap.has_alpha() && !single_alpha) {
     mitsuba::Properties uniform_props("uniform");
-    uniform_props.set("value", 1.0f);
+    uniform_props.set("value", key.scale[0] + key.bias[0]);
     return CreateExpandedObject(uniform_props, variant,
                                 mitsuba::ObjectType::Texture);
   }
@@ -223,10 +250,38 @@ mitsuba::ref<mitsuba::Object> CreateBitmapTexture(const TextureKey& key,
   if (key.to_uv != TextureKey::kIdentityUv) {
     props.set("to_uv", UvMatrixToTransform(key.to_uv));
   }
-  return CreateExpandedObject(props, variant, mitsuba::ObjectType::Texture);
+  return ApplyScaleBias(
+      key, CreateExpandedObject(props, variant, mitsuba::ObjectType::Texture),
+      variant);
 }
 
 }  // namespace
+
+std::pair<TextureKey::Rgb, TextureKey::Rgb> UsdUVTextureScaleBias(
+    const HdMaterialNode2& node, const TfToken& input_name, int channel) {
+  // UsdUVTexture outputs `texture * scale + bias`.
+  auto get_rgb = [&](const char* name, float fallback) {
+    GfVec4f v(fallback);
+    if (auto it = node.parameters.find(TfToken(name));
+        it != node.parameters.end()) {
+      v = it->second.GetWithDefault(v);
+    }
+    return channel >= 0 ? TextureKey::Rgb{v[channel], v[channel], v[channel]}
+                        : TextureKey::Rgb{v[0], v[1], v[2]};
+  };
+  TextureKey::Rgb scale = get_rgb("scale", 1.0f);
+  TextureKey::Rgb bias = get_rgb("bias", 0.0f);
+  if (input_name == TfToken("normal")) {
+    // UsdPreviewSurface expects `inputs:normal` in `[-1, 1]`
+    // (https://openusd.org/release/spec_usdpreviewsurface.html#preview-surface),
+    // whereas Mitsuba's `normalmap` decodes its texture `t` as `2 * t - 1`.
+    for (int i = 0; i < 3; ++i) {
+      scale[i] *= 0.5f;
+      bias[i] = 0.5f * bias[i] + 0.5f;
+    }
+  }
+  return {scale, bias};
+}
 
 std::optional<TextureKey> ExtractTextureKey(const HdMaterialNetwork2& network,
                                             const HdMaterialNode2& node,
@@ -290,6 +345,9 @@ std::optional<TextureKey> ExtractTextureKey(const HdMaterialNetwork2& network,
       }
     }
     key.to_uv = ExtractUsdTransform2d(network, node);
+
+    std::tie(key.scale, key.bias) =
+        UsdUVTextureScaleBias(node, input_name, key.channel);
   } else if (nodeTypeId == TfToken("mitsuba_bitmap")) {
     // Each setter returns false if `v` does not hold the expected type.
     auto set_as = [](const VtValue& v, auto& dst) {

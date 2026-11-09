@@ -40,16 +40,16 @@ def _set_mitsuba_variant():
   mi.set_variant('cuda_ad_rgb', 'llvm_ad_rgb')
 
 
-def _uniform(value: float, bias: float) -> tuple[Any, float, bool, bool]:
-  return mi.load_dict({'type': 'uniform', 'value': value}), bias, False, False
+def _uniform(value: float) -> tuple[Any, bool, bool]:
+  return mi.load_dict({'type': 'uniform', 'value': value}), False, False
 
 
-def _vector(value: tuple[float, float, float]) -> tuple[Any, float, bool, bool]:
-  return mi.load_dict({'type': 'rgb', 'value': value}), 0.0, False, True
+def _vector(value: tuple[float, float, float]) -> tuple[Any, bool, bool]:
+  return mi.load_dict({'type': 'rgb', 'value': value}), False, True
 
 
 def _process(
-    displacement: tuple[Any, float, bool, bool] | None,
+    displacement: tuple[Any, bool, bool] | None,
     transform: Gf.Matrix4d | None = None,
     requested: set[str] | None = None,
     points: list[tuple[float, float, float]] | None = None,
@@ -78,7 +78,7 @@ def _process(
       mesh_data,
       0,
       transform or Gf.Matrix4d(1.0),
-      [(None, 0.5, True, False) if displacement is None else displacement],
+      [(None, True, False) if displacement is None else displacement],
       requested or set(),
   )
   return sub
@@ -92,7 +92,7 @@ def test_scalar_displacement_is_applied_in_object_space():
   transform = Gf.Matrix4d().SetScale(Gf.Vec3d(1, 1, 2)) * Gf.Matrix4d(
   ).SetTranslate(Gf.Vec3d(0, 0, 1))
   sub = _process(
-      _uniform(1.0, bias=0.5),
+      _uniform(0.5),
       transform,
       {'__p_object', '__n_disp_object', '__n_disp_world'},
   )
@@ -114,7 +114,7 @@ def test_scalar_displacement_is_applied_in_object_space():
 @pytest.mark.parametrize('displaced', [False, True])
 def test_mirrored_transform_keeps_outward_winding(displaced: bool):
   sub = _process(
-      _uniform(1.0, bias=0.0) if displaced else None,
+      _uniform(1.0) if displaced else None,
       Gf.Matrix4d().SetScale(Gf.Vec3d(-1, 1, 1)),
   )
   points = _get(sub, 'points')
@@ -132,7 +132,7 @@ def test_authored_face_varying_normals_are_preserved():
   # edge: each face uses its own face normal.
   n0, n1 = (0.0, 0.0, 1.0), (-1.0, 0.0, 0.0)
   sub = _process(
-      _uniform(0.1, bias=0.0),
+      _uniform(0.1),
       requested={'__n_object'},
       points=[(0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 1, 0), (1, 1, 0), (1, 1, 1)],
       normals=[n0] * 4 + [n1] * 4,
@@ -157,7 +157,7 @@ def test_authored_face_varying_normals_are_preserved():
 def test_authored_vertex_normals_define_displacement_direction():
   n = (0.0, 0.6, 0.8)
   sub = _process(
-      _uniform(1.0, bias=0.0),
+      _uniform(1.0),
       requested={'__p_object'},
       normals=[n] * len(_POINTS),
       normals_interpolation=UsdGeom.Tokens.vertex,
@@ -238,7 +238,7 @@ def test_points_shared_by_displaced_subsets_are_displaced_once():
       mesh_data,
       0,
       Gf.Matrix4d(1.0),
-      [_uniform(1.0, bias=0.0), _uniform(2.0, bias=0.0)],
+      [_uniform(1.0), _uniform(2.0)],
       set(),
   )
   # The first subset displaces the points on the shared edge (x = 1).

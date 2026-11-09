@@ -352,3 +352,25 @@ def test_invalid_normal_and_bump_fallbacks():
       'value': (0.5, 0.5, 1.0),
   }
   assert isinstance(mi.load_dict(mi_dict), mi.BSDF)
+
+
+def test_displacement_through_preview_surface():
+  stage = Usd.Stage.CreateInMemory()
+  usd_material = UsdShade.Material.Define(stage, Sdf.Path('/Material'))
+  surface = UsdShade.Shader.Define(stage, Sdf.Path('/Material/surface'))
+  surface.CreateIdAttr('UsdPreviewSurface')
+  texture = UsdShade.Shader.Define(stage, Sdf.Path('/Material/texture'))
+  texture.CreateIdAttr('UsdUVTexture')
+  texture.CreateInput('file', Sdf.ValueTypeNames.Asset).Set(_ALBEDO_PNG)
+  surface.CreateInput('displacement', Sdf.ValueTypeNames.Float).ConnectToSource(
+      texture.CreateOutput('r', Sdf.ValueTypeNames.Float)
+  )
+  usd_material.CreateDisplacementOutput().ConnectToSource(
+      surface.CreateOutput('displacement', Sdf.ValueTypeNames.Token)
+  )
+  mesh = stage.DefinePrim('/Mesh', 'Mesh')
+  UsdShade.MaterialBindingAPI.Apply(mesh).Bind(usd_material)
+  assert isinstance(material.convert_material(mesh)[2], mi.Texture)
+
+  surface.GetInput('displacement').DisconnectSource()
+  assert material.convert_material(mesh)[2] is None

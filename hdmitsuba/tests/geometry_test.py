@@ -544,9 +544,7 @@ def test_scalar_displacement(subdivision_level: int):
   material = _create_diffuse_material(stage, '/Material')
   disp = UsdShade.Shader.Define(stage, '/Material/Displacement')
   disp.CreateIdAttr('mitsuba_uniform')
-  # Scalar displacement subtracts a default bias of 0.5, so 0.75 offsets by
-  # +0.25 along the object-space normal (+Z).
-  disp.CreateInput('value', Sdf.ValueTypeNames.Float).Set(0.75)
+  disp.CreateInput('value', Sdf.ValueTypeNames.Float).Set(0.25)
   material.CreateDisplacementOutput('mitsuba').ConnectToSource(
       disp.ConnectableAPI(), 'out'
   )
@@ -861,3 +859,22 @@ def test_primvar_reader_with_preview_surface():
   # Pointing `varname` at a missing primvar evaluates to zero in both backends.
   varname_input.Set('missing_primvar')
   _assert_close(_render_aovs(stage)['albedo'], (0.0, 0.0, 0.0))
+
+  # `UsdPrimvarReader_normal` connected to `inputs:normal` is re-encoded from
+  # `[-1, 1]` tangent space to `[0, 1]`.
+  _set_vertex_uvs(mesh)
+  n_tangent = (-0.6, 0.0, 0.8)
+  _set_primvar(
+      mesh,
+      't_normal',
+      Sdf.ValueTypeNames.Normal3fArray,
+      UsdGeom.Tokens.constant,
+      [n_tangent],
+  )
+  normal_reader = UsdShade.Shader.Define(stage, '/Material/NormalReader')
+  normal_reader.CreateIdAttr('UsdPrimvarReader_normal')
+  normal_reader.CreateInput('varname', Sdf.ValueTypeNames.Token).Set('t_normal')
+  surface.CreateInput('normal', Sdf.ValueTypeNames.Normal3f).ConnectToSource(
+      normal_reader.ConnectableAPI(), 'result'
+  )
+  _assert_close(_render_aovs(stage)['sh_normal'], n_tangent)

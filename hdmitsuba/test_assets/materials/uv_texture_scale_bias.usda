@@ -1,0 +1,164 @@
+#usda 1.0
+(
+    doc = """Tests UsdUVTexture scale/bias across RGB diffuseColor, single-channel
+    UsdPreviewSurface displacement, [-1, 1] normal mapping with custom strength,
+    and out-of-[0, 1] missing-file fallbacks."""
+    defaultPrim = "root"
+    upAxis = "Z"
+)
+
+def Xform "root"
+{
+    def Scope "Camera"
+    {
+        def Camera "Camera"
+        {
+            float focalLength = 0.036
+            float horizontalAperture = 0.036
+            float verticalAperture = 0.036
+            double3 xformOp:translate = (0, 0, 2.4)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+
+    def SphereLight "Key"
+    {
+        float inputs:intensity = 12
+        float inputs:radius = 0
+        bool treatAsPoint = 1
+        double3 xformOp:translate = (0.8, -1.0, 1.8)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    class Mesh "_Tile" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+            interpolation = "vertex"
+        )
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "faceVarying"
+        )
+        uniform token subdivisionScheme = "none"
+    }
+
+    # Top-left: per-channel RGB scale/bias on diffuseColor.
+    def Mesh "RgbTile" (inherits = </root/_Tile>)
+    {
+        rel material:binding = </root/_materials/rgb_scale_bias>
+        point3f[] points = [(-0.95, 0.05, 0), (-0.05, 0.05, 0), (-0.05, 0.95, 0), (-0.95, 0.95, 0)]
+    }
+
+    # Top-right: single-channel scale/bias driving UsdPreviewSurface displacement.
+    def Mesh "DispTile" (inherits = </root/_Tile>)
+    {
+        rel material:binding = </root/_materials/disp_scale_bias>
+        point3f[] points = [(0.05, 0.05, 0), (0.95, 0.05, 0), (0.95, 0.95, 0), (0.05, 0.95, 0)]
+        int primvars:mitsuba:subdivision_level = 3
+        uniform token subdivisionScheme = "catmullClark"
+    }
+
+    # Bottom-left: [-1, 1] normal map with custom scale/bias on UsdPreviewSurface.
+    def Mesh "NormalTile" (inherits = </root/_Tile>)
+    {
+        rel material:binding = </root/_materials/normal_scale_bias>
+        point3f[] points = [(-0.95, -0.95, 0), (-0.05, -0.95, 0), (-0.05, -0.05, 0), (-0.95, -0.05, 0)]
+    }
+
+    # Bottom-right: out-of-[0, 1] missing-file fallback with scale/bias.
+    def Mesh "FallbackTile" (inherits = </root/_Tile>)
+    {
+        rel material:binding = </root/_materials/fallback_scale_bias>
+        point3f[] points = [(0.05, -0.95, 0), (0.95, -0.95, 0), (0.95, -0.05, 0), (0.05, -0.05, 0)]
+    }
+
+    def Scope "_materials"
+    {
+        def Material "rgb_scale_bias"
+        {
+            token outputs:surface.connect = </root/_materials/rgb_scale_bias/Shader.outputs:surface>
+            def Shader "Shader"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </root/_materials/rgb_scale_bias/Tex.outputs:rgb>
+                float inputs:roughness = 0.5
+                token outputs:surface
+            }
+            def Shader "Tex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./textures/albedo.png@
+                float4 inputs:scale = (0.8, 1.2, 0.5, 1)
+                float4 inputs:bias = (0.1, -0.1, 0.2, 0)
+                float3 outputs:rgb
+            }
+        }
+
+        def Material "disp_scale_bias"
+        {
+            token outputs:surface.connect = </root/_materials/disp_scale_bias/Shader.outputs:surface>
+            token outputs:displacement.connect = </root/_materials/disp_scale_bias/Shader.outputs:displacement>
+            def Shader "Shader"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.2, 0.6, 0.8)
+                float inputs:roughness = 0.5
+                float inputs:displacement.connect = </root/_materials/disp_scale_bias/Tex.outputs:g>
+                token outputs:surface
+                token outputs:displacement
+            }
+            def Shader "Tex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./textures/uv_quadrants.png@
+                float4 inputs:scale = (1, 0.2, 1, 1)
+                float4 inputs:bias = (0, -0.1, 0, 0)
+                float outputs:g
+            }
+        }
+
+        def Material "normal_scale_bias"
+        {
+            token outputs:surface.connect = </root/_materials/normal_scale_bias/Shader.outputs:surface>
+            def Shader "Shader"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.8, 0.8, 0.8)
+                float inputs:roughness = 0.35
+                normal3f inputs:normal.connect = </root/_materials/normal_scale_bias/Tex.outputs:rgb>
+                token outputs:surface
+            }
+            def Shader "Tex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./textures/normalmap.png@
+                token inputs:sourceColorSpace = "raw"
+                float4 inputs:scale = (1, 1, 2, 1)
+                float4 inputs:bias = (-0.5, -0.5, -1, 0)
+                float3 outputs:rgb
+            }
+        }
+
+        def Material "fallback_scale_bias"
+        {
+            token outputs:surface.connect = </root/_materials/fallback_scale_bias/Shader.outputs:surface>
+            def Shader "Shader"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </root/_materials/fallback_scale_bias/Tex.outputs:rgb>
+                float inputs:roughness = 0.5
+                token outputs:surface
+            }
+            def Shader "Tex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./textures/does_not_exist.png@
+                float4 inputs:fallback = (-0.5, 0.2, 1.5, 1)
+                float4 inputs:scale = (0.4, 1.5, 0.5, 1)
+                float4 inputs:bias = (0.3, 0.1, -0.25, 0)
+                float3 outputs:rgb
+            }
+        }
+    }
+}

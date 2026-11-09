@@ -42,6 +42,7 @@ struct TextureKey {
   // Row-major 3x3 UV transform in Mitsuba's (column-vector) convention, i.e.
   // exactly what the bitmap plugin's `to_uv` parameter consumes.
   using UvMatrix = std::array<float, 9>;
+  using Rgb = std::array<float, 3>;
   static constexpr UvMatrix kIdentityUv = {1, 0, 0, 0, 1, 0, 0, 0, 1};
 
   std::string filename;
@@ -55,12 +56,16 @@ struct TextureKey {
   // Extracted channel index for UsdUVTexture single-channel outputs
   // (-1 for full image, 0 = R, 1 = G, 2 = B, 3 = A).
   int channel = -1;
+  // Per-channel `texture * scale + bias` applied on top of the bitmap (see
+  // UsdUVTextureScaleBias()).
+  Rgb scale = {1, 1, 1};
+  Rgb bias = {0, 0, 0};
 
  private:
   // Single source of truth for equality and hashing. Add new fields here.
   auto Fields() const {
     return std::tie(filename, raw, wrap_mode, filter_type, max_anisotropy,
-                    format, accel, to_uv, channel);
+                    format, accel, to_uv, channel, scale, bias);
   }
 
  public:
@@ -89,6 +94,14 @@ inline int UsdUVTextureChannel(const TfToken& output_name) {
   if (output_name == TfToken("a")) return 3;
   return -1;
 }
+
+// Returns the per-channel `(scale, bias)` that the UsdUVTexture `node` applies
+// to its `channel` output (see UsdUVTextureChannel()) connected to
+// `input_name`. For UsdPreviewSurface `normal` inputs, which are specified in
+// `[-1, 1]`, the result is also encoded to the `[0, 1]` range that Mitsuba's
+// `normalmap` decodes as `2 * t - 1`.
+std::pair<TextureKey::Rgb, TextureKey::Rgb> UsdUVTextureScaleBias(
+    const HdMaterialNode2& node, const TfToken& input_name, int channel);
 
 // Builds the cache key for a `UsdUVTexture` or `mitsuba_bitmap` node connected
 // to `input_name`. Returns nullopt if the node has no usable file path.

@@ -285,7 +285,7 @@ std::string ActiveVariant() {
 std::vector<SubMeshOutput> ProcessMesh(
     const MeshExtractionData& mesh_data, int refine_level,
     const GfMatrix4d& transform,
-    const std::vector<std::tuple<nb::object, float, bool, bool>>& displacements,
+    const std::vector<std::tuple<nb::object, bool, bool>>& displacements,
     const std::set<std::string>& requested_attributes) {
   SubdivisionEvaluator subdiv;
   subdiv.Initialize(mesh_data.GetTopology(), refine_level,
@@ -307,13 +307,12 @@ std::vector<SubMeshOutput> ProcessMesh(
 
   std::vector<MaterialDisplacement> material_displacements;
   material_displacements.reserve(displacements.size());
-  for (const auto& [texture, bias, requires_uv, is_vector] : displacements) {
+  for (const auto& [texture, requires_uv, is_vector] : displacements) {
     MaterialDisplacement& displacement = material_displacements.emplace_back();
     if (!texture.is_none()) {
       displacement.texture = reinterpret_cast<mitsuba::Object*>(
           nb::cast<uintptr_t>(texture.attr("ptr")));
     }
-    displacement.bias = bias;
     displacement.requires_uv = requires_uv;
     displacement.is_vector = is_vector;
   }
@@ -384,7 +383,7 @@ NB_MODULE(geometry_ext, m) {
         nb::arg("requested_attributes"),
         "Subdivides, displaces, transforms to world space, triangulates and "
         "splits `mesh_data` into one sub-mesh per material.\n\n"
-        "`displacements` holds one `(texture, bias, requires_uv, is_vector)` "
+        "`displacements` holds one `(texture, requires_uv, is_vector)` "
         "tuple per entry of `mesh_data.material_ids`, where `texture` is a "
         "Mitsuba texture of the active variant or None. "
         "`requested_attributes` are the primvar names read by the materials, "
