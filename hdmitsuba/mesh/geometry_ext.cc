@@ -78,6 +78,9 @@ struct MeshExtractionData : public MeshGeometry {
   TfToken scheme;
   TfToken interp_boundary = PxOsdOpenSubdivTokens->edgeAndCorner;
   TfToken face_varying_interp = PxOsdOpenSubdivTokens->cornersPlus1;
+  TfToken triangle_subdiv = PxOsdOpenSubdivTokens->catmullClark;
+  VtIntArray crease_indices, crease_lengths, corner_indices;
+  VtFloatArray crease_sharpnesses, corner_sharpnesses;
   // Unflattened values and indices (empty if not indexed) of faceVarying
   // primvars, which are subdivided using their own face-varying topology.
   absl::flat_hash_map<TfToken, VtValue, TfToken::HashFunctor>
@@ -86,17 +89,14 @@ struct MeshExtractionData : public MeshGeometry {
 
   PxOsdMeshTopology GetTopology() const {
     PxOsdSubdivTags tags(interp_boundary, face_varying_interp, TfToken(),
-                         TfToken(),
-                         /*creaseIndices=*/VtIntArray(),
-                         /*creaseLengths=*/VtIntArray(),
-                         /*creaseWeights=*/VtFloatArray(),
-                         /*cornerIndices=*/VtIntArray(),
-                         /*cornerWeights=*/VtFloatArray());
+                         triangle_subdiv, crease_indices, crease_lengths,
+                         crease_sharpnesses, corner_indices,
+                         corner_sharpnesses);
     return PxOsdMeshTopology(scheme,
                              left_handed ? PxOsdOpenSubdivTokens->leftHanded
                                          : PxOsdOpenSubdivTokens->rightHanded,
                              face_vertex_counts, face_vertex_indices,
-                             VtIntArray(), tags);
+                             hole_indices, tags);
   }
 };
 
@@ -207,12 +207,16 @@ MeshExtractionData ExtractMeshData(UsdStagePtr stage, const SdfPath& path,
   TfToken orientation;
   mesh.GetOrientationAttr().Get(&orientation);
   data.left_handed = orientation == UsdGeomTokens->leftHanded;
-  if (UsdAttribute attr = mesh.GetInterpolateBoundaryAttr()) {
-    attr.Get(&data.interp_boundary);
-  }
-  if (UsdAttribute attr = mesh.GetFaceVaryingLinearInterpolationAttr()) {
-    attr.Get(&data.face_varying_interp);
-  }
+  mesh.GetInterpolateBoundaryAttr().Get(&data.interp_boundary, time);
+  mesh.GetFaceVaryingLinearInterpolationAttr().Get(&data.face_varying_interp,
+                                                   time);
+  mesh.GetTriangleSubdivisionRuleAttr().Get(&data.triangle_subdiv, time);
+  mesh.GetHoleIndicesAttr().Get(&data.hole_indices, time);
+  mesh.GetCreaseIndicesAttr().Get(&data.crease_indices, time);
+  mesh.GetCreaseLengthsAttr().Get(&data.crease_lengths, time);
+  mesh.GetCreaseSharpnessesAttr().Get(&data.crease_sharpnesses, time);
+  mesh.GetCornerIndicesAttr().Get(&data.corner_indices, time);
+  mesh.GetCornerSharpnessesAttr().Get(&data.corner_sharpnesses, time);
 
   UsdGeomPrimvarsAPI primvars_api(mesh);
   for (const UsdGeomPrimvar& primvar : primvars_api.GetPrimvars()) {

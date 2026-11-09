@@ -23,11 +23,13 @@
 #include <absl/container/flat_hash_map.h>
 #include <mitsuba/core/vector.h>
 #include <pxr/base/gf/matrix4d.h>
+#include <pxr/base/gf/vec2f.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/tf/diagnostic.h>
 #include <pxr/base/tf/staticTokens.h>
 #include <pxr/base/tf/token.h>
 #include <pxr/base/trace/trace.h>
+#include <pxr/base/vt/array.h>
 #include <pxr/base/vt/types.h>
 #include <pxr/base/vt/value.h>
 #include <pxr/imaging/hd/changeTracker.h>
@@ -82,6 +84,7 @@ bool ValidatePrimvarSize(const VtValue& value, HdInterpolation interpolation,
     case HdInterpolationUniform:
       return size == face_count;
     case HdInterpolationVertex:
+    case HdInterpolationVarying:
       return size == vertex_count;
     case HdInterpolationFaceVarying:
       return size == corner_count;
@@ -161,9 +164,13 @@ void HdMitsubaMesh::Sync(HdSceneDelegate* sceneDelegate,
     refine_level = ResolveRefineLevel(sceneDelegate);
   }
   const bool topology_dirty =
-      (*dirtyBits & (HdChangeTracker::DirtyTopology |
-                     HdChangeTracker::DirtyMaterialId)) != 0 ||
-      refine_level != refine_level_;
+      (*dirtyBits &
+       (HdChangeTracker::DirtyTopology | HdChangeTracker::DirtySubdivTags |
+        HdChangeTracker::DirtyMaterialId)) != 0 ||
+      refine_level != refine_level_ ||
+      (subdiv_evaluator_.IsSubdivided() &&
+       (*dirtyBits & HdChangeTracker::DirtyPrimvar) != 0 &&
+       GetFVarIndices(sceneDelegate) != subdiv_evaluator_.FVarIndices());
   const bool primvars_dirty =
       (*dirtyBits &
        (HdChangeTracker::DirtyPrimvar | HdChangeTracker::DirtyPoints |
@@ -229,6 +236,7 @@ void HdMitsubaMesh::SyncTopology(HdSceneDelegate* sceneDelegate,
   geometry_.left_handed =
       topology.GetOrientation() == PxOsdOpenSubdivTokens->leftHanded;
   geometry_.is_subdivided = false;
+  geometry_.hole_indices = topology.GetHoleIndices();
   std::vector<std::pair<SdfPath, VtIntArray>> subsets;
   for (const HdGeomSubset& subset : topology.GetGeomSubsets()) {
     // Faces of subsets without a material binding use the mesh's material.
@@ -240,15 +248,9 @@ void HdMitsubaMesh::SyncTopology(HdSceneDelegate* sceneDelegate,
       subsets, sceneDelegate->GetMaterialId(GetId()), geometry_);
 
   const TfToken scheme = topology.GetScheme();
-  absl::flat_hash_map<TfToken, VtIntArray, TfToken::HashFunctor> fvar_indices;
+  SubdivisionEvaluator::FVarIndicesMap fvar_indices;
   if (refineLevel > 0 && scheme != PxOsdOpenSubdivTokens->none) {
-    for (const auto& primvar :
-         GetPrimvarDescriptors(sceneDelegate, HdInterpolationFaceVarying)) {
-      VtIntArray& indices = fvar_indices[primvar.name];
-      if (primvar.indexed) {
-        GetIndexedPrimvar(sceneDelegate, primvar.name, &indices);
-      }
-    }
+    fvar_indices = GetFVarIndices(sceneDelegate);
   }
 
   topology.SetSubdivTags(GetSubdivTags(sceneDelegate));
@@ -301,6 +303,19 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
     }
   }
 
+  static const TfToken kSt("st");
+  auto has_primvar = [&](const TfToken& name, auto type_tag) {
+    auto it = geometry_.primvars.find(name);
+    return it != geometry_.primvars.end() &&
+           it->second.value.IsHolding<decltype(type_tag)>() &&
+           !it->second.value.UncheckedGet<decltype(type_tag)>().empty();
+  };
+  // Mitsuba's mesh layout (normals and texcoords presence) is fixed at
+  // creation.
+  const uint8_t layout =
+      (has_primvar(HdTokens->normals, VtVec3fArray()) ? 1 : 0) |
+      (has_primvar(kSt, VtVec2fArray()) ? 2 : 0);
+
   MeshSpec spec;
   spec.id = id;
   spec.geometry = geometry_;
@@ -309,7 +324,9 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
   spec.instance_transforms = std::move(instance_transforms);
   spec.motion_wrapped = motion_wrapped;
   spec.needs_rebuild =
-      dirtyBits && (*dirtyBits & HdChangeTracker::DirtyTopology);
+      (dirtyBits && (*dirtyBits & HdChangeTracker::DirtyTopology)) ||
+      layout != primvar_layout_;
+  primvar_layout_ = layout;
   spec.dirty_bits = dirtyBits ? *dirtyBits : HdChangeTracker::Clean;
   spec.double_sided = IsDoubleSided(sceneDelegate);
   scene->SyncMesh(std::move(spec));
@@ -337,6 +354,19 @@ HdMitsubaMesh::GetAllPrimvarDescriptors(HdSceneDelegate* sceneDelegate) {
     }
   }
   return primvar_descriptors;
+}
+
+SubdivisionEvaluator::FVarIndicesMap HdMitsubaMesh::GetFVarIndices(
+    HdSceneDelegate* sceneDelegate) {
+  SubdivisionEvaluator::FVarIndicesMap fvar_indices;
+  for (const auto& primvar :
+       GetPrimvarDescriptors(sceneDelegate, HdInterpolationFaceVarying)) {
+    VtIntArray& indices = fvar_indices[primvar.name];
+    if (primvar.indexed) {
+      GetIndexedPrimvar(sceneDelegate, primvar.name, &indices);
+    }
+  }
+  return fvar_indices;
 }
 
 void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
@@ -426,9 +456,12 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
 
   // 2. Explicitly sync normals (only if no subdivision is used).
   if (!subdiv_evaluator_.IsSubdivided() &&
-      (*dirtyBits & HdChangeTracker::DirtyNormals)) {
+      ((*dirtyBits & HdChangeTracker::DirtyNormals) ||
+       HdChangeTracker::IsPrimvarDirty(*dirtyBits, id, HdTokens->normals))) {
     VtValue value = resolve_primvar_value(HdTokens->normals);
-    if (!value.IsEmpty()) {
+    if (value.IsEmpty()) {
+      geometry_.primvars.erase(HdTokens->normals);
+    } else {
       const HdInterpolation interpolation =
           primvar_descriptors.contains(HdTokens->normals)
               ? primvar_descriptors.at(HdTokens->normals).interpolation
@@ -437,7 +470,8 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
       auto points_it = geometry_.primvars.find(HdTokens->points);
       if (points_it != geometry_.primvars.end() &&
           points_it->second.value.IsHolding<VtVec3fArray>()) {
-        vertex_count = points_it->second.value.UncheckedGet<VtVec3fArray>().size();
+        vertex_count =
+            points_it->second.value.UncheckedGet<VtVec3fArray>().size();
       }
       size_t face_count = geometry_.face_vertex_counts.size();
       size_t corner_count = geometry_.face_vertex_indices.size();
@@ -446,6 +480,7 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
         geometry_.primvars[HdTokens->normals] = {std::move(value),
                                                  interpolation};
       } else {
+        geometry_.primvars.erase(HdTokens->normals);
         size_t actual_size =
             value.IsHolding<VtVec3fArray>()
                 ? value.UncheckedGet<VtVec3fArray>().size()

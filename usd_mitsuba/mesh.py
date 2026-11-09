@@ -24,7 +24,6 @@ import numpy as np
 
 from pxr import Gf
 from pxr import Sdf
-from pxr import Tf
 from pxr import Usd
 from pxr import UsdLux
 from pxr import UsdGeom
@@ -165,8 +164,6 @@ def convert_mesh(
       displacements,
       requested_attrs,
   )
-  if not sub_meshes:
-    Tf.Warn(f"Mesh {prim.GetPath()} has no points. Skipping translation.")
 
   materials_by_id = {
       material_id: (subprim, mat)

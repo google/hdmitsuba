@@ -397,10 +397,8 @@ class SceneModel final : public SceneManager {
     TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("RemoveShape: %s\n", id.GetText());
     std::string id_str = id.GetAsString();
     absl::MutexLock lock(state_mutex_);
-    mesh_specs_.erase(id);
-    curve_specs_.erase(id);
-    particle_field_specs_.erase(id);
-    bool erased = false;
+    bool erased = mesh_specs_.erase(id) > 0 || curve_specs_.erase(id) > 0 ||
+                  particle_field_specs_.erase(id) > 0;
     if (shapes_.erase(id_str) > 0) {
       erased = true;
     }
@@ -1135,8 +1133,8 @@ class SceneModel final : public SceneManager {
     if (spec.geometry.material_ids.size() <= 1) {
       std::string key = absl::StrCat(key_prefix, spec.id.GetAsString());
       auto it = shapes_.find(key);
-      if (!TF_VERIFY(it != shapes_.end(), "Sub-mesh not found: %s",
-                     key.c_str())) {
+      if (it == shapes_.end()) {
+        // Empty mesh (e.g. all faces marked as holes) was not emitted.
         return;
       }
       const SdfPath& mat_id = spec.geometry.material_ids.empty()
@@ -1315,7 +1313,7 @@ class SceneModel final : public SceneManager {
       if ((spec.dirty_bits & kMeshGeometryDirty) != 0) {
         auto group_it = shapes_.find(
             absl::StrCat(kProtoGroupPrefix, spec.id.GetAsString()));
-        if (TF_VERIFY(group_it != shapes_.end())) {
+        if (group_it != shapes_.end()) {
           group_it->second->parameters_changed();
         }
       }
@@ -1325,7 +1323,7 @@ class SceneModel final : public SceneManager {
         for (size_t i = 0; i < spec.instance_transforms.size(); ++i) {
           auto inst_it =
               shapes_.find(absl::StrCat(kInstancePrefix, id_str, "_", i));
-          if (TF_VERIFY(inst_it != shapes_.end())) {
+          if (inst_it != shapes_.end()) {
             SetTransform(inst_it->second.get(), spec.instance_transforms[i]);
           }
         }
@@ -1342,6 +1340,7 @@ class SceneModel final : public SceneManager {
   }
 
   bool MergeInstancedMesh(CommittedMesh& res, const std::string& id_str) {
+    if (res.meshes.empty()) return true;
     for (auto& mesh : res.meshes) {
       shapes_[absl::StrCat(kProtoPrefix, mesh->id())] = mesh;
     }

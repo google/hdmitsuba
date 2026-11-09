@@ -69,6 +69,7 @@ PXR_NAMESPACE_OPEN_SCOPE
 // vectorized Dr.Jit pass and migrated back to host memory.
 template <typename Float, typename Spectrum>
 void ApplyDisplacement(const SdfPath& mesh_id, const MeshGeometry& mesh,
+                       const std::vector<bool>& is_hole,
                        const MaterialDisplacement& displacement,
                        int material_index, const ExpandedMesh& uv_mesh,
                        const VtVec3fArray& normals, const GfMatrix4d& transform,
@@ -114,7 +115,7 @@ void ApplyDisplacement(const SdfPath& mesh_id, const MeshGeometry& mesh,
   int corner = 0;
   for (size_t face = 0; face < mesh.face_vertex_counts.size(); ++face) {
     const int count = mesh.face_vertex_counts[face];
-    if (mesh.face_material_indices[face] != material_index) {
+    if (is_hole[face] || mesh.face_material_indices[face] != material_index) {
       corner += count;
       continue;
     }
@@ -322,13 +323,28 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
     }
   };
   auto compute_normals = [&] {
-    return GeometryProcessor::ComputeNormals(points, counts, indices,
-                                             mesh.left_handed);
+    return GeometryProcessor::ComputeNormals(
+        points, counts, indices, mesh.left_handed, mesh.hole_indices);
   };
   auto set_smooth_normals = [&] {
     primvars[kNormals] = {VtValue(compute_normals()), HdInterpolationVertex};
   };
   add_intrinsic(kPObject, VtValue(points), HdInterpolationVertex);
+
+  std::vector<bool> is_hole(counts.size());
+  for (const int face : mesh.hole_indices) {
+    if (face >= 0 && static_cast<size_t>(face) < is_hole.size()) {
+      is_hole[face] = true;
+    }
+  }
+  bool has_displacement = false;
+  for (size_t face = 0; face < counts.size(); ++face) {
+    if (!is_hole[face] &&
+        displacements[mesh.face_material_indices[face]].texture != nullptr) {
+      has_displacement = true;
+      break;
+    }
+  }
 
   auto normals_it = primvars.find(kNormals);
   PrimvarState* authored_normals =
@@ -336,10 +352,7 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
               normals_it->second.value.IsHolding<VtVec3fArray>()
           ? &normals_it->second
           : nullptr;
-  if (std::any_of(mesh.face_material_indices.cbegin(),
-                  mesh.face_material_indices.cend(), [&](int material) {
-                    return displacements[material].texture != nullptr;
-                  })) {
+  if (has_displacement) {
     const VtVec3fArray geo_normals = compute_normals();
     const HdInterpolation interp = authored_normals
                                        ? authored_normals->interpolation
@@ -377,7 +390,7 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
     for (size_t i = 0; i < mesh.material_ids.size(); ++i) {
       if (displacements[i].texture) {
         ApplyDisplacement<Float, Spectrum>(
-            id, mesh, displacements[i], static_cast<int>(i), uv_mesh,
+            id, mesh, is_hole, displacements[i], static_cast<int>(i), uv_mesh,
             disp_normals, transform, displaced_points, points);
       }
     }
@@ -429,7 +442,8 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
   auto [triangles, primitive_params] =
       GeometryProcessor::TriangulateWithFaceMapping(
           counts, expanded.face_vertices,
-          mesh.left_handed ^ (transform.GetDeterminant() < 0.0));
+          mesh.left_handed ^ (transform.GetDeterminant() < 0.0),
+          mesh.hole_indices);
   return GeometryProcessor::SplitAndCompactMeshes(
       id, triangles, primitive_params, expanded.primvars, mesh.material_ids,
       mesh.face_material_indices);
