@@ -154,6 +154,11 @@ def usd_to_mitsuba(
       sensor_dict['near_clip'] = clipping_range[0]
       sensor_dict['far_clip'] = clipping_range[1]
 
+    if filter_type := prim.GetAttribute(
+        'mitsuba:sensor:film:pixel_filter:type'
+    ).Get(time):
+      sensor_dict['film']['pixel_filter'] = {'type': filter_type}
+
   film_dict = sensor_dict['film']
   assert isinstance(film_dict, dict)
 
@@ -197,6 +202,10 @@ def usd_to_mitsuba(
   }
 
   if reconstruction_filter is not None:
-    film_dict['reconstruction_filter'] = reconstruction_filter
+    film_dict['pixel_filter'] = (
+        {'type': reconstruction_filter}
+        if isinstance(reconstruction_filter, str)
+        else reconstruction_filter
+    )
   sensor_dict['shutter_open'], sensor_dict['shutter_close'] = shutter
   return sensor_dict
