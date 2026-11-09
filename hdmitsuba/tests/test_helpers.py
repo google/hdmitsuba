@@ -174,3 +174,92 @@ def assert_hydra_equal_to_offline(
 
   robust_assert_close(image_hd[..., :3], image_usd, atol=atol, rtol=rtol)
   return image_hd, image_usd
+
+
+# USD render var data types of the AOVs rendered by `render_aovs`.
+_AOV_DATA_TYPES = {
+    'albedo': 'color3f',
+    'depth': 'float',
+    'dp_du': 'vector3f',
+    'dp_dv': 'vector3f',
+    'geo_normal': 'normal3f',
+    'position': 'point3f',
+    'prim_index': 'int',
+    'sh_normal': 'normal3f',
+    'shape_index': 'int',
+    'uv': 'float2',
+}
+
+
+def create_aov_render_settings(
+    stage: Usd.Stage,
+    aovs: tuple[str, ...],
+    resolution: tuple[int, int] = (32, 32),
+) -> UsdRender.Settings:
+  """Creates render settings with a single render product holding `aovs`.
+
+  Each AOV is rendered into a render var of the same name. Each pixel holds a
+  single sample, so that the AOVs are point samples of the visible surface.
+
+  Args:
+    stage: The USD stage to create the render settings in.
+    aovs: The Mitsuba AOVs to render, e.g. 'position' or 'uv'.
+    resolution: The image resolution.
+
+  Returns:
+    The render settings prim.
+  """
+  render_settings = create_render_settings(stage, resolution, spp=1)
+  product = UsdRender.Product.Define(stage, '/Render/AovProduct')
+  var_paths = []
+  for aov in aovs:
+    var = UsdRender.Var.Define(stage, f'/Render/Vars/{aov}')
+    var.CreateDataTypeAttr(_AOV_DATA_TYPES[aov])
+    var.CreateSourceNameAttr(aov)
+    var_paths.append(var.GetPath())
+  product.CreateOrderedVarsRel().SetTargets(var_paths)
+  render_settings.CreateProductsRel().SetTargets([product.GetPath()])
+  return render_settings
+
+
+def render_aovs(
+    stage: Usd.Stage,
+    backend: str,
+    camera_path: str,
+    engine: usd_render.RenderEngine | None = None,
+) -> dict[str, np.ndarray]:
+  """Renders the AOVs of the render settings of `stage`.
+
+  The render settings are expected to be created by
+  `create_aov_render_settings`.
+
+  Args:
+    stage: The USD stage to render.
+    backend: 'hydra' to render with the Hydra delegate, or 'offline' to render
+      the scene translated by `usd_mitsuba`.
+    camera_path: The path of the camera to render.
+    engine: Optional configured Hydra `RenderEngine` to reuse across stage edits.
+
+  Returns:
+    The AOV images, as (height, width, channels) arrays keyed by AOV name.
+  """
+  if backend == 'hydra':
+    if engine is None:
+      engine = usd_render.RenderEngine(stage)
+      engine.configure(
+          hydra_delegate_id='HdMitsubaRendererPlugin', camera_path=camera_path
+      )
+    return {
+        name: np.atleast_3d(np.array(image, dtype=np.float32))
+        for name, image in engine.render().items()
+    }
+
+  assert backend == 'offline', backend
+  scene = mi.load_dict(usd_mitsuba.convert_to_mitsuba(stage))
+  mi.render(scene)
+  # Skips the '<root>' bitmap holding the color channels, like Hydra.
+  return {
+      name: np.atleast_3d(np.array(bitmap, dtype=np.float32))
+      for name, bitmap in scene.sensors()[0].film().bitmap().split()
+      if name != '<root>'
+  }

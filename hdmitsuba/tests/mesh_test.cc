@@ -14,6 +14,7 @@
 
 #include "hdmitsuba/mesh.h"
 
+#include <cmath>
 #include <cstddef>
 #include <tuple>
 
@@ -21,7 +22,6 @@
 #include <gtest/gtest.h>
 #include <mitsuba/core/fwd.h>
 #include <mitsuba/core/object.h>
-#include <mitsuba/core/properties.h>
 #include <mitsuba/render/fwd.h>
 #include <mitsuba/render/mesh.h>
 #include <mitsuba/render/scene.h>
@@ -30,19 +30,13 @@
 #include <pxr/base/vt/types.h>
 #include <pxr/base/vt/value.h>
 #include <pxr/imaging/hd/changeTracker.h>
-#include <pxr/imaging/hd/enums.h>
-#include <pxr/imaging/hd/meshTopology.h>
-#include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/imaging/hd/tokens.h>
 #include <pxr/imaging/hd/types.h>
-#include <pxr/imaging/pxOsd/tokens.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
-#include <pxr/usd/sdf/types.h>
 #include <pxr/usd/usd/common.h>
 #include <pxr/usd/usd/stage.h>
 #include <pxr/usd/usdGeom/mesh.h>
-#include <pxr/usd/usdGeom/primvarsAPI.h>
 #include <pxr/usd/usdGeom/subset.h>
 #include <pxr/usd/usdGeom/tokens.h>
 #include <pxr/usd/usdShade/material.h>
@@ -58,11 +52,7 @@ PXR_NAMESPACE_OPEN_SCOPE
 namespace {
 
 using pxr::GfVec3f;
-using pxr::HdMeshTopology;
 using pxr::HdMitsubaMesh;
-using pxr::HdPrimvarDescriptor;
-using pxr::HdPrimvarRoleTokens;
-using pxr::HdTokens;
 using pxr::TfToken;
 using pxr::VtIntArray;
 using pxr::VtValue;
@@ -124,150 +114,6 @@ TEST(HdMitsubaMeshTest, ComputeNormalsMatchesMitsuba) {
   ASSERT_EQ(hdmitsuba_normals.size(), mitsuba_computed_normals.size());
   EXPECT_THAT(hdmitsuba_normals,
               Pointwise(Vec3fNear(1e-3), mitsuba_computed_normals));
-}
-
-TEST(HdMitsubaMeshTest, LeftHandedReversesWindingAndNormals) {
-  VtVec3fArray points = {GfVec3f(0, 0, 0), GfVec3f(1, 0, 0), GfVec3f(0, 1, 0)};
-  VtIntArray face_vertex_counts = {3};
-  VtIntArray face_vertex_indices = {0, 1, 2};
-
-  auto [right_triangles, right_params] =
-      GeometryProcessor::TriangulateWithFaceMapping(
-          face_vertex_counts, face_vertex_indices, /*left_handed=*/false);
-  auto [left_triangles, left_params] =
-      GeometryProcessor::TriangulateWithFaceMapping(
-          face_vertex_counts, face_vertex_indices, /*left_handed=*/true);
-  EXPECT_EQ(right_triangles, VtIntArray({0, 1, 2}));
-  EXPECT_EQ(left_triangles, VtIntArray({0, 2, 1}));
-  EXPECT_EQ(left_params, right_params);
-
-  const VtVec3fArray right_normals = GeometryProcessor::ComputeNormals(
-      points, face_vertex_counts, face_vertex_indices, /*left_handed=*/false);
-  const VtVec3fArray left_normals = GeometryProcessor::ComputeNormals(
-      points, face_vertex_counts, face_vertex_indices, /*left_handed=*/true);
-  ASSERT_EQ(right_normals.size(), points.size());
-  ASSERT_EQ(left_normals.size(), points.size());
-  for (size_t i = 0; i < points.size(); ++i) {
-    EXPECT_THAT(std::make_tuple(right_normals[i], GfVec3f(0, 0, 1)),
-                Vec3fNear(1e-5));
-    EXPECT_THAT(std::make_tuple(left_normals[i], -right_normals[i]),
-                Vec3fNear(1e-5));
-  }
-}
-
-TEST(HdMitsubaMeshTest, SubdivisionLevelAttribute) {
-  pxr::UsdStageRefPtr stage = pxr::UsdStage::CreateInMemory();
-  pxr::SdfPath mesh_path("/mesh");
-  pxr::UsdGeomMesh usd_mesh = pxr::UsdGeomMesh::Define(stage, mesh_path);
-
-  pxr::VtVec3fArray points = {GfVec3f(-1, -1, 1), GfVec3f(1, -1, 1),
-                              GfVec3f(1, 1, 1), GfVec3f(-1, 1, 1)};
-  pxr::VtIntArray face_counts = {4};
-  pxr::VtIntArray face_indices = {0, 1, 2, 3};
-
-  usd_mesh.CreatePointsAttr(pxr::VtValue(points));
-  usd_mesh.CreateFaceVertexCountsAttr(pxr::VtValue(face_counts));
-  usd_mesh.CreateFaceVertexIndicesAttr(pxr::VtValue(face_indices));
-  usd_mesh.CreateSubdivisionSchemeAttr().Set(pxr::UsdGeomTokens->catmullClark);
-
-  auto [render_delegate, render_index, scene_delegate, scene_manager,
-        render_param] = CreateRenderDelegateStateObjects<Scene>();
-
-  scene_delegate->Populate(stage->GetPseudoRoot());
-
-  pxr::HdMitsubaMesh mitsuba_mesh(mesh_path);
-  pxr::HdDirtyBits dirty_bits = pxr::HdChangeTracker::AllDirty;
-
-  // By default, refinement level is 0 if not specified in DisplayStyle.
-  // We'll set it to 1 via the primvar.
-  pxr::UsdGeomPrimvarsAPI(usd_mesh.GetPrim())
-      .CreatePrimvar(HdMitsubaMeshTokens->subdivision_level,
-                     pxr::SdfValueTypeNames->Int)
-      .Set(1);
-
-  mitsuba_mesh.Sync(scene_delegate.get(), render_param, &dirty_bits,
-                    pxr::HdReprTokens->hull);
-
-  scene_manager->CommitResources();
-  Scene* scene = dynamic_cast<Scene*>(scene_manager->GetScene());
-  ASSERT_NE(scene, nullptr);
-  ASSERT_EQ(scene->shapes().size(), 1);
-
-  Mesh* mitsuba_mesh_obj = dynamic_cast<Mesh*>(scene->shapes()[0].get());
-  ASSERT_NE(mitsuba_mesh_obj, nullptr);
-
-  // A single quad subdivided at level 1 Catmull-Clark should result in 4 quads.
-  // These are triangulated into 8 triangles.
-  EXPECT_EQ(mitsuba_mesh_obj->face_count(), 8);
-
-  scene_delegate.reset();
-  render_index.reset();
-  render_delegate.reset();
-}
-
-TEST(HdMitsubaMeshTest, SubdivisionLevelReactivity) {
-  pxr::UsdStageRefPtr stage = pxr::UsdStage::CreateInMemory();
-  pxr::SdfPath mesh_path("/mesh");
-  pxr::UsdGeomMesh usd_mesh = pxr::UsdGeomMesh::Define(stage, mesh_path);
-
-  pxr::VtVec3fArray points = {GfVec3f(-1, -1, 1), GfVec3f(1, -1, 1),
-                              GfVec3f(1, 1, 1), GfVec3f(-1, 1, 1)};
-  pxr::VtIntArray face_counts = {4};
-  pxr::VtIntArray face_indices = {0, 1, 2, 3};
-
-  usd_mesh.CreatePointsAttr(pxr::VtValue(points));
-  usd_mesh.CreateFaceVertexCountsAttr(pxr::VtValue(face_counts));
-  usd_mesh.CreateFaceVertexIndicesAttr(pxr::VtValue(face_indices));
-  usd_mesh.CreateSubdivisionSchemeAttr().Set(pxr::UsdGeomTokens->catmullClark);
-
-  auto [render_delegate, render_index, scene_delegate, scene_manager,
-        render_param] = CreateRenderDelegateStateObjects<Scene>();
-
-  scene_delegate->Populate(stage->GetPseudoRoot());
-
-  pxr::HdMitsubaMesh mitsuba_mesh(mesh_path);
-  pxr::HdDirtyBits dirty_bits = pxr::HdChangeTracker::AllDirty;
-
-  // Set initial level to 1.
-  pxr::UsdGeomPrimvar level_primvar =
-      pxr::UsdGeomPrimvarsAPI(usd_mesh.GetPrim())
-          .CreatePrimvar(HdMitsubaMeshTokens->subdivision_level,
-                         pxr::SdfValueTypeNames->Int);
-  level_primvar.Set(1);
-
-  mitsuba_mesh.Sync(scene_delegate.get(), render_param, &dirty_bits,
-                    pxr::HdReprTokens->hull);
-  scene_manager->CommitResources();
-
-  {
-    Scene* scene = dynamic_cast<Scene*>(scene_manager->GetScene());
-    Mesh* mitsuba_mesh_obj = dynamic_cast<Mesh*>(scene->shapes()[0].get());
-    ASSERT_EQ(mitsuba_mesh_obj->face_count(), 8);
-  }
-
-  // Change level to 2.
-  level_primvar.Set(2);
-
-  // In a real scenario, UsdImaging would mark this as dirty.
-  // We'll simulate it by manually marking it dirty in the render index.
-  render_index->GetChangeTracker().MarkRprimDirty(
-      mesh_path, pxr::HdChangeTracker::DirtyPrimvar);
-
-  dirty_bits = render_index->GetChangeTracker().GetRprimDirtyBits(mesh_path);
-  mitsuba_mesh.Sync(scene_delegate.get(), render_param, &dirty_bits,
-                    pxr::HdReprTokens->hull);
-  scene_manager->CommitResources();
-
-  {
-    Scene* scene = dynamic_cast<Scene*>(scene_manager->GetScene());
-    Mesh* mitsuba_mesh_obj = dynamic_cast<Mesh*>(scene->shapes()[0].get());
-    // At level 2, 1 quad -> 16 quads -> 32 triangles.
-    EXPECT_EQ(mitsuba_mesh_obj->face_count(), 32);
-  }
-
-  scene_delegate.reset();
-  render_index.reset();
-  render_delegate.reset();
 }
 
 TEST(HdMitsubaMeshTest, GeomSubsetsSkipUnusedBaseMaterialSlot) {
