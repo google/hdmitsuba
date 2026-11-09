@@ -91,7 +91,12 @@ class RenderEngine {
                  std::optional<int> width,
                  const std::optional<pxr::SdfPath>& camera_path,
                  std::optional<int> refine_level_fallback,
-                 const pxr::HdRenderSettingsMap& overrides = {});
+                 const pxr::HdRenderSettingsMap& overrides = {},
+                 // USD purposes to render (subset of "default", "render",
+                 // "proxy" and "guide"). Defaults to {"default", "render"},
+                 // matching usdrecord.
+                 const std::optional<pxr::TfTokenVector>& purposes =
+                     std::nullopt);
 
   // Renders the current frame. When enableInteractive is false (the default),
   // loops until the frame has converged. When enableInteractive is true, runs
@@ -142,6 +147,7 @@ class RenderEngine {
   int width_;
   pxr::HdRenderSettingsMap settings_map_;
   pxr::GfRange2f data_window_ndc_;
+  pxr::TfTokenVector render_tags_;
 };
 
 }  // namespace hdmitsuba

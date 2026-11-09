@@ -185,3 +185,27 @@ def test_invalid_camera_throws():
     pytest.skip("No renderers registered")
   with pytest.raises(RuntimeError, match="No camera found"):
     engine.configure(hydra_delegate_id=renderers[0])
+
+
+@pytest.mark.parametrize('delegate_id', _DELEGATES)
+def test_render_purposes(delegate_id: str):
+  _skip_missing_delegate(delegate_id)
+  # Red default (left), green render (center) and blue proxy (right) cubes.
+  stage = Usd.Stage.CreateInMemory()
+  for i, purpose in enumerate(('default', 'render', 'proxy')):
+    cube = UsdGeom.Cube.Define(stage, f'/{purpose}')
+    cube.AddTranslateOp().Set((1.4 * (i - 1), 0, 0))
+    cube.GetDisplayColorAttr().Set([tuple(float(i == j) for j in range(3))])
+    cube.GetPurposeAttr().Set(purpose)
+  UsdLux.DomeLight.Define(stage, '/dome_light')
+  UsdGeom.Camera.Define(stage, '/camera').AddTranslateOp().Set((0, 0, 10))
+  engine = usd_render.RenderEngine(stage)
+
+  def visible(**kwargs) -> list[bool]:
+    engine.configure(hydra_delegate_id=delegate_id, width=96, **kwargs)
+    row = engine.render()['color'][36]
+    # A cube is visible if its color dominates the pixel at its center.
+    return [row[x, i] > 2 * row[x].mean() for i, x in enumerate((16, 48, 80))]
+
+  assert visible() == [True, True, False]
+  assert visible(purposes=['default', 'proxy']) == [True, False, True]

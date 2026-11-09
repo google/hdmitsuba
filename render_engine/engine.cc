@@ -62,6 +62,7 @@
 #include <pxr/usd/usd/primRange.h>
 #include <pxr/usd/usd/timeCode.h>
 #include <pxr/usd/usdGeom/camera.h>
+#include <pxr/usd/usdGeom/tokens.h>
 #include <pxr/usd/usdRender/product.h>
 #include <pxr/usd/usdRender/settings.h>
 #include <pxr/usd/usdRender/spec.h>
@@ -370,7 +371,8 @@ void RenderEngine::Configure(
     const std::optional<SdfPath>& render_settings_prim_path,
     std::optional<int> width, const std::optional<SdfPath>& camera_path,
     std::optional<int> refine_level_fallback,
-    const HdRenderSettingsMap& overrides) {
+    const HdRenderSettingsMap& overrides,
+    const std::optional<TfTokenVector>& purposes) {
   ArResolverScopedCache resolver_cache;
   // Unconditionally read settings to support robust fallbacks
   HdRenderSettingsMap settings_map;
@@ -393,6 +395,16 @@ void RenderEngine::Configure(
   }
   bool ndc_changed = (new_data_window_ndc != data_window_ndc_);
 
+  // Map USD purposes to Hydra render tags. Prims with the "default" purpose
+  // carry the "geometry" render tag; the other purposes map 1:1.
+  TfTokenVector render_tags;
+  for (const TfToken& purpose : purposes.value_or(TfTokenVector{
+           UsdGeomTokens->default_, UsdGeomTokens->render})) {
+    render_tags.push_back(purpose == UsdGeomTokens->default_
+                              ? HdRenderTagTokens->geometry
+                              : purpose);
+  }
+
   // Unconditionally disable progressive refinement in the batch render engine
   settings_map.insert(
       {pxr::HdRenderSettingsTokens->enableInteractive, pxr::VtValue(false)});
@@ -400,7 +412,10 @@ void RenderEngine::Configure(
   bool rebuild_delegate =
       !render_delegate_ || !stage_scene_index_ ||
       (hydra_delegate_id != hydra_delegate_id_) ||
-      (render_settings_prim_path != render_settings_prim_path_);
+      (render_settings_prim_path != render_settings_prim_path_) ||
+      // Render delegates keep rprims that were synced before a render tag got
+      // disabled, so a change of render tags requires a fresh render index.
+      (render_tags != render_tags_);
 
   if (!rebuild_delegate) {
     for (const auto& [key, _] : settings_map_) {
@@ -515,6 +530,7 @@ void RenderEngine::Configure(
       hydra_delegate_id_ = hydra_delegate_id;
       render_settings_prim_path_ = render_settings_prim_path;
       settings_map_ = settings_map;
+      render_tags_ = render_tags;
     }
   }
 
@@ -547,8 +563,7 @@ void RenderEngine::Configure(
       params_delegate_->SetParameter(render_task_id_, HdTokens->collection,
                                      collection);
       params_delegate_->SetParameter(
-          render_task_id_, HdTokens->renderTags,
-          TfTokenVector{HdRenderTagTokens->geometry});
+          render_task_id_, HdTokens->renderTags, render_tags_);
       tasks_.push_back(render_index_->GetTask(render_task_id_));
     }
     if (!rebuild_delegate) {
