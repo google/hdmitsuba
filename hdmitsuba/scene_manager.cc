@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
 #include <map>
 #include <optional>
 #include <string>
@@ -36,7 +37,6 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/string_view.h>
-#include <absl/strings/strip.h>
 #include <absl/synchronization/mutex.h>
 #include <drjit-core/jit.h>
 #include <drjit/array_router.h>
@@ -92,6 +92,7 @@
 #include "hdmitsuba/kernel_freezing.h"
 #include "hdmitsuba/mesh/displacement.h"
 #include "hdmitsuba/mesh/geometry_processor.h"
+#include "hdmitsuba/plugin_builder.h"
 #include "hdmitsuba/prim_translator.h"
 #include "hdmitsuba/render_buffer.h"
 #include "hdmitsuba/render_delegate.h"
@@ -140,6 +141,23 @@ std::optional<T> GetSetting(const VtDictionary& settings,
           key.c_str(), TfType::Find<T>().GetTypeName().c_str(),
           it->second.GetTypeName().c_str());
   return std::nullopt;
+}
+
+bool ExtractHideEmitters(const PluginSpecNode& spec) {
+  auto it = spec.params.find("hide_emitters");
+  if (it == spec.params.end()) {
+    return false;
+  }
+  if (it->second.IsHolding<bool>()) {
+    return it->second.UncheckedGet<bool>();
+  }
+  if (it->second.IsHolding<int>()) {
+    return it->second.UncheckedGet<int>() != 0;
+  }
+  if (it->second.IsHolding<int64_t>()) {
+    return it->second.UncheckedGet<int64_t>() != 0;
+  }
+  return false;
 }
 
 // Sync the Python-side Mitsuba variant so Python-defined plugins
@@ -605,31 +623,7 @@ class SceneModel final : public SceneManager {
       reset_progressive_ = true;
     }
 
-    if (!integrator_) {
-      TF_DEBUG(HDMITSUBA_LIFECYCLE)
-          .Msg("Creating integrator, type: %s (%zu properties)\n",
-               integrator_type_.c_str(), integrator_settings_.size());
-      Properties props(integrator_type_);
-      for (const auto& [param, val] : integrator_settings_) {
-        SetMitsubaPropertyFromValue(props, param, val);
-      }
-      try {
-        integrator_ =
-            PluginManager::instance()->create_object<Integrator>(props);
-        if (auto unqueried = props.unqueried(); !unqueried.empty()) {
-          TF_WARN("Integrator '%s' ignores unsupported properties: %s",
-                  integrator_type_.c_str(),
-                  absl::StrJoin(unqueried, ", ").c_str());
-        }
-      } catch (const std::exception& e) {
-        TF_WARN(
-            "Failed to create integrator '%s': %s. Falling back to the default "
-            "path tracer.",
-            integrator_type_.c_str(), e.what());
-        integrator_ = PluginManager::instance()->create_object<Integrator>(
-            Properties("path"));
-      }
-    }
+    EnsureIntegrator();
 
     Integrator* render_integrator = integrator_.get();
     if (!pass_state.aov_requests.empty()) {
@@ -731,9 +725,12 @@ class SceneModel final : public SceneManager {
 
     // 5. Copy the data to the output render buffers.
     size_t base_channels = sensor->film()->base_channels().size();
+    size_t aov_start_channel =
+        base_channels +
+        (integrator_ ? integrator_->aov_names(sensor->film()).size() : 0);
     if (denoise_ && pass_state.color_buffer && base_channels >= 3) {
       denoiser_.Denoise(display_result, sensor, pass_state.aov_requests,
-                        base_channels);
+                        base_channels, aov_start_channel);
     }
     size_t total_channels = display_result.shape()[2];
     destinations_.clear();
@@ -743,7 +740,7 @@ class SceneModel final : public SceneManager {
       destinations_.push_back({pass_state.color_buffer, 0, static_cast<int>(base_channels), false});
     }
 
-    size_t current_offset = base_channels;
+    size_t current_offset = aov_start_channel;
     for (const auto& req : pass_state.aov_requests) {
       if (!TF_VERIFY(req.buffer, "AOV buffer is null")) continue;
       if (!TF_VERIFY(current_offset + req.channel_count <= total_channels,
@@ -797,21 +794,18 @@ class SceneModel final : public SceneManager {
       interactive_samples_per_pass_ = new_samples_per_pass;
       reset_progressive_ = true;
     }
-    std::string integrator_type =
-        GetSetting<std::string>(namespaced_settings, "mitsuba:integrator:type")
-            .value_or("path");
-    VtDictionary integrator_settings;
-    for (const auto& [key, val] : namespaced_settings) {
-      std::string_view param = key;
-      if (absl::ConsumePrefix(&param, "mitsuba:integrator:") &&
-          !param.empty() && param != "type" && !val.IsEmpty()) {
-        integrator_settings[std::string(param)] = val;
+    PluginSpecNode integrator_spec = ParsePluginSpec(
+        namespaced_settings, "mitsuba:integrator:", /*default_type=*/"path");
+    if (integrator_spec != integrator_spec_) {
+      const bool new_hide_emitters = ExtractHideEmitters(integrator_spec);
+      if (new_hide_emitters != hide_emitters_) {
+        if (hide_emitters_ && !new_hide_emitters) {
+          MarkEmittersForRebuild();
+        }
+        hide_emitters_ = new_hide_emitters;
+        scene_dirty_ = true;
       }
-    }
-    if (integrator_type != integrator_type_ ||
-        integrator_settings != integrator_settings_) {
-      integrator_type_ = std::move(integrator_type);
-      integrator_settings_ = std::move(integrator_settings);
+      integrator_spec_ = std::move(integrator_spec);
       integrator_ = nullptr;
       for (auto& [_, pass_state] : pass_aov_states_) {
         pass_state.aov_integrator = nullptr;
@@ -1481,14 +1475,28 @@ class SceneModel final : public SceneManager {
         });
   }
 
+  static std::string ResolveLeafIntegratorType(const PluginSpecNode& spec) {
+    if (spec.plugin_type == "aov" || spec.plugin_type == "moment") {
+      for (const auto& [_, child] : spec.children) {
+        if (!child.plugin_type.empty() && child.plugin_type != "rgb" &&
+            child.plugin_type != "spectrum" && child.plugin_type != "vector") {
+          return ResolveLeafIntegratorType(child);
+        }
+      }
+    }
+    return spec.plugin_type;
+  }
+
   bool CommitParticleFields() {
+    const std::string leaf_integrator =
+        ResolveLeafIntegratorType(integrator_spec_);
     if (!particle_field_specs_.empty() &&
-        integrator_type_ != "volprim_rf_basic") {
+        leaf_integrator != "volprim_rf_basic") {
       TF_WARN(
           "Scene contains Gaussian splats (%zu), which require the "
           "'volprim_rf_basic' integrator for radiance field evaluation. "
           "Current integrator: '%s'.",
-          particle_field_specs_.size(), integrator_type_.c_str());
+          particle_field_specs_.size(), leaf_integrator.c_str());
     }
     return ParallelCommit<decltype(particle_field_specs_), mitsuba::ref<Shape>>(
         particle_field_specs_,
@@ -1594,6 +1602,12 @@ class SceneModel final : public SceneManager {
     if (rebuild_scene) {
       TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("Instantiating new scene\n");
       Properties props;
+      if (hide_emitters_) {
+        EnsureIntegrator();
+        if (integrator_) {
+          props.set("integrator", integrator_.get());
+        }
+      }
       for (auto& [id, shape] : shapes_) {
         bool is_proto_mesh = absl::StartsWith(id, kProtoPrefix) &&
                              !absl::StartsWith(id, kProtoGroupPrefix);
@@ -1656,8 +1670,8 @@ class SceneModel final : public SceneManager {
   bool scene_dirty_ = true;
   ref<Scene> scene_;
   ref<Integrator> integrator_ = nullptr;
-  std::string integrator_type_ = "path";
-  VtDictionary integrator_settings_;
+  PluginSpecNode integrator_spec_{"path"};
+  bool hide_emitters_ = false;
   absl::flat_hash_map<const HdRenderPass*, RenderPassState> pass_aov_states_;
   size_t sample_count_ = kDefaultSampleCount;
   uint32_t seed_ = 0;
@@ -1703,6 +1717,37 @@ class SceneModel final : public SceneManager {
   bool denoise_ = false;
   bool denoise_dirty_ = false;
   Denoiser<Float, Spectrum> denoiser_;
+
+  void EnsureIntegrator() {
+    if (integrator_) {
+      return;
+    }
+    TF_DEBUG(HDMITSUBA_LIFECYCLE)
+        .Msg("Creating integrator, type: %s\n",
+             integrator_spec_.plugin_type.c_str());
+    try {
+      integrator_ = BuildPluginObject<Integrator>(integrator_spec_);
+    } catch (const std::exception& e) {
+      TF_WARN(
+          "Failed to create integrator '%s': %s. Falling back to the default "
+          "path tracer.",
+          integrator_spec_.plugin_type.c_str(), e.what());
+      integrator_ = PluginManager::instance()->create_object<Integrator>(
+          Properties("path"));
+    }
+  }
+
+  void MarkEmittersForRebuild() {
+    for (auto& [_, light_spec] : light_specs_) {
+      light_spec.needs_rebuild = true;
+    }
+    for (auto& [_, mesh_spec] : mesh_specs_) {
+      if (HasEmitter(mesh_spec)) {
+        mesh_spec.needs_rebuild = true;
+      }
+    }
+    has_pending_commits_ = true;
+  }
 
   void MarkSensorsForRebuild() {
     for (auto& [_, camera_spec] : camera_specs_) {

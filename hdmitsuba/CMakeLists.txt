@@ -41,6 +41,7 @@ add_library(hdMitsuba SHARED
   scene_manager.cc
   particle_field.cc
   traversal.cc
+  plugin_builder.cc
   prim_translator.cc
   texture_cache.cc
   utils.cc
@@ -185,6 +186,7 @@ if(HDMITSUBA_BUILD_TESTS)
     set_tests_properties(${Name} PROPERTIES ENVIRONMENT "HDMITSUBA_VARIANT=scalar_rgb")
   endfunction()
 
+  add_hdmitsuba_test(plugin_builder_test tests/plugin_builder_test.cc)
   add_hdmitsuba_test(camera_test tests/camera_test.cc)
   add_hdmitsuba_test(mesh_test tests/mesh_test.cc)
   add_hdmitsuba_test(geometry_processor_test mesh/tests/geometry_processor_test.cc)

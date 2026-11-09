@@ -352,13 +352,14 @@ def _convert_render_settings(
     render_settings: UsdRender.Settings | None,
     render_product_path: str | None = None,
     variant_name: str | None = None,
+    time: Usd.TimeCode = Usd.TimeCode.Default(),
 ) -> dict[str, Any]:
   """Handles the render settings and returns the integrator dictionary."""
   resolved_variant = variant_name
   if not resolved_variant and render_settings:
     prim = render_settings.GetPrim()
     if variant_attr := prim.GetAttribute('mitsuba:variant'):
-      resolved_variant = variant_attr.Get()
+      resolved_variant = variant_attr.Get(time)
 
   if resolved_variant:
     if resolved_variant != mi.variant():
@@ -371,7 +372,7 @@ def _convert_render_settings(
     return {'type': 'path'}
 
   prim = render_settings.GetPrim()
-  integrator_dict = util.extract_nested_dict(prim, 'mitsuba:integrator:')
+  integrator_dict = util.extract_nested_dict(prim, 'mitsuba:integrator:', time)
   if not integrator_dict.setdefault('type', 'path'):
     raise ValueError('mitsuba:integrator:type cannot be empty, if specified.')
 
@@ -416,6 +417,7 @@ def convert_to_mitsuba(
       render_settings,
       render_product_path,
       variant_name,
+      time=time,
   )
 
   prototype_paths = instancing.get_prototype_paths(stage)
