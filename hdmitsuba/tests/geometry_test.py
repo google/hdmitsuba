@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""End-to-end AOV tests for the mesh geometry pipeline.
+"""End-to-end AOV tests for the mesh geometry and primvar pipeline.
 
 Each test builds a small quad grid over `[0, 1]^2` in the `z = 0` plane,
 renders geometric AOVs (`position`, `geo_normal`, `sh_normal`, `uv`, `albedo`,
@@ -177,6 +177,28 @@ def _create_diffuse_material(
   diffuse.CreateInput('reflectance', Sdf.ValueTypeNames.Color3f).Set(
       Gf.Vec3f(*color)
   )
+  material.CreateSurfaceOutput().ConnectToSource(
+      diffuse.ConnectableAPI(), 'surface'
+  )
+  return material
+
+
+def _create_primvar_material(
+    stage: Usd.Stage,
+    path: str,
+    primvar: str,
+    reader_type: str = 'float3',
+) -> UsdShade.Material:
+  """Creates a diffuse material whose reflectance reads `primvar`."""
+  material = UsdShade.Material.Define(stage, path)
+  diffuse = UsdShade.Shader.Define(stage, f'{path}/Diffuse')
+  diffuse.CreateIdAttr('mitsuba_diffuse')
+  reader = UsdShade.Shader.Define(stage, f'{path}/Reader')
+  reader.CreateIdAttr(f'UsdPrimvarReader_{reader_type}')
+  reader.CreateInput('varname', Sdf.ValueTypeNames.Token).Set(primvar)
+  diffuse.CreateInput(
+      'reflectance', Sdf.ValueTypeNames.Color3f
+  ).ConnectToSource(reader.ConnectableAPI(), 'result')
   material.CreateSurfaceOutput().ConnectToSource(
       diffuse.ConnectableAPI(), 'surface'
   )
@@ -554,3 +576,288 @@ def test_varying_normals():
   x, y = aovs['position'][..., 0], aovs['position'][..., 1]
   _assert_close(aovs['sh_normal'], normal)
   _assert_close(aovs['uv'], np.stack([x, 1.0 - y], axis=-1))
+
+
+# -----------------------------------------------------------------------------
+# Primvar interpolation, indexing, UV convention, and UsdPrimvarReader
+# -----------------------------------------------------------------------------
+
+
+def test_uv_v_flip_only_applies_to_mesh_texcoords():
+  """Mitsuba mesh UVs flip `v`, while `UsdPrimvarReader` reads authored `st`."""
+  stage = _create_stage()
+  mesh = _create_grid(stage, resolution=2)
+  _set_vertex_uvs(mesh)
+  _bind_material(
+      mesh,
+      _create_primvar_material(stage, '/Material', 'st', reader_type='float2'),
+  )
+
+  aovs = _render_aovs(stage)
+  x, y = aovs['position'][..., 0], aovs['position'][..., 1]
+  _assert_close(aovs['uv'], np.stack([x, 1.0 - y], axis=-1))
+  _assert_close(aovs['albedo'], np.stack([x, y, np.zeros_like(x)], axis=-1))
+
+
+# Under subdivision, indexed and flattened `faceVarying` primvars only match
+# with linear `'all'` interpolation, because smooth `faceVarying` subdivision
+# uses the index buffer to detect shared seam topology.
+@pytest.mark.parametrize(
+    'subdivision_level, fvar_interpolation',
+    [(0, 'cornersPlus1'), (2, 'all')],
+)
+def test_indexed_primvars_match_unindexed(
+    subdivision_level: int, fvar_interpolation: str
+):
+  stage = _create_stage()
+  mesh = _create_grid(
+      stage, resolution=2, subdivision_level=subdivision_level, bumpy=True
+  )
+  mesh.CreateFaceVaryingLinearInterpolationAttr(fvar_interpolation)
+
+  points = mesh.GetPointsAttr().Get()
+  face_vertex_indices = list(mesh.GetFaceVertexIndicesAttr().Get())
+  vertex_uvs = [(p[0], p[1]) for p in points]
+
+  # Left faces (0, 2) and right faces (1, 3) use distinct palette entries.
+  color_palette = [(0.8, 0.2, 0.1), (0.1, 0.5, 0.8)]
+  normal_palette = [(-0.3, 0.0, 1.0), (0.3, 0.0, 1.0)]
+  half_indices = [0] * 4 + [1] * 4 + [0] * 4 + [1] * 4
+  _bind_material(mesh, _create_primvar_material(stage, '/Material', 'color'))
+  _assert_close(_render_aovs(stage)['albedo'], (0.0, 0.0, 0.0))
+
+  # 1. Unindexed (one value per face corner).
+  _set_primvar(
+      mesh,
+      'st',
+      Sdf.ValueTypeNames.TexCoord2fArray,
+      UsdGeom.Tokens.faceVarying,
+      [vertex_uvs[i] for i in face_vertex_indices],
+  )
+  _set_primvar(
+      mesh,
+      'color',
+      Sdf.ValueTypeNames.Color3fArray,
+      UsdGeom.Tokens.faceVarying,
+      [color_palette[i] for i in half_indices],
+  )
+  _set_primvar(
+      mesh,
+      'normals',
+      Sdf.ValueTypeNames.Normal3fArray,
+      UsdGeom.Tokens.faceVarying,
+      [normal_palette[i] for i in half_indices],
+  )
+  unindexed = _render_aovs(stage)
+
+  # 2. Indexed (compact value table + explicit per-corner indices).
+  _set_primvar(
+      mesh,
+      'st',
+      Sdf.ValueTypeNames.TexCoord2fArray,
+      UsdGeom.Tokens.faceVarying,
+      vertex_uvs,
+      indices=face_vertex_indices,
+  )
+  _set_primvar(
+      mesh,
+      'color',
+      Sdf.ValueTypeNames.Color3fArray,
+      UsdGeom.Tokens.faceVarying,
+      color_palette,
+      indices=half_indices,
+  )
+  _set_primvar(
+      mesh,
+      'normals',
+      Sdf.ValueTypeNames.Normal3fArray,
+      UsdGeom.Tokens.faceVarying,
+      normal_palette,
+      indices=half_indices,
+  )
+  _assert_all_aovs_close(_render_aovs(stage), unindexed)
+
+
+@pytest.mark.parametrize('subdivision_level', [0, 2])
+@pytest.mark.parametrize(
+    'interpolation',
+    ['constant', 'uniform', 'vertex', 'varying', 'faceVarying'],
+)
+def test_primvar_interpolation(interpolation: str, subdivision_level: int):
+  stage = _create_stage()
+  mesh = _create_grid(stage, resolution=2, subdivision_level=subdivision_level)
+  mesh.CreateFaceVaryingLinearInterpolationAttr('all')
+  _bind_material(mesh, _create_primvar_material(stage, '/Material', 'color'))
+
+  points = mesh.GetPointsAttr().Get()
+  face_vertex_indices = mesh.GetFaceVertexIndicesAttr().Get()
+  quadrant_colors = [
+      (0.8, 0.1, 0.1),  # face 0: bottom-left
+      (0.1, 0.8, 0.1),  # face 1: bottom-right
+      (0.1, 0.2, 0.8),  # face 2: top-left
+      (0.8, 0.8, 0.1),  # face 3: top-right
+  ]
+  values_by_interpolation = {
+      'constant': [(0.25, 0.5, 0.75)],
+      'uniform': quadrant_colors,
+      'vertex': [(p[0], p[1], 0.5) for p in points],
+      'varying': [(p[0], p[1], 0.5) for p in points],
+      'faceVarying': [
+          (points[i][0], points[i][1], 0.5) for i in face_vertex_indices
+      ],
+  }
+  _set_primvar(
+      mesh,
+      'color',
+      Sdf.ValueTypeNames.Color3fArray,
+      interpolation,
+      values_by_interpolation[interpolation],
+  )
+
+  aovs = _render_aovs(stage)
+  albedo = aovs['albedo']
+  if interpolation == 'constant':
+    _assert_close(albedo, (0.25, 0.5, 0.75))
+  elif interpolation == 'uniform':
+    _assert_close(albedo[_HALF:, :_HALF], quadrant_colors[0])
+    _assert_close(albedo[_HALF:, _HALF:], quadrant_colors[1])
+    _assert_close(albedo[:_HALF, :_HALF], quadrant_colors[2])
+    _assert_close(albedo[:_HALF, _HALF:], quadrant_colors[3])
+  else:
+    x, y = aovs['position'][..., 0], aovs['position'][..., 1]
+    _assert_close(albedo, np.stack([x, y, np.full_like(x, 0.5)], axis=-1))
+
+
+def test_scalar_constant_st():
+  stage = _create_stage()
+  mesh = _create_grid(stage, resolution=2)
+  _render_aovs(stage)
+
+  _set_primvar(
+      mesh,
+      'st',
+      Sdf.ValueTypeNames.TexCoord2f,
+      UsdGeom.Tokens.constant,
+      Gf.Vec2f(0.25, 0.75),
+  )
+  _assert_close(_render_aovs(stage)['uv'], (0.25, 0.25))
+
+
+@pytest.mark.parametrize(
+    'reader_type, type_name, authored, expected_rgb',
+    [
+        # Scalars (both array and non-array constant primvars) broadcast to RGB.
+        ('float', 'FloatArray', 0.25, (0.25, 0.25, 0.25)),
+        ('float', 'Float', 0.25, (0.25, 0.25, 0.25)),
+        ('float', 'BoolArray', True, (1.0, 1.0, 1.0)),
+        ('float', 'Bool', True, (1.0, 1.0, 1.0)),
+        ('int', 'IntArray', 1, (1.0, 1.0, 1.0)),
+        ('int', 'Int', 1, (1.0, 1.0, 1.0)),
+        # 2D values pad the third channel with zero; 4D values drop the fourth.
+        ('float2', 'Float2Array', (0.25, 0.75), (0.25, 0.75, 0.0)),
+        ('float2', 'Float2', (0.25, 0.75), (0.25, 0.75, 0.0)),
+        ('float3', 'Color3fArray', (0.25, 0.5, 0.75), (0.25, 0.5, 0.75)),
+        ('float3', 'Color3f', (0.25, 0.5, 0.75), (0.25, 0.5, 0.75)),
+        ('float4', 'Float4Array', (0.25, 0.5, 0.75, 1.0), (0.25, 0.5, 0.75)),
+        ('float4', 'Float4', (0.25, 0.5, 0.75, 1.0), (0.25, 0.5, 0.75)),
+        ('normal', 'Normal3fArray', (0.25, 0.5, 0.75), (0.25, 0.5, 0.75)),
+        ('point', 'Point3fArray', (0.25, 0.5, 0.75), (0.25, 0.5, 0.75)),
+        ('vector', 'Vector3fArray', (0.25, 0.5, 0.75), (0.25, 0.5, 0.75)),
+    ],
+)
+def test_primvar_reader_types(
+    reader_type: str,
+    type_name: str,
+    authored: object,
+    expected_rgb: tuple[float, float, float],
+):
+  stage = _create_stage()
+  mesh = _create_grid(stage, resolution=2)
+  sdf_type = getattr(Sdf.ValueTypeNames, type_name)
+  _set_primvar(
+      mesh,
+      'pv',
+      sdf_type,
+      UsdGeom.Tokens.constant,
+      [authored] if sdf_type.isArray else authored,
+  )
+  _bind_material(
+      mesh, _create_primvar_material(stage, '/Material', 'pv', reader_type)
+  )
+  _assert_close(_render_aovs(stage)['albedo'], expected_rgb)
+
+
+@pytest.mark.parametrize(
+    'reader_type, type_name',
+    [
+        ('point', 'Point3fArray'),
+        ('normal', 'Normal3fArray'),
+        ('vector', 'Vector3fArray'),
+    ],
+)
+def test_primvar_reader_returns_object_space_values(
+    reader_type: str, type_name: str
+):
+  """User primvars with spatial roles keep their authored object-space values."""
+  stage = _create_stage()
+  mesh = _create_grid(stage, resolution=2)
+  # Rotate in XY around `(0.5, 0.5)` and scale Z so any world-space point,
+  # normal, or vector transform would alter `(0.25, 0.5, 0.75)`.
+  to_origin = Gf.Matrix4d().SetTranslate(Gf.Vec3d(-0.5, -0.5, 0.0))
+  rot_scale = Gf.Matrix4d().SetScale(
+      Gf.Vec3d(1.0, 1.0, 2.0)
+  ) * Gf.Matrix4d().SetRotate(Gf.Rotation(Gf.Vec3d(0, 0, 1), 90))
+  mesh.AddTransformOp().Set(to_origin * rot_scale * to_origin.GetInverse())
+
+  authored = (0.25, 0.5, 0.75)
+  _set_primvar(
+      mesh,
+      'pv',
+      getattr(Sdf.ValueTypeNames, type_name),
+      UsdGeom.Tokens.constant,
+      [authored],
+  )
+  _bind_material(
+      mesh, _create_primvar_material(stage, '/Material', 'pv', reader_type)
+  )
+  _assert_close(_render_aovs(stage)['albedo'], authored)
+
+
+def test_primvar_reader_with_preview_surface():
+  """`UsdPreviewSurface` reads primvars (including interface-wired `varname`)."""
+  stage = _create_stage()
+  mesh = _create_grid(stage, resolution=2)
+  authored = (0.2, 0.4, 0.6)
+  _set_primvar(
+      mesh,
+      'coat_tint',
+      Sdf.ValueTypeNames.Color3fArray,
+      UsdGeom.Tokens.constant,
+      [authored],
+  )
+
+  material = UsdShade.Material.Define(stage, '/Material')
+  varname_input = material.CreateInput('primvarName', Sdf.ValueTypeNames.Token)
+  varname_input.Set('coat_tint')
+
+  surface = UsdShade.Shader.Define(stage, '/Material/PreviewSurface')
+  surface.CreateIdAttr('UsdPreviewSurface')
+  surface.CreateInput('metallic', Sdf.ValueTypeNames.Float).Set(1.0)
+  reader = UsdShade.Shader.Define(stage, '/Material/Reader')
+  reader.CreateIdAttr('UsdPrimvarReader_float3')
+  reader.CreateInput('varname', Sdf.ValueTypeNames.Token).ConnectToSource(
+      varname_input
+  )
+  surface.CreateInput(
+      'diffuseColor', Sdf.ValueTypeNames.Color3f
+  ).ConnectToSource(reader.ConnectableAPI(), 'result')
+  material.CreateSurfaceOutput().ConnectToSource(
+      surface.ConnectableAPI(), 'surface'
+  )
+  _bind_material(mesh, material)
+
+  _assert_close(_render_aovs(stage)['albedo'], authored)
+
+  # Pointing `varname` at a missing primvar evaluates to zero in both backends.
+  varname_input.Set('missing_primvar')
+  _assert_close(_render_aovs(stage)['albedo'], (0.0, 0.0, 0.0))
