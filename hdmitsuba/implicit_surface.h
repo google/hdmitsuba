@@ -21,6 +21,8 @@
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
 
+#include "hdmitsuba/plugin_builder.h"
+
 PXR_NAMESPACE_OPEN_SCOPE
 
 class SceneManager;
@@ -52,6 +54,8 @@ class HdMitsubaImplicitSurface final : public HdRprim {
   void RemoveFromScene(SceneManager* scene);
 
   TfToken type_;
+  PluginSpecNode shape_spec_;
+  PluginSpecNode mitsuba_emitter_spec_;
   bool in_scene_ = false;
   bool warned_tapered_ = false;
 };

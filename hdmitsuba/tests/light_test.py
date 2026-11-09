@@ -609,3 +609,113 @@ def test_ies_matches_hdembree(
       atol=0.05,
       rtol=0.1,
   )
+
+
+def test_mitsuba_emitter_override_and_invalidation():
+  stage = Usd.Stage.Open(f'{test_helpers.TEST_ASSETS_PATH}/lights/spot.usda')
+  test_helpers.create_render_settings(stage, resolution=_RENDER_RESOLUTION)
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin')
+  image_before = engine.render()['color'][..., :3]
+
+  spot_prim = stage.GetPrimAtPath('/root/Area/Area')
+  cutoff_attr = spot_prim.CreateAttribute(
+      'mitsuba:emitter:cutoff_angle', Sdf.ValueTypeNames.Float
+  )
+  cutoff_attr.Set(8.0)
+  beam_attr = spot_prim.CreateAttribute(
+      'mitsuba:emitter:beam_width', Sdf.ValueTypeNames.Float
+  )
+  beam_attr.Set(8.0)
+  spot_prim.CreateAttribute(
+      'mitsuba:emitter:intensity:type', Sdf.ValueTypeNames.String
+  ).Set('rgb')
+  intensity_attr = spot_prim.CreateAttribute(
+      'mitsuba:emitter:intensity:value', Sdf.ValueTypeNames.Color3f
+  )
+  intensity_attr.Set((0.0, 15.0, 0.0))
+
+  image_after, _ = test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      output_prefix='test_mitsuba_emitter_override_spot',
+      atol=0.1,
+      engine=engine,
+  )
+  assert np.mean(np.abs(image_after[..., :3] - image_before)) > 0.02
+  assert np.mean(image_after[..., 1]) > np.mean(image_after[..., 0]) * 5.0
+
+  # Live leaf updates via TraversalCallback + parameters_changed must match
+  # usd_mitsuba offline rendering.
+  cutoff_attr.Set(22.0)
+  beam_attr.Set(12.0)
+  intensity_attr.Set((0.0, 0.0, 18.0))
+  image_blue, _ = test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      output_prefix='test_mitsuba_emitter_override_spot_updated',
+      atol=0.1,
+      engine=engine,
+  )
+  assert np.mean(image_blue[..., 2]) > np.mean(image_blue[..., 1]) * 5.0
+
+  # Removing `mitsuba:emitter:beam_width` falls back to single-emitter rebuild.
+  spot_prim.RemoveProperty('mitsuba:emitter:beam_width')
+  test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      output_prefix='test_mitsuba_emitter_override_spot_beam_removed',
+      atol=0.1,
+      engine=engine,
+  )
+
+
+def test_mitsuba_distant_and_dome_emitter_overrides():
+  stage = _create_stage()
+  stage.GetPrimAtPath('/domeLight').SetActive(False)
+  distant = UsdLux.DistantLight.Define(stage, '/distantLight')
+  distant.CreateIntensityAttr().Set(3.0)
+  distant.CreateNormalizeAttr().Set(True)
+  distant.AddRotateXOp().Set(-45.0)
+  distant_prim = distant.GetPrim()
+  distant_prim.CreateAttribute(
+      'mitsuba:emitter:direction', Sdf.ValueTypeNames.Vector3f
+  ).Set((0.3, -1.0, -0.2))
+
+  test_helpers.create_render_settings(stage, resolution=_RENDER_RESOLUTION)
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin', camera_path='/camera'
+  )
+  image_distant, _ = test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      camera_path='/camera',
+      output_prefix='test_mitsuba_distant_direction_override',
+      atol=0.05,
+      engine=engine,
+  )
+  assert np.max(image_distant[..., :3]) > 0.1
+
+  # Updating the USD transform must not re-inject `to_world` onto an emitter
+  # that specifies an explicit `mitsuba:emitter:direction`.
+  distant.GetOrderedXformOps()[0].Set(-60.0)
+  np.testing.assert_allclose(
+      engine.render()['color'][..., :3], image_distant[..., :3], atol=0.05
+  )
+
+  # Textured DomeLight with `mitsuba:emitter:filename` override must replace
+  # `inputs:texture:file` cleanly without passing both `bitmap` and `filename`.
+  env_stage = Usd.Stage.Open(
+      f'{test_helpers.TEST_ASSETS_PATH}/lights/envmap.usda'
+  )
+  test_helpers.create_render_settings(env_stage, resolution=_RENDER_RESOLUTION)
+  env_prim = env_stage.GetPrimAtPath('/root/env_light')
+  env_prim.CreateAttribute(
+      'mitsuba:emitter:filename', Sdf.ValueTypeNames.Asset
+  ).Set(
+      Sdf.AssetPath(
+          f'{test_helpers.TEST_ASSETS_PATH}/lights/textures/envmap_1x1.png'
+      )
+  )
+  test_helpers.assert_hydra_equal_to_offline(
+      env_stage,
+      output_prefix='test_mitsuba_dome_filename_override',
+      atol=0.1,
+  )

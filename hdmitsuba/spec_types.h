@@ -92,7 +92,7 @@ struct ShapingSpec {
 struct LightSpec : public BaseSpec {
   TfToken prim_type;
   // For mesh lights, which bake their transform into the vertices, this is the
-  // light frame of the `ies` emitter (see `GetMeshEmitterSpec` in mesh.cc).
+  // light frame of the `ies` emitter (see `GetMeshEmitterSpec` in light.h).
   MotionTransform transform;
   GfVec3f emission;
   float angle = 0.0f;
@@ -104,6 +104,25 @@ struct LightSpec : public BaseSpec {
   // Whether the `lightLink` collection includes everything (the default).
   bool light_link_everything = true;
   ShapingSpec shaping;
+  PluginSpecNode emitter_spec;
+  PluginSpecNode shape_spec;
+  std::optional<MotionTransform> committed_transform = std::nullopt;
+  std::optional<PluginSpecNode> committed_emitter_spec = std::nullopt;
+  std::optional<PluginSpecNode> committed_shape_spec = std::nullopt;
+
+  void FoldPendingFrom(const LightSpec& prev) {
+    committed_transform = prev.committed_transform;
+    committed_emitter_spec = prev.committed_emitter_spec;
+    committed_shape_spec = prev.committed_shape_spec;
+    BaseSpec::FoldPendingFrom(prev);
+  }
+
+  void MarkClean() {
+    BaseSpec::MarkClean();
+    committed_transform = transform;
+    committed_emitter_spec = emitter_spec;
+    committed_shape_spec = shape_spec;
+  }
 
   // Area lights are represented as Mitsuba shapes with an attached area
   // emitter, rather than standalone emitter objects.
@@ -161,6 +180,10 @@ struct MeshSpec : public BaseSpec {
   // If set, the shape is rendered as this native Mitsuba shape with a single
   // material, and the topology is unused.
   std::optional<ImplicitSurface> implicit_surface = std::nullopt;
+  PluginSpecNode shape_spec;
+  PluginSpecNode mitsuba_emitter_spec;
+  std::optional<PluginSpecNode> committed_shape_spec = std::nullopt;
+  std::optional<PluginSpecNode> committed_mitsuba_emitter_spec = std::nullopt;
   // Instance-to-world transforms when rendered through Mitsuba instances. For a
   // non-instanced mesh with an animated transform (or an implicit surface whose
   // transform is not supported by its native shape) this holds a single entry
@@ -170,15 +193,31 @@ struct MeshSpec : public BaseSpec {
   bool motion_wrapped = false;
   bool double_sided = false;
 
+  GfMatrix4d EffectiveTransform() const {
+    if (auto xform_it = shape_spec.params.find("to_world");
+        xform_it != shape_spec.params.end()) {
+      if (const auto extra = ExtractMatrix4d(xform_it->second)) {
+        return *extra * transform;
+      }
+    }
+    return transform;
+  }
+
   void FoldPendingFrom(const MeshSpec& prev) {
+    committed_shape_spec = prev.committed_shape_spec;
+    committed_mitsuba_emitter_spec = prev.committed_mitsuba_emitter_spec;
     if (emitter_spec.has_value() != prev.emitter_spec.has_value() ||
         (emitter_spec && emitter_spec->shaping != prev.emitter_spec->shaping) ||
         geometry.material_ids != prev.geometry.material_ids ||
         double_sided != prev.double_sided ||
         geometry.left_handed != prev.geometry.left_handed ||
         // A mirroring transform flips the triangle winding.
-        (transform.GetDeterminant() < 0.0) !=
-            (prev.transform.GetDeterminant() < 0.0) ||
+        (EffectiveTransform().GetDeterminant() < 0.0) !=
+            (prev.EffectiveTransform().GetDeterminant() < 0.0) ||
+        motion_wrapped != prev.motion_wrapped ||
+        !CanUpdatePluginStructureInPlace(prev.shape_spec, shape_spec) ||
+        !CanUpdatePluginStructureInPlace(prev.mitsuba_emitter_spec,
+                                         mitsuba_emitter_spec) ||
         !std::equal(instance_transforms.begin(), instance_transforms.end(),
                     prev.instance_transforms.begin(),
                     prev.instance_transforms.end(),
@@ -189,6 +228,12 @@ struct MeshSpec : public BaseSpec {
     }
     BaseSpec::FoldPendingFrom(prev);
   }
+
+  void MarkClean() {
+    BaseSpec::MarkClean();
+    committed_shape_spec = shape_spec;
+    committed_mitsuba_emitter_spec = mitsuba_emitter_spec;
+  }
 };
 
 struct CurveSpec : public BaseSpec {
@@ -197,6 +242,10 @@ struct CurveSpec : public BaseSpec {
   std::string plugin_name;
   std::vector<float> control_points;  // Flat packed [x, y, z, r] control points
   std::vector<uint32_t> segment_indices;  // Precomputed segment indices
+  bool double_sided = false;
+  std::optional<LightSpec> emitter_spec;
+  PluginSpecNode shape_spec;
+  PluginSpecNode mitsuba_emitter_spec;
 };
 
 struct ParticleFieldSpec : public BaseSpec {

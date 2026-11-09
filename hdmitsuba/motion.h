@@ -72,6 +72,13 @@ struct MotionSamples {
     }
     return std::move(result).Collapsed();
   }
+
+  bool operator==(const MotionSamples& other) const {
+    return samples == other.samples;
+  }
+  bool operator!=(const MotionSamples& other) const {
+    return !(*this == other);
+  }
 };
 
 using MotionTransform = MotionSamples<ScalarAffineTransform4f>;

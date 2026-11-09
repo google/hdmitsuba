@@ -108,6 +108,12 @@ class PrimTranslator {
                                      const PluginSpecNode& new_spec,
                                      bool* wrote_host_scalar = nullptr);
 
+  // Returns true if `shape` carries a `DirectionalArea` emitter directly or
+  // nested inside an `IesEmitter` (`DirectionalArea` caches surface area once
+  // in `set_shape()` and must be rebuilt when shape geometry changes).
+  static bool HasDirectionalAreaEmitter(
+      const mitsuba::Shape<Float, Spectrum>* shape);
+
   static TranslatedMaterial BuildMaterial(
       const MaterialSpec& spec,
       const TextureCache<Float, Spectrum>& texture_cache);
@@ -119,17 +125,29 @@ class PrimTranslator {
 
   static TranslatedLight BuildLight(const LightSpec& spec);
 
-  // Creates the `area` emitter of `spec`, wrapped in an `ies` emitter if `spec`
-  // has an IES profile.
-  static mitsuba::ref<mitsuba::Object> CreateAreaEmitter(const LightSpec& spec);
+  // Creates the `area` emitter of `spec` (with optional `emitter_override`),
+  // wrapped in an `ies` emitter if `spec` has active shaping.
+  static mitsuba::ref<mitsuba::Object> CreateAreaEmitter(
+      const LightSpec& spec, const PluginSpecNode& emitter_override = {});
 
   // Updates the radiance and IES light frame of an emitter created by
   // `CreateAreaEmitter`.
   static void UpdateAreaEmitterInPlace(
-      mitsuba::Emitter<Float, Spectrum>* emitter, const LightSpec& spec);
+      mitsuba::Emitter<Float, Spectrum>* emitter, const LightSpec& spec,
+      const PluginSpecNode& emitter_override = {});
+
+  static bool TryUpdateAreaEmitterInPlace(
+      mitsuba::Emitter<Float, Spectrum>* emitter, const LightSpec& spec,
+      const PluginSpecNode& old_emitter_spec,
+      const PluginSpecNode& new_emitter_spec,
+      bool* wrote_host_scalar = nullptr);
 
   static void UpdateLightInPlace(mitsuba::Object* light_obj,
                                  const LightSpec& spec);
+
+  static bool TryUpdateLightInPlace(mitsuba::Object* light_obj,
+                                    const LightSpec& spec,
+                                    bool* wrote_host_scalar = nullptr);
 
   static mitsuba::ref<mitsuba::Sensor<Float, Spectrum>> BuildSensor(
       const CameraSpec& spec, bool use_box_filter = false,
@@ -158,7 +176,8 @@ class PrimTranslator {
       const VertexPrimvarMap& primvars,
       const MeshAttributeRequests& mesh_attributes, mitsuba::Object* bsdf,
       mitsuba::Object* emitter_ptr, mitsuba::Object* sensor_ptr,
-      mitsuba::Object* interior_medium = nullptr);
+      mitsuba::Object* interior_medium = nullptr,
+      const PluginSpecNode& shape_spec = {});
 
   static void UpdateMeshInPlace(mitsuba::Object* mesh_obj,
                                 const VtIntArray& face_indices,
@@ -174,7 +193,10 @@ class PrimTranslator {
       const MeshAttributeRequests& mesh_attributes);
 
   static mitsuba::ref<mitsuba::Shape<Float, Spectrum>> BuildCurves(
-      const CurveSpec& spec, mitsuba::Object* bsdf);
+      const CurveSpec& spec, mitsuba::Object* bsdf,
+      mitsuba::Object* emitter_ptr = nullptr,
+      mitsuba::Object* sensor_ptr = nullptr,
+      mitsuba::Object* interior_medium = nullptr);
 
   static mitsuba::ref<mitsuba::Shape<Float, Spectrum>> BuildParticleField(
       const ParticleFieldSpec& spec);

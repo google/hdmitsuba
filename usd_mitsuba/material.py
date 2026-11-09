@@ -36,6 +36,8 @@ from pxr import Usd
 from pxr import UsdShade
 from hdmitsuba import geometry_ext as geom_lib
 
+from usd_mitsuba import util
+
 
 USD_TO_MI_PRINCIPLED_RENAMING = {
     'diffuseColor': 'base_color',
@@ -588,7 +590,9 @@ class MeshMaterial:
 
 
 def convert_mesh_material(
-    prim: Usd.Prim, double_sided: bool = False
+    prim: Usd.Prim,
+    double_sided: bool = False,
+    emitter_overrides: dict[str, Any] | None = None,
 ) -> MeshMaterial:
   """Parses a USD geometry prim and returns Mitsuba material properties.
 
@@ -601,6 +605,7 @@ def convert_mesh_material(
   Args:
     prim: The USD prim to extract the material from.
     double_sided: Whether the emitter of an emissive material is two-sided.
+    emitter_overrides: Optional `mitsuba:emitter:*` overrides from the shape.
 
   Returns:
     The converted material.
@@ -621,7 +626,13 @@ def convert_mesh_material(
         bsdf = mi.load_dict(bsdf_dict)
         if emitter_dict:
           # Like hdMitsuba, double-sided geometry emits from both sides.
-          emitter = mi.load_dict(emitter_dict | {'twosided': double_sided})
+          emitter_dict = emitter_dict | {'twosided': double_sided}
+          if emitter_overrides:
+            custom_type = emitter_overrides.get('type')
+            if custom_type and custom_type != emitter_dict.get('type'):
+              emitter_dict = {'type': custom_type}
+            util.deep_merge_dict(emitter_dict, emitter_overrides)
+          emitter = mi.load_dict(emitter_dict)
       elif shader.GetShaderId().startswith(_MI_PREFIX):
         if bsdf_dict := usd_mitsuba_material_to_dict(
             shader, mesh_attributes=mesh_attributes
@@ -673,6 +684,7 @@ def convert_mesh_material(
 def convert_material(
     prim: Usd.Prim,
     double_sided: bool = False,
+    emitter_overrides: dict[str, Any] | None = None,
 ) -> tuple[
     mi.BSDF | None, mi.Emitter | None, mi.Texture | None, mi.Medium | None
 ]:
@@ -683,12 +695,15 @@ def convert_material(
   Args:
     prim: The USD prim to extract the material from.
     double_sided: Whether the emitter of an emissive material is two-sided.
+    emitter_overrides: Optional `mitsuba:emitter:*` overrides from the shape.
 
   Returns:
     A tuple of the Mitsuba BSDF, emitter, displacement texture, and interior
     medium (each may be None if not found).
   """
-  mat = convert_mesh_material(prim, double_sided)
+  mat = convert_mesh_material(
+      prim, double_sided, emitter_overrides=emitter_overrides
+  )
   return mat.bsdf, mat.emitter, mat.displacement, mat.interior_medium
 
 
