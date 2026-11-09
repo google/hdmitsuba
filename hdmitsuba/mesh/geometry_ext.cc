@@ -216,16 +216,15 @@ MeshExtractionData ExtractMeshData(UsdStagePtr stage, const SdfPath& path,
 
   UsdGeomPrimvarsAPI primvars_api(mesh);
   for (const UsdGeomPrimvar& primvar : primvars_api.GetPrimvars()) {
-    HdPrimvarDescriptor desc;
-    desc.name = primvar.GetPrimvarName();
-    desc.interpolation =
+    const TfToken name = primvar.GetPrimvarName();
+    const HdInterpolation interpolation =
         UsdInterpolationToHdInterpolation(primvar.GetInterpolation());
     VtValue value;
     if (primvar.ComputeFlattened(&value, time) && !value.IsEmpty()) {
-      data.primvars[desc.name] = {std::move(value), desc};
-      if (desc.interpolation == HdInterpolationFaceVarying) {
-        primvar.Get(&data.unflattened_fvar_values[desc.name], time);
-        primvar.GetIndices(&data.fvar_indices[desc.name], time);
+      data.primvars[name] = {std::move(value), interpolation};
+      if (interpolation == HdInterpolationFaceVarying) {
+        primvar.Get(&data.unflattened_fvar_values[name], time);
+        primvar.GetIndices(&data.fvar_indices[name], time);
       }
     }
   }
@@ -233,20 +232,14 @@ MeshExtractionData ExtractMeshData(UsdStagePtr stage, const SdfPath& path,
   auto [points, normals] = GetMeshPointsAndNormals(prim, mesh, time);
 
   if (!points.empty()) {
-    HdPrimvarDescriptor desc;
-    desc.name = HdTokens->points;
-    desc.interpolation = HdInterpolationVertex;
-    desc.role = HdPrimvarRoleTokens->point;
-    data.primvars[desc.name] = {VtValue(std::move(points)), desc};
+    data.primvars[HdTokens->points] = {VtValue(std::move(points)),
+                                       HdInterpolationVertex};
   }
 
   if (!normals.empty()) {
-    HdPrimvarDescriptor desc;
-    desc.name = HdTokens->normals;
-    desc.interpolation =
-        UsdInterpolationToHdInterpolation(mesh.GetNormalsInterpolation());
-    desc.role = HdPrimvarRoleTokens->normal;
-    data.primvars[desc.name] = {VtValue(std::move(normals)), desc};
+    data.primvars[HdTokens->normals] = {
+        VtValue(std::move(normals)),
+        UsdInterpolationToHdInterpolation(mesh.GetNormalsInterpolation())};
   }
 
   std::vector<std::pair<SdfPath, VtIntArray>> subsets;
@@ -301,8 +294,8 @@ std::vector<SubMeshOutput> ProcessMesh(
       if (subdiv.HasFVarChannel(token)) {
         state.value = mesh_data.unflattened_fvar_values.at(token);
       }
-      state.value = subdiv.RefinePrimvar(state.value,
-                                         state.descriptor.interpolation, token);
+      state.value =
+          subdiv.RefinePrimvar(state.value, state.interpolation, token);
     }
     subdiv.RefineTopology(geometry);
   }
@@ -334,15 +327,16 @@ std::vector<SubMeshOutput> ProcessMesh(
 }
 
 template <typename Float, typename Spectrum>
-void AttachMeshAttributes(mitsuba::Object* mesh, const PrimvarMap& primvars,
+void AttachMeshAttributes(mitsuba::Object* mesh,
+                          const VertexPrimvarMap& primvars,
                           const MeshAttributeRequests& mesh_attributes) {
   PrimTranslator<Float, Spectrum>::AttachMeshAttributes(mesh, primvars,
                                                         mesh_attributes);
 }
 
-// Adds the requested `primvars` of a sub-mesh as vertex attributes to the
-// Mitsuba mesh `mesh` of the active variant, see `add_mesh_attributes` below.
-void AddMeshAttributes(const nb::object& mesh, const PrimvarMap& primvars,
+// Adds the requested primvars of `sub` as vertex attributes to the Mitsuba
+// mesh `mesh` of the active variant, see `add_mesh_attributes` below.
+void AddMeshAttributes(const nb::object& mesh, const SubMeshOutput& sub,
                        const MeshAttributeRequests& mesh_attributes) {
   using mitsuba::ClassName;
   using mitsuba::Color;
@@ -352,28 +346,25 @@ void AddMeshAttributes(const nb::object& mesh, const PrimvarMap& primvars,
   MI_INVOKE_VARIANT(
       ActiveVariant(), AttachMeshAttributes,
       reinterpret_cast<mitsuba::Object*>(nb::cast<uintptr_t>(mesh.attr("ptr"))),
-      primvars, mesh_attributes);
+      sub.primvars, mesh_attributes);
 }
 
 NB_MODULE(geometry_ext, m) {
   PXR_NS::RegisterIesEmitter();
   m.doc() = "Python bindings for hdmitsuba geometry processing utilities.";
 
-  nb::class_<PrimvarState>(m, "PrimvarState")
-      .def_rw("value", &PrimvarState::value);
-
   nb::class_<SubMeshOutput>(m, "SubMeshOutput")
       .def_ro("material_id", &SubMeshOutput::material_id)
       .def_ro("triangles", &SubMeshOutput::triangles)
-      .def_rw("primvars", &SubMeshOutput::primvars);
+      .def_ro("primvars", &SubMeshOutput::primvars);
 
   nb::class_<MeshExtractionData>(m, "MeshExtractionData")
       .def_ro("material_ids", &MeshExtractionData::material_ids);
 
   m.def("add_mesh_attributes", &AddMeshAttributes, nb::arg("mesh"),
-        nb::arg("primvars"), nb::arg("mesh_attributes"),
+        nb::arg("sub"), nb::arg("mesh_attributes"),
         "Adds the `(primvar name, channel count)` pairs `mesh_attributes` of "
-        "the sub-mesh `primvars` that exist to the Mitsuba mesh `mesh` of the "
+        "the sub-mesh `sub` that exist to the Mitsuba mesh `mesh` of the "
         "active variant as vertex attributes, like the Hydra delegate.");
   m.def("extract_mesh_data", &ExtractMeshData, nb::arg("stage"),
         nb::arg("path"), nb::arg("time"),

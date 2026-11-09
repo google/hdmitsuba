@@ -251,23 +251,28 @@ class SceneModel final : public SceneManager {
 
   ref<BSDF> DefaultBsdf() { return default_bsdf_; }
 
-  ref<BSDF> ResolveBsdf(const SdfPath& material_id,
-                        const PrimvarMap& primvars) {
+  static const VtValue& PrimvarValue(const VtValue& v) { return v; }
+  static const VtValue& PrimvarValue(const PrimvarState& s) { return s.value; }
+
+  template <typename Map>
+  ref<BSDF> ResolveBsdf(const SdfPath& material_id, const Map& primvars) {
     auto bsdf_it = bsdfs_.find(material_id);
     if (bsdf_it != bsdfs_.end()) {
       return bsdf_it->second;
     }
     // Fallback to the mesh's display color of specified.
     auto color_it = primvars.find(HdTokens->displayColor);
-    if (color_it != primvars.end() && !color_it->second.value.IsEmpty()) {
+    if (color_it != primvars.end() &&
+        !PrimvarValue(color_it->second).IsEmpty()) {
+      const VtValue& val = PrimvarValue(color_it->second);
       GfVec3f color(0.5f, 0.5f, 0.5f);
-      if (color_it->second.value.IsHolding<VtVec3fArray>()) {
-        const auto& colors = color_it->second.value.UncheckedGet<VtVec3fArray>();
+      if (val.IsHolding<VtVec3fArray>()) {
+        const auto& colors = val.UncheckedGet<VtVec3fArray>();
         if (!colors.empty()) {
           color = colors[0];
         }
-      } else if (color_it->second.value.IsHolding<GfVec3f>()) {
-        color = color_it->second.value.UncheckedGet<GfVec3f>();
+      } else if (val.IsHolding<GfVec3f>()) {
+        color = val.UncheckedGet<GfVec3f>();
       }
       auto color_key = std::make_tuple(color[0], color[1], color[2]);
 
@@ -1089,9 +1094,10 @@ class SceneModel final : public SceneManager {
       HdChangeTracker::DirtyNormals | HdChangeTracker::DirtyPrimvar |
       HdChangeTracker::DirtyTopology;
 
+  template <typename Map>
   void UpdateSubMeshEmitterAndBsdf(Shape* shape, const MeshSpec& spec,
                                    const SdfPath& material_id,
-                                   const PrimvarMap& primvars,
+                                   const Map& primvars,
                                    std::string_view key_prefix) {
     ref<BSDF> bsdf = ResolveBsdf(material_id, primvars);
     if (key_prefix.empty() && spec.dirty_bits != 0 && shape->is_emitter() &&

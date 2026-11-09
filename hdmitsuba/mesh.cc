@@ -406,7 +406,7 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
   };
 
   // Helper to sync and optionally refine a primvar
-  auto sync_primvar = [&](const TfToken& name, const HdPrimvarDescriptor& desc,
+  auto sync_primvar = [&](const TfToken& name, HdInterpolation interpolation,
                           bool refine = true) {
     // FaceVarying primvars are refined on their unflattened values, matching
     // the topology of their OpenSubdiv channel.
@@ -414,17 +414,14 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
         name, refine && subdiv_evaluator_.HasFVarChannel(name));
     if (value.IsEmpty()) return;
     if (refine && subdiv_evaluator_.IsSubdivided()) {
-      value =
-          subdiv_evaluator_.RefinePrimvar(value, desc.interpolation, desc.name);
+      value = subdiv_evaluator_.RefinePrimvar(value, interpolation, name);
     }
-    geometry_.primvars[name] = {std::move(value), desc};
+    geometry_.primvars[name] = {std::move(value), interpolation};
   };
 
   // 1. Explicitly sync points (built-in geometric attribute)
   if (*dirtyBits & HdChangeTracker::DirtyPoints) {
-    HdPrimvarDescriptor desc{HdTokens->points, HdInterpolationVertex,
-                             HdPrimvarRoleTokens->point};
-    sync_primvar(HdTokens->points, desc);
+    sync_primvar(HdTokens->points, HdInterpolationVertex);
   }
 
   // 2. Explicitly sync normals (only if no subdivision is used).
@@ -432,14 +429,10 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
       (*dirtyBits & HdChangeTracker::DirtyNormals)) {
     VtValue value = resolve_primvar_value(HdTokens->normals);
     if (!value.IsEmpty()) {
-      HdPrimvarDescriptor desc;
-      if (primvar_descriptors.contains(HdTokens->normals)) {
-        desc = primvar_descriptors.at(HdTokens->normals);
-      } else {
-        desc.name = HdTokens->normals;
-        desc.interpolation = HdInterpolationVertex;
-        desc.role = HdPrimvarRoleTokens->normal;
-      }
+      const HdInterpolation interpolation =
+          primvar_descriptors.contains(HdTokens->normals)
+              ? primvar_descriptors.at(HdTokens->normals).interpolation
+              : HdInterpolationVertex;
       size_t vertex_count = 0;
       auto points_it = geometry_.primvars.find(HdTokens->points);
       if (points_it != geometry_.primvars.end() &&
@@ -448,9 +441,10 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
       }
       size_t face_count = geometry_.face_vertex_counts.size();
       size_t corner_count = geometry_.face_vertex_indices.size();
-      if (ValidatePrimvarSize(value, desc.interpolation, vertex_count,
-                              face_count, corner_count)) {
-        geometry_.primvars[HdTokens->normals] = {std::move(value), desc};
+      if (ValidatePrimvarSize(value, interpolation, vertex_count, face_count,
+                              corner_count)) {
+        geometry_.primvars[HdTokens->normals] = {std::move(value),
+                                                 interpolation};
       } else {
         size_t actual_size =
             value.IsHolding<VtVec3fArray>()
@@ -460,10 +454,11 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
         if (actual_size > 1) {
           TF_WARN(
               "Ignored invalid normals for %s (size mismatch). "
-              "Interpolation: %d, Actual size: %zu, Expected (Vertex: %zu, Face: "
+              "Interpolation: %d, Actual size: %zu, Expected (Vertex: %zu, "
+              "Face: "
               "%zu, Corner: %zu)",
-              id.GetText(), (int)desc.interpolation, actual_size,
-              vertex_count, face_count, corner_count);
+              id.GetText(), (int)interpolation, actual_size, vertex_count,
+              face_count, corner_count);
         }
       }
     }
@@ -480,7 +475,7 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
       }
       TF_DEBUG(HDMITSUBA_SYNC).Msg("SyncPrimvar: %s\n", token.GetText());
       if (HdChangeTracker::IsPrimvarDirty(*dirtyBits, id, token)) {
-        sync_primvar(token, descriptor);
+        sync_primvar(token, descriptor.interpolation);
       }
     }
   }

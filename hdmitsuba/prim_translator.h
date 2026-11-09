@@ -134,13 +134,14 @@ class PrimTranslator {
   // `MeshAttributeName`.
   static mitsuba::ref<mitsuba::Shape<Float, Spectrum>> BuildMesh(
       const std::string& id, const VtIntArray& face_indices,
-      const PrimvarMap& primvars, const MeshAttributeRequests& mesh_attributes,
-      mitsuba::Object* bsdf, mitsuba::Object* emitter_ptr,
-      mitsuba::Object* sensor_ptr, mitsuba::Object* interior_medium = nullptr);
+      const VertexPrimvarMap& primvars,
+      const MeshAttributeRequests& mesh_attributes, mitsuba::Object* bsdf,
+      mitsuba::Object* emitter_ptr, mitsuba::Object* sensor_ptr,
+      mitsuba::Object* interior_medium = nullptr);
 
   static void UpdateMeshInPlace(mitsuba::Object* mesh_obj,
                                 const VtIntArray& face_indices,
-                                const PrimvarMap& primvars,
+                                const VertexPrimvarMap& primvars,
                                 const MeshAttributeRequests& mesh_attributes,
                                 HdDirtyBits dirty_bits);
 
@@ -148,7 +149,7 @@ class PrimTranslator {
   // per-vertex `primvars` to the Mitsuba mesh `mesh_obj` as vertex attributes,
   // like `BuildMesh`.
   static void AttachMeshAttributes(
-      mitsuba::Object* mesh_obj, const PrimvarMap& primvars,
+      mitsuba::Object* mesh_obj, const VertexPrimvarMap& primvars,
       const MeshAttributeRequests& mesh_attributes);
 
   static mitsuba::ref<mitsuba::Shape<Float, Spectrum>> BuildCurves(

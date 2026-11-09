@@ -54,23 +54,24 @@ def _to_mitsuba_mesh(
     The Mitsuba mesh.
   """
 
-  vertices = np.array(sub.primvars['points'].value)
+  primvars = sub.primvars
+  vertices = np.array(primvars['points'])
   faces = np.array(sub.triangles).reshape(-1, 3)
-  has_vertex_normals = 'normals' in sub.primvars
+  has_vertex_normals = 'normals' in primvars
   # Without authored normals the mesh is flat shaded. Requesting face normals
   # keeps Mitsuba from deriving smooth shading normals of its own.
   properties['face_normals'] = not has_vertex_normals
   texture_coordinates = (
-      np.array(sub.primvars['st'].value) if 'st' in sub.primvars else None
+      np.array(primvars['st']) if 'st' in primvars else None
   )
 
   normals = mi.TensorXf()
   if has_vertex_normals:
-      normals = mi.TensorXf(np.array(sub.primvars['normals'].value, dtype=np.float32))
+    normals = mi.TensorXf(np.array(primvars['normals'], dtype=np.float32))
   texcoords = mi.TensorXf()
   if texture_coordinates is not None:
-      texture_coordinates[:, 1] = 1 - texture_coordinates[:, 1]
-      texcoords = mi.TensorXf(texture_coordinates.astype(np.float32))
+    texture_coordinates[:, 1] = 1 - texture_coordinates[:, 1]
+    texcoords = mi.TensorXf(texture_coordinates.astype(np.float32))
 
   # The mesh fields are immutable after construction, so they all have to be
   # supplied up front.
@@ -81,7 +82,7 @@ def _to_mitsuba_mesh(
       normals=normals,
       texcoords=texcoords,
   )
-  geom_lib.add_mesh_attributes(mi_mesh, sub.primvars, mesh_attributes)
+  geom_lib.add_mesh_attributes(mi_mesh, sub, mesh_attributes)
   return mi_mesh
 
 

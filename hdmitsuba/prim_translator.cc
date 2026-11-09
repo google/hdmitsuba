@@ -1019,17 +1019,14 @@ typename Mesh::TensorXu32 LoadFaceTensor(const void* data, size_t rows) {
                                    {rows, size_t(3)});
 }
 
-// Populates `dst` (sized `vertex_count * channels`) from `state`. Returns false
-// if `state` does not hold a supported array type of size `vertex_count`.
-// If the source array layout already matches `channels` without needing a V
-// flip, sets `*direct_ptr` to the contiguous source float buffer instead of
-// copying into `dst`.
+// Populates `dst` (sized `vertex_count * channels`) from `value`. Returns false
+// if `value` does not hold a supported array type of size `vertex_count`.
+// If the source array layout already matches `channels`, sets `*direct_ptr` to
+// the contiguous source float buffer instead of copying into `dst`.
 bool ExtractAttributeBuffer(const std::string& name, size_t channels,
-                            size_t vertex_count, const PrimvarState& state,
-                            std::vector<float>* dst,
-                            const float** direct_ptr) {
+                            size_t vertex_count, const VtValue& value,
+                            std::vector<float>* dst, const float** direct_ptr) {
   *direct_ptr = nullptr;
-  const VtValue& value = state.value;
   if (value.GetArraySize() != vertex_count) {
     TF_WARN("Primvar '%s' has %zu values, but the mesh has %zu vertices.",
             name.c_str(), value.GetArraySize(), vertex_count);
@@ -1074,23 +1071,7 @@ bool ExtractAttributeBuffer(const std::string& name, size_t channels,
     return fill_scalar(value.UncheckedGet<VtIntArray>().cdata());
   }
   if (value.IsHolding<VtVec2fArray>()) {
-    const GfVec2f* src = value.UncheckedGet<VtVec2fArray>().cdata();
-    const bool flip =
-        channels == 2 &&
-        state.descriptor.role == HdPrimvarRoleTokens->textureCoordinate;
-    if (channels == 2 && !flip) {
-      *direct_ptr = src[0].data();
-      return true;
-    }
-    dst->assign(vertex_count * channels, 0.f);
-    float* out = dst->data();
-    for (size_t i = 0; i < vertex_count; ++i) {
-      out[i * channels] = src[i][0];
-      if (channels > 1) {
-        out[i * channels + 1] = flip ? 1.f - src[i][1] : src[i][1];
-      }
-    }
-    return true;
+    return copy_vec(value.UncheckedGet<VtVec2fArray>().cdata());
   }
   if (value.IsHolding<VtVec3fArray>()) {
     return copy_vec(value.UncheckedGet<VtVec3fArray>().cdata());
@@ -1104,7 +1085,7 @@ bool ExtractAttributeBuffer(const std::string& name, size_t channels,
 // Adds the primvars in `mesh_attributes` that exist in `primvars` to `packed`
 // as vertex attributes with the requested channel count.
 void AddPackedMeshAttributes(mitsuba::PackedMesh& packed, size_t vertex_count,
-                             const PrimvarMap& primvars,
+                             const VertexPrimvarMap& primvars,
                              const MeshAttributeRequests& mesh_attributes) {
   if (mesh_attributes.empty()) return;
   std::vector<float> scratch;
@@ -1125,11 +1106,9 @@ void AddPackedMeshAttributes(mitsuba::PackedMesh& packed, size_t vertex_count,
 
 // Adds the primvars in `mesh_attributes` that exist in `primvars` to `mesh` as
 // vertex attributes with the requested channel count. Float primvars are
-// broadcast, and vec2 primvars are padded with zeros. Texture coordinates were
-// flipped to Mitsuba's convention by `TransformPrimvars` and are flipped back
-// to USD's convention.
+// broadcast, and vec2 primvars are padded with zeros.
 template <typename Mesh>
-void AddMeshAttributes(Mesh* mesh, const PrimvarMap& primvars,
+void AddMeshAttributes(Mesh* mesh, const VertexPrimvarMap& primvars,
                        const MeshAttributeRequests& mesh_attributes) {
   if (mesh_attributes.empty()) return;
   const size_t vertex_count = mesh->vertex_count();
@@ -1153,9 +1132,10 @@ void AddMeshAttributes(Mesh* mesh, const PrimvarMap& primvars,
 MI_VARIANT mitsuba::ref<mitsuba::Shape<Float, Spectrum>>
 PrimTranslator<Float, Spectrum>::BuildMesh(
     const std::string& id, const VtIntArray& face_indices,
-    const PrimvarMap& primvars, const MeshAttributeRequests& mesh_attributes,
-    mitsuba::Object* bsdf, mitsuba::Object* emitter_ptr,
-    mitsuba::Object* sensor_ptr, mitsuba::Object* interior_medium) {
+    const VertexPrimvarMap& primvars,
+    const MeshAttributeRequests& mesh_attributes, mitsuba::Object* bsdf,
+    mitsuba::Object* emitter_ptr, mitsuba::Object* sensor_ptr,
+    mitsuba::Object* interior_medium) {
   using Mesh = mitsuba::Mesh<Float, Spectrum>;
 
   auto points_it = primvars.find(HdTokens->points);
@@ -1164,8 +1144,7 @@ PrimTranslator<Float, Spectrum>::BuildMesh(
     return nullptr;
   }
 
-  const auto& points_array =
-      points_it->second.value.UncheckedGet<VtVec3fArray>();
+  const auto& points_array = points_it->second.UncheckedGet<VtVec3fArray>();
   size_t vertex_count = points_array.size();
   if (vertex_count == 0) return nullptr;
 
@@ -1175,9 +1154,8 @@ PrimTranslator<Float, Spectrum>::BuildMesh(
   auto normals_it = primvars.find(HdTokens->normals);
   const GfVec3f* normals_ptr = nullptr;
   if (normals_it != primvars.end() &&
-      normals_it->second.value.IsHolding<VtVec3fArray>()) {
-    const auto& normals_array =
-        normals_it->second.value.UncheckedGet<VtVec3fArray>();
+      normals_it->second.IsHolding<VtVec3fArray>()) {
+    const auto& normals_array = normals_it->second.UncheckedGet<VtVec3fArray>();
     if (normals_array.size() == vertex_count) {
       normals_ptr = normals_array.cdata();
     }
@@ -1188,9 +1166,9 @@ PrimTranslator<Float, Spectrum>::BuildMesh(
   const GfVec2f* texcoords_ptr = nullptr;
   auto texcoords_it = primvars.find(kStToken);
   if (texcoords_it != primvars.end() &&
-      texcoords_it->second.value.IsHolding<VtVec2fArray>()) {
+      texcoords_it->second.IsHolding<VtVec2fArray>()) {
     const auto& texcoords_array =
-        texcoords_it->second.value.UncheckedGet<VtVec2fArray>();
+        texcoords_it->second.UncheckedGet<VtVec2fArray>();
     if (texcoords_array.size() == vertex_count) {
       texcoords_ptr = texcoords_array.cdata();
     }
@@ -1240,9 +1218,10 @@ PrimTranslator<Float, Spectrum>::BuildMesh(
       vrec[mitsuba::PackedFrameOffset + 2] = 0.f;
     }
     if (texcoords_ptr) {
+      // Mitsuba's v axis points down.
       const GfVec2f& uv = texcoords_ptr[i];
       vrec[mitsuba::PackedTexcoordOffset + 0] = uv[0];
-      vrec[mitsuba::PackedTexcoordOffset + 1] = uv[1];
+      vrec[mitsuba::PackedTexcoordOffset + 1] = 1.f - uv[1];
     } else {
       vrec[mitsuba::PackedTexcoordOffset + 0] = 0.f;
       vrec[mitsuba::PackedTexcoordOffset + 1] = 0.f;
@@ -1265,8 +1244,8 @@ PrimTranslator<Float, Spectrum>::BuildMesh(
 
 MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateMeshInPlace(
     mitsuba::Object* mesh_obj, const VtIntArray& face_indices,
-    const PrimvarMap& primvars, const MeshAttributeRequests& mesh_attributes,
-    HdDirtyBits dirty_bits) {
+    const VertexPrimvarMap& primvars,
+    const MeshAttributeRequests& mesh_attributes, HdDirtyBits dirty_bits) {
   using Mesh = mitsuba::Mesh<Float, Spectrum>;
   using TensorXf32 = typename Mesh::TensorXf32;
   using TensorXu32 = typename Mesh::TensorXu32;
@@ -1275,8 +1254,7 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateMeshInPlace(
 
   auto points_it = primvars.find(HdTokens->points);
   if (points_it == primvars.end()) return;
-  const auto& points_array =
-      points_it->second.value.UncheckedGet<VtVec3fArray>();
+  const auto& points_array = points_it->second.UncheckedGet<VtVec3fArray>();
   size_t vertex_count = points_array.size();
   size_t face_count = face_indices.size() / 3;
   if (vertex_count == 0 || face_count == 0) return;
@@ -1303,8 +1281,7 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateMeshInPlace(
 
   auto normals_it = primvars.find(HdTokens->normals);
   if (normals_it != primvars.end() && mesh->has_normals()) {
-    const auto& normals_array =
-        normals_it->second.value.UncheckedGet<VtVec3fArray>();
+    const auto& normals_array = normals_it->second.UncheckedGet<VtVec3fArray>();
     cb.set<TensorXf32>("normals",
                        LoadFloatTensor<Mesh>(normals_array.cdata(),
                                              normals_array.size(), 3));
@@ -1318,11 +1295,13 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateMeshInPlace(
     static const TfToken kStToken("st");
     auto texcoords_it = primvars.find(kStToken);
     if (texcoords_it != primvars.end() && mesh->has_texcoords()) {
-      const auto& texcoords_array =
-          texcoords_it->second.value.UncheckedGet<VtVec2fArray>();
-      cb.set<TensorXf32>("texcoords",
-                         LoadFloatTensor<Mesh>(texcoords_array.cdata(),
-                                               texcoords_array.size(), 2));
+      // Mitsuba's v axis points down.
+      VtVec2fArray texcoords =
+          texcoords_it->second.UncheckedGet<VtVec2fArray>();
+      for (GfVec2f& uv : texcoords) uv[1] = 1.f - uv[1];
+      cb.set<TensorXf32>(
+          "texcoords",
+          LoadFloatTensor<Mesh>(texcoords.cdata(), texcoords.size(), 2));
       keys.push_back("texcoords");
     }
   }
@@ -1345,7 +1324,7 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateMeshInPlace(
 }
 
 MI_VARIANT void PrimTranslator<Float, Spectrum>::AttachMeshAttributes(
-    mitsuba::Object* mesh_obj, const PrimvarMap& primvars,
+    mitsuba::Object* mesh_obj, const VertexPrimvarMap& primvars,
     const MeshAttributeRequests& mesh_attributes) {
   AddMeshAttributes(dynamic_cast<mitsuba::Mesh<Float, Spectrum>*>(mesh_obj),
                     primvars, mesh_attributes);
