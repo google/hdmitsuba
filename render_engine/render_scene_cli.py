@@ -32,6 +32,49 @@ from pxr import UsdRender
 import usd_render
 
 _RENDER_SETTINGS_PATH = '/renderSettings'
+_DEFAULT_FRAME = 'default'
+
+
+def _parse_frame(value: str) -> str | float:
+  """Parses the --frame argument.
+
+  Args:
+    value: Either 'default' (case-insensitive) or a numeric time code.
+
+  Returns:
+    The string 'default' or the time code as a float.
+  """
+  if value.lower() == _DEFAULT_FRAME:
+    return _DEFAULT_FRAME
+  try:
+    return float(value)
+  except ValueError:
+    raise argparse.ArgumentTypeError(
+        f"invalid frame {value!r}: expected a number or '{_DEFAULT_FRAME}'"
+    ) from None
+
+
+def _resolve_time_code(
+    stage: Usd.Stage, frame: str | float | None
+) -> Usd.TimeCode:
+  """Resolves the time code at which to render the stage.
+
+  Args:
+    stage: The USD stage to render.
+    frame: The parsed --frame argument. None selects the stage's start time
+      code if the stage has an authored time code range, and the default time
+      code otherwise. 'default' always selects the default time code.
+
+  Returns:
+    The time code to render at.
+  """
+  if frame is None:
+    if stage.HasAuthoredTimeCodeRange():
+      return Usd.TimeCode(stage.GetStartTimeCode())
+    return Usd.TimeCode.Default()
+  if frame == _DEFAULT_FRAME:
+    return Usd.TimeCode.Default()
+  return Usd.TimeCode(frame)
 
 
 def main() -> None:
@@ -69,6 +112,16 @@ def main() -> None:
       help=(
           'Output image path. If not set, writes to'
           ' /tmp/<scene_name>_<renderer>.<extension>.'
+      ),
+  )
+  parser.add_argument(
+      '--frame',
+      type=_parse_frame,
+      default=None,
+      help=(
+          'Time code to render, or "default" for UsdTimeCode::Default(). If'
+          ' not set, uses the stage start time code if the stage has an'
+          ' authored time code range, and the default time code otherwise.'
       ),
   )
   parser.add_argument(
@@ -155,7 +208,9 @@ def main() -> None:
       camera_path=camera_path,
       overrides=overrides,
   )
-  outputs = engine.render()
+  time_code = _resolve_time_code(stage, args.frame)
+  print(f'Rendering at time code {time_code}')
+  outputs = engine.render(time_code=time_code)
 
   dr.sync_thread()
   image = outputs['color']

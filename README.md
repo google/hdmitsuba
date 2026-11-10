@@ -116,10 +116,14 @@ python render_engine/render_scene_cli.py --scene /path/to/scene.usd
 
 # Render with a specific Mitsuba variant, sample count, and output path
 python render_engine/render_scene_cli.py --scene /path/to/scene.usd --variant llvm_ad_rgb --spp 32 --output output.png
+
+# Render an animated scene at a specific frame (time code)
+python render_engine/render_scene_cli.py --scene /path/to/scene.usd --frame 1030
 ```
 
 **Key Features of the CLI:**
 *   **Automatic Camera Framing**: If your USD stage has no authored cameras, the CLI automatically computes the scene's bounding box and creates a default camera (`/default_cam`) that frames the entire scene.
+*   **Time Code Selection**: Pass `--frame <time code>` to render an animated stage at a specific time code, or `--frame default` to render at `UsdTimeCode::Default()`. If `--frame` is omitted, the CLI renders at the stage's start time code if the stage has an authored time code range (`startTimeCode`/`endTimeCode`), and at the default time code otherwise.
 *   **Performance Profiling**: Pass the `--profile` flag to collect a detailed Chrome tracing JSON profile (saved as `<output_path>.trace.json`). You can load this file into [Perfetto UI](https://ui.perfetto.dev/) or `chrome://tracing` to inspect and profile execution times (JIT tracing, scene sync, rendering).
 *   **Dr.Jit Logging**: Pass `--drjit_log info` to print Dr.Jit's own log statements.
 
