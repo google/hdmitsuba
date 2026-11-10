@@ -604,7 +604,10 @@ def convert_mesh_material(prim: Usd.Prim) -> MeshMaterial:
 
   bsdf, emitter, displacement, interior_medium = None, None, None, None
   mesh_attributes = set()
-  material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
+  # Like hdMitsuba, resolve the "full" purpose (falling back to allPurpose).
+  material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial(
+      UsdShade.Tokens.full
+  )
   if material:
     if shader := find_shader(_get_surface_output(material)):
       if shader.GetShaderId() == 'UsdPreviewSurface':

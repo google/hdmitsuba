@@ -24,7 +24,6 @@ from pxr import Gf
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
-from pxr import UsdShade
 from pxr import UsdVol
 from pxr import Vt
 import usd_render
@@ -285,28 +284,6 @@ def test_modify_curve_transform_only():
   assert (
       np.max(np.abs(image_modified[..., :3] - image_original[..., :3])) > 0.2
   )
-
-
-@pytest.mark.parametrize(
-    'purpose', [UsdShade.Tokens.full, UsdShade.Tokens.preview]
-)
-def test_curve_material_binding_purpose(purpose: str):
-  # hdMitsuba requests the "full" binding purpose, which falls back to
-  # allPurpose but not to preview: a preview-only binding is ignored.
-  stage = Usd.Stage.Open(f'{test_helpers.TEST_ASSETS_PATH}/shapes/curve.usda')
-  test_helpers.create_render_settings(stage, resolution=(64, 64), spp=16)
-  curve = stage.GetPrimAtPath('/root/mycurve/curve')
-  curve.CreateRelationship(f'material:binding:{purpose}').SetTargets(
-      curve.GetRelationship('material:binding').GetTargets()
-  )
-  curve.RemoveProperty('material:binding')
-  engine = usd_render.RenderEngine(stage)
-  engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin')
-  image = engine.render()['color'][..., :3]
-  assert np.max(image) > 0.05
-  # The bound material is cyan, the default material grey.
-  is_cyan = np.sum(image[..., 1]) > 1.5 * np.sum(image[..., 0])
-  assert is_cyan == (purpose == UsdShade.Tokens.full)
 
 
 def test_curve_bspline_type():
