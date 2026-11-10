@@ -127,10 +127,53 @@ bool IsPrincipledNode(const HdMaterialNode2& node) {
          node.nodeTypeId == TfToken("mitsuba_principled");
 }
 
-// Mitsuba's principled BSDF only accepts constants for these inputs.
+// Maps a UsdPreviewSurface input onto a parameter of Mitsuba's principled BSDF.
+struct PreviewSurfaceParam {
+  TfToken usd_name;
+  std::string_view mitsuba_name;
+  bool invert_float = false;
+  // Mitsuba's principled BSDF only accepts a constant for this parameter.
+  bool scalar_only = false;
+};
+
+const std::vector<PreviewSurfaceParam>& PreviewSurfaceParams() {
+  static const absl::NoDestructor<std::vector<PreviewSurfaceParam>> params({
+      {TfToken("diffuseColor"), "base_color"},
+      {TfToken("roughness"), "roughness"},
+      {TfToken("metallic"), "metallic"},
+      {TfToken("clearcoat"), "clearcoat"},
+      {TfToken("clearcoatRoughness"), "clearcoat_gloss"},
+      {TfToken("ior"), "eta", false, true},
+      {TfToken("specular"), "specular", false, true},
+      {TfToken("opacity"), "spec_trans", true},
+  });
+  return *params;
+}
+
+// Returns whether the principled BSDF input `input_name`, named either after
+// the UsdPreviewSurface or the Mitsuba parameter, only accepts constants.
 bool IsScalarOnlyPrincipledInput(const TfToken& input_name) {
-  return input_name == TfToken("specular") || input_name == TfToken("ior") ||
-         input_name == TfToken("eta");
+  return std::any_of(PreviewSurfaceParams().begin(),
+                     PreviewSurfaceParams().end(), [&](const auto& param) {
+                       return param.scalar_only &&
+                              (param.usd_name == input_name ||
+                               param.mitsuba_name == input_name.GetString());
+                     });
+}
+
+// Returns whether ParsePreviewSurface reads textures from the UsdPreviewSurface
+// input `input_name`. All other inputs (e.g. occlusion) are ignored, and so is
+// displacement, which is only consumed through the displacement terminal.
+bool IsTexturedPreviewSurfaceInput(const TfToken& input_name) {
+  if (input_name == TfToken("emissiveColor") ||
+      input_name == TfToken("normal")) {
+    return true;
+  }
+  return std::any_of(PreviewSurfaceParams().begin(),
+                     PreviewSurfaceParams().end(), [&](const auto& param) {
+                       return !param.scalar_only &&
+                              param.usd_name == input_name;
+                     });
 }
 
 }  // namespace
@@ -223,18 +266,17 @@ void DiscoverTextures(
         if (!visited_nodes.insert(conn.upstreamNode).second) {
           return;
         }
+        const bool is_preview_surface =
+            node.nodeTypeId == TfToken("UsdPreviewSurface");
         const bool is_principled = IsPrincipledNode(node);
         for (const auto& [conn_input, connections] : node.inputConnections) {
           if (connections.empty()) {
             continue;
           }
-          if (is_principled && IsScalarOnlyPrincipledInput(conn_input)) {
-            continue;
-          }
-          // A UsdPreviewSurface's displacement is only consumed through the
-          // displacement terminal.
-          if (node.nodeTypeId == TfToken("UsdPreviewSurface") &&
-              conn_input == HdMaterialTerminalTokens->displacement) {
+          // Skip inputs whose textures the material parsers never consume.
+          if (is_preview_surface
+                  ? !IsTexturedPreviewSurfaceInput(conn_input)
+                  : is_principled && IsScalarOnlyPrincipledInput(conn_input)) {
             continue;
           }
           visit(connections[0], conn_input);
@@ -534,28 +576,11 @@ PrimTranslator<Float, Spectrum>::ParsePreviewSurface(
       return res;
     }
   }
-  struct ParamMapping {
-    TfToken usd_name;
-    std::string_view mitsuba_name;
-    bool invert_float = false;
-  };
-  static const absl::NoDestructor<std::vector<ParamMapping>> param_mappings({
-      {TfToken("diffuseColor"), "base_color"},
-      {TfToken("roughness"), "roughness"},
-      {TfToken("metallic"), "metallic"},
-      {TfToken("clearcoat"), "clearcoat"},
-      {TfToken("clearcoatRoughness"), "clearcoat_gloss"},
-      {TfToken("ior"), "eta"},
-      {TfToken("specular"), "specular"},
-      {TfToken("opacity"), "spec_trans", true},
-  });
-
   mitsuba::Properties props("principled");
   bool spec_trans_is_texture = false;
-  for (const auto& mapping : *param_mappings) {
-    const bool is_scalar_only = IsScalarOnlyPrincipledInput(mapping.usd_name);
+  for (const auto& mapping : PreviewSurfaceParams()) {
     mitsuba::ref<mitsuba::Object> texture = nullptr;
-    if (!is_scalar_only) {
+    if (!mapping.scalar_only) {
       texture = ResolveConnectedTexture<Float, Spectrum>(
           network2, preview_surface_node, mapping.usd_name, texture_cache,
           &res.mesh_attributes);
