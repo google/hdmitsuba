@@ -545,6 +545,28 @@ def test_unrefined_mesh_shading_normals(scheme: str, smooth: bool):
     _assert_close(aovs['sh_normal'], aovs['geo_normal'], atol=1e-5)
 
 
+def test_subdivision_render_settings_resync():
+  """Changing the subdivision settings re-subdivides synced meshes."""
+  stage = _create_stage()
+  mesh = _create_grid(stage, resolution=4, bumpy=True)
+  coarse = _render_aovs(stage)
+  _set_subdivision_level(mesh, 2)
+  refined = _render_aovs(stage)
+  UsdGeom.PrimvarsAPI(mesh).RemovePrimvar('mitsuba:subdivision_level')
+
+  engine = usd_render.RenderEngine(stage)
+  for level, expected in ((0, coarse), (2, refined), (0, coarse)):
+    engine.configure(
+        hydra_delegate_id='HdMitsubaRendererPlugin',
+        camera_path='/Camera',
+        overrides={'mitsuba:subdivision:default_level': level},
+    )
+    _assert_all_aovs_close(
+        test_helpers.render_aovs(stage, 'hydra', '/Camera', engine=engine),
+        expected,
+    )
+
+
 def test_subdivision_boundary_interpolation():
   stage = _create_stage(view_size=1.2)
   mesh = _create_grid(stage, resolution=4, subdivision_level=0)

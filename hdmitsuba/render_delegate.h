@@ -25,6 +25,7 @@
 #include <pxr/imaging/hd/changeTracker.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/rprimCollection.h>
+#include <pxr/imaging/hd/sceneIndex.h>
 #include <pxr/imaging/hd/types.h>
 #include <pxr/pxr.h>
 
@@ -39,7 +40,8 @@ PXR_NAMESPACE_OPEN_SCOPE
   ((integrator_max_depth, "mitsuba:integrator:max_depth")) \
   ((integrator_rr_depth, "mitsuba:integrator:rr_depth")) \
   ((use_kernel_freezing, "mitsuba:use_kernel_freezing")) \
-  ((denoise, "mitsuba:denoise"))
+  ((denoise, "mitsuba:denoise")) \
+  ((subdivision_default_level, "mitsuba:subdivision:default_level"))
 
 TF_DECLARE_PUBLIC_TOKENS(HdMitsubaRenderSettingsTokens,
                          HDMITSUBA_RENDER_SETTINGS_TOKENS);
@@ -104,6 +106,16 @@ class HdMitsubaRenderDelegate final : public HdRenderDelegate {
 
   void SetRenderSetting(const TfToken& key, const VtValue& value) override;
 
+  void SetTerminalSceneIndex(
+      const HdSceneIndexBaseRefPtr& terminalSceneIndex) override;
+
+  // Returns the `mitsuba:subdivision:default_level` setting.
+  int GetSubdivisionDefaultLevel() const {
+    return ResolveSetting(
+               HdMitsubaRenderSettingsTokens->subdivision_default_level)
+        .GetWithDefault<int>(0);
+  }
+
   // Stores the settings authored on the render settings prim, which
   // CommitResources() applies.
   void SyncPrimSettings(const VtDictionary& namespaced_settings);
@@ -143,6 +155,7 @@ class HdMitsubaRenderDelegate final : public HdRenderDelegate {
   // Whether `prim_settings_` or `delegate_settings_` changed since the last
   // CommitResources().
   bool settings_dirty_ = false;
+  HdSceneIndexBasePtr terminal_scene_index_;
 
   HdRenderSettingDescriptorList setting_descriptors_;
 };

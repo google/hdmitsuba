@@ -32,6 +32,7 @@ from usd_mitsuba import camera
 from usd_mitsuba import light
 from usd_mitsuba import material
 from usd_mitsuba import motion
+from usd_mitsuba import render_settings
 from usd_mitsuba import util
 
 
@@ -85,6 +86,31 @@ def _to_mitsuba_mesh(
   return mi_mesh
 
 
+def _default_subdivision_level(prim: Usd.Prim, time: Usd.TimeCode) -> int:
+  """Returns the subdivision level of a mesh that does not request one.
+
+  Like hdMitsuba, meshes with a smooth subdivision scheme are refined to the
+  `mitsuba:subdivision:default_level` of the render settings.
+
+  Args:
+    prim: The mesh prim.
+    time: The time code.
+
+  Returns:
+    The subdivision level.
+  """
+  settings = render_settings.get_render_settings(prim.GetStage())
+  if not settings:
+    return 0
+  attr = settings.GetPrim().GetAttribute('mitsuba:subdivision:default_level')
+  default_level = (attr.Get() if attr else None) or 0
+  is_smooth = UsdGeom.Mesh(prim).GetSubdivisionSchemeAttr().Get(time) in (
+      UsdGeom.Tokens.catmullClark,
+      UsdGeom.Tokens.loop,
+  )
+  return default_level if default_level > 0 and is_smooth else 0
+
+
 def convert_mesh(
     prim: Usd.Prim,
     subdivision_level: int,
@@ -97,7 +123,8 @@ def convert_mesh(
 
   Args:
     prim: The USD prim.
-    subdivision_level: The subdivision level.
+    subdivision_level: The subdivision level. Like a display style refine
+      level of 0 in hdMitsuba, 0 defers to the subdivision render settings.
     time: The time code.
     sensor_bindings: Precomputed shape path -> sensor prim map.
     custom_transform: Optional transform to use instead of local-to-world.
@@ -114,6 +141,8 @@ def convert_mesh(
   )
   if level_primvar and (level := level_primvar.Get()) is not None:
     subdivision_level = level
+  elif subdivision_level <= 0:
+    subdivision_level = _default_subdivision_level(prim, time)
 
   mesh_data = geom_lib.extract_mesh_data(stage, path, time)
   # Faces not bound to a GeomSubset use the material of the mesh itself (an

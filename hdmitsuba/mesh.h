@@ -66,8 +66,9 @@ class HdMitsubaMesh final : public HdMesh {
   // Topology (after subdivision), face materials and (refined) primvars.
   MeshGeometry geometry_;
 
-  // Resolves the effective subdivision level from the display style and the
-  // optional `mitsuba:subdivision_level` override.
+  // Resolves the effective subdivision level from the optional
+  // `mitsuba:subdivision_level` override, the display style and, if neither
+  // requests a level, the `mitsuba:subdivision:default_level` render setting.
   int ResolveRefineLevel(HdSceneDelegate* sceneDelegate) const;
 
   void SyncTopology(HdSceneDelegate* sceneDelegate, int refineLevel);

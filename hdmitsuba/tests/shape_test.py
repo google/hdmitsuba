@@ -340,6 +340,19 @@ def test_curve_width_world_scale():
   np.testing.assert_allclose(image_scaled_usd, image_ref_usd, atol=0.05)
 
 
+def test_subdivision_render_settings():
+  stage = Usd.Stage.Open(
+      f'{test_helpers.TEST_ASSETS_PATH}/shapes/subdivision_settings.usda'
+  )
+  test_helpers.create_render_settings(stage, resolution=(256, 256))
+  # A subdivision level of 0 defers to the subdivision render settings.
+  test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      output_prefix='test_subdivision_render_settings',
+      subdivision_level=0,
+  )
+
+
 def test_subdivision_refinement():
   stage = Usd.Stage.Open(
       f'{test_helpers.TEST_ASSETS_PATH}/shapes/subdiv_cube.usda'

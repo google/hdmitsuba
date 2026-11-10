@@ -57,6 +57,7 @@
 #include "hdmitsuba/render_param.h"
 #include "hdmitsuba/render_pass.h"
 #include "hdmitsuba/render_settings.h"
+#include "hdmitsuba/scene_index_plugin.h"
 #include "hdmitsuba/scene_manager.h"
 #include "hdmitsuba/particle_field.h"
 
@@ -137,6 +138,8 @@ void HdMitsubaRenderDelegate::Initialize() {
        VtValue(config.use_kernel_freezing == 1)},
       {"Enable Denoising (OptiX on CUDA, OIDN on CPU)",
        HdMitsubaRenderSettingsTokens->denoise, VtValue(false)},
+      {"Subdivision Default Level",
+       HdMitsubaRenderSettingsTokens->subdivision_default_level, VtValue(0)},
   };
   _PopulateDefaultSettings(setting_descriptors_);
 
@@ -301,11 +304,23 @@ void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* /*tracker*/) {
 
 void HdMitsubaRenderDelegate::SetRenderSetting(const TfToken& key,
                                                const VtValue& value) {
+  const int subdivision_default_level = GetSubdivisionDefaultLevel();
   HdRenderDelegate::SetRenderSetting(key, value);
   // An empty value unsets the setting.
   settings_dirty_ |= value.IsEmpty() ? delegate_settings_.erase(key) > 0
                                      : delegate_settings_.insert(key).second;
   if (!value.IsEmpty()) recent_delegate_settings_.insert(key);
+  // Hydra prims fed by scene indices cannot be dirtied during sync, so the
+  // meshes are dirtied here (before the render index exists, there are none).
+  // The scene index plugin dirties them when the render settings prim changes.
+  if (GetSubdivisionDefaultLevel() != subdivision_default_level) {
+    DirtyMeshDisplayStyles(terminal_scene_index_);
+  }
+}
+
+void HdMitsubaRenderDelegate::SetTerminalSceneIndex(
+    const HdSceneIndexBaseRefPtr& terminalSceneIndex) {
+  terminal_scene_index_ = terminalSceneIndex;
 }
 
 void HdMitsubaRenderDelegate::SyncPrimSettings(

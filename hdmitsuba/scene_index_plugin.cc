@@ -22,7 +22,8 @@
 // - A scene index publishing the motion interval (the union of all camera
 //   shutter intervals) on the absolute root prim, and invalidating light
 //   transforms when it changes. This is the only data source contributed here.
-//   It also resyncs the render settings prims when the active one changes.
+//   It also resyncs the render settings prims when the active one changes,
+//   and the meshes when the subdivision render settings change.
 // - A keyless API-schema adapter fixing *invalidation*: every other value
 //   hdMitsuba reads is a schema property or a primvar UsdImaging already
 //   surfaces, but UsdImagingStageSceneIndex drops a property change unless
@@ -35,7 +36,11 @@
 // UsdImagingStageSceneIndex. A separate plugin library without the Mitsuba
 // dependency would avoid both.
 
+#include "hdmitsuba/scene_index_plugin.h"
+
 #include <algorithm>
+#include <utility>
+#include <vector>
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/strings/match.h>
@@ -46,6 +51,7 @@
 #include <pxr/imaging/hd/dependencyForwardingSceneIndex.h>
 #include <pxr/imaging/hd/dirtyBitsTranslator.h>
 #include <pxr/imaging/hd/filteringSceneIndex.h>
+#include <pxr/imaging/hd/legacyDisplayStyleSchema.h>
 #include <pxr/imaging/hd/lightSchema.h>
 #include <pxr/imaging/hd/materialSchema.h>
 #include <pxr/imaging/hd/overlayContainerDataSource.h>
@@ -72,6 +78,7 @@
 #include "hdmitsuba/config.h"
 #include "hdmitsuba/mesh.h"
 #include "hdmitsuba/motion.h"
+#include "hdmitsuba/render_delegate.h"
 #include "hdmitsuba/utils.h"
 
 #if PXR_VERSION < 2605
@@ -87,6 +94,11 @@ PXR_NAMESPACE_OPEN_SCOPE
 //
 // Also resyncs the render settings prims when the active one changes, since
 // only that one applies (see HdMitsubaRenderSettings).
+//
+// Also resyncs the meshes when the subdivision render settings change, either
+// on the render settings prim or in the render delegate (see
+// DirtyMeshDisplayStyles): prims fed by scene indices cannot be dirtied
+// through the HdChangeTracker.
 class HdMitsuba_MotionIntervalSceneIndex final
     : public HdSingleInputFilteringSceneIndexBase {
  public:
@@ -112,6 +124,20 @@ class HdMitsuba_MotionIntervalSceneIndex final
     return _GetInputSceneIndex()->GetChildPrimPaths(prim_path);
   }
 
+  // Dirties the display style of all meshes, which makes them re-resolve
+  // their refine level.
+  void DirtyMeshes() {
+    HdSceneIndexObserver::DirtiedPrimEntries dirtied;
+    const HdSceneIndexBaseRefPtr& input = _GetInputSceneIndex();
+    for (const SdfPath& path : HdSceneIndexPrimView(input)) {
+      if (input->GetPrim(path).primType == HdPrimTypeTokens->mesh) {
+        dirtied.emplace_back(path,
+                             HdLegacyDisplayStyleSchema::GetDefaultLocator());
+      }
+    }
+    _SendPrimsDirtied(dirtied);
+  }
+
  protected:
   explicit HdMitsuba_MotionIntervalSceneIndex(
       const HdSceneIndexBaseRefPtr& input_scene)
@@ -125,11 +151,14 @@ class HdMitsuba_MotionIntervalSceneIndex final
   void _PrimsAdded(
       const HdSceneIndexBase& /*sender*/,
       const HdSceneIndexObserver::AddedPrimEntries& entries) override {
+    bool subdivision_changed = false;
     for (const auto& entry : entries) {
       TrackPrim(entry.primPath, entry.primType);
+      subdivision_changed |= UpdateSubdivisionSettings(entry.primPath);
     }
     _SendPrimsAdded(entries);
     UpdateMotionInterval();
+    if (subdivision_changed) DirtyMeshes();
   }
 
   void _PrimsRemoved(
@@ -154,7 +183,12 @@ class HdMitsuba_MotionIntervalSceneIndex final
         HdPrimvarsSchema::GetDefaultLocator().Append(
             HdMitsubaMotionTokens->motion_samples);
     HdSceneIndexObserver::DirtiedPrimEntries extra;
+    bool subdivision_changed = false;
     for (const auto& entry : entries) {
+      subdivision_changed |=
+          entry.dirtyLocators.Intersects(
+              HdRenderSettingsSchema::GetNamespacedSettingsLocator()) &&
+          UpdateSubdivisionSettings(entry.primPath);
       if (auto it = shutters_.find(entry.primPath);
           it != shutters_.end() &&
           entry.dirtyLocators.Intersects(shutter_locators)) {
@@ -166,6 +200,8 @@ class HdMitsuba_MotionIntervalSceneIndex final
       if (entry.primPath.IsAbsoluteRootPath() &&
           entry.dirtyLocators.Intersects(
               HdSceneGlobalsSchema::GetActiveRenderSettingsPrimLocator())) {
+        // The newly active prim may author other subdivision settings.
+        subdivision_changed = true;
         const HdSceneIndexBaseRefPtr& input = _GetInputSceneIndex();
         for (const SdfPath& path : HdSceneIndexPrimView(input)) {
           if (input->GetPrim(path).primType ==
@@ -179,6 +215,7 @@ class HdMitsuba_MotionIntervalSceneIndex final
     _SendPrimsDirtied(entries);
     if (!extra.empty()) _SendPrimsDirtied(extra);
     UpdateMotionInterval();
+    if (subdivision_changed) DirtyMeshes();
   }
 
  private:
@@ -229,9 +266,42 @@ class HdMitsuba_MotionIntervalSceneIndex final
     _SendPrimsDirtied(dirtied);
   }
 
+  // Returns whether `path` is a render settings prim whose authored
+  // subdivision default level changed.
+  bool UpdateSubdivisionSettings(const SdfPath& path) {
+    const HdSceneIndexPrim prim = _GetInputSceneIndex()->GetPrim(path);
+    if (prim.primType != HdPrimTypeTokens->renderSettings) return false;
+    const HdSampledDataSourceHandle source =
+        HdRenderSettingsSchema::GetFromParent(prim.dataSource)
+            .GetNamespacedSettings()
+            .Get(HdMitsubaRenderSettingsTokens->subdivision_default_level);
+    const VtValue value = source ? source->GetValue(0.0f) : VtValue();
+    return std::exchange(subdivision_default_level_, value) != value;
+  }
+
   absl::flat_hash_map<SdfPath, GfVec2f, SdfPath::Hash> shutters_;
   GfVec2f motion_interval_{0.0f};
+  // The subdivision default level authored on the render settings prim.
+  VtValue subdivision_default_level_;
 };
+
+void DirtyMeshDisplayStyles(const HdSceneIndexBasePtr& terminal_scene) {
+  // The scene indices appended by plugins (and the terminal caching scene
+  // index) each have a single input.
+  HdSceneIndexBase* current = get_pointer(terminal_scene);
+  while (current) {
+    if (auto* scene_index =
+            dynamic_cast<HdMitsuba_MotionIntervalSceneIndex*>(current)) {
+      scene_index->DirtyMeshes();
+      return;
+    }
+    const auto* filtering = dynamic_cast<HdFilteringSceneIndexBase*>(current);
+    if (!filtering) return;
+    const std::vector<HdSceneIndexBaseRefPtr> inputs =
+        filtering->GetInputScenes();
+    current = inputs.empty() ? nullptr : get_pointer(inputs.front());
+  }
+}
 
 // Converts implicit surfaces to meshes and publishes the motion interval.
 //

@@ -40,6 +40,7 @@
 #include <pxr/imaging/hd/lightSchema.h>
 #include <pxr/imaging/hd/mesh.h>
 #include <pxr/imaging/hd/meshTopology.h>
+#include <pxr/imaging/hd/primvarsSchema.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/imaging/hd/tokens.h>
@@ -53,6 +54,7 @@
 #include "hdmitsuba/mesh/geometry_processor.h"
 #include "hdmitsuba/mesh/subdivision.h"
 #include "hdmitsuba/motion.h"
+#include "hdmitsuba/render_delegate.h"
 #include "hdmitsuba/render_param.h"
 #include "hdmitsuba/scene_manager.h"
 #include "hdmitsuba/spec_types.h"
@@ -229,12 +231,30 @@ void HdMitsubaMesh::_InitRepr(const TfToken& reprToken,
 }
 
 int HdMitsubaMesh::ResolveRefineLevel(HdSceneDelegate* sceneDelegate) const {
-  const VtValue subdiv_level_value =
-      sceneDelegate->Get(GetId(), HdMitsubaMeshTokens->subdivision_level);
-  if (subdiv_level_value.IsHolding<int>()) {
-    return subdiv_level_value.UncheckedGet<int>();
+  const HdSampledDataSourceHandle subdiv_level =
+      HdPrimvarsSchema::GetFromParent(GetPrimDataSource(sceneDelegate, GetId()))
+          .GetPrimvar(HdMitsubaMeshTokens->subdivision_level)
+          .GetPrimvarValue();
+  if (const VtValue value = subdiv_level ? subdiv_level->GetValue(0.0f)
+                                         : VtValue();
+      value.IsHolding<int>()) {
+    return value.UncheckedGet<int>();
   }
-  return GetDisplayStyle(sceneDelegate).refineLevel;
+  // A display style refine level of 0 cannot be told apart from an unset one
+  // (it is also the default of, e.g., usdview's lowest complexity), so only
+  // positive levels take precedence over the subdivision render settings.
+  if (const int refine_level = GetDisplayStyle(sceneDelegate).refineLevel;
+      refine_level > 0) {
+    return refine_level;
+  }
+  const int default_level =
+      static_cast<const HdMitsubaRenderDelegate*>(
+          sceneDelegate->GetRenderIndex().GetRenderDelegate())
+          ->GetSubdivisionDefaultLevel();
+  return default_level > 0 &&
+                 IsSmoothScheme(GetMeshTopology(sceneDelegate).GetScheme())
+             ? default_level
+             : 0;
 }
 
 void HdMitsubaMesh::SyncTopology(HdSceneDelegate* sceneDelegate,

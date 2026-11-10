@@ -7,7 +7,7 @@ This document provides an overview of the USD features supported by `hdMitsuba`,
 `hdMitsuba` translates many standard USD concepts into Mitsuba equivalents. We are continuously expanding the supported feature set, currently we support:
 
 ### Geometry & Animation
-*   **Meshes**: Flat meshes, subdivision surfaces (Catmull-Clark), and deforming geometry (such as skeletal animation). Subdivision surfaces are evaluated at a fixed subdivision level before rendering (no on-the-fly or adaptive tessellation). The subdivision level can be overridden per mesh by authoring the `primvars:mitsuba:subdivision_level` (int) primvar. Creases, corners, and hole faces (`holeIndices`) are supported, the latter also on meshes that are not subdivided.
+*   **Meshes**: Flat meshes, subdivision surfaces (Catmull-Clark), and deforming geometry (such as skeletal animation). Subdivision surfaces are evaluated at a fixed subdivision level before rendering (no on-the-fly or adaptive tessellation). The subdivision level can be overridden per mesh by authoring the `primvars:mitsuba:subdivision_level` (int) primvar, and meshes that do not request a level can be refined by default with the `mitsuba:subdivision:default_level` render setting. Creases, corners, and hole faces (`holeIndices`) are supported, the latter also on meshes that are not subdivided.
 *   **Curves**: Linear and cubic (`bspline` and `catmullRom`, with `nonperiodic` and `pinned` wrap modes) `BasisCurves` (translated to Mitsuba curve shapes). USD supports additional curve types (e.g., Bezier) which Mitsuba itself currently does not support.
 *   **Implicit Surfaces**: Spheres and cylinders are rendered as exact native Mitsuba shapes (cylinders as a `cylinder` with two `disk` caps), including under non-uniform scaling, which is handled by wrapping them in a Mitsuba instance. Since Mitsuba has no tapered cylinder, a cylinder with differing `radiusTop` and `radiusBottom` is rendered with its bottom radius. Displacement is not supported on these shapes. Cubes, planes, cones, and capsules are tessellated. Set the environment variable `HDMITSUBA_TESSELLATE_IMPLICIT_SURFACES=1` to tessellate spheres and cylinders as well.
 *   **Points**: `Points` prims are rendered as a sphere per point (using a single Mitsuba `ellipsoids` shape), with a diameter given by their constant or per-point `widths` (1 if not authored). Without a bound material, they use their constant or per-point `displayColor`. Primvar readers, emission, and displacement are not supported on points.
@@ -72,6 +72,16 @@ You can configure the render delegate by authoring a `RenderSettings` prim insid
     when requested (normal guidance requires `albedo`). Enabling
     `mitsuba:denoise` forces the `box` pixel filter so pixel noise remains
     uncorrelated.
+*   **`mitsuba:subdivision:default_level`**: Subdivision level (int, default
+    `0`, i.e., disabled) applied to smooth subdivision meshes (`catmullClark`
+    or `loop` scheme) whose refine level is not requested by the scene. This
+    avoids faceted silhouettes and shadow terminators on coarse cages, at the
+    cost of roughly four times the memory per level. Requested refine levels
+    always take precedence: a `primvars:mitsuba:subdivision_level` primvar
+    (including `0`, which opts a mesh out) or a positive display style refine
+    level (e.g., the viewport complexity). A display style refine level of `0`
+    is the Hydra default and therefore treated as not requested. Changing this
+    setting re-subdivides the affected meshes.
 
 ### Standard Hydra Viewport Settings
 *   **`enableInteractive`**:
