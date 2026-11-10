@@ -260,6 +260,39 @@ bool GeometryProcessor::ValidatePointCount(const SdfPath& id,
   return true;
 }
 
+void GeometryProcessor::RemoveTruncatedPrimvars(const SdfPath& id,
+                                                PrimvarMap& primvars,
+                                                size_t num_points,
+                                                size_t num_faces,
+                                                size_t num_corners) {
+  for (auto it = primvars.begin(); it != primvars.end();) {
+    const auto& [name, state] = *it;
+    const size_t size = state.value.GetArraySize();
+    size_t expected = 0;
+    switch (state.interpolation) {
+      case HdInterpolationUniform:
+        expected = num_faces;
+        break;
+      case HdInterpolationVertex:
+      case HdInterpolationVarying:
+        expected = num_points;
+        break;
+      case HdInterpolationFaceVarying:
+        expected = num_corners;
+        break;
+      default:
+        break;
+    }
+    if (size > 0 && size < expected) {
+      TF_WARN("Ignoring primvar %s of mesh %s with %zu values, expected %zu.",
+              name.GetText(), id.GetText(), size, expected);
+      it = primvars.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
 VtVec3fArray GeometryProcessor::ComputeFaceNormals(
     const VtVec3fArray& points, const VtIntArray& face_vertex_counts,
     const VtIntArray& face_vertex_indices, bool left_handed) {

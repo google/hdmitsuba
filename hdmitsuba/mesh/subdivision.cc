@@ -245,7 +245,10 @@ VtValue SubdivisionEvaluator::RefinePrimvarImpl(
     return value;
   }
   const T& initial_values = value.UncheckedGet<T>();
-  if (initial_values.empty()) {
+  // Truncated primvars are returned unrefined, to be removed by
+  // `GeometryProcessor::RemoveTruncatedPrimvars`.
+  if (initial_values.size() <
+      static_cast<size_t>(stencil->GetNumControlVertices())) {
     return value;
   }
 
@@ -277,10 +280,12 @@ VtValue SubdivisionEvaluator::RefinePrimvar(const VtValue& value,
   }
 
   // Uniform primvars hold one value per face, which refined faces inherit from
-  // their parent coarse face.
+  // their parent coarse face. Truncated primvars are returned unrefined, to be
+  // removed by `GeometryProcessor::RemoveTruncatedPrimvars`.
   if (interpolation == HdInterpolationUniform) {
     auto map_to_refined = [&](const auto& src) -> VtValue {
-      if (src.empty()) return value;
+      if (src.size() < static_cast<size_t>(refiner_->GetLevel(0).GetNumFaces()))
+        return value;
       std::decay_t<decltype(src)> dst(refined_to_coarse_map_.size());
       auto* dst_ptr = dst.data();
       for (size_t i = 0; i < refined_to_coarse_map_.size(); ++i) {

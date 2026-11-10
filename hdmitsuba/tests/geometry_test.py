@@ -477,6 +477,22 @@ def test_invalid_topology(subdivision_level: int):
   assert _render_aovs(stage)['depth'][_HALF, _HALF] == 0.0
 
 
+@pytest.mark.parametrize('subdivision_level', [0, 2])
+@pytest.mark.parametrize(
+    'interpolation',
+    [UsdGeom.Tokens.uniform, UsdGeom.Tokens.vertex, UsdGeom.Tokens.faceVarying],
+)
+def test_truncated_primvar(interpolation: str, subdivision_level: int):
+  """Primvars with too few values are ignored."""
+  stage = _create_stage()
+  mesh = _create_grid(stage, resolution=4, subdivision_level=subdivision_level)
+  without_st = _render_aovs(stage)
+  _set_primvar(
+      mesh, 'st', Sdf.ValueTypeNames.TexCoord2fArray, interpolation, [(0.5,) * 2]
+  )
+  _assert_all_aovs_close(_render_aovs(stage), without_st)
+
+
 # -----------------------------------------------------------------------------
 # Subdivision and displacement
 # -----------------------------------------------------------------------------

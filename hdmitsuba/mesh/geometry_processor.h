@@ -97,6 +97,14 @@ class GeometryProcessor {
                                  size_t num_referenced_points,
                                  size_t num_points);
 
+  // Removes the non-empty array primvars of the mesh `id` with fewer values
+  // than their interpolation requires for `num_points` points, `num_faces`
+  // faces and `num_corners` face corners, and warns about them. These would be
+  // read out of bounds by `ExpandPrimData`.
+  static void RemoveTruncatedPrimvars(const SdfPath& id, PrimvarMap& primvars,
+                                      size_t num_points, size_t num_faces,
+                                      size_t num_corners);
+
   // Triangulates a mesh topology and returns the triangle indices and primitive
   // parameters mapping each triangle to its parent polygon index. Triangles are
   // always wound counter-clockwise (right-handed), so the winding of
