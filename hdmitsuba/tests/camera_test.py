@@ -266,6 +266,9 @@ def test_irradiancemeter_rebind():
   second_cube.GetFaceVertexIndicesAttr().Set(
       source_cube.GetFaceVertexIndicesAttr().Get()
   )
+  second_cube.GetSubdivisionSchemeAttr().Set(
+      source_cube.GetSubdivisionSchemeAttr().Get()
+  )
   UsdGeom.Xformable(stage.GetPrimAtPath('/root/Cube2')).AddTranslateOp().Set(
       (0.0, 0.0, -6.0)
   )

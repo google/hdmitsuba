@@ -420,7 +420,7 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
     } else {
       set_smooth_normals();
     }
-  } else if (!authored_normals && mesh.is_subdivided) {
+  } else if (!authored_normals && mesh.is_smooth_surface) {
     set_smooth_normals();
   }
 

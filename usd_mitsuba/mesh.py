@@ -57,8 +57,8 @@ def _to_mitsuba_mesh(
   vertices = np.array(primvars['points'])
   faces = np.array(sub.triangles).reshape(-1, 3)
   has_vertex_normals = 'normals' in primvars
-  # Without authored normals the mesh is flat shaded. Requesting face normals
-  # keeps Mitsuba from deriving smooth shading normals of its own.
+  # Without (authored or computed) normals the mesh is flat shaded. Requesting
+  # face normals keeps Mitsuba from deriving smooth shading normals of its own.
   properties['face_normals'] = not has_vertex_normals
   texture_coordinates = (
       np.array(primvars['st']) if 'st' in primvars else None

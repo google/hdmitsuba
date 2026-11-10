@@ -251,7 +251,7 @@ void HdMitsubaMesh::SyncTopology(HdSceneDelegate* sceneDelegate,
   geometry_.face_vertex_indices = topology.GetFaceVertexIndices();
   geometry_.left_handed =
       topology.GetOrientation() == PxOsdOpenSubdivTokens->leftHanded;
-  geometry_.is_subdivided = false;
+  geometry_.is_smooth_surface = IsSmoothScheme(topology.GetScheme());
   geometry_.hole_indices = topology.GetHoleIndices();
   std::vector<std::pair<SdfPath, VtIntArray>> subsets;
   for (const HdGeomSubset& subset : topology.GetGeomSubsets()) {

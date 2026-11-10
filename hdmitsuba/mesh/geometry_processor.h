@@ -56,8 +56,10 @@ struct MeshGeometry {
   VtIntArray face_vertex_indices;
   // Whether the polygons are wound clockwise.
   bool left_handed = false;
-  // Whether the mesh was refined by subdivision, which requires smooth normals.
-  bool is_subdivided = false;
+  // Whether the mesh is a smooth (catmullClark or loop) subdivision surface.
+  // Without authored normals, such meshes get smooth normals, also when they
+  // are not refined (like Storm).
+  bool is_smooth_surface = false;
   // Faces that are not rendered. Subdivision removes them from the topology.
   VtIntArray hole_indices;
   // Materials of the faces, indexed by `face_material_indices`.
