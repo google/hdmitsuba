@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <optional>
 #include <string>
@@ -36,6 +37,7 @@
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/gf/vec3i.h>
 #include <pxr/base/gf/vec4f.h>
+#include <pxr/base/tf/diagnostic.h>
 #include <pxr/base/tf/token.h>
 #include <pxr/base/trace/trace.h>
 #include <pxr/base/vt/array.h>
@@ -216,6 +218,46 @@ VtVec3fArray GeometryProcessor::ComputeNormals(
     n.Normalize();
   }
   return normals;
+}
+
+std::optional<size_t> GeometryProcessor::ValidateTopology(
+    const SdfPath& id, const VtIntArray& face_vertex_counts,
+    const VtIntArray& face_vertex_indices) {
+  int64_t num_corners = 0;
+  int min_count = 0;
+  for (const int count : face_vertex_counts) {
+    num_corners += count;
+    min_count = std::min(min_count, count);
+  }
+  int min_index = 0;
+  int max_index = -1;
+  for (const int index : face_vertex_indices) {
+    min_index = std::min(min_index, index);
+    max_index = std::max(max_index, index);
+  }
+  if (min_count < 0 ||
+      num_corners != static_cast<int64_t>(face_vertex_indices.size()) ||
+      min_index < 0) {
+    TF_WARN("Mesh %s has an invalid topology (face vertex counts summing to "
+            "%lld, %zu face vertex indices in [%d, %d]). Removing it from the "
+            "scene.",
+            id.GetText(), static_cast<long long>(num_corners),
+            face_vertex_indices.size(), min_index, max_index);
+    return std::nullopt;
+  }
+  return static_cast<size_t>(max_index) + 1;
+}
+
+bool GeometryProcessor::ValidatePointCount(const SdfPath& id,
+                                           size_t num_referenced_points,
+                                           size_t num_points) {
+  if (num_points < num_referenced_points) {
+    TF_WARN("Mesh %s has face vertex indices up to %zu, but only %zu points. "
+            "Removing it from the scene.",
+            id.GetText(), num_referenced_points - 1, num_points);
+    return false;
+  }
+  return true;
 }
 
 VtVec3fArray GeometryProcessor::ComputeFaceNormals(

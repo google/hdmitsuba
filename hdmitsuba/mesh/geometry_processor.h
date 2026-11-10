@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -80,6 +81,21 @@ class GeometryProcessor {
  public:
   GeometryProcessor() = delete;
   ~GeometryProcessor() = delete;
+
+  // Returns the number of points referenced by the face vertex indices (the
+  // largest index plus one) if the face vertex counts are non-negative and sum
+  // to the number of face vertex indices, which are non-negative. Warns about
+  // the mesh `id` and returns std::nullopt otherwise.
+  static std::optional<size_t> ValidateTopology(
+      const SdfPath& id, const VtIntArray& face_vertex_counts,
+      const VtIntArray& face_vertex_indices);
+
+  // Returns whether the `num_points` points of the mesh `id` cover the
+  // `num_referenced_points` returned by `ValidateTopology`, and warns
+  // otherwise.
+  static bool ValidatePointCount(const SdfPath& id,
+                                 size_t num_referenced_points,
+                                 size_t num_points);
 
   // Triangulates a mesh topology and returns the triangle indices and primitive
   // parameters mapping each triangle to its parent polygon index. Triangles are

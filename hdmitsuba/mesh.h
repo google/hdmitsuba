@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include <cstddef>
+#include <optional>
 #include <vector>
 
 #include <absl/container/flat_hash_map.h>
@@ -82,6 +84,11 @@ class HdMitsubaMesh final : public HdMesh {
 
   bool in_scene_ = false;
   int refine_level_ = -1;  // -1 means "not yet synced"
+  // Number of points referenced by the face vertex indices, or std::nullopt
+  // if the topology is inconsistent.
+  std::optional<size_t> num_referenced_points_;
+  // Number of (coarse) points.
+  size_t num_points_ = 0;
   uint8_t primvar_layout_ = 0;
 };
 

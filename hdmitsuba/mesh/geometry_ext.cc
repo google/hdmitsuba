@@ -287,6 +287,19 @@ std::vector<SubMeshOutput> ProcessMesh(
     const GfMatrix4d& transform,
     const std::vector<std::tuple<nb::object, bool, bool>>& displacements,
     const std::set<std::string>& requested_attributes) {
+  const auto points_it = mesh_data.primvars.find(HdTokens->points);
+  const std::optional<size_t> num_referenced_points =
+      GeometryProcessor::ValidateTopology(mesh_data.id,
+                                          mesh_data.face_vertex_counts,
+                                          mesh_data.face_vertex_indices);
+  if (!num_referenced_points ||
+      !GeometryProcessor::ValidatePointCount(
+          mesh_data.id, *num_referenced_points,
+          points_it == mesh_data.primvars.end()
+              ? 0
+              : points_it->second.value.GetArraySize())) {
+    return {};
+  }
   SubdivisionEvaluator subdiv;
   subdiv.Initialize(mesh_data.GetTopology(), refine_level,
                     mesh_data.fvar_indices, mesh_data.id.GetNameToken());
