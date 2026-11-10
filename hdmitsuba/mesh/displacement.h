@@ -314,6 +314,8 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
     return {};
   }
   VtVec3fArray points = points_it->second.value.UncheckedGet<VtVec3fArray>();
+  GeometryProcessor::RemoveTruncatedPrimvars(id, primvars, points.size(),
+                                             counts.size(), indices.size());
   // Adds the intrinsic primvar `name` if it is requested.
   auto add_intrinsic = [&](const TfToken& name, VtValue value,
                            HdInterpolation interpolation) {

@@ -191,8 +191,21 @@ void HdMitsubaMesh::Sync(HdSceneDelegate* sceneDelegate,
   }
 
   if (topology_dirty || primvars_dirty || scene_update_dirty) {
-    if (topology_dirty || primvars_dirty) {
+    // Inconsistent topologies would be read out of bounds by the geometry
+    // pipeline, so such meshes are not rendered (like in Storm). The topology
+    // is validated in `SyncTopology` (before syncing primvars, which would be
+    // refined by a stale subdivision evaluator), the (possibly animated)
+    // points in O(1).
+    if (num_referenced_points_ && (topology_dirty || primvars_dirty)) {
       SyncPrimvars(sceneDelegate, dirtyBits);
+    }
+    if (!num_referenced_points_ ||
+        !GeometryProcessor::ValidatePointCount(
+            GetId(), *num_referenced_points_, num_points_)) {
+      RemoveFromScene(scene);
+      refine_level_ = -1;  // Fully re-sync the mesh once it is valid.
+      *dirtyBits = HdChangeTracker::Clean;
+      return;
     }
     UpdateScene(sceneDelegate, renderParam, dirtyBits);
   }
@@ -230,6 +243,9 @@ void HdMitsubaMesh::SyncTopology(HdSceneDelegate* sceneDelegate,
   refine_level_ = refineLevel;
   HdMeshTopology topology =
       HdMeshTopology(GetMeshTopology(sceneDelegate), refineLevel);
+  num_referenced_points_ = GeometryProcessor::ValidateTopology(
+      GetId(), topology.GetFaceVertexCounts(), topology.GetFaceVertexIndices());
+  if (!num_referenced_points_) return;
 
   geometry_.face_vertex_counts = topology.GetFaceVertexCounts();
   geometry_.face_vertex_indices = topology.GetFaceVertexIndices();
@@ -446,6 +462,8 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
     // the topology of their OpenSubdiv channel.
     VtValue value = resolve_primvar_value(
         name, refine && subdiv_evaluator_.HasFVarChannel(name));
+    // The number of (coarse) points is validated against the topology.
+    if (name == HdTokens->points) num_points_ = value.GetArraySize();
     if (value.IsEmpty()) return;
     if (refine && subdiv_evaluator_.IsSubdivided()) {
       value = subdiv_evaluator_.RefinePrimvar(value, interpolation, name);

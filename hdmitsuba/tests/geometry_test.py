@@ -460,6 +460,39 @@ def test_hole_indices(subdivision_level: int):
   _assert_close(_render_aovs(stage)['depth'], 0.0)
 
 
+@pytest.mark.parametrize('subdivision_level', [0, 2])
+def test_invalid_topology(subdivision_level: int):
+  """Meshes with inconsistent topologies are skipped, and shown once fixed."""
+  stage = _create_stage()
+  mesh = _create_grid(stage, resolution=2, subdivision_level=subdivision_level)
+  points = mesh.GetPointsAttr().Get()
+
+  # Face vertex indices exceeding the points (a points-only change).
+  mesh.GetPointsAttr().Set(points[:4])
+  assert _render_aovs(stage)['depth'][_HALF, _HALF] == 0.0
+  mesh.GetPointsAttr().Set(points)
+  assert _render_aovs(stage)['depth'][_HALF, _HALF] > 0.0
+  # Face vertex counts not summing to the number of face vertex indices.
+  mesh.GetFaceVertexCountsAttr().Set([4, 4, 4])
+  assert _render_aovs(stage)['depth'][_HALF, _HALF] == 0.0
+
+
+@pytest.mark.parametrize('subdivision_level', [0, 2])
+@pytest.mark.parametrize(
+    'interpolation',
+    [UsdGeom.Tokens.uniform, UsdGeom.Tokens.vertex, UsdGeom.Tokens.faceVarying],
+)
+def test_truncated_primvar(interpolation: str, subdivision_level: int):
+  """Primvars with too few values are ignored."""
+  stage = _create_stage()
+  mesh = _create_grid(stage, resolution=4, subdivision_level=subdivision_level)
+  without_st = _render_aovs(stage)
+  _set_primvar(
+      mesh, 'st', Sdf.ValueTypeNames.TexCoord2fArray, interpolation, [(0.5,) * 2]
+  )
+  _assert_all_aovs_close(_render_aovs(stage), without_st)
+
+
 # -----------------------------------------------------------------------------
 # Subdivision and displacement
 # -----------------------------------------------------------------------------

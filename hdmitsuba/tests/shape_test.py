@@ -48,6 +48,7 @@ def _set_mitsuba_variant():
         ('curve_catmull_rom_pinned', Usd.TimeCode.Default(), True),
         ('geom_subsets', Usd.TimeCode.Default(), True),
         ('empty_mesh', Usd.TimeCode.Default(), False),
+        ('invalid_topology', Usd.TimeCode.Default(), True),
         ('skinned_mesh', Usd.TimeCode(20), True),
         ('gaussian_splats', Usd.TimeCode.Default(), True),
         ('implicit_surfaces', Usd.TimeCode.Default(), True),
