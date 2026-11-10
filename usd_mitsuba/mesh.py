@@ -122,7 +122,12 @@ def convert_mesh(
       prim if material_id.isEmpty else stage.GetPrimAtPath(material_id)
       for material_id in mesh_data.material_ids
   ]
-  materials = [material.convert_mesh_material(subprim) for subprim in subprims]
+  # GeomSubsets share the sidedness of their mesh.
+  double_sided = UsdGeom.Mesh(prim).GetDoubleSidedAttr().Get()
+  materials = [
+      material.convert_mesh_material(subprim, double_sided)
+      for subprim in subprims
+  ]
 
   # Emitters and sensors are only attached to top-level shapes: Mitsuba does
   # not support them on instances, so prototypes do without, and shapes

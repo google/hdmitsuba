@@ -586,7 +586,9 @@ class MeshMaterial:
   mesh_attributes: tuple[tuple[str, int], ...] = ()
 
 
-def convert_mesh_material(prim: Usd.Prim) -> MeshMaterial:
+def convert_mesh_material(
+    prim: Usd.Prim, double_sided: bool = False
+) -> MeshMaterial:
   """Parses a USD geometry prim and returns Mitsuba material properties.
 
   This function will use the Mitsuba material variant if available, and
@@ -597,6 +599,7 @@ def convert_mesh_material(prim: Usd.Prim) -> MeshMaterial:
 
   Args:
     prim: The USD prim to extract the material from.
+    double_sided: Whether the emitter of an emissive material is two-sided.
 
   Returns:
     The converted material.
@@ -615,7 +618,9 @@ def convert_mesh_material(prim: Usd.Prim) -> MeshMaterial:
             shader, mesh_attributes
         )
         bsdf = mi.load_dict(bsdf_dict)
-        emitter = mi.load_dict(emitter_dict) if emitter_dict else None
+        if emitter_dict:
+          # Like hdMitsuba, double-sided geometry emits from both sides.
+          emitter = mi.load_dict(emitter_dict | {'twosided': double_sided})
       elif shader.GetShaderId().startswith(_MI_PREFIX):
         if bsdf_dict := usd_mitsuba_material_to_dict(
             shader, mesh_attributes=mesh_attributes
