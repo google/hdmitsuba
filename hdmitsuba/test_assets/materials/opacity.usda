@@ -26,6 +26,10 @@ def Xform "root"
 
     def Xform "Cube"
     {
+        double3 xformOp:translate = (-1.14, -1.2, 0)
+        float3 xformOp:scale = (0.4, 0.4, 0.4)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+
         def Mesh "Cube" (
             prepend apiSchemas = ["MaterialBindingAPI"]
         )
@@ -43,6 +47,42 @@ def Xform "root"
                 interpolation = "faceVarying"
             )
             uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def "CubeTransparent" (
+        references = </root/Cube>
+    )
+    {
+        double3 xformOp:translate = (-0.38, -0.4, 0)
+
+        over "Cube"
+        {
+            rel material:binding = </root/_materials/Transparent>
+        }
+    }
+
+    def "CubePresence" (
+        references = </root/Cube>
+    )
+    {
+        double3 xformOp:translate = (0.38, 0.4, 0)
+
+        over "Cube"
+        {
+            rel material:binding = </root/_materials/Presence>
+        }
+    }
+
+    def "CubeThreshold" (
+        references = </root/Cube>
+    )
+    {
+        double3 xformOp:translate = (1.14, 1.2, 0)
+
+        over "Cube"
+        {
+            rel material:binding = </root/_materials/Threshold>
         }
     }
 
@@ -66,6 +106,49 @@ def Xform "root"
                 asset inputs:file = @./textures/albedo.png@
                 float4 inputs:scale = (1, 1, 1, 0.25)
                 float outputs:a
+            }
+        }
+
+        # The alpha of this texture is 0.25, 0.5, 0.75 and 0.94 in its four
+        # quadrants. In the default `transparent` opacity mode, the opacity
+        # maps to transmission.
+        def Material "Transparent"
+        {
+            token outputs:surface.connect = </root/_materials/Transparent/Shader.outputs:surface>
+            def Shader "Shader"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.8, 0.1, 0.1)
+                float inputs:opacity.connect = </root/_materials/Transparent/Tex.outputs:a>
+                token outputs:surface
+            }
+            def Shader "Tex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./textures/uv_quadrants.png@
+                float outputs:a
+            }
+        }
+
+        # In the `presence` opacity mode, the opacity fades the surface.
+        def Material "Presence" (
+            inherits = </root/_materials/Transparent>
+        )
+        {
+            over "Shader"
+            {
+                token inputs:opacityMode = "presence"
+            }
+        }
+
+        # With an opacity threshold, the surface is cut out below it.
+        def Material "Threshold" (
+            inherits = </root/_materials/Transparent>
+        )
+        {
+            over "Shader"
+            {
+                float inputs:opacityThreshold = 0.4
             }
         }
     }
