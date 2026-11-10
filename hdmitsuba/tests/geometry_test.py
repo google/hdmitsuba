@@ -38,6 +38,7 @@ from pxr import UsdGeom
 from pxr import UsdShade
 import usd_render
 from hdmitsuba.tests import test_helpers
+from usd_mitsuba import translator as usd_mitsuba
 
 
 _IMAGE_SIZE = 32
@@ -311,8 +312,9 @@ _TRANSFORMS = {
         ('rigid', 0, False),
         ('rigid', 0, True),
         ('rigid', 2, False),
-        # Subdivision computes smooth normals in object space, which only
-        # commutes with rigid and mirroring transforms (not non-uniform scale).
+        # Subdivision meshes (also unrefined ones) get smooth normals computed
+        # in object space, which only commutes with rigid and mirroring
+        # transforms. Non-uniform scale is thus tested on polygonal meshes.
         ('nonuniform_scale', 0, False),
         ('nonuniform_scale', 0, True),
         ('mirror', 0, False),
@@ -332,6 +334,8 @@ def test_transform_matches_baked_geometry(
   mesh = _create_grid(
       stage, resolution=4, subdivision_level=subdivision_level, bumpy=True
   )
+  if transform_name == 'nonuniform_scale':
+    mesh.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
   _set_vertex_uvs(mesh)
   points = list(mesh.GetPointsAttr().Get())
   normals = [Gf.Vec3f(p[0] - 0.5, p[1] - 0.5, 1.0) for p in points]
@@ -508,10 +512,37 @@ def test_catmull_clark_subdivision():
 
   # Subdividing a curved cage changes surface positions.
   assert np.max(np.abs(coarse['position'] - refined['position'])) > 0.01
-  # Unsubdivided meshes without authored normals are flat-shaded, whereas
-  # subdivided meshes get smooth shading normals.
-  _assert_close(coarse['sh_normal'], coarse['geo_normal'], atol=1e-5)
+  # Subdivided meshes without authored normals get smooth shading normals.
   assert np.max(np.abs(refined['sh_normal'] - refined['geo_normal'])) > 1e-3
+
+
+@pytest.mark.parametrize(
+    'scheme, smooth',
+    [
+        ('catmullClark', True),
+        ('loop', True),
+        ('bilinear', False),
+        ('none', False),
+    ],
+)
+def test_unrefined_mesh_shading_normals(scheme: str, smooth: bool):
+  """Like Storm, unrefined smooth subdivision surfaces are smooth shaded."""
+  stage = _create_stage()
+  mesh = _create_grid(stage, resolution=4, bumpy=True)
+  mesh.CreateSubdivisionSchemeAttr(scheme)
+  aovs = _render_aovs(stage)
+
+  scene = mi.load_dict(usd_mitsuba.convert_to_mitsuba(stage))
+  (mi_mesh,) = scene.shapes()
+  assert mi_mesh.has_face_normals() != smooth
+  if smooth:
+    # The smooth normals match the ones computed by Mitsuba.
+    normals = np.array(mi_mesh.normals())
+    mi_mesh.recompute_normals()
+    _assert_close(normals, np.array(mi_mesh.normals()), atol=1e-5)
+    assert np.max(np.abs(aovs['sh_normal'] - aovs['geo_normal'])) > 1e-3
+  else:
+    _assert_close(aovs['sh_normal'], aovs['geo_normal'], atol=1e-5)
 
 
 def test_subdivision_boundary_interpolation():

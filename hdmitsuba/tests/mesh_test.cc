@@ -14,16 +14,10 @@
 
 #include "hdmitsuba/mesh.h"
 
-#include <cmath>
-#include <cstddef>
-#include <tuple>
-
-#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <mitsuba/core/fwd.h>
 #include <mitsuba/core/object.h>
 #include <mitsuba/render/fwd.h>
-#include <mitsuba/render/mesh.h>
 #include <mitsuba/render/scene.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/tf/token.h>
@@ -44,7 +38,6 @@
 #include <pxr/usd/usdShade/tokens.h>
 #include <pxr/usdImaging/usdImaging/delegate.h>
 
-#include "hdmitsuba/mesh/geometry_processor.h"
 #include "hdmitsuba/tests/test_util.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -57,64 +50,11 @@ using pxr::TfToken;
 using pxr::VtIntArray;
 using pxr::VtValue;
 using pxr::VtVec3fArray;
-using ::testing::Pointwise;
 
 using Float = float;
 using Spectrum = mitsuba::Color<Float, 3>;
 using Scene = mitsuba::Scene<Float, Spectrum>;
 static MitsubaStaticState<Scene> global_static_state;
-
-MI_IMPORT_TYPES(Mesh)
-
-MATCHER_P(Vec3fNear, tolerance, "") {
-  return (std::abs(std::get<0>(arg)[0] - std::get<1>(arg)[0]) < tolerance) &&
-         (std::abs(std::get<0>(arg)[1] - std::get<1>(arg)[1]) < tolerance) &&
-         (std::abs(std::get<0>(arg)[2] - std::get<1>(arg)[2]) < tolerance);
-}
-
-TEST(HdMitsubaMeshTest, ComputeNormalsMatchesMitsuba) {
-  // This checks that our custom normal computation matches Mitsuba's on a
-  // simple triangle mesh.
-
-  VtVec3fArray points = {GfVec3f(0.5, 1.0, 0.0), GfVec3f(4, 5, 6),
-                         GfVec3f(7, 8, 9), GfVec3f(-1, 2, 3)};
-  VtIntArray face_vertex_indices = {0, 1, 2, 0, 2, 3, 0, 3, 1};
-  VtIntArray face_vertex_counts;
-  size_t face_count = face_vertex_indices.size() / 3;
-  for (size_t i = 0; i < face_count; ++i) {
-    face_vertex_counts.push_back(3);
-  }
-
-  const VtVec3fArray hdmitsuba_normals = GeometryProcessor::ComputeNormals(
-      points, face_vertex_counts, face_vertex_indices, /*left_handed=*/false);
-
-  // Compute the normals using Mitsuba too.
-  size_t vertex_count = points.size();
-  // Leaving the shading normals unspecified makes Mitsuba derive them from
-  // the positions and the face winding order.
-  mitsuba::ref<Mesh> mitsuba_mesh = new Mesh(
-      "test_mesh",
-      typename Mesh::TensorXu32(
-          dr::load<typename Mesh::IndexBuffer>(face_vertex_indices.data(),
-                                               face_vertex_indices.size()),
-          {face_count, size_t(3)}),
-      typename Mesh::TensorXf32(
-          dr::load<typename Mesh::FloatBuffer>(points.data(), vertex_count * 3),
-          {vertex_count, size_t(3)}));
-
-  VtVec3fArray mitsuba_computed_normals;
-  const auto& mitsuba_normals_data = mitsuba_mesh->normals().array();
-  for (size_t i = 0; i < mitsuba_normals_data.size() / 3; ++i) {
-    mitsuba_computed_normals.push_back(
-        GfVec3f(mitsuba_normals_data[3 * i], mitsuba_normals_data[3 * i + 1],
-                mitsuba_normals_data[3 * i + 2]));
-  }
-
-  // Ensure hdmitsuba and Mitsuba computed normals are the same.
-  ASSERT_EQ(hdmitsuba_normals.size(), mitsuba_computed_normals.size());
-  EXPECT_THAT(hdmitsuba_normals,
-              Pointwise(Vec3fNear(1e-3), mitsuba_computed_normals));
-}
 
 TEST(HdMitsubaMeshTest, GeomSubsetsSkipUnusedBaseMaterialSlot) {
   pxr::UsdStageRefPtr stage = pxr::UsdStage::CreateInMemory();

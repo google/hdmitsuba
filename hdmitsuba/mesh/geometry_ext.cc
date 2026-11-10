@@ -205,6 +205,7 @@ MeshExtractionData ExtractMeshData(UsdStagePtr stage, const SdfPath& path,
   mesh.GetFaceVertexCountsAttr().Get(&data.face_vertex_counts, time);
   mesh.GetFaceVertexIndicesAttr().Get(&data.face_vertex_indices, time);
   mesh.GetSubdivisionSchemeAttr().Get(&data.scheme);
+  data.is_smooth_surface = IsSmoothScheme(data.scheme);
   TfToken orientation;
   mesh.GetOrientationAttr().Get(&orientation);
   data.left_handed = orientation == UsdGeomTokens->leftHanded;

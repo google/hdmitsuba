@@ -27,11 +27,19 @@
 #include <pxr/imaging/hd/enums.h>
 #include <pxr/imaging/pxOsd/meshTopology.h>
 #include <pxr/imaging/pxOsd/subdivTags.h>
+#include <pxr/imaging/pxOsd/tokens.h>
 #include <pxr/pxr.h>
 
 #include "hdmitsuba/mesh/geometry_processor.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
+
+// Returns whether `scheme` defines a smooth limit surface (catmullClark or
+// loop). Meshes with the `bilinear` or `none` scheme are not refined.
+inline bool IsSmoothScheme(const TfToken& scheme) {
+  return scheme == PxOsdOpenSubdivTokens->catmullClark ||
+         scheme == PxOsdOpenSubdivTokens->loop;
+}
 
 class SubdivisionEvaluator {
  public:

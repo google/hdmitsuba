@@ -112,9 +112,7 @@ void SubdivisionEvaluator::Initialize(
   Clear();
 
   const TfToken scheme = topology.GetScheme();
-  if ((scheme != PxOsdOpenSubdivTokens->catmullClark &&
-       scheme != PxOsdOpenSubdivTokens->loop) ||
-      refine_level <= 0) {
+  if (!IsSmoothScheme(scheme) || refine_level <= 0) {
     return;
   }
   fvar_indices_ = fvar_indices;
@@ -226,7 +224,6 @@ void SubdivisionEvaluator::RefineTopology(MeshGeometry& mesh) const {
   mesh.face_vertex_indices = refined_face_vertex_indices_;
   // OpenSubdiv refines `leftHanded` meshes into right-handed faces.
   mesh.left_handed = false;
-  mesh.is_subdivided = true;
   mesh.hole_indices = {};
   const size_t num_refined = refined_to_coarse_map_.size();
   VtIntArray mapped(num_refined);
