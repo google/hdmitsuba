@@ -161,6 +161,16 @@ class PrimTranslator {
   static void UpdateParticleFieldInPlace(mitsuba::Object* shape_obj,
                                          const ParticleFieldSpec& spec);
 
+  // Builds an `ellipsoids` shape holding a sphere per point of `points`, whose
+  // positions and radii are transformed by the similarity transform `to_world`.
+  // Without a `bsdf`, the spheres are diffuse with the per-point colors of
+  // `points` (or Mitsuba's default diffuse BSDF if there are none).
+  // `visibility` is the Mitsuba ray visibility.
+  static mitsuba::ref<mitsuba::Shape<Float, Spectrum>> BuildPoints(
+      const std::string& id, const ImplicitSurface& points,
+      const ScalarAffineTransform4f& to_world, mitsuba::Object* bsdf,
+      const std::string& visibility);
+
  private:
   static mitsuba::Properties BuildLightProperties(const LightSpec& spec);
 

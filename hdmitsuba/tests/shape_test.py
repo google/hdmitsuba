@@ -53,6 +53,7 @@ def _set_mitsuba_variant():
         ('gaussian_splats', Usd.TimeCode.Default(), True),
         ('implicit_surfaces', Usd.TimeCode.Default(), True),
         ('visibility', Usd.TimeCode.Default(), True),
+        ('points', Usd.TimeCode.Default(), True),
     ],
 )
 def test_render(scene_name: str, time: Usd.TimeCode, expect_non_black: bool):

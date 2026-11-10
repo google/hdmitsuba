@@ -39,6 +39,7 @@ from usd_mitsuba import light
 from usd_mitsuba import material
 from usd_mitsuba import mesh
 from usd_mitsuba import motion
+from usd_mitsuba import points
 from usd_mitsuba import render_settings as render_settings_lib
 from usd_mitsuba import util
 
@@ -200,6 +201,30 @@ def _convert_implicit_surface(
       }
       for s, part in parts.items()
   }
+
+
+def _convert_points(
+    prim: Usd.Prim,
+    time: Usd.TimeCode,
+    motion_interval: tuple[float, float],
+) -> dict[str, Any]:
+  """Converts a points prim to a Mitsuba `ellipsoids` shape."""
+  prim_id = util.get_mitsuba_id(prim)
+  to_world = motion.sample_world_transform(
+      prim, time, motion_interval, uniform=True
+  )
+  # Like spheres, the shape only supports similarity transforms.
+  wrap = isinstance(
+      to_world, mi.AnimatedTransform4f
+  ) or not _supports_transform(
+      {'type': 'sphere', 'to_world': mi.ScalarTransform4f()}, to_world
+  )
+  shape = points.convert_points(prim, time, None if wrap else to_world)
+  if shape is None:
+    return {}
+  if wrap:
+    return motion.wrap_in_instance(prim_id, [shape], to_world)
+  return {prim_id: shape}
 
 
 def _create_empty_mitsuba_curve(
@@ -477,6 +502,8 @@ def convert_to_mitsuba(
       mi_scene_dict.update(
           _convert_implicit_surface(prim, time, sensor_bindings, motion_interval)
       )
+    elif prim.IsA(UsdGeom.Points):
+      mi_scene_dict.update(_convert_points(prim, time, motion_interval))
     elif prim.IsA(UsdGeom.Camera):
       # A sensor bound to a shape is emitted as part of that shape.
       if camera.get_target_shape_path(prim) is None:

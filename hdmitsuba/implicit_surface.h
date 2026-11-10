@@ -31,6 +31,9 @@ class SceneManager;
 //
 // Mitsuba has no tapered cylinder, so a cylinder with differing top and bottom
 // radii is rendered with its bottom radius.
+//
+// Points are rendered as a sphere per point, using a single Mitsuba
+// `ellipsoids` shape. They neither emit light nor carry surface sensors.
 class HdMitsubaImplicitSurface final : public HdRprim {
  public:
   HdMitsubaImplicitSurface(const SdfPath& id, const TfToken& type);

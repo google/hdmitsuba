@@ -69,11 +69,12 @@ const TfTokenVector& HdMitsubaRenderDelegate::GetSupportedRprimTypes() const {
       HdMitsubaConfig::GetInstance().tessellate_implicit_surfaces
           ? new TfTokenVector{HdPrimTypeTokens->mesh,
                               HdPrimTypeTokens->basisCurves,
-                              HdPrimTypeTokens->particleField}
+                              HdPrimTypeTokens->particleField,
+                              HdPrimTypeTokens->points}
           : new TfTokenVector{
                 HdPrimTypeTokens->mesh, HdPrimTypeTokens->basisCurves,
                 HdPrimTypeTokens->particleField, HdPrimTypeTokens->sphere,
-                HdPrimTypeTokens->cylinder};
+                HdPrimTypeTokens->cylinder, HdPrimTypeTokens->points};
   return *kSupportedRprimTypes;
 }
 
@@ -154,7 +155,8 @@ HdRprim* HdMitsubaRenderDelegate::CreateRprim(const TfToken& typeId,
   } else if (typeId == HdPrimTypeTokens->particleField) {
     return new HdMitsubaParticleField(rprimId);
   } else if (typeId == HdPrimTypeTokens->sphere ||
-             typeId == HdPrimTypeTokens->cylinder) {
+             typeId == HdPrimTypeTokens->cylinder ||
+             typeId == HdPrimTypeTokens->points) {
     return new HdMitsubaImplicitSurface(rprimId, typeId);
   }
   return nullptr;

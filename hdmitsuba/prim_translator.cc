@@ -19,6 +19,7 @@
 #include <cstddef>
 #include <map>
 #include <memory>
+#include <numeric>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -1818,6 +1819,98 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateParticleFieldInPlace(
     return;
   }
   shape->parameters_changed(changed);
+}
+
+namespace {
+
+// Returns a texture that evaluates to the color of the point hit on an
+// `ellipsoids` shape, and adds the attribute it reads to `shape_props`.
+//
+// The `ellipsoids` shape only exposes per-ellipsoid attributes through
+// `eval_attribute_1/3`, which `mesh_attribute` textures do not call for
+// spectra. Instead, look up the colors in a `lut` texture indexed by the
+// point index, which it reads through `eval_attribute_1`.
+template <typename Float, typename Spectrum>
+mitsuba::ref<mitsuba::Object> PointColorTexture(
+    const VtVec3fArray& colors, mitsuba::Properties* shape_props) {
+  using FloatStorage = mitsuba::DynamicBuffer<dr::float32_array_t<Float>>;
+  using TensorXf32 = dr::Tensor<FloatStorage>;
+  using Texture = mitsuba::Texture<Float, Spectrum>;
+
+  const size_t count = colors.size();
+  std::vector<float> indices(count);
+  std::iota(indices.begin(), indices.end(), 0.f);
+  shape_props->set(
+      "vertex_point_index",
+      mitsuba::Any(TensorXf32(dr::load<FloatStorage>(indices.data(), count),
+                              {count, 1})));
+  mitsuba::Properties index_props("mesh_attribute");
+  index_props.set("name", "vertex_point_index");
+  mitsuba::Properties lut_props("lut");
+  lut_props.set("input", mitsuba::PluginManager::instance()->create_object(
+                             index_props, Texture::Variant, Texture::Type));
+  lut_props.set("filter_type", "nearest");
+  lut_props.set("input_max", static_cast<float>(count) - 1.f);
+  lut_props.set("data",
+                mitsuba::Any(TensorXf32(
+                    dr::load<FloatStorage>(colors.cdata(), count * 3),
+                    {count, 3})));
+  return mitsuba::PluginManager::instance()->create_object(
+      lut_props, Texture::Variant, Texture::Type);
+}
+
+}  // namespace
+
+MI_VARIANT mitsuba::ref<mitsuba::Shape<Float, Spectrum>>
+PrimTranslator<Float, Spectrum>::BuildPoints(
+    const std::string& id, const ImplicitSurface& points,
+    const ScalarAffineTransform4f& to_world, mitsuba::Object* bsdf,
+    const std::string& visibility) {
+  using FloatStorage = mitsuba::DynamicBuffer<dr::float32_array_t<Float>>;
+  using TensorXf32 = dr::Tensor<FloatStorage>;
+  using Point3f = mitsuba::Point<float, 3>;
+  using Vector3f = mitsuba::Vector<float, 3>;
+
+  const size_t count = points.points.size();
+  const float scale = dr::norm(to_world * Vector3f(1.f, 0.f, 0.f));
+  std::vector<float> data(count * kEllipsoidStride, 0.f);
+  for (size_t i = 0; i < count; ++i) {
+    float* record = data.data() + i * kEllipsoidStride;
+    const GfVec3f& point = points.points[i];
+    dr::store(record, to_world * Point3f(point[0], point[1], point[2]));
+    std::fill_n(
+        record + 3, 3,
+        scale * (points.radii.empty() ? points.radius : points.radii[i]));
+    record[9] = 1.f;  // The real part of the identity quaternion.
+  }
+  mitsuba::Properties props("ellipsoids");
+  props.set("extent", 1.f);
+  props.set("visibility", visibility);
+  props.set("data", mitsuba::Any(TensorXf32(
+                        dr::load<FloatStorage>(data.data(), data.size()),
+                        {count, kEllipsoidStride})));
+  if (bsdf != nullptr) {
+    props.set("bsdf", bsdf);
+  } else if (!points.colors.empty()) {
+    mitsuba::Properties bsdf_props("diffuse");
+    if (count == 1) {
+      // The `lut` texture of PointColorTexture requires at least two entries.
+      const GfVec3f& color = points.colors[0];
+      bsdf_props.set("reflectance",
+                     mitsuba::Color<float, 3>(color[0], color[1], color[2]));
+    } else {
+      bsdf_props.set("reflectance", PointColorTexture<Float, Spectrum>(
+                                        points.colors, &props));
+    }
+    props.set("bsdf", mitsuba::PluginManager::instance()->create_object(
+                          bsdf_props, mitsuba::BSDF<Float, Spectrum>::Variant,
+                          mitsuba::BSDF<Float, Spectrum>::Type));
+  }
+  mitsuba::ref<mitsuba::Shape<Float, Spectrum>> shape =
+      mitsuba::PluginManager::instance()
+          ->template create_object<mitsuba::Shape<Float, Spectrum>>(props);
+  shape->set_id(id);
+  return shape;
 }
 
 using mitsuba::Color;

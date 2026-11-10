@@ -1242,11 +1242,50 @@ class SceneModel final : public SceneManager {
     }
   }
 
+  // Builds the `ellipsoids` shape of the points of `spec` into `res.meshes`,
+  // or updates its BSDF in place. Instance prototypes are identified by a
+  // non-empty `key_prefix`.
+  void CommitPointsWork(const MeshSpec& spec, std::string_view key_prefix,
+                        CommittedMesh& res) {
+    const ImplicitSurface& points = *spec.implicit_surface;
+    const SdfPath& material_id = spec.geometry.material_ids[0];
+    // Like the constant displayColor, per-point colors are a fallback for
+    // geometry without a material, which `BuildPoints` handles.
+    ref<BSDF> bsdf = points.colors.empty() || bsdfs_.contains(material_id)
+                         ? ResolveBsdf(material_id, spec.geometry.primvars)
+                         : nullptr;
+    const std::string id_str = spec.id.GetAsString();
+    if (!spec.needs_rebuild) {
+      // Geometry changes rebuild the shape (see HdMitsubaImplicitSurface).
+      auto it = shapes_.find(absl::StrCat(key_prefix, id_str));
+      if (bsdf && TF_VERIFY(it != shapes_.end(), "Points not found: %s",
+                            id_str.c_str())) {
+        it->second->set_bsdf(bsdf.get());
+      }
+      return;
+    }
+    if (displacements_.contains(material_id)) {
+      TF_WARN("Displacement on %s is not supported.", id_str.c_str());
+    }
+    if (key_prefix.empty() &&
+        (HasEmitter(spec) || shape_sensors_.contains(spec.id))) {
+      TF_WARN("Emitters and surface sensors on points %s are not supported.",
+              id_str.c_str());
+    }
+    res.meshes.push_back(PrimTranslator::BuildPoints(
+        id_str, points, UsdToMitsubaTransform(spec.transform), bsdf.get(),
+        spec.visibility));
+  }
+
   void CommitNonInstancedMeshWork(MeshCommitWork* work, CommittedMesh& res,
                                   std::string_view key_prefix = "") {
     const auto& spec = *(work->spec);
     if (spec.implicit_surface.has_value()) {
-      CommitImplicitSurfaceWork(spec, key_prefix, res);
+      if (spec.implicit_surface->type == HdPrimTypeTokens->points) {
+        CommitPointsWork(spec, key_prefix, res);
+      } else {
+        CommitImplicitSurfaceWork(spec, key_prefix, res);
+      }
       return;
     }
     if (spec.needs_rebuild) {

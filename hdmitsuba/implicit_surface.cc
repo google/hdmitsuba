@@ -22,6 +22,7 @@
 #include <pxr/imaging/hd/changeTracker.h>
 #include <pxr/imaging/hd/cylinderSchema.h>
 #include <pxr/imaging/hd/instancer.h>
+#include <pxr/imaging/hd/primvarsSchema.h>
 #include <pxr/imaging/hd/sphereSchema.h>
 #include <pxr/imaging/hd/tokens.h>
 
@@ -96,11 +97,12 @@ void HdMitsubaImplicitSurface::Sync(HdSceneDelegate* sceneDelegate,
 
   const HdContainerDataSourceHandle prim_source =
       GetPrimDataSource(sceneDelegate, id);
-  ImplicitSurface surface{type_};
+  ImplicitSurface surface;
+  surface.type = type_;
   if (type_ == HdPrimTypeTokens->sphere) {
     surface.radius = GetValue(
         HdSphereSchema::GetFromParent(prim_source).GetRadius(), 1.0f);
-  } else {
+  } else if (type_ == HdPrimTypeTokens->cylinder) {
     const HdCylinderSchema cylinder =
         HdCylinderSchema::GetFromParent(prim_source);
     surface.height = GetValue(cylinder.GetHeight(), 2.0f);
@@ -115,6 +117,37 @@ void HdMitsubaImplicitSurface::Sync(HdSceneDelegate* sceneDelegate,
           "supported. Rendering it with its bottom radius. Set "
           "HDMITSUBA_TESSELLATE_IMPLICIT_SURFACES=1 to tessellate it instead.",
           id.GetText());
+    }
+  } else {
+    const HdPrimvarsSchema primvars =
+        HdPrimvarsSchema::GetFromParent(prim_source);
+    auto get_primvar = [&](const TfToken& name) {
+      const HdSampledDataSourceHandle value =
+          primvars.GetPrimvar(name).GetPrimvarValue();
+      return value ? value->GetValue(0.0f) : VtValue();
+    };
+    surface.points =
+        get_primvar(HdTokens->points).GetWithDefault<VtVec3fArray>();
+    if (surface.points.empty()) {
+      RemoveFromScene(scene);
+      *dirtyBits = HdChangeTracker::Clean;
+      return;
+    }
+    // Widths are diameters, either per point or constant, and default to 1.
+    VtFloatArray widths =
+        get_primvar(HdTokens->widths).GetWithDefault<VtFloatArray>();
+    if (widths.size() == surface.points.size()) {
+      for (float& width : widths) width *= 0.5f;
+      surface.radii = std::move(widths);
+    } else {
+      surface.radius = widths.empty() ? 0.5f : 0.5f * widths[0];
+    }
+    // A displayColor with a value per point; a single point is also matched by
+    // a constant one, which renders the same.
+    surface.colors =
+        get_primvar(HdTokens->displayColor).GetWithDefault<VtVec3fArray>();
+    if (surface.colors.size() != surface.points.size()) {
+      surface.colors.clear();
     }
   }
 
@@ -165,6 +198,12 @@ void HdMitsubaImplicitSurface::Sync(HdSceneDelegate* sceneDelegate,
     }
   }
   spec.dirty_bits = *dirtyBits;
+  // The `ellipsoids` shape of points bakes their geometry and transform.
+  spec.needs_rebuild =
+      type_ == HdPrimTypeTokens->points &&
+      (*dirtyBits &
+       (HdChangeTracker::DirtyPoints | HdChangeTracker::DirtyWidths |
+        HdChangeTracker::DirtyPrimvar | HdChangeTracker::DirtyTransform));
 
   scene->SyncMesh(std::move(spec));
   in_scene_ = true;
