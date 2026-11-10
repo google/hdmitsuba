@@ -24,6 +24,7 @@ from pxr import Gf
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
+from pxr import UsdShade
 from pxr import UsdVol
 from pxr import Vt
 import usd_render
@@ -284,6 +285,74 @@ def test_modify_curve_transform_only():
   assert (
       np.max(np.abs(image_modified[..., :3] - image_original[..., :3])) > 0.2
   )
+
+
+def _define_preview_material(
+    stage: Usd.Stage, path: str, color: tuple[float, float, float]
+) -> UsdShade.Material:
+  """Defines a UsdPreviewSurface material with a diffuse color.
+
+  Args:
+    stage: The USD stage to define the material in.
+    path: The path of the material prim.
+    color: The diffuse color of the material.
+
+  Returns:
+    The material.
+  """
+  material = UsdShade.Material.Define(stage, path)
+  shader = UsdShade.Shader.Define(stage, f'{path}/Surface')
+  shader.CreateIdAttr('UsdPreviewSurface')
+  shader.CreateInput('diffuseColor', Sdf.ValueTypeNames.Color3f).Set(color)
+  material.CreateSurfaceOutput().ConnectToSource(
+      shader.ConnectableAPI(), 'surface'
+  )
+  return material
+
+
+def _render_curve(engine: usd_render.RenderEngine, name: str) -> np.ndarray:
+  image = engine.render()['color'][..., :3]
+  test_helpers.write_image(image, f'test_curve_material_binding_{name}.png')
+  assert np.max(image) > 0.05
+  return image
+
+
+@pytest.mark.parametrize(
+    'binding_purpose', [UsdShade.Tokens.full, UsdShade.Tokens.preview]
+)
+def test_curve_material_binding_purpose(binding_purpose: str):
+  stage = Usd.Stage.Open(f'{test_helpers.TEST_ASSETS_PATH}/shapes/curve.usda')
+  test_helpers.create_render_settings(stage, resolution=(64, 64), spp=16)
+  curve = stage.GetPrimAtPath('/root/mycurve/curve')
+  curve.RemoveProperty('material:binding')
+  binding_api = UsdShade.MaterialBindingAPI.Apply(curve)
+  binding_api.Bind(
+      _define_preview_material(stage, '/root/_materials/Red', (1, 0, 0)),
+      materialPurpose=binding_purpose,
+  )
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin')
+  image = _render_curve(engine, f'{binding_purpose}_red')
+  if binding_purpose == UsdShade.Tokens.full:
+    # hdMitsuba requests the "full" material binding purpose, so a binding
+    # authored only as material:binding:full must be used for curves.
+    assert np.sum(image[..., 0]) > 10.0 * np.sum(image[..., 1:])
+
+    # Rebinding the material (DirtyMaterialId) must re-sync the curves.
+    binding_api.Bind(
+        _define_preview_material(stage, '/root/_materials/Green', (0, 1, 0)),
+        materialPurpose=binding_purpose,
+    )
+    image = _render_curve(engine, f'{binding_purpose}_green')
+    assert np.sum(image[..., 1]) > 10.0 * np.sum(image[..., [0, 2]])
+  else:
+    # A preview-only binding (material:binding:preview) does not apply to the
+    # "full" purpose requested by hdMitsuba: USD only falls back from a
+    # specific purpose to allPurpose. The curve thus uses the default grey
+    # material.
+    np.testing.assert_allclose(
+        np.sum(image[..., 1]), np.sum(image[..., 0]), rtol=0.1
+    )
 
 
 def test_curve_bspline_type():

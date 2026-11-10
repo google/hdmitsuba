@@ -230,8 +230,13 @@ void HdMitsubaCurves::Sync(HdSceneDelegate* sceneDelegate,
     return;
   }
 
-  // 5. Material binding
-  SdfPath material_id = GetParam<SdfPath>(data_source, material_locator);
+  // 5. Material binding. GetMaterialId resolves the binding for the render
+  // delegate's material binding purpose (e.g. material:binding:full), like
+  // meshes do. Fall back to the allPurpose binding of the data source.
+  SdfPath material_id = sceneDelegate->GetMaterialId(id);
+  if (material_id.IsEmpty()) {
+    material_id = GetParam<SdfPath>(data_source, material_locator);
+  }
 
   // 6. Convert data to CurveSpec and pass it to the scene manager.
   CurveSpec spec;
