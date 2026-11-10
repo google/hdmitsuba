@@ -1,0 +1,25 @@
+#usda 1.0
+(
+    doc = """Tests the UsdUVTexture default fallback color (0, 0, 0, 1) for a
+    missing texture without an authored fallback."""
+    defaultPrim = "root"
+    metersPerUnit = 1
+    subLayers = [
+        @./texture_fallback.usda@
+    ]
+    upAxis = "Z"
+)
+
+over "root"
+{
+    over "_materials"
+    {
+        over "Material"
+        {
+            over "Texture_Fallback_Test"
+            {
+                float4 inputs:fallback = None
+            }
+        }
+    }
+}

@@ -266,18 +266,18 @@ mitsuba::ref<mitsuba::VolumeGrid<Float, Spectrum>> LoadVolumeGrid(
   return new mitsuba::VolumeGrid<Float, Spectrum>(path);
 }
 
-// Returns a texture node's RGBA `fallback` parameter (magenta if unset). Alpha
-// defaults to 1 for RGB fallbacks.
+// Returns a texture node's RGBA `fallback` parameter. If unset, returns the
+// UsdUVTexture default (0, 0, 0, 1). Alpha defaults to 1 for RGB fallbacks.
 GfVec4f ExtractFallbackColor(const std::map<TfToken, VtValue>& parameters) {
   auto it = parameters.find(TfToken("fallback"));
-  if (it == parameters.end()) return GfVec4f(1.0f, 0.0f, 1.0f, 1.0f);
+  if (it == parameters.end()) return GfVec4f(0.0f, 0.0f, 0.0f, 1.0f);
   const VtValue& val = it->second;
   if (val.IsHolding<GfVec4f>()) return val.UncheckedGet<GfVec4f>();
   if (val.IsHolding<GfVec3d>()) {
     const GfVec3f c(val.UncheckedGet<GfVec3d>());
     return GfVec4f(c[0], c[1], c[2], 1.0f);
   }
-  const GfVec3f c = val.GetWithDefault(GfVec3f(1.0f, 0.0f, 1.0f));
+  const GfVec3f c = val.GetWithDefault(GfVec3f(0.0f));
   return GfVec4f(c[0], c[1], c[2], 1.0f);
 }
 

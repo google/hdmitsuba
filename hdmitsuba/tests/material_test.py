@@ -43,6 +43,7 @@ def _set_mitsuba_variant():
         'display_color',
         'mitsuba_bitmap',
         'opacity',
+        'texture_fallback_unauthored',
         'uv_texture',
         'uv_texture_scale_bias',
         'volumes',

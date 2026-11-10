@@ -302,13 +302,14 @@ def _convert_uv_texture(
   if input_name in ('normal', 'bump'):
     return None
 
-  # 2. If the file is missing/unresolved, use the fallback color (or magenta).
+  # 2. If the file is missing/unresolved, use the fallback color (or the
+  # UsdUVTexture default of (0, 0, 0, 1)).
   if input_name == 'normalmap':
     return {'type': 'rgb', 'value': (0.5, 0.5, 1.0)}
   if input_name == 'bumpmap':
     return {'type': 'uniform', 'value': 0.0}
   fb = shader.GetInput('fallback').Get()
-  fb = tuple(fb) if fb is not None else (1.0, 0.0, 1.0, 1.0)
+  fb = tuple(fb) if fb is not None else (0.0, 0.0, 0.0, 1.0)
   if ch_idx >= 0:
     fallback = {
         'type': 'uniform',
