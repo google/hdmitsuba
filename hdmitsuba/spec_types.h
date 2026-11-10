@@ -129,13 +129,22 @@ struct LightSpec : public BaseSpec {
 // An implicit surface rendered as a native Mitsuba shape (see
 // HdMitsubaImplicitSurface).
 struct ImplicitSurface {
-  TfToken type;  // HdPrimTypeTokens->sphere or HdPrimTypeTokens->cylinder.
+  // HdPrimTypeTokens->sphere, HdPrimTypeTokens->cylinder or
+  // HdPrimTypeTokens->points, which are rendered as a Mitsuba `ellipsoids`
+  // shape holding a sphere per point.
+  TfToken type;
   float radius = 1.0f;
   float height = 2.0f;  // Cylinders only, which are centered and aligned with Z.
+  // Points only: the sphere centers, their per-point radii (if empty, all
+  // spheres have `radius`), and optional per-point colors (the displayColor
+  // primvar).
+  VtVec3fArray points;
+  VtFloatArray radii;
+  VtVec3fArray colors;
 
   // Returns whether the native Mitsuba shape can be placed by `transform`
-  // without distortion. Spheres require a similarity transform, and cylinders
-  // an orthogonal one with uniform scaling in X and Y.
+  // without distortion. Spheres and points require a similarity transform, and
+  // cylinders an orthogonal one with uniform scaling in X and Y.
   bool SupportsTransform(const ScalarAffineTransform4f& transform) const {
     using Vector3f = mitsuba::Vector<float, 3>;
     const Vector3f x = transform * Vector3f(1.f, 0.f, 0.f),

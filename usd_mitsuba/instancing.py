@@ -26,6 +26,7 @@ from hdmitsuba import geometry_ext as geom_lib
 from usd_mitsuba import material
 from usd_mitsuba import mesh
 from usd_mitsuba import motion
+from usd_mitsuba import points
 from usd_mitsuba import util
 
 
@@ -140,6 +141,16 @@ def convert_point_instancer(
           if interior_medium is not None:
             part['interior'] = interior_medium
           group_dict[f'shape_{shape_idx}'] = part
+          shape_idx += 1
+      elif child_prim.IsA(UsdGeom.Points):
+        child_to_prototype = util.to_mitsuba_transform(
+            UsdGeom.Xformable(child_prim).ComputeLocalToWorldTransform(time)
+            * proto_to_local_transform
+        )
+        if shape := points.convert_points(
+            child_prim, time, child_to_prototype
+        ):
+          group_dict[f'shape_{shape_idx}'] = shape
           shape_idx += 1
     if shape_idx > 0:
       mi_scene_dict[group_id] = group_dict
