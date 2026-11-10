@@ -515,7 +515,9 @@ def convert_light(
   for light_class, converter in _LIGHT_CONVERTERS:
     if prim.IsA(light_class):
       emitter = converter(prim, world_transform, color, intensity, time)
-      vis = prim.GetAttribute('mitsuba:visibility').Get(time)
+      vis = util.parse_ray_visibility(
+          prim.GetAttribute('mitsuba:visibility').Get(time), None
+      )
       if _is_area_light(prim, time):
         emitter['bsdf'] = {'type': 'null'}
         emitter['visibility'] = vis or 'secondary'

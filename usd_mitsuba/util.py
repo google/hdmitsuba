@@ -83,6 +83,50 @@ def extract_nested_dict(prim: Usd.Prim, prefix: str) -> dict[str, Any]:
   return result
 
 
+def parse_ray_visibility(value: str | None, fallback: str | None) -> str | None:
+  """Validates the value of a `mitsuba:visibility` attribute or primvar.
+
+  Mirrors `ParseMitsubaVisibility` in hdmitsuba/utils.h.
+
+  Args:
+    value: The authored value, if any.
+    fallback: The value to return if `value` is not authored or invalid.
+
+  Returns:
+    The Mitsuba ray visibility ("all", "primary", "secondary" or "hidden"), or
+    `fallback`.
+  """
+  if not value:
+    return fallback
+  if value not in ('all', 'primary', 'secondary', 'hidden'):
+    Tf.Warn(
+        f"Ignoring invalid mitsuba:visibility '{value}', expected"
+        ' "all", "primary", "secondary" or "hidden".'
+    )
+    return fallback
+  return value
+
+
+def get_ray_visibility(
+    prim: Usd.Prim, time: Usd.TimeCode = Usd.TimeCode.Default()
+) -> str:
+  """Returns the Mitsuba ray visibility of a shape.
+
+  Args:
+    prim: The USD shape prim.
+    time: The time code to evaluate the primvar at.
+
+  Returns:
+    The value of the (inherited) `primvars:mitsuba:visibility` primvar ("all",
+    "primary", "secondary" or "hidden"), or "all" if it is not authored or
+    invalid.
+  """
+  primvar = UsdGeom.PrimvarsAPI(prim).FindPrimvarWithInheritance(
+      'mitsuba:visibility'
+  )
+  return parse_ray_visibility(primvar.Get(time) if primvar else None, 'all')
+
+
 def get_world_transform(
     prim: Usd.Prim, time: Usd.TimeCode = Usd.TimeCode.Default()
 ) -> mi.ScalarTransform4f:

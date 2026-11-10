@@ -1224,6 +1224,7 @@ class SceneModel final : public SceneManager {
       Properties props(parts[i].plugin);
       props.set("to_world", parts[i].to_world);
       props.set("flip_normals", parts[i].flip_normals);
+      props.set("visibility", spec.visibility);
       if (interior_medium) props.set("interior", interior_medium);
       if (bsdf) props.set("bsdf", bsdf.get());
       // Every part needs an emitter of its own, whereas the sensor can only be
@@ -1263,7 +1264,7 @@ class SceneModel final : public SceneManager {
         auto mesh = PrimTranslator::BuildMesh(
             sub_mesh.id, sub_mesh.triangles, sub_mesh.primvars,
             ResolveMeshAttributes(sub_mesh.material_id), bsdf.get(),
-            env.emitter_ptr, env.sensor_ptr, interior_medium);
+            env.emitter_ptr, env.sensor_ptr, spec.visibility, interior_medium);
         if (mesh) {
           res.meshes.push_back(mesh);
         }

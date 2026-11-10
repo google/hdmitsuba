@@ -23,7 +23,9 @@
 #include <mitsuba/core/object.h>
 #include <mitsuba/core/plugin.h>
 #include <mitsuba/core/properties.h>
+#include <pxr/base/tf/stringUtils.h>
 #include <pxr/base/vt/value.h>
+#include <pxr/imaging/hd/primvarsSchema.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/assetPath.h>
 
@@ -33,6 +35,33 @@ std::string MeshAttributeName(std::string_view primvar, int channels) {
   return absl::StrCat(kVertexAttributePrefix,
                       absl::StrReplaceAll(primvar, {{"color", "Color"}}), "_",
                       channels);
+}
+
+TF_DEFINE_PUBLIC_TOKENS(HdMitsubaUtilsTokens, HDMITSUBA_UTILS_TOKENS);
+
+std::string ParseMitsubaVisibility(const VtValue& value,
+                                   const std::string& fallback) {
+  if (value.IsEmpty()) return fallback;
+  const std::string visibility =
+      VtValue::Cast<std::string>(value).GetWithDefault<std::string>();
+  if (visibility != "all" && visibility != "primary" &&
+      visibility != "secondary" && visibility != "hidden") {
+    TF_WARN(
+        "Ignoring invalid mitsuba:visibility '%s', expected \"all\", "
+        "\"primary\", \"secondary\" or \"hidden\".",
+        TfStringify(value).c_str());
+    return fallback;
+  }
+  return visibility;
+}
+
+std::string GetShapeVisibility(const HdContainerDataSourceHandle& prim_source) {
+  const HdSampledDataSourceHandle value =
+      HdPrimvarsSchema::GetFromParent(prim_source)
+          .GetPrimvar(HdMitsubaUtilsTokens->visibility)
+          .GetPrimvarValue();
+  return ParseMitsubaVisibility(value ? value->GetValue(0.0f) : VtValue(),
+                                "all");
 }
 
 std::string ResolvePathFromValue(const VtValue& value) {

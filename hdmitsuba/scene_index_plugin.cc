@@ -69,6 +69,7 @@
 #include "hdmitsuba/config.h"
 #include "hdmitsuba/mesh.h"
 #include "hdmitsuba/motion.h"
+#include "hdmitsuba/utils.h"
 
 #if PXR_VERSION < 2605
 #error "hdmitsuba requires OpenUSD 26.05 or newer."
@@ -274,7 +275,7 @@ class HdMitsuba_APISchemaAdapter : public UsdImagingAPISchemaAdapter {
         result.insert(HdCameraSchema::GetDefaultLocator());
       } else if ((prop == UsdLuxTokens->treatAsPoint ||
                   prop == UsdLuxTokens->treatAsLine ||
-                  prop == TfToken("mitsuba:visibility")) &&
+                  prop == HdMitsubaUtilsTokens->visibility) &&
                  prim.HasAPI<UsdLuxLightAPI>()) {
         // The LightAPI adapter only claims `inputs:*` and `light:*`.
         result.insert(HdLightSchema::GetDefaultLocator());

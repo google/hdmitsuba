@@ -168,12 +168,14 @@ struct MeshSpec : public BaseSpec {
   std::vector<MotionTransform> instance_transforms;
   bool motion_wrapped = false;
   bool double_sided = false;
+  // Mitsuba ray visibility of the shape (`mitsuba:visibility` primvar).
+  std::string visibility = "all";
 
   void FoldPendingFrom(const MeshSpec& prev) {
     if (emitter_spec.has_value() != prev.emitter_spec.has_value() ||
         (emitter_spec && emitter_spec->shaping != prev.emitter_spec->shaping) ||
         geometry.material_ids != prev.geometry.material_ids ||
-        double_sided != prev.double_sided ||
+        double_sided != prev.double_sided || visibility != prev.visibility ||
         geometry.left_handed != prev.geometry.left_handed ||
         // A mirroring transform flips the triangle winding.
         (transform.GetDeterminant() < 0.0) !=
@@ -196,6 +198,8 @@ struct CurveSpec : public BaseSpec {
   std::string plugin_name;
   std::vector<float> control_points;  // Flat packed [x, y, z, r] control points
   std::vector<uint32_t> segment_indices;  // Precomputed segment indices
+  // Mitsuba ray visibility of the shape (`mitsuba:visibility` primvar).
+  std::string visibility = "all";
 };
 
 struct ParticleFieldSpec : public BaseSpec {

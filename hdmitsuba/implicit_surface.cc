@@ -123,6 +123,7 @@ void HdMitsubaImplicitSurface::Sync(HdSceneDelegate* sceneDelegate,
   spec.implicit_surface = surface;
   spec.geometry.material_ids = {sceneDelegate->GetMaterialId(id)};
   spec.double_sided = sceneDelegate->GetDoubleSided(id);
+  spec.visibility = GetShapeVisibility(prim_source);
   for (const HdPrimvarDescriptor& descriptor :
        GetPrimvarDescriptors(sceneDelegate, HdInterpolationConstant)) {
     spec.geometry.primvars[descriptor.name] = {
