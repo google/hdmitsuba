@@ -246,6 +246,7 @@ void HdMitsubaCurves::Sync(HdSceneDelegate* sceneDelegate,
   spec.material_id = std::move(material_id);
   spec.needs_rebuild = true;
   spec.plugin_name = std::move(plugin_name);
+  spec.visibility = GetShapeVisibility(data_source);
 
   // Pack control points [x, y, z, r] (lazy-evaluating widths based on layout)
   if (widths_.size() == points_.size()) {

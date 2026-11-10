@@ -349,6 +349,7 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
   primvar_layout_ = layout;
   spec.dirty_bits = dirtyBits ? *dirtyBits : HdChangeTracker::Clean;
   spec.double_sided = IsDoubleSided(sceneDelegate);
+  spec.visibility = GetShapeVisibility(GetPrimDataSource(sceneDelegate, id));
   scene->SyncMesh(std::move(spec));
   in_scene_ = true;
 }
@@ -527,6 +528,7 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
       // Skip explicitly handled attributes
       if (token == HdTokens->points || token == HdTokens->normals ||
           token == HdMitsubaMeshTokens->subdivision_level ||
+          token == HdMitsubaUtilsTokens->visibility ||
           token == HdMitsubaMotionTokens->motion_samples) {
         continue;
       }

@@ -52,6 +52,7 @@ def _set_mitsuba_variant():
         ('skinned_mesh', Usd.TimeCode(20), True),
         ('gaussian_splats', Usd.TimeCode.Default(), True),
         ('implicit_surfaces', Usd.TimeCode.Default(), True),
+        ('visibility', Usd.TimeCode.Default(), True),
     ],
 )
 def test_render(scene_name: str, time: Usd.TimeCode, expect_non_black: bool):

@@ -134,6 +134,7 @@ def convert_point_instancer(
         bsdf, _, _, interior_medium = material.convert_material(child_prim)
         for part in parts.values():
           part['to_world'] = child_to_prototype @ part['to_world']
+          part['visibility'] = util.get_ray_visibility(child_prim, time)
           if bsdf is not None:
             part['bsdf'] = bsdf
           if interior_medium is not None:

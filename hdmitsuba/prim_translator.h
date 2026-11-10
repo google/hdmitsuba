@@ -130,12 +130,13 @@ class PrimTranslator {
 
   // Builds a mesh from expanded per-vertex `primvars`. The primvars listed in
   // `mesh_attributes` are uploaded as vertex attributes named by
-  // `MeshAttributeName`.
+  // `MeshAttributeName`. `visibility` is the Mitsuba ray visibility.
   static mitsuba::ref<mitsuba::Shape<Float, Spectrum>> BuildMesh(
       const std::string& id, const VtIntArray& face_indices,
       const VertexPrimvarMap& primvars,
       const MeshAttributeRequests& mesh_attributes, mitsuba::Object* bsdf,
       mitsuba::Object* emitter_ptr, mitsuba::Object* sensor_ptr,
+      const std::string& visibility,
       mitsuba::Object* interior_medium = nullptr);
 
   static void UpdateMeshInPlace(mitsuba::Object* mesh_obj,

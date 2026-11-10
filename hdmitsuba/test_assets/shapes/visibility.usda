@@ -1,0 +1,94 @@
+#usda 1.0
+(
+    defaultPrim = "root"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "root"
+{
+    def Xform "Camera"
+    {
+        float3 xformOp:rotateXYZ = (63.559296, 2.2983238e-7, 46.691944)
+        double3 xformOp:translate = (4.8382463455200195, -4.495369911193848, 3.1569976806640625)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+
+        def Camera "Camera"
+        {
+            float2 clippingRange = (0.1, 100)
+            float focalLength = 0.5
+            float horizontalAperture = 0.36
+            token projection = "perspective"
+            float verticalAperture = 0.36
+        }
+    }
+
+    def Mesh "Floor"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-4, -4, -0.5), (4, -4, -0.5), (4, 4, -0.5), (-4, 4, -0.5)]
+        uniform token subdivisionScheme = "none"
+    }
+
+    # Visible to the camera, but casts no shadow (a tessellated mesh).
+    def Cube "Primary"
+    {
+        double size = 1
+        token primvars:mitsuba:visibility = "primary"
+        double3 xformOp:translate = (-0.8, 0.8, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # Invisible to the camera, but casts a shadow (a native shape).
+    def Sphere "Secondary"
+    {
+        double radius = 0.5
+        token primvars:mitsuba:visibility = "secondary"
+        double3 xformOp:translate = (0.8, -0.8, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # The primvar is inherited by descendant prims.
+    def Xform "Hidden"
+    {
+        token primvars:mitsuba:visibility = "hidden"
+
+        def Cylinder "Cylinder"
+        {
+            double height = 1
+            double radius = 0.4
+            double3 xformOp:translate = (1.4, 1.0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+
+    def BasisCurves "Curve"
+    {
+        int[] curveVertexCounts = [4]
+        point3f[] points = [(-1.6, -1.2, -0.3), (-1.0, -1.6, 0.2), (-0.4, -1.4, -0.2), (0.2, -2.0, 0.3)]
+        token primvars:mitsuba:visibility = "primary"
+        uniform token type = "linear"
+        float[] widths = [0.15] (
+            interpolation = "constant"
+        )
+    }
+
+    def DomeLight "Environment"
+    {
+        float inputs:intensity = 0.3
+    }
+
+    def Xform "Light"
+    {
+        double3 xformOp:translate = (4.0, 1.0, 5.9)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def SphereLight "Light"
+        {
+            float inputs:intensity = 318.30988
+            bool inputs:normalize = 1
+            float inputs:radius = 0.1
+        }
+    }
+}

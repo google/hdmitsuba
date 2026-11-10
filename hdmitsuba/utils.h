@@ -34,6 +34,7 @@
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/matrix4f.h>
 #include <pxr/base/tf/diagnostic.h>
+#include <pxr/base/tf/staticTokens.h>
 #include <pxr/base/tf/type.h>
 #include <pxr/base/vt/value.h>
 #include <pxr/imaging/hd/dataSource.h>
@@ -61,6 +62,21 @@ using MeshAttributeRequests = std::set<std::pair<std::string, int>>;
 // "color" as rgb2spec coefficients in spectral variants, so "color" is
 // capitalized to keep the raw values.
 std::string MeshAttributeName(std::string_view primvar, int channels);
+
+#define HDMITSUBA_UTILS_TOKENS ((visibility, "mitsuba:visibility"))
+
+TF_DECLARE_PUBLIC_TOKENS(HdMitsubaUtilsTokens, HDMITSUBA_UTILS_TOKENS);
+
+// Returns the Mitsuba ray visibility ("all", "primary", "secondary" or
+// "hidden") held by `value`, a string or token `mitsuba:visibility` attribute
+// or primvar, or `fallback` if `value` is empty. Warns about and ignores other
+// values.
+std::string ParseMitsubaVisibility(const VtValue& value,
+                                   const std::string& fallback);
+
+// Returns the Mitsuba ray visibility of the shape `prim_source`, which is
+// authored as its (inherited) constant `mitsuba:visibility` primvar.
+std::string GetShapeVisibility(const HdContainerDataSourceHandle& prim_source);
 
 template <typename T>
 T GetParam(const HdContainerDataSourceHandle& container, const TfToken& name,

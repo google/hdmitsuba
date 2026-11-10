@@ -180,6 +180,7 @@ def convert_mesh(
   for sub in sub_meshes:
     subprim, mat = materials_by_id[sub.material_id]
     props = mi.Properties()
+    props['visibility'] = util.get_ray_visibility(prim, time)
     if mat.bsdf is not None:
       props['bsdf'] = mat.bsdf
     if mat.interior_medium is not None:

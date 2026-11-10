@@ -82,6 +82,7 @@ def _convert_cube(
     )
 
   mi_cube = util.get_implicit_surface_parts(prim, time)['']
+  mi_cube['visibility'] = util.get_ray_visibility(prim, time)
   if bsdf is not None:
     mi_cube['bsdf'] = bsdf
   if interior_medium is not None:
@@ -109,6 +110,7 @@ def _convert_plane(
     )
 
   mi_plane = util.get_implicit_surface_parts(prim, time)['']
+  mi_plane['visibility'] = util.get_ray_visibility(prim, time)
   if bsdf is not None:
     mi_plane['bsdf'] = bsdf
   if interior_medium is not None:
@@ -152,6 +154,7 @@ def _convert_implicit_surface(
         ' mesh.'
     )
   for i, part in enumerate(parts.values()):
+    part['visibility'] = util.get_ray_visibility(prim, time)
     if bsdf is not None:
       part['bsdf'] = bsdf
     if interior_medium is not None:
@@ -199,7 +202,9 @@ def _convert_implicit_surface(
   }
 
 
-def _create_empty_mitsuba_curve(curve_type: str, bsdf: Any) -> mi.Object:
+def _create_empty_mitsuba_curve(
+    curve_type: str, bsdf: Any, visibility: str
+) -> mi.Object:
   """Creates an empty Mitsuba curve object.
 
   Mitsuba's curve plugins (linearcurve, bsplinecurve) require a filename
@@ -220,6 +225,7 @@ def _create_empty_mitsuba_curve(curve_type: str, bsdf: Any) -> mi.Object:
     curve_dict: dict[str, Any] = {
         'type': curve_type,
         'filename': f.name,
+        'visibility': visibility,
     }
     if bsdf is not None:
       curve_dict['bsdf'] = bsdf
@@ -338,7 +344,9 @@ def _convert_curves(
       np.cumsum(skipped) - skipped, repeats
   )
 
-  curve_obj = _create_empty_mitsuba_curve(curve_type, bsdf)
+  curve_obj = _create_empty_mitsuba_curve(
+      curve_type, bsdf, util.get_ray_visibility(prim, time)
+  )
   params = mi.traverse(curve_obj)
   params['control_point_count'] = len(curve_points) // 4
   params['segment_indices'] = mi.Int32(curve_indices)

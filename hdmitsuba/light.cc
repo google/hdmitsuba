@@ -72,7 +72,6 @@ struct LightParams {
 
 LightParams ReadLightParams(const HdContainerDataSourceHandle& container) {
   static const TfToken treat_as_point_token("treatAsPoint");
-  static const TfToken visibility_token("mitsuba:visibility");
   LightParams p;
   p.base_emission = GetLightBaseEmission(container);
   p.radius = GetParam<float>(container, HdLightTokens->radius, 1.0f);
@@ -95,9 +94,9 @@ LightParams ReadLightParams(const HdContainerDataSourceHandle& container) {
   p.texture_file_path =
       GetParam<SdfAssetPath>(container, HdLightTokens->textureFile)
           .GetResolvedPath();
-  if (auto ds = HdSampledDataSource::Cast(container->Get(visibility_token))) {
-    p.visibility =
-        ds->GetValue(0.0f).Cast<std::string>().GetWithDefault<std::string>();
+  if (auto ds = HdSampledDataSource::Cast(
+          container->Get(HdMitsubaUtilsTokens->visibility))) {
+    p.visibility = ParseMitsubaVisibility(ds->GetValue(0.0f), "");
   }
   return p;
 }

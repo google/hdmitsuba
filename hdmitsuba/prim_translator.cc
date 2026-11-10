@@ -1336,7 +1336,7 @@ PrimTranslator<Float, Spectrum>::BuildMesh(
     const VertexPrimvarMap& primvars,
     const MeshAttributeRequests& mesh_attributes, mitsuba::Object* bsdf,
     mitsuba::Object* emitter_ptr, mitsuba::Object* sensor_ptr,
-    mitsuba::Object* interior_medium) {
+    const std::string& visibility, mitsuba::Object* interior_medium) {
   using Mesh = mitsuba::Mesh<Float, Spectrum>;
 
   auto points_it = primvars.find(HdTokens->points);
@@ -1381,6 +1381,7 @@ PrimTranslator<Float, Spectrum>::BuildMesh(
   // keeps Mitsuba from deriving smooth shading normals of its own: normal
   // computation is handled explicitly by the hydra delegate.
   props.set("face_normals", !has_normals);
+  props.set("visibility", visibility);
   if (emitter_ptr != nullptr) {
     props.set("emitter", emitter_ptr);
   }
@@ -1552,6 +1553,7 @@ PrimTranslator<Float, Spectrum>::BuildCurves(const CurveSpec& spec,
   if (bsdf != nullptr) {
     props.set("bsdf", bsdf);
   }
+  props.set("visibility", spec.visibility);
 
   mitsuba::ref<mitsuba::Shape<Float, Spectrum>> shape =
       mitsuba::PluginManager::instance()
