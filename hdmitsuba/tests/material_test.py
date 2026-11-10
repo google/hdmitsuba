@@ -218,3 +218,31 @@ def test_unsupported_diffuse_falls_back_to_display_color(render_context: str):
   r, g, b = engine.render()['color'][32, 32, :3]
   assert g > 2.0 * max(r, b)
 
+
+def test_unused_texture_not_loaded(capfd):
+  stage = Usd.Stage.Open(
+      f'{test_helpers.TEST_ASSETS_PATH}/materials/display_color.usda'
+  )
+  stage.SetEditTarget(stage.GetSessionLayer())
+  mat = UsdShade.Material.Define(stage, '/root/Mat')
+  surf = UsdShade.Shader.Define(stage, '/root/Mat/Surface')
+  surf.CreateIdAttr('UsdPreviewSurface')
+  mat.CreateSurfaceOutput().ConnectToSource(surf.ConnectableAPI(), 'surface')
+  # Neither texture exists: only consumed inputs should attempt a load.
+  for name in ('roughness', 'occlusion'):
+    tex = UsdShade.Shader.Define(stage, f'/root/Mat/{name}')
+    tex.CreateIdAttr('UsdUVTexture')
+    tex.CreateInput('file', Sdf.ValueTypeNames.Asset).Set(f'/no_{name}.png')
+    surf.CreateInput(name, Sdf.ValueTypeNames.Float).ConnectToSource(
+        tex.ConnectableAPI(), 'r'
+    )
+  UsdShade.MaterialBindingAPI.Apply(
+      stage.GetPrimAtPath('/root/Cube/Cube')
+  ).Bind(mat)
+  test_helpers.create_render_settings(stage, resolution=(16, 16), spp=1)
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin')
+  engine.render()
+  err = capfd.readouterr().err
+  assert 'no_roughness' in err and 'no_occlusion' not in err
+
