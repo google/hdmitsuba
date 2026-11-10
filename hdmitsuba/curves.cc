@@ -33,6 +33,7 @@
 #include <pxr/imaging/hd/materialBindingsSchema.h>
 #include <pxr/imaging/hd/primvarsSchema.h>
 #include <pxr/imaging/hd/renderDelegate.h>
+#include <pxr/imaging/hd/renderIndex.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/imaging/hd/sceneIndex.h>
 #include <pxr/imaging/hd/tokens.h>
@@ -137,10 +138,6 @@ void HdMitsubaCurves::Sync(HdSceneDelegate* sceneDelegate,
   static const HdDataSourceLocator widths_locator(
       HdPrimvarsSchema::GetSchemaToken(), HdTokens->widths,
       HdPrimvarSchemaTokens->primvarValue);
-  static const HdDataSourceLocator material_locator(
-      HdMaterialBindingsSchema::GetSchemaToken(),
-      HdMaterialBindingsSchemaTokens->allPurpose,
-      HdMaterialBindingSchemaTokens->path);
   static const HdDataSourceLocator basis_locator(
       TfToken("basisCurves"), TfToken("topology"),
       HdBasisCurvesTopologySchemaTokens->basis);
@@ -230,12 +227,16 @@ void HdMitsubaCurves::Sync(HdSceneDelegate* sceneDelegate,
     return;
   }
 
-  // 5. Material binding. GetMaterialId resolves the binding for the render
-  // delegate's material binding purpose (e.g. material:binding:full), like
-  // meshes do. Fall back to the allPurpose binding of the data source.
-  SdfPath material_id = sceneDelegate->GetMaterialId(id);
-  if (material_id.IsEmpty()) {
-    material_id = GetParam<SdfPath>(data_source, material_locator);
+  // 5. Material binding for the render delegate's purpose (e.g.
+  // material:binding:full), falling back to the allPurpose binding.
+  SdfPath material_id;
+  if (HdPathDataSourceHandle material_path =
+          HdMaterialBindingsSchema::GetFromParent(data_source)
+              .GetMaterialBinding(sceneDelegate->GetRenderIndex()
+                                      .GetRenderDelegate()
+                                      ->GetMaterialBindingPurpose())
+              .GetPath()) {
+    material_id = material_path->GetTypedValue(0.0f);
   }
 
   // 6. Convert data to CurveSpec and pass it to the scene manager.
