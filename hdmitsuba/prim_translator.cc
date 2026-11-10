@@ -131,7 +131,6 @@ bool IsPrincipledNode(const HdMaterialNode2& node) {
 struct PreviewSurfaceParam {
   TfToken usd_name;
   std::string_view mitsuba_name;
-  bool invert_float = false;
   // Mitsuba's principled BSDF only accepts a constant for this parameter.
   bool scalar_only = false;
 };
@@ -143,9 +142,9 @@ const std::vector<PreviewSurfaceParam>& PreviewSurfaceParams() {
       {TfToken("metallic"), "metallic"},
       {TfToken("clearcoat"), "clearcoat"},
       {TfToken("clearcoatRoughness"), "clearcoat_gloss"},
-      {TfToken("ior"), "eta", false, true},
-      {TfToken("specular"), "specular", false, true},
-      {TfToken("opacity"), "spec_trans", true},
+      {TfToken("ior"), "eta", true},
+      {TfToken("specular"), "specular", true},
+      {TfToken("opacity"), "spec_trans"},
   });
   return *params;
 }
@@ -159,6 +158,12 @@ bool IsScalarOnlyPrincipledInput(const TfToken& input_name) {
                               (param.usd_name == input_name ||
                                param.mitsuba_name == input_name.GetString());
                      });
+}
+
+// Returns the parameter `name` of `node`, or an empty value if it is not set.
+VtValue GetNodeParameter(const HdMaterialNode2& node, const char* name) {
+  auto it = node.parameters.find(TfToken(name));
+  return it != node.parameters.end() ? it->second : VtValue();
 }
 
 // Returns whether ParsePreviewSurface reads textures from the UsdPreviewSurface
@@ -577,7 +582,9 @@ PrimTranslator<Float, Spectrum>::ParsePreviewSurface(
     }
   }
   mitsuba::Properties props("principled");
-  bool spec_trans_is_texture = false;
+  // The opacity is either a texture or a constant, and is applied below.
+  mitsuba::ref<mitsuba::Object> opacity_texture;
+  float opacity = 1.0f;
   for (const auto& mapping : PreviewSurfaceParams()) {
     mitsuba::ref<mitsuba::Object> texture = nullptr;
     if (!mapping.scalar_only) {
@@ -594,27 +601,70 @@ PrimTranslator<Float, Spectrum>::ParsePreviewSurface(
     }
     auto* constant_tex =
         static_cast<mitsuba::Texture<Float, Spectrum>*>(texture.get());
-    if (mapping.invert_float && constant_tex &&
-        !constant_tex->is_spatially_varying()) {
-      // Constant textures (e.g. the alpha of an image without an alpha
-      // channel) can be inverted, unlike spatially varying ones.
-      props.set(mapping.mitsuba_name, 1.0f - constant_tex->max());
+    if (mapping.mitsuba_name == "spec_trans") {
+      if (constant_tex && !constant_tex->is_spatially_varying()) {
+        // E.g., the alpha of an image without an alpha channel.
+        opacity = constant_tex->max();
+      } else if (texture) {
+        opacity_texture = texture;
+      } else {
+        opacity = VtValue::Cast<float>(
+                      GetNodeParameter(preview_surface_node, "opacity"))
+                      .GetWithDefault<float>(1.0f);
+      }
     } else if (texture) {
       props.set(mapping.mitsuba_name, texture);
-      if (mapping.mitsuba_name == "spec_trans") {
-        spec_trans_is_texture = true;
-      }
     } else {
       auto param_it = preview_surface_node.parameters.find(mapping.usd_name);
       if (param_it != preview_surface_node.parameters.end()) {
         SetMitsubaPropertyFromValue(props, mapping.mitsuba_name,
-                                    param_it->second, mapping.invert_float);
+                                    param_it->second);
       }
     }
   }
 
+  // As per the UsdPreviewSurface specification, an `opacityThreshold` > 0 cuts
+  // out the surface where the opacity is below the threshold and renders it
+  // fully visible elsewhere. Otherwise, the opacity fades the entire surface
+  // in the `presence` opacity mode (both use a `mask` BSDF, see below), and
+  // only its diffuse component in favor of transmission in the default
+  // `transparent` mode, which keeps the specular response.
+  auto opacity_math = [&](const std::string& expr) {
+    mitsuba::Properties math_props("math");
+    math_props.set("expr", expr);
+    math_props.set("in0", opacity_texture);
+    return mitsuba::PluginManager::instance()->create_object(
+        math_props, mitsuba::Texture<Float, Spectrum>::Variant,
+        mitsuba::Texture<Float, Spectrum>::Type);
+  };
+  const float opacity_threshold =
+      VtValue::Cast<float>(
+          GetNodeParameter(preview_surface_node, "opacityThreshold"))
+          .GetWithDefault<float>(0.0f);
+  const bool presence =
+      opacity_threshold > 0.0f ||
+      VtValue::Cast<std::string>(
+          GetNodeParameter(preview_surface_node, "opacityMode"))
+              .GetWithDefault<std::string>() == "presence";
+  if (opacity_threshold > 0.0f) {
+    if (opacity_texture) {
+      opacity_texture =
+          opacity_math(absl::StrCat("in[0] >= ", opacity_threshold));
+    } else {
+      opacity = opacity >= opacity_threshold ? 1.0f : 0.0f;
+    }
+  }
+  if (!presence) {
+    if (opacity_texture) {
+      props.set("spec_trans", opacity_math("1 - in[0]"));
+    } else {
+      props.set("spec_trans", 1.0f - opacity);
+    }
+  }
+
   if (props.has_property("eta") && props.has_property("specular")) {
-    if (spec_trans_is_texture || props.get<float>("spec_trans", 0.0f) > 0.0f) {
+    if ((!presence && opacity_texture) ||
+        props.get<float>("spec_trans", 0.0f) > 0.0f) {
       props.remove_property("specular");
     } else {
       props.remove_property("eta");
@@ -660,6 +710,19 @@ PrimTranslator<Float, Spectrum>::ParsePreviewSurface(
     normal_props.set("nested_bsdf", res.bsdf);
     res.bsdf = mitsuba::PluginManager::instance()->create_object(
         normal_props, mitsuba::BSDF<Float, Spectrum>::Variant,
+        mitsuba::BSDF<Float, Spectrum>::Type);
+  }
+
+  if (presence && (opacity_texture || opacity < 1.0f)) {
+    mitsuba::Properties mask_props("mask");
+    if (opacity_texture) {
+      mask_props.set("opacity", opacity_texture);
+    } else {
+      mask_props.set("opacity", opacity);
+    }
+    mask_props.set("nested_bsdf", res.bsdf);
+    res.bsdf = mitsuba::PluginManager::instance()->create_object(
+        mask_props, mitsuba::BSDF<Float, Spectrum>::Variant,
         mitsuba::BSDF<Float, Spectrum>::Type);
   }
   return res;

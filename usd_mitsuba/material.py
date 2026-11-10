@@ -491,9 +491,13 @@ def usd_preview_surface_to_mitsuba(
   parent_bsdf_dict = {}
   renaming = USD_TO_MI_PRINCIPLED_RENAMING
   emitter_dict: dict[str, Any] = {'type': 'area'}
+  # The opacity is either a texture or a constant, and is applied below.
+  opacity = None
   for usd_input in shader.GetInputs():
     name = usd_input.GetBaseName()
     if name == 'displacement':  # Handled by convert_mesh_material().
+      continue
+    if name in ('opacityThreshold', 'opacityMode'):  # Applied with `opacity`.
       continue
     val = None
     conn = _find_shader_output(usd_input)
@@ -509,7 +513,11 @@ def usd_preview_surface_to_mitsuba(
         val = _convert_uv_texture(conn[0], name, conn[1])
       elif conn_id.startswith(_PRIMVAR_READER_PREFIX):
         val = _convert_primvar_reader(conn[0], name, mesh_attributes)
-      if val is not None and name in ('opacity', 'clearcoatRoughness'):
+      if val is not None and name == 'opacity':
+        # E.g., the alpha of an image without an alpha channel is constant.
+        opacity = val['value'] if val['type'] == 'uniform' else val
+        continue
+      if val is not None and name == 'clearcoatRoughness':
         # Constant textures (e.g. the alpha of an image without an alpha
         # channel) can be inverted, unlike spatially varying ones.
         if val['type'] == 'uniform':
@@ -524,7 +532,10 @@ def usd_preview_surface_to_mitsuba(
       if raw_val is not None:
         if name == 'emissiveColor' and (raw_val == Gf.Vec3f(0) or raw_val == 0):
           continue
-        val = _get_value(raw_val, name in ('opacity', 'clearcoatRoughness'))
+        if name == 'opacity':
+          opacity = raw_val
+          continue
+        val = _get_value(raw_val, name == 'clearcoatRoughness')
 
     if val is None:
       continue
@@ -540,20 +551,61 @@ def usd_preview_surface_to_mitsuba(
     else:
       Tf.Warn(f"Unsupported input {name} in preview surface shader.")
 
+  # As per the UsdPreviewSurface specification, an `opacityThreshold` > 0 cuts
+  # out the surface where the opacity is below the threshold and renders it
+  # fully visible elsewhere. Otherwise, the opacity fades the entire surface in
+  # the `presence` opacity mode (both use a `mask` BSDF, see below), and only
+  # its diffuse component in favor of transmission in the default `transparent`
+  # mode, which keeps the specular response.
+  def get_input(name: str, default: Any) -> Any:
+    usd_input = shader.GetInput(name)
+    value = usd_input.Get() if usd_input else None
+    return default if value is None else value
+
+  def opacity_math(expr: str) -> dict[str, Any]:
+    return {'type': 'math', 'expr': expr, 'in0': opacity}
+
+  opacity_threshold = get_input('opacityThreshold', 0.0)
+  presence = (
+      opacity_threshold > 0.0
+      or get_input('opacityMode', 'transparent') == 'presence'
+  )
+  if opacity is not None and opacity_threshold > 0.0:
+    opacity = (
+        opacity_math(f'in[0] >= {opacity_threshold:g}')
+        if isinstance(opacity, dict)
+        else float(opacity >= opacity_threshold)
+    )
+  if opacity is not None and not presence:
+    bsdf_dict['spec_trans'] = (
+        opacity_math('1 - in[0]')
+        if isinstance(opacity, dict)
+        else 1.0 - opacity
+    )
+
   # Mitsuba's principled BSDF throws an error if both eta and specular are
   # provided. For transmissive materials (spec_trans > 0), we must keep eta
   # for proper refraction. Otherwise, we keep specular.
+  spec_trans = bsdf_dict.get('spec_trans', 0.0)
   if 'specular' in bsdf_dict and 'eta' in bsdf_dict:
-    spec_trans = bsdf_dict.get('spec_trans', 0.0)
-    if isinstance(spec_trans, dict) or (
-        isinstance(spec_trans, (int, float)) and spec_trans > 0.0
-    ):
+    if isinstance(spec_trans, dict) or spec_trans > 0.0:
       del bsdf_dict['specular']
     else:
       del bsdf_dict['eta']
 
   if parent_bsdf_dict:
     bsdf_dict = parent_bsdf_dict | {'nested_bsdf': bsdf_dict}
+
+  if (
+      opacity is not None
+      and presence
+      and (isinstance(opacity, dict) or opacity < 1.0)
+  ):
+    bsdf_dict = {
+        'type': 'mask',
+        'opacity': opacity,
+        'nested_bsdf': bsdf_dict,
+    }
 
   # Only return an emitter dict if a radiance value was found.
   res_emitter_dict: dict[str, Any] | None = (

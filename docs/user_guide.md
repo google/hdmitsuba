@@ -20,7 +20,7 @@ This document provides an overview of the USD features supported by `hdMitsuba`,
     *   `metallic` (Metalness)
     *   `specular` (Specular reflectance)
     *   `clearcoat` & `clearcoatRoughness`
-    *   `opacity` (Transmission)
+    *   `opacity`, `opacityMode` & `opacityThreshold`: As per the specification, an `opacityThreshold` > 0 cuts out the surface where `opacity < opacityThreshold` and renders it fully visible elsewhere. Otherwise, the `presence` opacity mode fades the entire surface (`opacity` is the fraction of rays that hit it), and the default `transparent` mode maps to specular transmission (`spec_trans = 1 - opacity`), which keeps the specular response. Cutouts and presence use a Mitsuba `mask` BSDF, which shadow rays of the `path` integrator pass through as well, but which does not mask the emission of emissive materials. All three modes support constant and textured (or primvar reader) opacities.
     *   `ior` (Index of refraction)
     *   `normal` (Normal mapping; expects tangent-space normals in `[-1, 1]` as per the [UsdPreviewSurface spec](https://openusd.org/release/spec_usdpreviewsurface.html#preview-surface), i.e. 8-bit textures need `scale = (2, 2, 2, 1)`, `bias = (-1, -1, -1, 0)` and `sourceColorSpace = "raw"`)
 *   **UsdUVTexture**: `inputs:scale` and `inputs:bias` are applied (`texture * scale + bias`), including to `inputs:fallback`. Scaled or biased textures are wrapped in a Mitsuba `math` texture, which does not support bump mapping (`mitsuba_bumpmap`), emissive textures with the `ptracer` integrator, or per-channel scale/bias on color inputs in spectral variants.
