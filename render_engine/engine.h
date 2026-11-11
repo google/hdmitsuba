@@ -34,6 +34,7 @@
 #include <pxr/imaging/hd/task.h>
 #include <pxr/imaging/hd/types.h>
 #include <pxr/imaging/hdsi/legacyDisplayStyleOverrideSceneIndex.h>
+#include <pxr/imaging/hdsi/sceneGlobalsSceneIndex.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
 #include <pxr/usd/usd/common.h>
@@ -128,6 +129,7 @@ class RenderEngine {
 
   pxr::UsdStageRefPtr stage_;
   pxr::UsdImagingStageSceneIndexRefPtr stage_scene_index_;
+  pxr::HdsiSceneGlobalsSceneIndexRefPtr scene_globals_scene_index_;
   pxr::HdsiLegacyDisplayStyleOverrideSceneIndexRefPtr
       display_style_scene_index_;
   pxr::HdRendererPlugin* renderer_plugin_ = nullptr;

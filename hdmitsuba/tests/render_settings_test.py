@@ -476,6 +476,47 @@ def test_denoise_render_settings(variant: str):
   )
 
 
+def test_render_settings_prim_precedence():
+  """The active RenderSettings prim applies, unless it is overridden."""
+  stage = Usd.Stage.Open(f"{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda")
+  settings_prim = test_helpers.create_render_settings(
+      stage, resolution=(16, 16), spp=1
+  ).GetPrim()
+  layer = stage.GetRootLayer()
+  Sdf.CopySpec(layer, settings_prim.GetPath(), layer, "/Render/Other")
+  engine = usd_render.RenderEngine(stage)
+
+  def render(render_settings_path: str | None = None, **overrides: int):
+    engine.configure(
+        hydra_delegate_id="HdMitsubaRendererPlugin",
+        render_settings_path=render_settings_path,
+        overrides={f"mitsuba:integrator:{k}": v for k, v in overrides.items()},
+    )
+    return engine.render()["color"][..., :3]
+
+  image_default = render()
+  # Authored after configuring the engine, the setting only reaches the render
+  # delegate through the prim, like in hosts that do not forward its attributes.
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:max_depth", Sdf.ValueTypeNames.Int
+  ).Set(1)
+  image_limited = engine.render()["color"][..., :3]
+  assert not np.allclose(image_limited, image_default, atol=0.05)
+  # Editing another RenderSettings prim has no effect.
+  stage.GetPrimAtPath("/Render/Other").CreateAttribute(
+      "mitsuba:seed", Sdf.ValueTypeNames.Int
+  ).Set(0)
+  np.testing.assert_allclose(
+      engine.render()["color"][..., :3], image_limited, atol=1e-4
+  )
+  # Overrides take precedence over the prim.
+  assert not np.allclose(render(max_depth=2), image_limited, atol=0.05)
+  # Switching to the other prim drops the settings of the previous one.
+  np.testing.assert_allclose(
+      render("/Render/Other"), image_default, atol=1e-4
+  )
+
+
 def test_integrator_parameters():
   def _register_flat_color(*_):
     if not mi.variant():

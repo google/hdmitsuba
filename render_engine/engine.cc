@@ -412,7 +412,6 @@ void RenderEngine::Configure(
   bool rebuild_delegate =
       !render_delegate_ || !stage_scene_index_ ||
       (hydra_delegate_id != hydra_delegate_id_) ||
-      (render_settings_prim_path != render_settings_prim_path_) ||
       // Render delegates keep rprims that were synced before a render tag got
       // disabled, so a change of render tags requires a fresh render index.
       (render_tags != render_tags_);
@@ -432,11 +431,15 @@ void RenderEngine::Configure(
       }
     }
     for (const auto& [key, value] : settings_map) {
-      if (render_delegate_->GetRenderSetting(key) != value) {
+      // Overrides are always forwarded: a render delegate may give them
+      // precedence over the values it syncs from the render settings prim.
+      if (overrides.count(key) > 0 ||
+          render_delegate_->GetRenderSetting(key) != value) {
         render_delegate_->SetRenderSetting(key, value);
       }
     }
     settings_map_ = settings_map;
+    render_settings_prim_path_ = render_settings_prim_path;
   }
 
   // Resolve target camera path upfront
@@ -495,6 +498,7 @@ void RenderEngine::Configure(
       params_delegate_ = nullptr;
       render_index_.reset();
       display_style_scene_index_ = nullptr;
+      scene_globals_scene_index_ = nullptr;
       stage_scene_index_ = nullptr;
       render_delegate_ = nullptr;
       aov_ids_.clear();
@@ -520,9 +524,11 @@ void RenderEngine::Configure(
       const UsdImagingSceneIndices scene_indices =
           UsdImagingCreateSceneIndices(create_info);
       stage_scene_index_ = scene_indices.stageSceneIndex;
+      scene_globals_scene_index_ =
+          HdsiSceneGlobalsSceneIndex::New(scene_indices.finalSceneIndex);
       display_style_scene_index_ =
           HdsiLegacyDisplayStyleOverrideSceneIndex::New(
-              scene_indices.finalSceneIndex);
+              scene_globals_scene_index_);
       render_index_->InsertSceneIndex(display_style_scene_index_,
                                       SdfPath::AbsoluteRootPath());
       params_delegate_ = std::make_unique<EngineSceneDelegate>(
@@ -535,6 +541,10 @@ void RenderEngine::Configure(
   }
 
   display_style_scene_index_->SetRefineLevelFallback(refine_level_fallback);
+  // Tells the render delegate which of the stage's render settings prims
+  // applies.
+  scene_globals_scene_index_->SetActiveRenderSettingsPrimPath(
+      render_settings ? render_settings.GetPath() : SdfPath());
 
   if (cache_invalid) {
     if (!rebuild_delegate) {

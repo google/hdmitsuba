@@ -22,6 +22,7 @@
 // - A scene index publishing the motion interval (the union of all camera
 //   shutter intervals) on the absolute root prim, and invalidating light
 //   transforms when it changes. This is the only data source contributed here.
+//   It also resyncs the render settings prims when the active one changes.
 // - A keyless API-schema adapter fixing *invalidation*: every other value
 //   hdMitsuba reads is a schema property or a primvar UsdImaging already
 //   surfaces, but UsdImagingStageSceneIndex drops a property change unless
@@ -49,7 +50,9 @@
 #include <pxr/imaging/hd/materialSchema.h>
 #include <pxr/imaging/hd/overlayContainerDataSource.h>
 #include <pxr/imaging/hd/primvarsSchema.h>
+#include <pxr/imaging/hd/renderSettingsSchema.h>
 #include <pxr/imaging/hd/retainedDataSource.h>
+#include <pxr/imaging/hd/sceneGlobalsSchema.h>
 #include <pxr/imaging/hd/sceneIndexPlugin.h>
 #include <pxr/imaging/hd/sceneIndexPluginRegistry.h>
 #include <pxr/imaging/hd/sceneIndexPrimView.h>
@@ -81,6 +84,9 @@ PXR_NAMESPACE_OPEN_SCOPE
 // all cameras, on the absolute root prim (see motion.h), and dirties shape,
 // instancer, and light transforms whenever it changes. This never happens for
 // scenes without motion blur, where all shutter intervals are empty.
+//
+// Also resyncs the render settings prims when the active one changes, since
+// only that one applies (see HdMitsubaRenderSettings).
 class HdMitsuba_MotionIntervalSceneIndex final
     : public HdSingleInputFilteringSceneIndexBase {
  public:
@@ -156,6 +162,18 @@ class HdMitsuba_MotionIntervalSceneIndex final
       }
       if (entry.dirtyLocators.Intersects(motion_samples_locator)) {
         extra.emplace_back(entry.primPath, HdXformSchema::GetDefaultLocator());
+      }
+      if (entry.primPath.IsAbsoluteRootPath() &&
+          entry.dirtyLocators.Intersects(
+              HdSceneGlobalsSchema::GetActiveRenderSettingsPrimLocator())) {
+        const HdSceneIndexBaseRefPtr& input = _GetInputSceneIndex();
+        for (const SdfPath& path : HdSceneIndexPrimView(input)) {
+          if (input->GetPrim(path).primType ==
+              HdPrimTypeTokens->renderSettings) {
+            extra.emplace_back(
+                path, HdRenderSettingsSchema::GetNamespacedSettingsLocator());
+          }
+        }
       }
     }
     _SendPrimsDirtied(entries);

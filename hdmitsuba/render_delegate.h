@@ -19,6 +19,7 @@
 
 #include <pxr/base/tf/staticTokens.h>
 #include <pxr/base/tf/token.h>
+#include <pxr/base/vt/dictionary.h>
 #include <pxr/base/vt/value.h>
 #include <pxr/imaging/hd/aov.h>
 #include <pxr/imaging/hd/changeTracker.h>
@@ -101,12 +102,28 @@ class HdMitsubaRenderDelegate final : public HdRenderDelegate {
 
   HdRenderSettingDescriptorList GetRenderSettingDescriptors() const override;
 
+  void SetRenderSetting(const TfToken& key, const VtValue& value) override;
+
+  // Stores the settings authored on the render settings prim, which
+  // CommitResources() applies.
+  void SyncPrimSettings(const VtDictionary& namespaced_settings);
+
   bool HasPendingSettings() const {
-    return GetRenderSettingsVersion() != last_settings_version_;
+    return settings_dirty_ ||
+           GetRenderSettingsVersion() != last_settings_version_;
   }
 
  private:
   void Initialize();
+
+  // Returns the value of a setting. Settings are either set on the render
+  // delegate (at construction or through SetRenderSetting(), e.g., as an
+  // override of the host) or authored on the render settings prim, and the
+  // most recent change applies. A value first synced from the prim yields to
+  // one set on the render delegate before, as does a prim edit synced in the
+  // same frame as the render delegate was set (e.g., when a host reapplies its
+  // override). Unset settings use the default of their descriptor, if any.
+  VtValue ResolveSetting(const TfToken& key) const;
 
   // This class is not copyable.
   HdMitsubaRenderDelegate(const HdMitsubaRenderDelegate&) = delete;
@@ -116,6 +133,16 @@ class HdMitsubaRenderDelegate final : public HdRenderDelegate {
   std::unique_ptr<HdMitsubaRenderParam> render_param_;
   std::string current_variant_;
   unsigned int last_settings_version_ = 0;
+  // The settings last synced from the render settings prim.
+  VtDictionary prim_settings_;
+  // The settings set on the render delegate that the render settings prim has
+  // not changed since.
+  TfToken::HashSet delegate_settings_;
+  // The settings set on the render delegate since the last CommitResources().
+  TfToken::HashSet recent_delegate_settings_;
+  // Whether `prim_settings_` or `delegate_settings_` changed since the last
+  // CommitResources().
+  bool settings_dirty_ = false;
 
   HdRenderSettingDescriptorList setting_descriptors_;
 };
