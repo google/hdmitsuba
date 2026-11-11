@@ -81,11 +81,7 @@ def _convert_cube(
         'Displacement is not supported for cubes. Please use a mesh.'
     )
 
-  size = UsdGeom.Cube(prim).GetSizeAttr().Get(time)
-  mi_cube: dict[str, Any] = {
-      'type': 'cube',
-      'to_world': mi.ScalarTransform4f().scale(0.5 * size),
-  }
+  mi_cube = util.get_implicit_surface_parts(prim, time)['']
   if bsdf is not None:
     mi_cube['bsdf'] = bsdf
   if interior_medium is not None:
@@ -112,14 +108,7 @@ def _convert_plane(
         'Displacement is not supported for planes. Please use a mesh.'
     )
 
-  width = plane_prim.GetWidthAttr().Get(time)
-  height = plane_prim.GetLengthAttr().Get(time)
-  mi_plane = {
-      'type': 'rectangle',
-      'to_world': mi.ScalarTransform4f().scale(
-          mi.ScalarVector3f(width * 0.5, height * 0.5, 1)
-      ),
-  }
+  mi_plane = util.get_implicit_surface_parts(prim, time)['']
   if bsdf is not None:
     mi_plane['bsdf'] = bsdf
   if interior_medium is not None:
@@ -154,48 +143,7 @@ def _convert_implicit_surface(
     motion_interval: tuple[float, float],
 ) -> dict[str, Any]:
   """Converts a sphere or cylinder prim to native Mitsuba shapes."""
-  if prim.IsA(UsdGeom.Sphere):
-    radius = UsdGeom.Sphere(prim).GetRadiusAttr().Get(time)
-    parts: dict[str, dict[str, Any]] = {
-        '': {'type': 'sphere', 'to_world': mi.ScalarTransform4f().scale(radius)}
-    }
-  else:
-    if prim.IsA(UsdGeom.Cylinder_1):
-      cylinder = UsdGeom.Cylinder_1(prim)
-      radius = cylinder.GetRadiusBottomAttr().Get(time)
-      if cylinder.GetRadiusTopAttr().Get(time) != radius:
-        Tf.Warn(
-            f'Cylinder {prim.GetPath()} has differing top and bottom radii,'
-            ' which is not supported. Rendering it with its bottom radius.'
-        )
-    else:
-      cylinder = UsdGeom.Cylinder(prim)
-      radius = cylinder.GetRadiusAttr().Get(time)
-    height = cylinder.GetHeightAttr().Get(time)
-    # Rotates the Z-aligned Mitsuba shapes onto the spine axis.
-    axis = {
-        UsdGeom.Tokens.x: mi.ScalarTransform4f(
-            [[0, 0, 1, 0], [1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1]]
-        ),
-        UsdGeom.Tokens.y: mi.ScalarTransform4f(
-            [[0, 1, 0, 0], [0, 0, 1, 0], [1, 0, 0, 0], [0, 0, 0, 1]]
-        ),
-        UsdGeom.Tokens.z: mi.ScalarTransform4f(),
-    }[cylinder.GetAxisAttr().Get(time)]
-    top = axis.translate([0, 0, 0.5 * height])
-    bottom = axis.translate([0, 0, -0.5 * height])
-    parts = {
-        'body': {
-            'type': 'cylinder',
-            'to_world': bottom.scale([radius, radius, height]),
-        },
-        'cap_top': {'type': 'disk', 'to_world': top.scale([radius, radius, 1])},
-        'cap_bottom': {
-            'type': 'disk',
-            'to_world': bottom.scale([radius, radius, 1]),
-            'flip_normals': True,
-        },
-    }
+  parts = util.get_implicit_surface_parts(prim, time)
 
   bsdf, emitter, displacement, interior_medium = material.convert_material(prim)
   if displacement is not None:

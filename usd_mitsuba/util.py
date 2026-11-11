@@ -23,6 +23,7 @@ import mitsuba as mi
 import numpy as np
 
 from pxr import Gf
+from pxr import Tf
 from pxr import Usd
 from pxr import UsdGeom
 
@@ -128,3 +129,80 @@ def remove_scale_from_transform(
   return mi.ScalarTransform4f(
       dr.transform_compose(mi.ScalarMatrix3f(1.0), rotation, translation)
   )
+
+
+def get_implicit_surface_parts(
+    prim: Usd.Prim, time: Usd.TimeCode
+) -> dict[str, dict[str, Any]]:
+  """Returns the native Mitsuba shapes of an implicit surface in object space.
+
+  Args:
+    prim: The cube, plane, sphere or cylinder prim.
+    time: The time code to evaluate the prim at.
+
+  Returns:
+    The shape dictionaries by ID suffix, empty if `prim` is none of the above.
+  """
+  if prim.IsA(UsdGeom.Cube):
+    size = UsdGeom.Cube(prim).GetSizeAttr().Get(time)
+    return {
+        '': {
+            'type': 'cube',
+            'to_world': mi.ScalarTransform4f().scale(0.5 * size),
+        }
+    }
+  if prim.IsA(UsdGeom.Plane):
+    plane = UsdGeom.Plane(prim)
+    width = plane.GetWidthAttr().Get(time)
+    length = plane.GetLengthAttr().Get(time)
+    return {
+        '': {
+            'type': 'rectangle',
+            'to_world': mi.ScalarTransform4f().scale(
+                mi.ScalarVector3f(width * 0.5, length * 0.5, 1)
+            ),
+        }
+    }
+  if prim.IsA(UsdGeom.Sphere):
+    radius = UsdGeom.Sphere(prim).GetRadiusAttr().Get(time)
+    return {
+        '': {'type': 'sphere', 'to_world': mi.ScalarTransform4f().scale(radius)}
+    }
+  if prim.IsA(UsdGeom.Cylinder_1):
+    cylinder = UsdGeom.Cylinder_1(prim)
+    radius = cylinder.GetRadiusBottomAttr().Get(time)
+    if cylinder.GetRadiusTopAttr().Get(time) != radius:
+      Tf.Warn(
+          f'Cylinder {prim.GetPath()} has differing top and bottom radii,'
+          ' which is not supported. Rendering it with its bottom radius.'
+      )
+  elif prim.IsA(UsdGeom.Cylinder):
+    cylinder = UsdGeom.Cylinder(prim)
+    radius = cylinder.GetRadiusAttr().Get(time)
+  else:
+    return {}
+  height = cylinder.GetHeightAttr().Get(time)
+  # Rotates the Z-aligned Mitsuba shapes onto the spine axis.
+  axis = {
+      UsdGeom.Tokens.x: mi.ScalarTransform4f(
+          [[0, 0, 1, 0], [1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1]]
+      ),
+      UsdGeom.Tokens.y: mi.ScalarTransform4f(
+          [[0, 1, 0, 0], [0, 0, 1, 0], [1, 0, 0, 0], [0, 0, 0, 1]]
+      ),
+      UsdGeom.Tokens.z: mi.ScalarTransform4f(),
+  }[cylinder.GetAxisAttr().Get(time)]
+  top = axis.translate([0, 0, 0.5 * height])
+  bottom = axis.translate([0, 0, -0.5 * height])
+  return {
+      'body': {
+          'type': 'cylinder',
+          'to_world': bottom.scale([radius, radius, height]),
+      },
+      'cap_top': {'type': 'disk', 'to_world': top.scale([radius, radius, 1])},
+      'cap_bottom': {
+          'type': 'disk',
+          'to_world': bottom.scale([radius, radius, 1]),
+          'flip_normals': True,
+      },
+  }
