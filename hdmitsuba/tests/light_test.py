@@ -142,6 +142,7 @@ def test_dome_light_corrupt_texture_falls_back_to_constant():
         'directional_wide',
         'disk',
         'disk_non_uniform',
+        'emissive_material_plane',
         'emissive_material_textured',
         'envmap',
         'envmap_1x1',

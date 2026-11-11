@@ -672,6 +672,7 @@ def convert_mesh_material(
 
 def convert_material(
     prim: Usd.Prim,
+    double_sided: bool = False,
 ) -> tuple[
     mi.BSDF | None, mi.Emitter | None, mi.Texture | None, mi.Medium | None
 ]:
@@ -681,12 +682,13 @@ def convert_material(
 
   Args:
     prim: The USD prim to extract the material from.
+    double_sided: Whether the emitter of an emissive material is two-sided.
 
   Returns:
     A tuple of the Mitsuba BSDF, emitter, displacement texture, and interior
     medium (each may be None if not found).
   """
-  mat = convert_mesh_material(prim)
+  mat = convert_mesh_material(prim, double_sided)
   return mat.bsdf, mat.emitter, mat.displacement, mat.interior_medium
 
 

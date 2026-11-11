@@ -102,13 +102,16 @@ def _convert_plane(
     motion_interval: tuple[float, float] = (0.0, 0.0),
 ) -> dict[str, Any]:
   """Handles a plane prim and returns the Mitsuba shape dictionary."""
-  bsdf, emitter, displacement, interior_medium = material.convert_material(prim)
+  plane_prim = UsdGeom.Plane(prim)
+  # Unlike the other implicit shapes, planes carry `doubleSided` through Hydra.
+  bsdf, emitter, displacement, interior_medium = material.convert_material(
+      prim, plane_prim.GetDoubleSidedAttr().Get()
+  )
   if displacement is not None:
     raise ValueError(
         'Displacement is not supported for planes. Please use a mesh.'
     )
 
-  plane_prim = UsdGeom.Plane(prim)
   width = plane_prim.GetWidthAttr().Get(time)
   height = plane_prim.GetLengthAttr().Get(time)
   mi_plane = {
