@@ -1,0 +1,58 @@
+#usda 1.0
+(
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "root"
+{
+    def Camera "Camera"
+    {
+        float2 clippingRange = (0.1, 100)
+        float focalLength = 0.5
+        float horizontalAperture = 0.36
+        token projection = "perspective"
+        float verticalAperture = 0.28125
+        float xformOp:rotateY = 180
+        double3 xformOp:translate = (0, 0, -4)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateY"]
+    }
+
+    # The camera faces the back of both planes. A plane is double-sided unless
+    # authored otherwise, so only this one emits towards the camera.
+    def Plane "double_sided" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double length = 1
+        rel material:binding = </root/material>
+        double width = 1
+        double3 xformOp:translate = (-0.6, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Plane "single_sided" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        uniform bool doubleSided = 0
+        double length = 1
+        rel material:binding = </root/material>
+        double width = 1
+        double3 xformOp:translate = (0.6, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Material "material"
+    {
+        token outputs:surface.connect = </root/material/surface.outputs:surface>
+
+        def Shader "surface"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0, 0, 0)
+            color3f inputs:emissiveColor = (1, 0.5, 0.25)
+            token outputs:surface
+        }
+    }
+}
