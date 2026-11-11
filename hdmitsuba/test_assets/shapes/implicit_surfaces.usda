@@ -54,6 +54,47 @@ def Xform "root"
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
 
+    def PointInstancer "Instancer"
+    {
+        point3f[] positions = [(-1.1, -1.1, 0), (2.6, -0.9, 0)]
+        int[] protoIndices = [0, 0]
+        rel prototypes = </root/Instancer/Prototypes/Post>
+
+        def Scope "Prototypes"
+        {
+            token visibility = "invisible"
+
+            def Xform "Post"
+            {
+                def Cylinder "Cylinder"
+                {
+                    double height = 0.6
+                    color3f[] primvars:displayColor = [(0.8, 0.7, 0.1)]
+                    double radius = 0.2
+                    double3 xformOp:translate = (0, 0, 0.3)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+
+                def Cube "Cube"
+                {
+                    color3f[] primvars:displayColor = [(0.6, 0.2, 0.7)]
+                    double size = 0.4
+                    double3 xformOp:translate = (0, 0, 0.8)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+
+                def Xform "Hidden"
+                {
+                    token visibility = "invisible"
+
+                    def Sphere "Sphere"
+                    {
+                    }
+                }
+            }
+        }
+    }
+
     def Scope "_materials"
     {
         def Material "Red"

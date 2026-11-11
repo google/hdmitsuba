@@ -23,6 +23,7 @@ from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
 from hdmitsuba import geometry_ext as geom_lib
+from usd_mitsuba import material
 from usd_mitsuba import mesh
 from usd_mitsuba import motion
 from usd_mitsuba import util
@@ -94,11 +95,19 @@ def convert_point_instancer(
     proto_to_local_transform = UsdGeom.Xformable(
         proto_prim).ComputeLocalToWorldTransform(time).GetInverse()
     group_id = f"proto_group_{instancer_id}_{proto_idx}"
-    group_dict = {'type': 'shapegroup'}
+    group_dict: dict[str, Any] = {'type': 'shapegroup'}
     shape_idx = 0
-    # TODO(vicini): Support other geometric prim types (curves, implicit shapes) in prototypes.
-    # Currently only UsdGeom.Mesh is supported.
-    for child_prim in Usd.PrimRange(proto_prim):
+    # TODO(vicini): Support curves in prototypes.
+    prim_range = iter(Usd.PrimRange(proto_prim))
+    for child_prim in prim_range:
+      # Like Hydra, an invisible prim hides its subtree, whereas the visibility
+      # of the prototype's ancestors is ignored.
+      if child_prim.IsA(UsdGeom.Imageable) and (
+          UsdGeom.Imageable(child_prim).GetVisibilityAttr().Get(time)
+          == UsdGeom.Tokens.invisible
+      ):
+        prim_range.PruneChildren()
+        continue
       if child_prim.IsA(UsdGeom.Mesh):
         child_xform = UsdGeom.Xformable(child_prim)
         relative_trans = (
@@ -114,6 +123,22 @@ def convert_point_instancer(
         )
         for _, mesh_obj in meshes.items():
           group_dict[f"shape_{shape_idx}"] = mesh_obj
+          shape_idx += 1
+      elif parts := util.get_implicit_surface_parts(child_prim, time):
+        child_to_prototype = util.to_mitsuba_transform(
+            UsdGeom.Xformable(child_prim).ComputeLocalToWorldTransform(time)
+            * proto_to_local_transform
+        )
+        # Like mesh prototypes, these carry no emitter, which Mitsuba does not
+        # support on instances.
+        bsdf, _, _, interior_medium = material.convert_material(child_prim)
+        for part in parts.values():
+          part['to_world'] = child_to_prototype @ part['to_world']
+          if bsdf is not None:
+            part['bsdf'] = bsdf
+          if interior_medium is not None:
+            part['interior'] = interior_medium
+          group_dict[f'shape_{shape_idx}'] = part
           shape_idx += 1
     if shape_idx > 0:
       mi_scene_dict[group_id] = group_dict
