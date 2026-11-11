@@ -16,6 +16,7 @@
 
 #include <memory>
 #include <string>
+#include <utility>
 
 #include <absl/base/no_destructor.h>
 #include <absl/container/flat_hash_map.h>
@@ -105,6 +106,9 @@ HdMitsubaRenderDelegate::HdMitsubaRenderDelegate(
     const HdRenderSettingsMap& settingsMap)
     : HdRenderDelegate(settingsMap) {
   Initialize();
+  for (const auto& [key, _] : settingsMap) {
+    delegate_settings_.insert(key);
+  }
 }
 
 HdMitsubaRenderDelegate::~HdMitsubaRenderDelegate() = default;
@@ -245,14 +249,14 @@ void HdMitsubaRenderDelegate::Update() {
 void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* /*tracker*/) {
   ScopedResolverCache resolver_cache(render_param_->TakeResolverCache());
 
-  const unsigned int settings_version = GetRenderSettingsVersion();
-  if (settings_version == last_settings_version_) {
+  recent_delegate_settings_.clear();
+  if (!HasPendingSettings()) {
     scene_impl_->CommitResources();
     return;
   }
 
   std::string target_variant =
-      GetRenderSetting(HdMitsubaRenderSettingsTokens->variant)
+      ResolveSetting(HdMitsubaRenderSettingsTokens->variant)
           .GetWithDefault<std::string>(HdMitsubaConfig::GetInstance().variant);
   if (!target_variant.empty() && current_variant_ != target_variant) {
     TF_DEBUG(HDMITSUBA_LIFECYCLE)
@@ -271,20 +275,64 @@ void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* /*tracker*/) {
   }
 
   VtDictionary namespaced_settings;
-  for (const auto& desc : setting_descriptors_) {
-    namespaced_settings[desc.key.GetString()] = GetRenderSetting(desc.key);
+  auto add_setting = [&](const TfToken& key) {
+    if (VtValue value = ResolveSetting(key); !value.IsEmpty()) {
+      namespaced_settings[key.GetString()] = std::move(value);
+    }
+  };
+  for (const auto& [key, _] : prim_settings_) {
+    add_setting(TfToken(key));
   }
-  for (const auto& [key, val] : _settingsMap) {
-    if (absl::StartsWith(key.GetString(), "mitsuba:integrator:") &&
-        !val.IsEmpty()) {
-      namespaced_settings[key.GetString()] = val;
+  for (const auto& desc : setting_descriptors_) {
+    add_setting(desc.key);
+  }
+  for (const auto& [key, _] : _settingsMap) {
+    if (absl::StartsWith(key.GetString(), "mitsuba:integrator:")) {
+      add_setting(key);
     }
   }
 
   scene_impl_->UpdateNamespacedSettings(namespaced_settings);
-  last_settings_version_ = settings_version;
+  last_settings_version_ = GetRenderSettingsVersion();
+  settings_dirty_ = false;
 
   scene_impl_->CommitResources();
+}
+
+void HdMitsubaRenderDelegate::SetRenderSetting(const TfToken& key,
+                                               const VtValue& value) {
+  HdRenderDelegate::SetRenderSetting(key, value);
+  // An empty value unsets the setting.
+  settings_dirty_ |= value.IsEmpty() ? delegate_settings_.erase(key) > 0
+                                     : delegate_settings_.insert(key).second;
+  if (!value.IsEmpty()) recent_delegate_settings_.insert(key);
+}
+
+void HdMitsubaRenderDelegate::SyncPrimSettings(
+    const VtDictionary& namespaced_settings) {
+  for (const auto& [key, value] : prim_settings_) {
+    auto it = namespaced_settings.find(key);
+    if ((it == namespaced_settings.end() || it->second != value) &&
+        recent_delegate_settings_.count(TfToken(key)) == 0) {
+      delegate_settings_.erase(TfToken(key));
+    }
+  }
+  prim_settings_ = namespaced_settings;
+  settings_dirty_ = true;
+}
+
+VtValue HdMitsubaRenderDelegate::ResolveSetting(const TfToken& key) const {
+  if (delegate_settings_.count(key) > 0) {
+    return GetRenderSetting(key);
+  }
+  if (auto it = prim_settings_.find(key.GetString());
+      it != prim_settings_.end()) {
+    return it->second;
+  }
+  for (const auto& desc : setting_descriptors_) {
+    if (desc.key == key) return desc.defaultValue;
+  }
+  return VtValue();
 }
 
 VtDictionary HdMitsubaRenderDelegate::GetRenderStats() const {

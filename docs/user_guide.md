@@ -55,7 +55,7 @@ Additionally, Mitsuba's native AOV names are also supported (e.g., `albedo`, `di
 
 ## 2. Render Settings Configuration
 
-You can configure the render delegate by authoring a `RenderSettings` prim inside your USD stage, or by passing settings programmatically.
+You can configure the render delegate by authoring a `RenderSettings` prim inside your USD stage, or by passing settings programmatically. The most recent change to a setting applies, and settings passed programmatically (e.g., as overrides) take precedence over the values initially authored on the `RenderSettings` prim.
 
 ### Custom Mitsuba Settings
 *   **`mitsuba:variant`**: The Mitsuba variant to use for rendering (e.g., `scalar_rgb`, `cuda_ad_rgb`, `llvm_ad_rgb`).
