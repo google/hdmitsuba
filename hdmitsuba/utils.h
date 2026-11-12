@@ -108,6 +108,13 @@ inline HdContainerDataSourceHandle GetPrimDataSource(
   return scene_index->GetPrim(id).dataSource;
 }
 
+inline HdContainerDataSourceHandle GetMitsubaDataSource(
+    const HdContainerDataSourceHandle& prim_source) {
+  if (!prim_source) return nullptr;
+  static const TfToken kMitsubaToken("mitsuba", TfToken::Immortal);
+  return HdContainerDataSource::Cast(prim_source->Get(kMitsubaToken));
+}
+
 inline bool GetPrimVisible(const HdContainerDataSourceHandle& prim_source,
                            bool default_visible = true) {
   if (auto schema = HdVisibilitySchema::GetFromParent(prim_source)) {
@@ -175,13 +182,20 @@ inline std::optional<ScalarAffineTransform3f> ExtractTransform3f(
   return std::nullopt;
 }
 
-inline std::optional<ScalarAffineTransform4f> ExtractTransform4f(
-    const VtValue& val) {
+inline std::optional<GfMatrix4d> ExtractMatrix4d(const VtValue& val) {
   if (val.IsHolding<GfMatrix4f>()) {
-    return UsdToMitsubaTransform(GfMatrix4d(val.Get<GfMatrix4f>()));
+    return GfMatrix4d(val.Get<GfMatrix4f>());
   }
   if (val.IsHolding<GfMatrix4d>()) {
-    return UsdToMitsubaTransform(val.Get<GfMatrix4d>());
+    return val.Get<GfMatrix4d>();
+  }
+  return std::nullopt;
+}
+
+inline std::optional<ScalarAffineTransform4f> ExtractTransform4f(
+    const VtValue& val) {
+  if (std::optional<GfMatrix4d> m = ExtractMatrix4d(val)) {
+    return UsdToMitsubaTransform(*m);
   }
   return std::nullopt;
 }

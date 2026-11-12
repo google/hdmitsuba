@@ -51,8 +51,10 @@ class ScopedResolverCache {
 
 class HdMitsubaRenderParam final : public HdRenderParam {
  public:
-  explicit HdMitsubaRenderParam(SceneManager* scene) : scene_(scene) {}
+  HdMitsubaRenderParam(HdMitsubaRenderDelegate* delegate, SceneManager* scene)
+      : delegate_(delegate), scene_(scene) {}
 
+  HdMitsubaRenderDelegate* GetDelegate() const { return delegate_; }
   SceneManager* GetScene() const { return scene_.load(); }
   void SetScene(SceneManager* scene) { scene_.store(scene); }
 
@@ -76,6 +78,7 @@ class HdMitsubaRenderParam final : public HdRenderParam {
   }
 
  private:
+  HdMitsubaRenderDelegate* delegate_;
   std::atomic<SceneManager*> scene_;
   VtValue resolver_cache_data_;
 };

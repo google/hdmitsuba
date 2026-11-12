@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <utility>
 #include <vector>
 
 #include <pxr/base/gf/matrix4d.h>
@@ -44,6 +45,8 @@
 #include <pxr/usd/sdf/path.h>
 
 #include "hdmitsuba/debug_codes.h"
+#include "hdmitsuba/light.h"
+#include "hdmitsuba/mesh.h"
 #include "hdmitsuba/render_param.h"
 #include "hdmitsuba/scene_manager.h"
 #include "hdmitsuba/spec_types.h"
@@ -126,7 +129,8 @@ HdDirtyBits HdMitsubaCurves::GetInitialDirtyBitsMask() const {
   return HdChangeTracker::Clean | HdChangeTracker::DirtyPrimvar |
          HdChangeTracker::DirtyRepr | HdChangeTracker::DirtyTopology |
          HdChangeTracker::DirtyTransform | HdChangeTracker::DirtyVisibility |
-         HdChangeTracker::DirtyMaterialId;
+         HdChangeTracker::DirtyMaterialId | HdMitsubaMesh::DirtyLight |
+         HdMitsubaMesh::DirtyMitsubaParams;
 }
 
 void HdMitsubaCurves::Sync(HdSceneDelegate* sceneDelegate,
@@ -227,8 +231,8 @@ void HdMitsubaCurves::Sync(HdSceneDelegate* sceneDelegate,
     return;
   }
 
-  // 5. Material binding for the render delegate's purpose (e.g.
-  // material:binding:full), falling back to the allPurpose binding.
+  // 5. Material binding (for the render delegate's purpose, falling back to
+  // allPurpose) & Mitsuba plugin overrides.
   SdfPath material_id;
   if (HdPathDataSourceHandle material_path =
           HdMaterialBindingsSchema::GetFromParent(data_source)
@@ -238,11 +242,31 @@ void HdMitsubaCurves::Sync(HdSceneDelegate* sceneDelegate,
               .GetPath()) {
     material_id = material_path->GetTypedValue(0.0f);
   }
+  if (!in_scene_ || (*dirtyBits & HdMitsubaMesh::DirtyMitsubaParams) != 0) {
+    ScopedResolverCache resolver_cache(
+        static_cast<HdMitsubaRenderParam*>(renderParam)->ResolverCacheData());
+    HdContainerDataSourceHandle mitsuba_source =
+        GetMitsubaDataSource(data_source);
+    shape_spec_ = ParsePluginSpec(mitsuba_source, "mitsuba:shape:");
+    mitsuba_emitter_spec_ = ParsePluginSpec(mitsuba_source, "mitsuba:emitter:");
+  }
 
   // 6. Convert data to CurveSpec and pass it to the scene manager.
   CurveSpec spec;
   spec.id = id;
-  spec.transform = UsdToMitsubaTransform(transform);
+  spec.shape_spec = shape_spec_;
+  spec.mitsuba_emitter_spec = mitsuba_emitter_spec_;
+  spec.double_sided = sceneDelegate->GetDoubleSided(id);
+  spec.emitter_spec = GetMeshEmitterSpec(sceneDelegate, id);
+  GfMatrix4d local_extra(1.0);
+  if (auto xform_it = spec.shape_spec.params.find("to_world");
+      xform_it != spec.shape_spec.params.end()) {
+    if (const auto extra = ExtractMatrix4d(xform_it->second)) {
+      local_extra = *extra;
+    }
+    spec.shape_spec.params.erase(xform_it);
+  }
+  spec.transform = UsdToMitsubaTransform(local_extra * transform);
   spec.material_id = std::move(material_id);
   spec.needs_rebuild = true;
   spec.plugin_name = std::move(plugin_name);
@@ -297,6 +321,8 @@ void HdMitsubaCurves::Finalize(HdRenderParam* renderParam) {
 void HdMitsubaCurves::RemoveFromScene(SceneManager* scene) {
   if (in_scene_) {
     scene->RemoveShape(GetId());
+    shape_spec_ = {};
+    mitsuba_emitter_spec_ = {};
     in_scene_ = false;
   }
 }

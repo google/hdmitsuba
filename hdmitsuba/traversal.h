@@ -41,6 +41,12 @@ class TraversalCallback : public mitsuba::TraversalCallback {
                     const absl::flat_hash_set<void*>& parent_hierarchy,
                     bool recurse_objects = true);
 
+  struct ValueEntry {
+    void* ptr;
+    const std::type_info& type;
+    uint32_t flags;
+  };
+
   template <typename T>
   T* get(std::string_view name) {
     auto it = prefix_.empty() ? data.find(name)
@@ -49,7 +55,7 @@ class TraversalCallback : public mitsuba::TraversalCallback {
                    static_cast<int>(name.size()), name.data())) {
       return nullptr;
     }
-    const std::type_info& type = it->second.second;
+    const std::type_info& type = it->second.type;
     if (!TF_VERIFY(type == typeid(T) ||
                        std::string_view(type.name()) == typeid(T).name(),
                    "Value %.*s is of type %s, but requested %s",
@@ -57,7 +63,7 @@ class TraversalCallback : public mitsuba::TraversalCallback {
                    typeid(T).name())) {
       return nullptr;
     }
-    return static_cast<T*>(it->second.first);
+    return static_cast<T*>(it->second.ptr);
   }
 
   template <typename T>
@@ -67,8 +73,7 @@ class TraversalCallback : public mitsuba::TraversalCallback {
     }
   }
 
-  absl::flat_hash_map<std::string, std::pair<void*, const std::type_info&>>
-      data;
+  absl::flat_hash_map<std::string, ValueEntry> data;
   // Traversed child objects, e.g. "to_world" for an animated transform.
   absl::flat_hash_map<std::string, mitsuba::Object*> objects;
 

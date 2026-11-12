@@ -291,9 +291,8 @@ def test_variant_change_dynamic():
   engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
   results_scalar = engine.render()
 
-  # Change the variant setting dynamically on the same stage and render engine
+  # Change the variant setting dynamically without reconfiguring the engine
   settings_prim.GetAttribute("mitsuba:variant").Set("llvm_ad_rgb")
-  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
   results_llvm = engine.render()
 
   test_helpers.robust_assert_close(
@@ -475,6 +474,27 @@ def test_denoise_render_settings(variant: str):
       unguided_results["normal"], noisy_results["normal"], atol=1e-5
   )
 
+  # User-configured `aov` integrator prepends its channels before Hydra AOVs;
+  # guided denoising must offset albedo/normal channels past user AOVs.
+  UsdRender.Product(
+      stage.GetPrimAtPath("/root/Render/Products/MainOutput")
+  ).GetOrderedVarsRel().SetTargets([
+      Sdf.Path("/root/Render/Vars/color"),
+      Sdf.Path("/root/Render/Vars/albedo"),
+      Sdf.Path("/root/Render/Vars/normal"),
+  ])
+  settings_prim = stage.GetPrimAtPath("/root/Render/Settings")
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:type", Sdf.ValueTypeNames.String
+  ).Set("aov")
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:aovs", Sdf.ValueTypeNames.String
+  ).Set("dd.y:depth")
+  user_aov_denoised = render(denoise=True, width=16)
+  assert user_aov_denoised["color"].shape == (16, 16, 4)
+  assert user_aov_denoised["albedo"].shape == (16, 16, 3)
+  assert user_aov_denoised["normal"].shape == (16, 16, 3)
+
 
 def test_integrator_parameters():
   def _register_flat_color(*_):
@@ -529,3 +549,303 @@ def test_integrator_parameters():
     )
   finally:
     mi.detail.remove_variant_callback(_register_flat_color)
+
+
+def test_dynamic_render_settings_without_reconfigure():
+  stage = Usd.Stage.Open(f"{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda")
+  plane = UsdGeom.Plane.Define(stage, "/World/Plane")
+  plane.GetWidthAttr().Set(10)
+  plane.GetLengthAttr().Set(10)
+
+  render_settings = test_helpers.create_render_settings(stage)
+  settings_prim = render_settings.GetPrim()
+  sample_count_attr = settings_prim.CreateAttribute(
+      "mitsuba:sample_count", Sdf.ValueTypeNames.Int
+  )
+  sample_count_attr.Set(4)
+  integrator_type_attr = settings_prim.CreateAttribute(
+      "mitsuba:integrator:type", Sdf.ValueTypeNames.String
+  )
+  integrator_type_attr.Set("direct")
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  direct_color = engine.render()["color"]
+  assert engine.get_render_stats()["totalSamples"] == 4
+
+  # Modify UsdRenderSettings attributes directly and render without configure()
+  sample_count_attr.Set(8)
+  integrator_type_attr.Set("path")
+  path_color = engine.render()["color"]
+  assert engine.get_render_stats()["totalSamples"] == 8
+  assert np.max(np.abs(path_color[..., :3] - direct_color[..., :3])) > 0.02
+
+  # Removing an authored attribute falls back to the descriptor default (128)
+  settings_prim.RemoveProperty("mitsuba:sample_count")
+  engine.render()
+  assert engine.get_render_stats()["totalSamples"] == 128
+
+
+def test_switch_active_render_settings_prim():
+  stage = Usd.Stage.CreateInMemory()
+  stage.GetRootLayer().subLayerPaths.append(
+      f"{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda"
+  )
+  direct_settings = UsdRender.Settings.Define(stage, "/Render/DirectSettings")
+  direct_settings.CreateResolutionAttr().Set(Gf.Vec2i(8, 8))
+  direct_settings.GetPrim().CreateAttribute(
+      "mitsuba:sample_count", Sdf.ValueTypeNames.Int
+  ).Set(4)
+
+  path_settings = UsdRender.Settings.Define(stage, "/Render/PathSettings")
+  path_settings.CreateResolutionAttr().Set(Gf.Vec2i(16, 12))
+  path_settings.GetPrim().CreateAttribute(
+      "mitsuba:sample_count", Sdf.ValueTypeNames.Int
+  ).Set(12)
+
+  stage.SetMetadata(
+      UsdRender.Tokens.renderSettingsPrimPath, "/Render/DirectSettings"
+  )
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  first = engine.render()["color"]
+  assert first.shape[:2] == (8, 8)
+  assert engine.get_render_stats()["totalSamples"] == 4
+
+  # Switch active UsdRenderSettings via stage metadata without rebuilding
+  stage.SetMetadata(
+      UsdRender.Tokens.renderSettingsPrimPath, "/Render/PathSettings"
+  )
+  second = engine.render()["color"]
+  assert second.shape[:2] == (12, 16)
+  assert engine.get_render_stats()["totalSamples"] == 12
+
+
+def test_render_settings_precedence():
+  stage = Usd.Stage.Open(f"{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda")
+  render_settings = test_helpers.create_render_settings(
+      stage, resolution=(8, 8)
+  )
+  render_settings.GetPrim().CreateAttribute(
+      "mitsuba:sample_count", Sdf.ValueTypeNames.Int
+  ).Set(4)
+
+  engine = usd_render.RenderEngine(stage)
+  # Explicit host override takes precedence over active UsdRenderSettings
+  engine.configure(
+      hydra_delegate_id="HdMitsubaRendererPlugin",
+      overrides={"mitsuba:sample_count": 16},
+  )
+  engine.render()
+  assert engine.get_render_stats()["totalSamples"] == 16
+
+  # Clearing host overrides restores the active UsdRenderSettings value
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin", overrides={})
+  engine.render()
+  assert engine.get_render_stats()["totalSamples"] == 4
+
+
+def test_integrator_flat_and_nested_parameters():
+  stage = Usd.Stage.Open(f"{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda")
+  plane = UsdGeom.Plane.Define(stage, "/World/Plane")
+  plane.GetWidthAttr().Set(10)
+  plane.GetLengthAttr().Set(10)
+
+  render_settings = test_helpers.create_render_settings(
+      stage, resolution=(16, 16), spp=4
+  )
+  settings_prim = render_settings.GetPrim()
+
+  # Flat integrator parameters without explicit `mitsuba:integrator:type`
+  # default to "path": max_depth = 1 disables surface lighting bounces.
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:max_depth", Sdf.ValueTypeNames.Int
+  ).Set(1)
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:hide_emitters", Sdf.ValueTypeNames.Bool
+  ).Set(True)
+
+  image_hd, _ = test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      output_prefix="test_integrator_flat_max_depth_1",
+      spp=4,
+      atol=0.02,
+  )
+  np.testing.assert_allclose(image_hd[..., :3], 0.0, atol=1e-5)
+
+  # Nested integrator parameters: wrap a configured path integrator inside an
+  # aov integrator under an arbitrary child plugin name (`sub_integrator`).
+  settings_prim.RemoveProperty("mitsuba:integrator:max_depth")
+  settings_prim.RemoveProperty("mitsuba:integrator:hide_emitters")
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:type", Sdf.ValueTypeNames.String
+  ).Set("aov")
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:aovs", Sdf.ValueTypeNames.String
+  ).Set("dd.y:depth")
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:sub_integrator:type", Sdf.ValueTypeNames.String
+  ).Set("path")
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:sub_integrator:max_depth", Sdf.ValueTypeNames.Int
+  ).Set(2)
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  nested_hd = engine.render()["color"]
+
+  scene_dict = usd_mitsuba.convert_to_mitsuba(stage)
+  assert scene_dict["integrator"]["type"] == "aov"
+  assert scene_dict["integrator"]["sub_integrator"] == {
+      "type": "path",
+      "max_depth": 2,
+  }
+  nested_mi = np.array(mi.render(mi.load_dict(scene_dict), spp=4))
+  test_helpers.robust_assert_close(
+      nested_hd[..., :3], nested_mi[..., :3], atol=0.05
+  )
+  assert np.max(nested_hd[..., :3]) > 0.1
+
+
+def test_integrator_parameters_dynamic_update():
+  stage = Usd.Stage.Open(f"{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda")
+  render_settings = test_helpers.create_render_settings(
+      stage, resolution=(16, 16), spp=4
+  )
+  settings_prim = render_settings.GetPrim()
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:type", Sdf.ValueTypeNames.String
+  ).Set("path")
+  max_depth_attr = settings_prim.CreateAttribute(
+      "mitsuba:integrator:max_depth", Sdf.ValueTypeNames.Int
+  )
+  max_depth_attr.Set(2)
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  lit_color = engine.render()["color"]
+  assert np.max(lit_color[..., :3]) > 0.1
+
+  # Live update of mitsuba:integrator:max_depth without calling configure()
+  max_depth_attr.Set(1)
+  unlit_color = engine.render()["color"]
+  np.testing.assert_allclose(unlit_color[..., :3], 0.0, atol=1e-5)
+
+
+@pytest.mark.parametrize(
+    "sampler_type,extra_params",
+    [
+        ("stratified", {"jitter": False}),
+        ("multijitter", {"jitter": True}),
+        ("ldsampler", {"seed": 7}),
+    ],
+)
+def test_sampler_type_and_parameters(sampler_type, extra_params):
+  stage = Usd.Stage.Open(f"{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda")
+  render_settings = test_helpers.create_render_settings(
+      stage, resolution=(16, 16), spp=4
+  )
+  settings_prim = render_settings.GetPrim()
+  # Keep mitsuba:sample_count = 4 on the stage to verify that
+  # mitsuba:sampler:sample_count = 16 takes precedence over it.
+  settings_prim.CreateAttribute(
+      "mitsuba:sampler:type", Sdf.ValueTypeNames.String
+  ).Set(sampler_type)
+  settings_prim.CreateAttribute(
+      "mitsuba:sampler:sample_count", Sdf.ValueTypeNames.Int
+  ).Set(16)
+  for key, value in extra_params.items():
+    sdf_type = (
+        Sdf.ValueTypeNames.Bool
+        if isinstance(value, bool)
+        else Sdf.ValueTypeNames.Int
+    )
+    settings_prim.CreateAttribute(f"mitsuba:sampler:{key}", sdf_type).Set(value)
+
+  scene_dict = usd_mitsuba.convert_to_mitsuba(stage)
+  sensor_key = next(
+      key
+      for key, val in scene_dict.items()
+      if isinstance(val, dict) and "film" in val
+  )
+  expected_sampler = {"type": sampler_type, "sample_count": 16, **extra_params}
+  assert scene_dict[sensor_key]["sampler"] == expected_sampler
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  image_hd = engine.render()["color"]
+  assert engine.get_render_stats()["totalSamples"] == 16
+
+  image_mi = np.array(mi.render(mi.load_dict(scene_dict), spp=16))
+  test_helpers.robust_assert_close(
+      image_hd[..., :3], image_mi[..., :3], atol=0.05
+  )
+
+  # Host overrides: whichever sample-count alias was set most recently wins.
+  engine.configure(
+      hydra_delegate_id="HdMitsubaRendererPlugin",
+      overrides={"mitsuba:sampler:sample_count": 12},
+  )
+  engine.render()
+  assert engine.get_render_stats()["totalSamples"] == 12
+  engine.configure(
+      hydra_delegate_id="HdMitsubaRendererPlugin",
+      overrides={"mitsuba:sample_count": 8},
+  )
+  engine.render()
+  assert engine.get_render_stats()["totalSamples"] == 8
+
+
+def test_sampler_dynamic_update():
+  stage = Usd.Stage.Open(f"{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda")
+  render_settings = test_helpers.create_render_settings(
+      stage, resolution=(16, 16), spp=4
+  )
+  settings_prim = render_settings.GetPrim()
+  sampler_type_attr = settings_prim.CreateAttribute(
+      "mitsuba:sampler:type", Sdf.ValueTypeNames.String
+  )
+  sampler_type_attr.Set("independent")
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  independent_color = engine.render()["color"]
+
+  # Live update of sampler plugin type and parameter without calling configure()
+  sampler_type_attr.Set("stratified")
+  settings_prim.CreateAttribute(
+      "mitsuba:sampler:jitter", Sdf.ValueTypeNames.Bool
+  ).Set(False)
+  stratified_color = engine.render()["color"]
+  assert not np.allclose(independent_color, stratified_color, atol=1e-4)
+
+  scene_dict = usd_mitsuba.convert_to_mitsuba(stage)
+  stratified_mi = np.array(mi.render(mi.load_dict(scene_dict), spp=4))
+  test_helpers.robust_assert_close(
+      stratified_color[..., :3], stratified_mi[..., :3], atol=0.02
+  )
+
+  # Progressive interactive rendering overrides structured samplers with
+  # `independent` so multi-pass accumulation does not collapse to a 1x1 grid.
+  engine.configure(
+      hydra_delegate_id="HdMitsubaRendererPlugin",
+      overrides={"enableInteractive": True, "mitsuba:sample_count": 2},
+  )
+  pass1 = engine.render()["color"]
+  pass2 = engine.render()["color"]
+  assert not np.allclose(pass1, pass2, atol=1e-5)
+
+
+def test_mitsuba_plugin_specs_usda():
+  stage = Usd.Stage.Open(
+      f"{test_helpers.TEST_ASSETS_PATH}/render_settings/mitsuba_plugin_specs.usda"
+  )
+  image_hd, image_mi = test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      output_prefix="test_mitsuba_plugin_specs_usda",
+      spp=16,
+      atol=0.05,
+  )
+  assert np.max(image_hd[..., :3]) > 0.1
+  assert np.max(image_mi) > 0.1

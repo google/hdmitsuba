@@ -14,15 +14,6 @@
 
 #pragma once
 
-#include <cstddef>
-#include <cstdint>
-#include <memory>
-#include <optional>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <absl/container/flat_hash_map.h>
 #include <pxr/base/gf/vec2i.h>
 #include <pxr/base/tf/token.h>
 #include <pxr/base/vt/dictionary.h>
@@ -34,6 +25,7 @@
 #include <pxr/imaging/hd/task.h>
 #include <pxr/imaging/hd/types.h>
 #include <pxr/imaging/hdsi/legacyDisplayStyleOverrideSceneIndex.h>
+#include <pxr/imaging/hdsi/sceneGlobalsSceneIndex.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
 #include <pxr/usd/usd/common.h>
@@ -41,6 +33,16 @@
 #include <pxr/usd/usdRender/settings.h>
 #include <pxr/usd/usdRender/spec.h>
 #include <pxr/usdImaging/usdImaging/stageSceneIndex.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <absl/container/flat_hash_map.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -123,11 +125,10 @@ class RenderEngine {
 
   pxr::UsdRenderSettings GetUsdRenderSettings(
       const std::optional<pxr::SdfPath>& path) const;
-  std::pair<pxr::HdRenderSettingsMap, pxr::UsdRenderSettings>
-  ReadRenderSettings(const std::optional<pxr::SdfPath>& path) const;
 
   pxr::UsdStageRefPtr stage_;
   pxr::UsdImagingStageSceneIndexRefPtr stage_scene_index_;
+  pxr::HdsiSceneGlobalsSceneIndexRefPtr scene_globals_scene_index_;
   pxr::HdsiLegacyDisplayStyleOverrideSceneIndexRefPtr
       display_style_scene_index_;
   pxr::HdRendererPlugin* renderer_plugin_ = nullptr;
@@ -143,8 +144,9 @@ class RenderEngine {
 
   std::string hydra_delegate_id_;
   std::optional<pxr::SdfPath> render_settings_prim_path_;
+  std::optional<int> configured_width_;
+  std::optional<pxr::SdfPath> configured_camera_path_;
   pxr::SdfPath camera_path_;
-  int width_;
   pxr::HdRenderSettingsMap settings_map_;
   pxr::GfRange2f data_window_ndc_;
   pxr::TfTokenVector render_tags_;
