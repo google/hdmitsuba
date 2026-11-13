@@ -24,6 +24,9 @@ TF_REGISTRY_FUNCTION(TfDebug) {
   TF_DEBUG_ENVIRONMENT_SYMBOL(HDMITSUBA_SYNC, "hdMitsuba sync calls");
   TF_DEBUG_ENVIRONMENT_SYMBOL(HDMITSUBA_GEOMETRY,
                               "hdMitsuba geometry processing");
+  TF_DEBUG_ENVIRONMENT_SYMBOL(
+      HDMITSUBA_MATERIAL,
+      "hdMitsuba material and texture features that Mitsuba does not support");
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE
