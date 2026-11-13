@@ -1,0 +1,92 @@
+#usda 1.0
+(
+    defaultPrim = "root"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "root"
+{
+    def Xform "Camera"
+    {
+        float3 xformOp:rotateXYZ = (63.559296, 2.2983238e-7, 46.691944)
+        float3 xformOp:scale = (1, 1, 1)
+        double3 xformOp:translate = (4.8382463455200195, -4.495369911193848, 3.1569976806640625)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+
+        def Camera "Camera"
+        {
+            float2 clippingRange = (0.1, 100)
+            float focalLength = 0.5
+            float horizontalAperture = 0.36
+            token projection = "perspective"
+            float verticalAperture = 0.36
+        }
+    }
+
+    def Sphere "SphereConstant" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </root/_materials/Clearcoat>
+        double radius = 0.9
+        double3 xformOp:translate = (-0.76, -0.8, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "SphereTextured" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </root/_materials/ClearcoatTextured>
+        double radius = 0.9
+        double3 xformOp:translate = (0.76, 0.8, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Scope "_materials"
+    {
+        # A smooth clearcoat mirrors the light.
+        def Material "Clearcoat"
+        {
+            token outputs:surface.connect = </root/_materials/Clearcoat/Shader.outputs:surface>
+            def Shader "Shader"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0, 0, 0)
+                float inputs:roughness = 1
+                float inputs:clearcoat = 1
+                float inputs:clearcoatRoughness = 0.05
+                token outputs:surface
+            }
+        }
+
+        # The red channel of the texture is 0.16, 0.24, 0.63 and 0.78 in its
+        # four quadrants.
+        def Material "ClearcoatTextured" (
+            inherits = </root/_materials/Clearcoat>
+        )
+        {
+            over "Shader"
+            {
+                float inputs:clearcoatRoughness.connect = </root/_materials/ClearcoatTextured/Tex.outputs:r>
+            }
+            def Shader "Tex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./textures/uv_quadrants.png@
+                token inputs:sourceColorSpace = "raw"
+                float outputs:r
+            }
+        }
+    }
+
+    def RectLight "Light"
+    {
+        float inputs:height = 8
+        float inputs:intensity = 60
+        float inputs:width = 8
+        double3 xformOp:translate = (0, 0, 4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}

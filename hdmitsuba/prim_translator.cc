@@ -585,6 +585,15 @@ PrimTranslator<Float, Spectrum>::ParsePreviewSurface(
   // The opacity is either a texture or a constant, and is applied below.
   mitsuba::ref<mitsuba::Object> opacity_texture;
   float opacity = 1.0f;
+  auto math_texture = [](const std::string& expr,
+                         const mitsuba::ref<mitsuba::Object>& input) {
+    mitsuba::Properties math_props("math");
+    math_props.set("expr", expr);
+    math_props.set("in0", input);
+    return mitsuba::PluginManager::instance()->create_object(
+        math_props, mitsuba::Texture<Float, Spectrum>::Variant,
+        mitsuba::Texture<Float, Spectrum>::Type);
+  };
   for (const auto& mapping : PreviewSurfaceParams()) {
     mitsuba::ref<mitsuba::Object> texture = nullptr;
     if (!mapping.scalar_only) {
@@ -601,6 +610,8 @@ PrimTranslator<Float, Spectrum>::ParsePreviewSurface(
     }
     auto* constant_tex =
         static_cast<mitsuba::Texture<Float, Spectrum>*>(texture.get());
+    // The clearcoat gloss is the inverse of the clearcoat roughness.
+    const bool invert = mapping.mitsuba_name == "clearcoat_gloss";
     if (mapping.mitsuba_name == "spec_trans") {
       if (constant_tex && !constant_tex->is_spatially_varying()) {
         // E.g., the alpha of an image without an alpha channel.
@@ -612,13 +623,18 @@ PrimTranslator<Float, Spectrum>::ParsePreviewSurface(
                       GetNodeParameter(preview_surface_node, "opacity"))
                       .GetWithDefault<float>(1.0f);
       }
+    } else if (invert && constant_tex &&
+               !constant_tex->is_spatially_varying()) {
+      props.set(mapping.mitsuba_name, 1.0f - constant_tex->max());
+    } else if (invert && texture) {
+      props.set(mapping.mitsuba_name, math_texture("1 - in[0]", texture));
     } else if (texture) {
       props.set(mapping.mitsuba_name, texture);
     } else {
       auto param_it = preview_surface_node.parameters.find(mapping.usd_name);
       if (param_it != preview_surface_node.parameters.end()) {
         SetMitsubaPropertyFromValue(props, mapping.mitsuba_name,
-                                    param_it->second);
+                                    param_it->second, invert);
       }
     }
   }
@@ -629,14 +645,6 @@ PrimTranslator<Float, Spectrum>::ParsePreviewSurface(
   // in the `presence` opacity mode (both use a `mask` BSDF, see below), and
   // only its diffuse component in favor of transmission in the default
   // `transparent` mode, which keeps the specular response.
-  auto opacity_math = [&](const std::string& expr) {
-    mitsuba::Properties math_props("math");
-    math_props.set("expr", expr);
-    math_props.set("in0", opacity_texture);
-    return mitsuba::PluginManager::instance()->create_object(
-        math_props, mitsuba::Texture<Float, Spectrum>::Variant,
-        mitsuba::Texture<Float, Spectrum>::Type);
-  };
   const float opacity_threshold =
       VtValue::Cast<float>(
           GetNodeParameter(preview_surface_node, "opacityThreshold"))
@@ -648,15 +656,15 @@ PrimTranslator<Float, Spectrum>::ParsePreviewSurface(
               .GetWithDefault<std::string>() == "presence";
   if (opacity_threshold > 0.0f) {
     if (opacity_texture) {
-      opacity_texture =
-          opacity_math(absl::StrCat("in[0] >= ", opacity_threshold));
+      opacity_texture = math_texture(
+          absl::StrCat("in[0] >= ", opacity_threshold), opacity_texture);
     } else {
       opacity = opacity >= opacity_threshold ? 1.0f : 0.0f;
     }
   }
   if (!presence) {
     if (opacity_texture) {
-      props.set("spec_trans", opacity_math("1 - in[0]"));
+      props.set("spec_trans", math_texture("1 - in[0]", opacity_texture));
     } else {
       props.set("spec_trans", 1.0f - opacity);
     }

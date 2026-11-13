@@ -518,15 +518,11 @@ def usd_preview_surface_to_mitsuba(
         opacity = val['value'] if val['type'] == 'uniform' else val
         continue
       if val is not None and name == 'clearcoatRoughness':
-        # Constant textures (e.g. the alpha of an image without an alpha
-        # channel) can be inverted, unlike spatially varying ones.
+        # The clearcoat gloss is the inverse of the clearcoat roughness.
         if val['type'] == 'uniform':
           val = 1.0 - val['value']
         else:
-          Tf.Warn(
-              f"Texture inversion for {name} is not supported. The resulting"
-              " Mitsuba material may look incorrect."
-          )
+          val = {'type': 'math', 'expr': '1 - in[0]', 'in0': val}
     elif name not in ('normal', 'bump'):  # Like hdMitsuba.
       raw_val = usd_input.GetAttr().Get()
       if raw_val is not None:
