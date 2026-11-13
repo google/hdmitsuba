@@ -52,6 +52,7 @@
 #include <pxr/usd/sdf/assetPath.h>
 #include <pxr/usd/sdf/path.h>
 
+#include "hdmitsuba/debug_codes.h"
 #include "hdmitsuba/utils.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -468,6 +469,12 @@ MI_VARIANT void TextureCache<Float, Spectrum>::GarbageCollect() {
 
 MI_VARIANT mitsuba::ref<mitsuba::Bitmap>
 TextureCache<Float, Spectrum>::LoadBitmap(const std::string& filename) {
+  if (absl::StrContains(filename, "<UDIM>")) {
+    TF_DEBUG(HDMITSUBA_MATERIAL)
+        .Msg("UDIM textures are not supported. Ignoring texture '%s'.\n",
+             filename.c_str());
+    return nullptr;
+  }
   try {
     return ReadBitmap(filename);
   } catch (const std::exception& e) {

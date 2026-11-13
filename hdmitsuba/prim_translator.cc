@@ -527,10 +527,11 @@ mitsuba::ref<mitsuba::Object> ParseNodeRecursive(
   for (const auto& [input_token, connections] : node.inputConnections) {
     if (connections.empty()) continue;
     if (IsPrincipledNode(node) && IsScalarOnlyPrincipledInput(input_token)) {
-      TF_WARN(
-          "Mitsuba's principled BSDF does not support texture connection for "
-          "'%s'. Ignoring connection.",
-          input_token.GetText());
+      TF_DEBUG(HDMITSUBA_MATERIAL)
+          .Msg(
+              "Mitsuba's principled BSDF does not support texture connection "
+              "for '%s'. Ignoring connection.\n",
+              input_token.GetText());
       continue;
     }
     mitsuba::ref<mitsuba::Object> upstream_object =
@@ -603,10 +604,11 @@ PrimTranslator<Float, Spectrum>::ParsePreviewSurface(
           &res.mesh_attributes);
     } else {
       if (preview_surface_node.inputConnections.count(mapping.usd_name) > 0) {
-        TF_WARN(
-            "Mitsuba's principled BSDF does not support texture for '%s'. "
-            "Using constant value instead.",
-            std::string(mapping.mitsuba_name).c_str());
+        TF_DEBUG(HDMITSUBA_MATERIAL)
+            .Msg(
+                "Mitsuba's principled BSDF does not support texture for '%s'. "
+                "Using constant value instead.\n",
+                std::string(mapping.mitsuba_name).c_str());
       }
     }
     auto* constant_tex =
