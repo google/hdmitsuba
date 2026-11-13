@@ -124,7 +124,10 @@ def get_ray_visibility(
   primvar = UsdGeom.PrimvarsAPI(prim).FindPrimvarWithInheritance(
       'mitsuba:visibility'
   )
-  return parse_ray_visibility(primvar.Get(time) if primvar else None, 'all')
+  return (
+      parse_ray_visibility(primvar.Get(time) if primvar else None, None)
+      or 'all'
+  )
 
 
 def get_world_transform(

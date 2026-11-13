@@ -38,6 +38,7 @@ def _set_mitsuba_variant():
     [
         'materials',
         'checkerboard',
+        'clearcoat',
         'normalmap',
         'nodegraphs',
         'display_color',
