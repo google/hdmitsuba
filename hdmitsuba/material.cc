@@ -70,6 +70,13 @@ void ConvertMaterialNetwork(const HdMaterialNetworkSchema& network_schema,
                 HdMaterialNodeParameterSchemaTokens->colorSpace, param_name))] =
                 cs_ds->GetValue(0.0f);
           }
+          if (auto tn_ds = param_schema.GetTypeName()) {
+            if (const TfToken tn = tn_ds->GetTypedValue(0.0f); !tn.IsEmpty()) {
+              node.parameters[TfToken(SdfPath::JoinIdentifier(
+                  HdMaterialNodeParameterSchemaTokens->typeName, param_name))] =
+                  VtValue(tn);
+            }
+          }
         }
       }
     }
