@@ -43,6 +43,8 @@ contributors). See [README.md](README.md) for build and test instructions and
     *   `pyrefly check` (must report 0 errors)
     *   `pyink --check .` and `isort --check-only .` (format Python code with
         `pyink .` and `isort .`)
+    *   `git ls-files '*.cc' '*.h' | xargs clang-format --dry-run --Werror`
+        (format C++ code with `clang-format -i`)
 *   Keep diffs minimal: do not touch unrelated code or comments.
 *   Keep the history of a branch clean: no "fix up" commits, amend follow-up
     changes into the commit they belong to.

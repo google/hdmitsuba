@@ -34,9 +34,11 @@ PXR_NAMESPACE_OPEN_SCOPE
 // Root-prim data-source key publishing the union of all camera shutter
 // intervals from HdMitsuba_MotionIntervalSceneIndex, and per-prim primvar
 // controlling the maximum number of transform motion samples.
+// clang-format off
 #define HDMITSUBA_MOTION_TOKENS                  \
   ((motion_interval, "mitsuba:motion_interval")) \
   ((motion_samples, "mitsuba:motion_samples"))
+// clang-format on
 
 TF_DECLARE_PUBLIC_TOKENS(HdMitsubaMotionTokens, HDMITSUBA_MOTION_TOKENS);
 

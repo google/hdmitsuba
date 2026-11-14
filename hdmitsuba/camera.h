@@ -33,10 +33,12 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 inline constexpr std::string_view kMitsubaSensorNamespace = "mitsuba:sensor:";
 
+// clang-format off
 #define HDMITSUBA_CAMERA_TOKENS                    \
   ((sensorType, "mitsuba:sensor:type"))            \
   ((sensorShape, "mitsuba:sensor:shape"))          \
   ((sensorPixelFilterType, "mitsuba:sensor:film:pixel_filter:type"))
+// clang-format on
 
 TF_DECLARE_PUBLIC_TOKENS(HdMitsubaCameraTokens, HDMITSUBA_CAMERA_TOKENS);
 

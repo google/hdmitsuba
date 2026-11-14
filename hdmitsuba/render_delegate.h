@@ -30,6 +30,7 @@
 
 PXR_NAMESPACE_OPEN_SCOPE
 
+// clang-format off
 #define HDMITSUBA_RENDER_SETTINGS_TOKENS \
   ((variant, "mitsuba:variant")) \
   ((sample_count, "mitsuba:sample_count")) \
@@ -40,6 +41,7 @@ PXR_NAMESPACE_OPEN_SCOPE
   ((integrator_rr_depth, "mitsuba:integrator:rr_depth")) \
   ((use_kernel_freezing, "mitsuba:use_kernel_freezing")) \
   ((denoise, "mitsuba:denoise"))
+// clang-format on
 
 TF_DECLARE_PUBLIC_TOKENS(HdMitsubaRenderSettingsTokens,
                          HDMITSUBA_RENDER_SETTINGS_TOKENS);

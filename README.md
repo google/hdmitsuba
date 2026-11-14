@@ -155,6 +155,17 @@ pyink .
 isort .
 ```
 
+## C++ Code Formatting (clang-format)
+
+C++ code follows the Google C++ style and is formatted with [`clang-format`](https://clang.llvm.org/docs/ClangFormat.html), configured in `.clang-format`. CI checks that the code is formatted. As for Python, install the version pinned in the CI configuration:
+
+```bash
+pip install clang-format==23.1.5
+
+# Format all C++ files
+git ls-files '*.cc' '*.h' | xargs clang-format -i
+```
+
 
 ## Limitations and Future Work
 
