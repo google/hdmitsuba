@@ -95,7 +95,7 @@ jobs:
 
     - name: Install Python Dependencies
       run: |
-        pip install numpy pytest pyrefly nanobind_backend
+        pip install numpy pytest pyrefly nanobind_backend pyink==26.5.1 isort==9.0.2
 
     - name: Cache Mitsuba 3
       id: cache-mitsuba
@@ -168,6 +168,11 @@ jobs:
     - name: Run Pyrefly Type Checker
       run: |
         pyrefly check
+
+    - name: Check Python Formatting
+      run: |
+        pyink --check --diff .
+        isort --check-only --diff .
 
     - name: Upload macOS Crash Reports
       if: failure() && runner.os == 'macOS'
