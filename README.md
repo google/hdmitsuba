@@ -63,11 +63,14 @@ cmake --build build
 
 ## Running Tests
 
-To run the tests, you must configure the environment so that USD can find the `hdMitsuba` plugin, and Python can find the built modules and dependencies.
+The built binaries locate the USD and Mitsuba libraries through their RPATH (which refers to the USD installation and the Mitsuba build directory), so `LD_LIBRARY_PATH` does not need to be set. Only two things need to be configured:
+
+*   `PXR_PLUGINPATH_NAME` must contain the directory of the `hdMitsuba` plugin (`build/hdmitsuba`, or `<prefix>/plugin/usd` after `cmake --install build --prefix <prefix>`). This is all that is needed to use the delegate in an existing USD application such as `usdview`: in a Python process, the delegate itself makes the Python modules of the Mitsuba build importable.
+*   `PYTHONPATH` must additionally contain the Python modules of this project, Mitsuba and USD to run the tests, the render CLI or the offline translator.
 
 ### Environment Setup
 
-CMake generates a `setpath.sh` script in your build directory that automatically configures all required environment variables (`PYTHONPATH`, `LD_LIBRARY_PATH`, etc.) based on your build configuration.
+CMake generates a `setpath.sh` script in your build directory that automatically configures these environment variables based on your build configuration.
 
 Before running any tests, source this script from the repository root:
 

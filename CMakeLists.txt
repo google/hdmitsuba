@@ -80,6 +80,10 @@ set(BUILD_SHARED_LIBS ON)
 add_subdirectory(third_party/abseil-cpp)
 unset(BUILD_SHARED_LIBS)
 
+# Add the directories of the linked libraries (USD, Mitsuba) to the RPATH of the
+# installed binaries, so that they are found without LD_LIBRARY_PATH.
+set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
+
 find_package(OpenGL REQUIRED)
 find_package(pxr REQUIRED)
 
