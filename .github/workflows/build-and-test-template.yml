@@ -102,7 +102,7 @@ jobs:
       uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
       with:
         path: |
-          mitsuba3
+          third_party/mitsuba3
         key: ${{ runner.os }}-mitsuba3-aa01500f57770a4ef0b067693cae08b3e8a2ac73
 
     - name: Clone and Build Mitsuba 3
@@ -111,8 +111,8 @@ jobs:
         COMPILER_CC: ${{ inputs.compiler_cc }}
         COMPILER_CXX: ${{ inputs.compiler_cxx }}
       run: |
-        git clone https://github.com/mitsuba-renderer/mitsuba3.git
-        cd mitsuba3
+        git clone https://github.com/mitsuba-renderer/mitsuba3.git third_party/mitsuba3
+        cd third_party/mitsuba3
         git checkout aa01500f57770a4ef0b067693cae08b3e8a2ac73
         git submodule update --init --recursive
         # Configure with minimal variants to speed up build
@@ -135,7 +135,7 @@ jobs:
         COMPILER_CC: ${{ inputs.compiler_cc }}
         COMPILER_CXX: ${{ inputs.compiler_cxx }}
       run: |
-        CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DMITSUBA_DIR=$PWD/mitsuba3 -DMITSUBA_BUILD_DIR=$PWD/mitsuba3/build"
+        CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DMITSUBA_DIR=$PWD/third_party/mitsuba3 -DMITSUBA_BUILD_DIR=$PWD/third_party/mitsuba3/build"
         if [ "$RUNNER_OS" = "Windows" ]; then
           # Use default MSBuild generator on Windows
           cmake -B build $CMAKE_FLAGS
