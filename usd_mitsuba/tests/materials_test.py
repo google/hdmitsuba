@@ -13,21 +13,24 @@
 # limitations under the License.
 
 import os
+
 import drjit as dr
 import mitsuba as mi
 import numpy as np
-import pytest
-
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdShade
+import pytest
+
 from usd_mitsuba import material
 from usd_mitsuba import material_authoring
 
 _ALBEDO_PNG = os.path.abspath(
-    'hdmitsuba/test_assets/materials/textures/albedo.png')
+    'hdmitsuba/test_assets/materials/textures/albedo.png'
+)
 _NORMALMAP_PNG = os.path.abspath(
-    'hdmitsuba/test_assets/materials/textures/normalmap.png')
+    'hdmitsuba/test_assets/materials/textures/normalmap.png'
+)
 
 MITSUBA_EXAMPLE_BSDFS = [
     {'type': 'diffuse'},
@@ -54,7 +57,11 @@ MITSUBA_EXAMPLE_BSDFS = [
     },
     {
         'type': 'normalmap',
-        'normalmap': {'type': 'bitmap', 'filename': _NORMALMAP_PNG, 'raw': True},
+        'normalmap': {
+            'type': 'bitmap',
+            'filename': _NORMALMAP_PNG,
+            'raw': True,
+        },
         'nested_bsdf': {
             'type': 'roughplastic',
             'diffuse_reflectance': {
@@ -80,9 +87,7 @@ def _set_mitsuba_variant():
 def _assert_pytree_equals(a, b, atol: float = 1e-6, rtol: float = 1e-6):
   """Asserts that two pytrees (e.g. trees of NumPy arrays) are equal."""
   if not isinstance(a, type(b)):
-    raise ValueError(
-        f'Types of a and b do not match: {type(a)} and {type(b)}'
-    )
+    raise ValueError(f'Types of a and b do not match: {type(a)} and {type(b)}')
 
   if isinstance(a, dict):
     assert set(a.keys()) == set(b.keys())
@@ -100,15 +105,13 @@ def _assert_pytree_equals(a, b, atol: float = 1e-6, rtol: float = 1e-6):
       _assert_pytree_equals(a[i], b[i], atol, rtol)
       return
   elif isinstance(a, (float, np.ndarray, dr.ArrayBase)):
-    np.testing.assert_allclose(
-        np.array(a), np.array(b), atol=atol, rtol=rtol
-    )
+    np.testing.assert_allclose(np.array(a), np.array(b), atol=atol, rtol=rtol)
     return
   elif isinstance(a, (int, bool, str)):
     assert a == b
 
 
-@pytest.mark.parametrize("mitsuba_bsdf", MITSUBA_EXAMPLE_BSDFS)
+@pytest.mark.parametrize('mitsuba_bsdf', MITSUBA_EXAMPLE_BSDFS)
 def test_mitsuba_to_usd_conversion(mitsuba_bsdf):
   stage = Usd.Stage.CreateInMemory()
   material_authoring.add_mitsuba_shader(stage, Sdf.Path('/test'), mitsuba_bsdf)
@@ -122,39 +125,46 @@ def test_mitsuba_to_usd_conversion(mitsuba_bsdf):
   _assert_pytree_equals(result_dict, mitsuba_bsdf)
 
 
-@pytest.mark.parametrize("bsdf_dict", [
-    {
-        'type': 'bumpmap',
-        'bumpmap': {'type': 'bitmap', 'filename': _NORMALMAP_PNG},
-        'nested_bsdf': {
+@pytest.mark.parametrize(
+    'bsdf_dict',
+    [
+        {
+            'type': 'bumpmap',
+            'bumpmap': {'type': 'bitmap', 'filename': _NORMALMAP_PNG},
+            'nested_bsdf': {
+                'type': 'principled',
+                'base_color': {'type': 'bitmap', 'filename': _ALBEDO_PNG},
+                'roughness': 0.2,
+            },
+        },
+        {
+            'type': 'normalmap',
+            'normalmap': {
+                'type': 'bitmap',
+                'filename': _NORMALMAP_PNG,
+                'raw': True,
+            },
+            'nested_bsdf': {
+                'type': 'principled',
+                'base_color': {'type': 'bitmap', 'filename': _ALBEDO_PNG},
+                'roughness': 0.2,
+            },
+        },
+        {
             'type': 'principled',
             'base_color': {'type': 'bitmap', 'filename': _ALBEDO_PNG},
             'roughness': 0.2,
+            'spec_trans': 0.3,
         },
-    },
-    {
-        'type': 'normalmap',
-        'normalmap': {'type': 'bitmap', 'filename': _NORMALMAP_PNG, 'raw': True},
-        'nested_bsdf': {
+        {
             'type': 'principled',
             'base_color': {'type': 'bitmap', 'filename': _ALBEDO_PNG},
             'roughness': 0.2,
+            'clearcoat': 0.5,
+            'clearcoat_gloss': 0.8,
         },
-    },
-    {
-        'type': 'principled',
-        'base_color': {'type': 'bitmap', 'filename': _ALBEDO_PNG},
-        'roughness': 0.2,
-        'spec_trans': 0.3,
-    },
-    {
-        'type': 'principled',
-        'base_color': {'type': 'bitmap', 'filename': _ALBEDO_PNG},
-        'roughness': 0.2,
-        'clearcoat': 0.5,
-        'clearcoat_gloss': 0.8,
-    },
-])
+    ],
+)
 def test_add_mitsuba_shader_as_usd_preview_surface(bsdf_dict):
   stage = Usd.Stage.CreateInMemory()
   prim_path = Sdf.Path('/test')

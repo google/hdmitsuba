@@ -20,15 +20,15 @@ from typing import Any
 
 import mitsuba as mi
 import numpy as np
-import pytest
-
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
 from pxr import UsdLux
 from pxr import UsdShade
-import usd_render
+import pytest
+
 from hdmitsuba.tests import test_helpers
+import usd_render
 
 _RENDER_RESOLUTION = (64, 64)
 
@@ -182,9 +182,7 @@ def test_render(scene_name: str):
 
 
 def test_change_light_type():
-  stage = Usd.Stage.Open(
-      f'{test_helpers.TEST_ASSETS_PATH}/lights/sphere.usda'
-  )
+  stage = Usd.Stage.Open(f'{test_helpers.TEST_ASSETS_PATH}/lights/sphere.usda')
   test_helpers.create_render_settings(stage, resolution=_RENDER_RESOLUTION)
 
   engine = usd_render.RenderEngine(stage)
@@ -209,9 +207,7 @@ def test_change_light_type():
 
 
 def test_visibility():
-  stage = Usd.Stage.Open(
-      f'{test_helpers.TEST_ASSETS_PATH}/lights/sphere.usda'
-  )
+  stage = Usd.Stage.Open(f'{test_helpers.TEST_ASSETS_PATH}/lights/sphere.usda')
   test_helpers.create_render_settings(stage, resolution=_RENDER_RESOLUTION)
 
   engine = usd_render.RenderEngine(stage)
@@ -245,9 +241,7 @@ def test_visibility():
 
 
 def test_active():
-  stage = Usd.Stage.Open(
-      f'{test_helpers.TEST_ASSETS_PATH}/lights/sphere.usda'
-  )
+  stage = Usd.Stage.Open(f'{test_helpers.TEST_ASSETS_PATH}/lights/sphere.usda')
   test_helpers.create_render_settings(stage, resolution=_RENDER_RESOLUTION)
 
   engine = usd_render.RenderEngine(stage)
@@ -280,9 +274,7 @@ def test_active():
 
 
 def test_update_treat_as_point():
-  stage = Usd.Stage.Open(
-      f'{test_helpers.TEST_ASSETS_PATH}/lights/sphere.usda'
-  )
+  stage = Usd.Stage.Open(f'{test_helpers.TEST_ASSETS_PATH}/lights/sphere.usda')
   test_helpers.create_render_settings(stage, resolution=_RENDER_RESOLUTION)
 
   engine = usd_render.RenderEngine(stage)
@@ -315,9 +307,7 @@ def test_update_treat_as_point():
 
 
 def test_update_dome_light_intensity():
-  stage = Usd.Stage.Open(
-      f'{test_helpers.TEST_ASSETS_PATH}/lights/envmap.usda'
-  )
+  stage = Usd.Stage.Open(f'{test_helpers.TEST_ASSETS_PATH}/lights/envmap.usda')
   test_helpers.create_render_settings(stage, resolution=_RENDER_RESOLUTION)
   engine = usd_render.RenderEngine(stage)
   engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin')
@@ -335,9 +325,7 @@ def test_update_dome_light_intensity():
 
 
 def test_update_spot_shaping_softness():
-  stage = Usd.Stage.Open(
-      f'{test_helpers.TEST_ASSETS_PATH}/lights/spot.usda'
-  )
+  stage = Usd.Stage.Open(f'{test_helpers.TEST_ASSETS_PATH}/lights/spot.usda')
   test_helpers.create_render_settings(stage, resolution=_RENDER_RESOLUTION)
   engine = usd_render.RenderEngine(stage)
   engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin')

@@ -19,13 +19,13 @@ from __future__ import annotations
 import drjit as dr
 import mitsuba as mi
 import numpy as np
-import pytest
-
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
-from pxr import UsdRender
 from pxr import UsdLux
+from pxr import UsdRender
+import pytest
+
 from hdmitsuba.tests import test_helpers
 import usd_render
 
@@ -64,12 +64,19 @@ def _setup_stage(stage: Usd.Stage, freeze_enabled: bool) -> None:
   ).Set(freeze_enabled)
 
 
-def _create_engine(freeze_enabled: bool, overrides: dict | None = None) -> tuple[Usd.Stage, usd_render.RenderEngine]:
+def _create_engine(
+    freeze_enabled: bool, overrides: dict | None = None
+) -> tuple[Usd.Stage, usd_render.RenderEngine]:
   stage = Usd.Stage.CreateInMemory()
   _setup_stage(stage, freeze_enabled=freeze_enabled)
   test_helpers.create_render_settings(stage)
   engine = usd_render.RenderEngine(stage)
-  engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin', camera_path='/camera', width=256, overrides=overrides)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      camera_path='/camera',
+      width=256,
+      overrides=overrides,
+  )
   return stage, engine
 
 
@@ -77,7 +84,9 @@ def test_kernel_freezing_camera_motion():
   # Compare renderings using modified camera with and without freezing.
   stage_frozen, engine_frozen = _create_engine(freeze_enabled=True)
   img_frozen_1 = engine_frozen.render()['color']
-  translate_op_frozen = UsdGeom.Xformable(UsdGeom.Camera.Get(stage_frozen, '/camera')).GetOrderedXformOps()[0]
+  translate_op_frozen = UsdGeom.Xformable(
+      UsdGeom.Camera.Get(stage_frozen, '/camera')
+  ).GetOrderedXformOps()[0]
   translate_op_frozen.Set((0.5, 2.0, 5.0))
   img_frozen_2 = engine_frozen.render()['color']
   translate_op_frozen.Set((1.0, 2.0, 5.0))
@@ -86,7 +95,9 @@ def test_kernel_freezing_camera_motion():
   # Render the same images with freezing disabled.
   stage_ref, engine_ref = _create_engine(freeze_enabled=False)
   img_ref_1 = engine_ref.render()['color']
-  translate_op_ref = UsdGeom.Xformable(UsdGeom.Camera.Get(stage_ref, '/camera')).GetOrderedXformOps()[0]
+  translate_op_ref = UsdGeom.Xformable(
+      UsdGeom.Camera.Get(stage_ref, '/camera')
+  ).GetOrderedXformOps()[0]
   translate_op_ref.Set((0.5, 2.0, 5.0))
   img_ref_2 = engine_ref.render()['color']
   translate_op_ref.Set((1.0, 2.0, 5.0))
@@ -102,18 +113,28 @@ def test_kernel_freezing_camera_motion():
 
 def test_kernel_freezing_interactive_rendering():
   # Similar to the test above, but with interactive (progressive) rendering enabled.
-  stage_frozen, engine_frozen = _create_engine(freeze_enabled=True, overrides={'mitsuba:sample_count': 4, 'enableInteractive': True})
+  stage_frozen, engine_frozen = _create_engine(
+      freeze_enabled=True,
+      overrides={'mitsuba:sample_count': 4, 'enableInteractive': True},
+  )
   img_frozen_1 = engine_frozen.render()['color']
 
-  translate_op_frozen = UsdGeom.Xformable(UsdGeom.Camera.Get(stage_frozen, '/camera')).GetOrderedXformOps()[0]
+  translate_op_frozen = UsdGeom.Xformable(
+      UsdGeom.Camera.Get(stage_frozen, '/camera')
+  ).GetOrderedXformOps()[0]
   translate_op_frozen.Set((0.5, 2.0, 5.0))
   img_frozen_2 = engine_frozen.render()['color']
   translate_op_frozen.Set((1.0, 2.0, 5.0))
   img_frozen_3 = engine_frozen.render()['color']
 
-  stage_ref, engine_ref = _create_engine(freeze_enabled=False, overrides={'mitsuba:sample_count': 4, 'enableInteractive': True})
+  stage_ref, engine_ref = _create_engine(
+      freeze_enabled=False,
+      overrides={'mitsuba:sample_count': 4, 'enableInteractive': True},
+  )
   img_ref_1 = engine_ref.render()['color']
-  translate_op_ref = UsdGeom.Xformable(UsdGeom.Camera.Get(stage_ref, '/camera')).GetOrderedXformOps()[0]
+  translate_op_ref = UsdGeom.Xformable(
+      UsdGeom.Camera.Get(stage_ref, '/camera')
+  ).GetOrderedXformOps()[0]
   translate_op_ref.Set((0.5, 2.0, 5.0))
   img_ref_2 = engine_ref.render()['color']
   translate_op_ref.Set((1.0, 2.0, 5.0))
@@ -132,7 +153,9 @@ def test_kernel_freezing_structural_change_invalidation():
   img_before = engine.render()['color']
   # Dynamically add a new geometry
   new_mesh = UsdGeom.Mesh.Define(stage, '/new_mesh')
-  new_mesh.GetPointsAttr().Set([(-0.5, 1, 1), (0.5, 1, 1), (0.5, 1, 2), (-0.5, 1, 2)])
+  new_mesh.GetPointsAttr().Set(
+      [(-0.5, 1, 1), (0.5, 1, 1), (0.5, 1, 2), (-0.5, 1, 2)]
+  )
   new_mesh.GetFaceVertexCountsAttr().Set([4])
   new_mesh.GetFaceVertexIndicesAttr().Set([3, 2, 1, 0])
   # Verify that the new geometry is visible and the cache was invalidated
@@ -151,7 +174,9 @@ def test_kernel_freezing_dynamic_toggle():
   np.testing.assert_allclose(img_frozen, img_disabled, atol=1e-4, rtol=1e-4)
   # Dynamically turn freezing ON again!
   settings_prim.GetAttribute('mitsuba:use_kernel_freezing').Set(True)
-  np.testing.assert_allclose(img_disabled, engine.render()['color'], atol=1e-4, rtol=1e-4)
+  np.testing.assert_allclose(
+      img_disabled, engine.render()['color'], atol=1e-4, rtol=1e-4
+  )
 
 
 def _render_instancing_frames(freeze_enabled: bool) -> list[np.ndarray]:
@@ -160,7 +185,9 @@ def _render_instancing_frames(freeze_enabled: bool) -> list[np.ndarray]:
   instancer.CreatePrototypesRel().SetTargets(['/mesh'])
   proto_indices = instancer.CreateProtoIndicesAttr([0, 0])
   positions = instancer.CreatePositionsAttr([(-1.5, 0.5, 0), (1.5, 0.5, 0)])
-  camera = UsdGeom.Xformable(stage.GetPrimAtPath('/camera')).GetOrderedXformOps()[0]
+  camera = UsdGeom.Xformable(
+      stage.GetPrimAtPath('/camera')
+  ).GetOrderedXformOps()[0]
   points = UsdGeom.Mesh.Get(stage, '/mesh').GetPointsAttr()
 
   def render(expect_replay: bool = False) -> np.ndarray:
@@ -207,9 +234,11 @@ def test_kernel_freezing_light_emission_updates(kind: str) -> None:
     intensity = UsdLux.DomeLight.Get(stage, '/light').GetIntensityAttr()
   else:
     stage.RemovePrim('/light')
-    light = {'point': UsdLux.SphereLight, 'rect': UsdLux.RectLight, 'distant': UsdLux.DistantLight}[kind].Define(
-        stage, '/test_light'
-    )
+    light = {
+        'point': UsdLux.SphereLight,
+        'rect': UsdLux.RectLight,
+        'distant': UsdLux.DistantLight,
+    }[kind].Define(stage, '/test_light')
     light.AddTranslateOp().Set((0, 2, 0))
     light.AddRotateXOp().Set(-90)
     if kind == 'point':

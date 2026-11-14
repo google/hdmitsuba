@@ -18,13 +18,13 @@ from __future__ import annotations
 
 import mitsuba as mi
 import numpy as np
-
 from pxr import Usd  # type: ignore
 from pxr import UsdGeom  # type: ignore
 from pxr import UsdRender  # type: ignore
-import usd_render
+
 from hdmitsuba.tests import test_helpers
 from usd_mitsuba import translator as usd_mitsuba
+import usd_render
 
 
 def test_dual_camera_stage_override():
@@ -39,9 +39,7 @@ def test_dual_camera_stage_override():
   c2.AddTranslateOp().Set((-0.5, 0.5, -0.5))
   c2.AddRotateXOp().Set(-10)
   c2.AddRotateYOp().Set(15)
-  c2.GetHorizontalApertureAttr().Set(
-      orig_cam.GetHorizontalApertureAttr().Get()
-  )
+  c2.GetHorizontalApertureAttr().Set(orig_cam.GetHorizontalApertureAttr().Get())
   c2.GetVerticalApertureAttr().Set(orig_cam.GetVerticalApertureAttr().Get())
   c2.GetFocalLengthAttr().Set(orig_cam.GetFocalLengthAttr().Get())
   c2.GetClippingRangeAttr().Set(orig_cam.GetClippingRangeAttr().Get())

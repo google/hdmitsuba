@@ -23,12 +23,12 @@ import os
 import drjit as dr
 import mitsuba as mi
 import numpy as np
-
 from pxr import Sdf
 from pxr import Tf
 from pxr import Trace
 from pxr import Usd
 from pxr import UsdRender
+
 import usd_render
 
 _RENDER_SETTINGS_PATH = '/renderSettings'
@@ -79,7 +79,7 @@ def _resolve_time_code(
 
 def main() -> None:
   parser = argparse.ArgumentParser(
-      description="Simple CLI that renders a fixed scene."
+      description='Simple CLI that renders a fixed scene.'
   )
   parser.add_argument(
       '--scene',
@@ -165,14 +165,14 @@ def main() -> None:
     if log_level is not None:
       dr.set_log_level(log_level)
     else:
-      Tf.Warn(f"Unknown Dr.Jit log level: {args.drjit_log}")
+      Tf.Warn(f'Unknown Dr.Jit log level: {args.drjit_log}')
 
   if args.mitsuba_log:
     log_level = getattr(mi.LogLevel, args.mitsuba_log.capitalize(), None)
     if log_level is not None:
       mi.set_log_level(log_level)
     else:
-      Tf.Warn(f"Unknown Mitsuba log level: {args.mitsuba_log}")
+      Tf.Warn(f'Unknown Mitsuba log level: {args.mitsuba_log}')
 
   if args.profile:
     Trace.Collector().enabled = True
@@ -233,7 +233,7 @@ def main() -> None:
     reporter.UpdateTraceTrees()
     trace_path = output_path + '.trace.json'
     reporter.ReportChromeTracingToFile(trace_path)
-    print(f"USD Trace written to {trace_path}")
+    print(f'USD Trace written to {trace_path}')
 
 
 if __name__ == '__main__':

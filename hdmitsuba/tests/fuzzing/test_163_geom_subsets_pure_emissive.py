@@ -18,14 +18,14 @@ from __future__ import annotations
 
 import mitsuba as mi
 import numpy as np
-
 from pxr import Gf  # type: ignore
 from pxr import Sdf  # type: ignore
 from pxr import Usd  # type: ignore
 from pxr import UsdShade  # type: ignore
-import usd_render
+
 from hdmitsuba.tests import test_helpers
 from usd_mitsuba import translator as usd_mitsuba
+import usd_render
 
 
 def test_geom_subsets_pure_emissive():
@@ -53,9 +53,7 @@ def test_geom_subsets_pure_emissive():
 
   # Modification: Define emissive material and bind to red subset
   em_mat = UsdShade.Material.Define(stage, '/root/_materials/EmissiveSubset')
-  em_shd = UsdShade.Shader.Define(
-      stage, '/root/_materials/EmissiveSubset/Shd'
-  )
+  em_shd = UsdShade.Shader.Define(stage, '/root/_materials/EmissiveSubset/Shd')
   em_shd.CreateIdAttr('UsdPreviewSurface')
   em_shd.CreateInput('emissiveColor', Sdf.ValueTypeNames.Color3f).Set(
       Gf.Vec3f(2.0, 0.2, 0.2)

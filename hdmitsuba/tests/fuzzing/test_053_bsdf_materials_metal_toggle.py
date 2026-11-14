@@ -18,12 +18,12 @@ from __future__ import annotations
 
 import mitsuba as mi
 import numpy as np
-
 from pxr import Usd  # type: ignore
 from pxr import UsdShade  # type: ignore
-import usd_render
+
 from hdmitsuba.tests import test_helpers
 from usd_mitsuba import translator as usd_mitsuba
+import usd_render
 
 
 def test_materials_metal_modify():
@@ -50,9 +50,7 @@ def test_materials_metal_modify():
   )
 
   # Modification: Update metallic on ground material
-  shader = UsdShade.Shader.Get(
-      stage, '/root/_materials/ground/Principled_BSDF'
-  )
+  shader = UsdShade.Shader.Get(stage, '/root/_materials/ground/Principled_BSDF')
   shader.GetInput('metallic').Set(1.0)
 
   image_hd_modified = engine.render()['color']

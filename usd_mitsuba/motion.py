@@ -20,7 +20,6 @@ from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 import mitsuba as mi
-
 from pxr import Gf
 from pxr import Usd
 from pxr import UsdGeom

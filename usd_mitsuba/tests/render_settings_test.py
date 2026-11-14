@@ -16,8 +16,9 @@
 
 from __future__ import annotations
 
-import pytest
 from pxr import Usd
+import pytest
+
 from usd_mitsuba import render_settings
 
 _TEST_ASSET_PATH = "hdmitsuba/test_assets/render_settings"

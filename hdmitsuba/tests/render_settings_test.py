@@ -18,20 +18,20 @@ from __future__ import annotations
 
 import mitsuba as mi
 import numpy as np
-import pytest
-
 from pxr import Gf
 from pxr import Sdf
 from pxr import Tf
 from pxr import Usd
 from pxr import UsdGeom
 from pxr import UsdRender
-import usd_render
+import pytest
+
 from hdmitsuba.tests import test_helpers
 from usd_mitsuba import translator as usd_mitsuba
-
+import usd_render
 
 _SPP = 4
+
 
 @pytest.fixture(autouse=True)
 def _set_mitsuba_variant():
@@ -78,7 +78,10 @@ def test_aovs():
   scene_dict = usd_mitsuba.convert_to_mitsuba(stage)
 
   assert scene_dict["integrator"]["type"] == "aov"
-  assert scene_dict["integrator"]["aovs"] == "albedo:albedo,normal:sh_normal,depth:depth"
+  assert (
+      scene_dict["integrator"]["aovs"]
+      == "albedo:albedo,normal:sh_normal,depth:depth"
+  )
   assert scene_dict["integrator"]["integrator"]["type"] == "path"
 
   assert set(results_hd.keys()) == {"color", "albedo", "normal", "depth"}
@@ -116,7 +119,10 @@ def test_aovs_multiple_products():
       stage, render_product_path="/root/Render/Products/AovOutput"
   )
   assert scene_dict_aov["integrator"]["type"] == "aov"
-  assert scene_dict_aov["integrator"]["aovs"] == "albedo:albedo,normal:sh_normal,depth:depth"
+  assert (
+      scene_dict_aov["integrator"]["aovs"]
+      == "albedo:albedo,normal:sh_normal,depth:depth"
+  )
 
   assert set(results_hd.keys()) == {"color", "albedo", "normal", "depth"}
 
@@ -217,9 +223,7 @@ def test_aovs_duplicate_resolving():
   prim_id_var = UsdRender.Var.Define(stage, "/root/Render/Vars/primId")
   prim_id_var.GetDataTypeAttr().Set("int")
   prim_id_var.GetSourceNameAttr().Set("primId")
-  instance_id_var = UsdRender.Var.Define(
-      stage, "/root/Render/Vars/instanceId"
-  )
+  instance_id_var = UsdRender.Var.Define(stage, "/root/Render/Vars/instanceId")
   instance_id_var.GetDataTypeAttr().Set("int")
   instance_id_var.GetSourceNameAttr().Set("instanceId")
 
@@ -512,9 +516,7 @@ def test_render_settings_prim_precedence():
   # Overrides take precedence over the prim.
   assert not np.allclose(render(max_depth=2), image_limited, atol=0.05)
   # Switching to the other prim drops the settings of the previous one.
-  np.testing.assert_allclose(
-      render("/Render/Other"), image_default, atol=1e-4
-  )
+  np.testing.assert_allclose(render("/Render/Other"), image_default, atol=1e-4)
 
 
 def test_integrator_parameters():

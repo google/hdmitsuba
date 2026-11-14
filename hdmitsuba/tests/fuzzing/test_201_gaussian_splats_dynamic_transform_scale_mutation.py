@@ -18,16 +18,16 @@ from __future__ import annotations
 
 import mitsuba as mi
 import numpy as np
-
 from pxr import Gf
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
 from pxr import UsdVol
 from pxr import Vt
-import usd_render
+
 from hdmitsuba.tests import test_helpers
 from usd_mitsuba import translator as usd_mitsuba
+import usd_render
 
 
 def test_gaussian_splats_dynamic_transform_primvar_mutation():
@@ -35,13 +35,17 @@ def test_gaussian_splats_dynamic_transform_primvar_mutation():
   stage = Usd.Stage.Open(
       f'{test_helpers.TEST_ASSETS_PATH}/shapes/gaussian_splats.usda'
   )
-  render_settings = test_helpers.create_render_settings(stage, resolution=(128, 128))
+  render_settings = test_helpers.create_render_settings(
+      stage, resolution=(128, 128)
+  )
   render_settings.GetPrim().CreateAttribute(
       'mitsuba:integrator:type', Sdf.ValueTypeNames.String
   ).Set('volprim_rf_basic')
 
   engine = usd_render.RenderEngine(stage)
-  engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin', camera_path='/World/camera')
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin', camera_path='/World/camera'
+  )
 
   # Initial render
   image_hd_initial = engine.render()['color']
@@ -58,8 +62,12 @@ def test_gaussian_splats_dynamic_transform_primvar_mutation():
   # The rotation exercises the quaternion composition path; the scale stays
   # uniform since non-uniform transform scales are unsupported (warn-only).
   splats_xform = UsdGeom.Xformable.Get(stage, '/World/gaussian_splats')
-  splats_xform.AddTranslateOp(opSuffix='fuzz_trans').Set(Gf.Vec3d(0.2, -0.3, 0.1))
-  splats_xform.AddRotateXYZOp(opSuffix='fuzz_rot').Set(Gf.Vec3f(25.0, -40.0, 10.0))
+  splats_xform.AddTranslateOp(opSuffix='fuzz_trans').Set(
+      Gf.Vec3d(0.2, -0.3, 0.1)
+  )
+  splats_xform.AddRotateXYZOp(opSuffix='fuzz_rot').Set(
+      Gf.Vec3f(25.0, -40.0, 10.0)
+  )
   splats_xform.AddScaleOp(opSuffix='fuzz_scale').Set(Gf.Vec3f(1.3, 1.3, 1.3))
 
   # Modification 2: Mutate individual particle scales primvar
@@ -89,7 +97,10 @@ def test_gaussian_splats_dynamic_transform_primvar_mutation():
   test_helpers.robust_assert_close(
       image_hd_modified[..., :3], image_usd_modified, atol=0.05
   )
-  assert np.mean(np.abs(image_hd_modified[..., :3] - image_hd_initial[..., :3])) > 0.01
+  assert (
+      np.mean(np.abs(image_hd_modified[..., :3] - image_hd_initial[..., :3]))
+      > 0.01
+  )
 
   # Modification 5: Pure opacity-only mutation with near-zero/sub-threshold
   # values (exercising in-place opacity clamping and proxy mesh recomputation

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from pxr import Sdf
 from pxr import Usd
+
 from usd_mitsuba import util
 
 
@@ -31,9 +32,9 @@ def test_extract_nested_dict():
   stage = Usd.Stage.CreateInMemory()
   prim = stage.DefinePrim("/World/Config")
   prim.CreateAttribute("custom:nested:val1", Sdf.ValueTypeNames.Int).Set(42)
-  prim.CreateAttribute(
-      "custom:nested:sub:val2", Sdf.ValueTypeNames.String
-  ).Set("hello")
+  prim.CreateAttribute("custom:nested:sub:val2", Sdf.ValueTypeNames.String).Set(
+      "hello"
+  )
   prim.CreateAttribute("ignored:attribute", Sdf.ValueTypeNames.Int).Set(10)
 
   extracted = util.extract_nested_dict(prim, "custom:nested:")

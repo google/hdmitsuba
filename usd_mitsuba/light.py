@@ -218,8 +218,10 @@ def _sphere_area(transform: mi.ScalarTransform4f, radius: float) -> float:
       for axis in ((1, 0, 0), (0, 1, 0), (0, 0, 1))
   )
   p = 1.6
-  return 4.0 * dr.pi * (((a * b) ** p + (a * c) ** p + (b * c) ** p) / 3.0) ** (
-      1.0 / p
+  return (
+      4.0
+      * dr.pi
+      * (((a * b) ** p + (a * c) ** p + (b * c) ** p) / 3.0) ** (1.0 / p)
   )
 
 
@@ -350,9 +352,7 @@ def _convert_disk_light(
   return {
       'type': 'disk',
       'to_world': world_transform,
-      'emitter': _area_emitter(
-          prim, time, color * intensity, world_transform
-      ),
+      'emitter': _area_emitter(prim, time, color * intensity, world_transform),
   }
 
 
@@ -395,9 +395,11 @@ def _convert_cylinder_light(
   radius = perimeter / (2.0 * dr.pi)
   return {
       'type': 'cylinder',
-      'to_world': light_frame.scale([length, radius, radius])
-      .rotate([0, 1, 0], 90)
-      .translate([0, 0, -0.5]),
+      'to_world': (
+          light_frame.scale([length, radius, radius])
+          .rotate([0, 1, 0], 90)
+          .translate([0, 0, -0.5])
+      ),
       'emitter': _area_emitter(prim, time, color * intensity, light_frame),
   }
 

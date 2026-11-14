@@ -20,13 +20,13 @@ import math
 
 import mitsuba as mi
 import numpy as np
-
 from pxr import Gf  # type: ignore
 from pxr import Usd  # type: ignore
 from pxr import UsdLux  # type: ignore
-import usd_render
+
 from hdmitsuba.tests import test_helpers
 from usd_mitsuba import translator as usd_mitsuba
+import usd_render
 
 
 def test_add_ten_point_lights_ring():
@@ -60,9 +60,7 @@ def test_add_ten_point_lights_ring():
     light.CreateTreatAsPointAttr(True)
     light.CreateIntensityAttr(10.0)
     light.CreateColorAttr(
-        Gf.Vec3f(
-            0.5 + 0.5 * math.cos(theta), 0.5 + 0.5 * math.sin(theta), 1.0
-        )
+        Gf.Vec3f(0.5 + 0.5 * math.cos(theta), 0.5 + 0.5 * math.sin(theta), 1.0)
     )
     light.AddTranslateOp().Set((x, y, 3.0))
 

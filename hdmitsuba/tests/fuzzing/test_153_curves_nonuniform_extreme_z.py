@@ -18,13 +18,13 @@ from __future__ import annotations
 
 import mitsuba as mi
 import numpy as np
-
 from pxr import Usd  # type: ignore
 from pxr import UsdGeom  # type: ignore
 from pxr import Vt  # type: ignore
-import usd_render
+
 from hdmitsuba.tests import test_helpers
 from usd_mitsuba import translator as usd_mitsuba
+import usd_render
 
 
 def test_curves_nonuniform_extreme_z():

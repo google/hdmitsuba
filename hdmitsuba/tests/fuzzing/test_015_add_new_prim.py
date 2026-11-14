@@ -18,14 +18,14 @@ from __future__ import annotations
 
 import mitsuba as mi
 import numpy as np
-
 from pxr import Sdf  # type: ignore
 from pxr import Usd  # type: ignore
 from pxr import UsdGeom  # type: ignore
 from pxr import UsdShade  # type: ignore
-import usd_render
+
 from hdmitsuba.tests import test_helpers
 from usd_mitsuba import translator as usd_mitsuba
+import usd_render
 
 
 def test_add_new_prim():
@@ -39,9 +39,7 @@ def test_add_new_prim():
   image_hd_initial = engine.render()['color']
   scene_initial = mi.load_dict(usd_mitsuba.convert_to_mitsuba(stage))
   image_usd_initial = np.array(mi.render(scene_initial, spp=128))
-  test_helpers.write_image(
-      image_hd_initial, 'test_add_new_prim_initial_hd.png'
-  )
+  test_helpers.write_image(image_hd_initial, 'test_add_new_prim_initial_hd.png')
   test_helpers.write_image(
       image_usd_initial, 'test_add_new_prim_initial_usd.png'
   )

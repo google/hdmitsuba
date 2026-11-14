@@ -29,17 +29,16 @@ from typing import Any
 import mitsuba as mi
 import numpy as np
 import numpy.typing as npt
-import pytest
-
 from pxr import Gf
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
 from pxr import UsdShade
-import usd_render
+import pytest
+
 from hdmitsuba.tests import test_helpers
 from usd_mitsuba import translator as usd_mitsuba
-
+import usd_render
 
 _IMAGE_SIZE = 32
 _HALF = _IMAGE_SIZE // 2
@@ -298,8 +297,10 @@ def test_left_handed_orientation(subdivision_level: int):
 
 
 _TRANSFORMS = {
-    'rigid': Gf.Matrix4d().SetTransform(
-        Gf.Rotation(Gf.Vec3d(0, 0, 1), 30), Gf.Vec3d(0.1, -0.05, 0.2)
+    'rigid': (
+        Gf.Matrix4d().SetTransform(
+            Gf.Rotation(Gf.Vec3d(0, 0, 1), 30), Gf.Vec3d(0.1, -0.05, 0.2)
+        )
     ),
     'nonuniform_scale': Gf.Matrix4d().SetScale(Gf.Vec3d(0.8, 0.6, 2.5)),
     'mirror': Gf.Matrix4d().SetScale(Gf.Vec3d(-1, 1, 1)),
@@ -492,7 +493,11 @@ def test_truncated_primvar(interpolation: str, subdivision_level: int):
   mesh = _create_grid(stage, resolution=4, subdivision_level=subdivision_level)
   without_st = _render_aovs(stage)
   _set_primvar(
-      mesh, 'st', Sdf.ValueTypeNames.TexCoord2fArray, interpolation, [(0.5,) * 2]
+      mesh,
+      'st',
+      Sdf.ValueTypeNames.TexCoord2fArray,
+      interpolation,
+      [(0.5,) * 2],
   )
   _assert_all_aovs_close(_render_aovs(stage), without_st)
 

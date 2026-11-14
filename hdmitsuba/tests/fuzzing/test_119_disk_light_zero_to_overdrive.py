@@ -18,19 +18,17 @@ from __future__ import annotations
 
 import mitsuba as mi
 import numpy as np
-
 from pxr import Usd  # type: ignore
 from pxr import UsdLux  # type: ignore
-import usd_render
+
 from hdmitsuba.tests import test_helpers
 from usd_mitsuba import translator as usd_mitsuba
+import usd_render
 
 
 def test_disk_zero_to_overdrive():
   mi.set_variant('cuda_ad_rgb', 'llvm_ad_rgb')
-  stage = Usd.Stage.Open(
-      f'{test_helpers.TEST_ASSETS_PATH}/lights/disk.usda'
-  )
+  stage = Usd.Stage.Open(f'{test_helpers.TEST_ASSETS_PATH}/lights/disk.usda')
   test_helpers.create_render_settings(stage, resolution=(128, 128))
 
   disk_light = UsdLux.DiskLight.Get(stage, '/root/Area/Area')

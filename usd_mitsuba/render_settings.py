@@ -56,8 +56,8 @@ def _parse_aov_var(
   source_name = _AOV_ALIASES.get(source_name, source_name)
   if source_name not in _SUPPORTED_AOVS:
     Tf.Warn(
-        f"  [Var] Name: {var_name} | Type: {data_type} |"
-        f" Source: {source_name} (unsupported, skipping)"
+        f'  [Var] Name: {var_name} | Type: {data_type} |'
+        f' Source: {source_name} (unsupported, skipping)'
     )
     return None
 
@@ -104,8 +104,8 @@ def parse_aovs(
     product_targets = [target_product_path]
   elif len(product_targets) > 1:
     Tf.Warn(
-        "Multiple render products are not yet supported. Only the first one"
-        " will be used."
+        'Multiple render products are not yet supported. Only the first one'
+        ' will be used.'
     )
 
   render_color = False
@@ -154,7 +154,7 @@ def get_render_settings(stage: Usd.Stage) -> UsdRender.Settings | None:
     return render_settings
 
   # 2. Optimized Fallback: Check the standard pipeline /Render scope first.
-  render_root = stage.GetPrimAtPath("/Render")
+  render_root = stage.GetPrimAtPath('/Render')
   if render_root:
     for prim in Usd.PrimRange(render_root):
       if prim.IsA(UsdRender.Settings):

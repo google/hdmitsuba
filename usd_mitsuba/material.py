@@ -21,21 +21,20 @@ of USD assets for Mitsuba rendering.
 
 from __future__ import annotations
 
-from typing import Any
 import dataclasses
 import os
+from typing import Any
 
 import mitsuba as mi
 import numpy as np
-
 from pxr import Ar
 from pxr import Gf
 from pxr import Sdf
 from pxr import Tf
 from pxr import Usd
 from pxr import UsdShade
-from hdmitsuba import geometry_ext as geom_lib
 
+from hdmitsuba import geometry_ext as geom_lib
 
 USD_TO_MI_PRINCIPLED_RENAMING = {
     'diffuseColor': 'base_color',
@@ -152,9 +151,7 @@ def _get_volume_shader(
   return None
 
 
-def _use_raw_bitmap(
-    cs: str, input_name: str | None, ch_idx: int
-) -> bool:
+def _use_raw_bitmap(cs: str, input_name: str | None, ch_idx: int) -> bool:
   """Returns whether a UsdUVTexture bitmap should skip sRGB decoding.
 
   Covers the Gf.ColorSpace names (e.g. `lin_rec709_scene`, `srgb_ap1_scene`,
@@ -216,9 +213,7 @@ def _extract_usd_transform2d(
   return flip @ xf @ flip
 
 
-def _load_uv_texture_image(
-    filename: str, ch_idx: int
-) -> dict[str, Any] | None:
+def _load_uv_texture_image(filename: str, ch_idx: int) -> dict[str, Any] | None:
   """Returns the texture dict for a UsdUVTexture image, or None if unusable."""
   # Strip the closing bracket of package paths like `a.usdz[tex.png]`.
   _, ext = os.path.splitext(filename.rstrip(']'))
@@ -545,7 +540,7 @@ def usd_preview_surface_to_mitsuba(
     elif name == 'bump':
       parent_bsdf_dict = {'type': 'bumpmap', 'bumpmap': val}
     else:
-      Tf.Warn(f"Unsupported input {name} in preview surface shader.")
+      Tf.Warn(f'Unsupported input {name} in preview surface shader.')
 
   # As per the UsdPreviewSurface specification, an `opacityThreshold` > 0 cuts
   # out the surface where the opacity is below the threshold and renders it

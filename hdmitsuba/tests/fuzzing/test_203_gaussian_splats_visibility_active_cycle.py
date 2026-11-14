@@ -18,13 +18,13 @@ from __future__ import annotations
 
 import mitsuba as mi
 import numpy as np
-
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
-import usd_render
+
 from hdmitsuba.tests import test_helpers
 from usd_mitsuba import translator as usd_mitsuba
+import usd_render
 
 
 def test_gaussian_splats_visibility_active_cycle():
@@ -32,13 +32,17 @@ def test_gaussian_splats_visibility_active_cycle():
   stage = Usd.Stage.Open(
       f'{test_helpers.TEST_ASSETS_PATH}/shapes/gaussian_splats.usda'
   )
-  render_settings = test_helpers.create_render_settings(stage, resolution=(128, 128))
+  render_settings = test_helpers.create_render_settings(
+      stage, resolution=(128, 128)
+  )
   render_settings.GetPrim().CreateAttribute(
       'mitsuba:integrator:type', Sdf.ValueTypeNames.String
   ).Set('volprim_rf_basic')
 
   engine = usd_render.RenderEngine(stage)
-  engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin', camera_path='/World/camera')
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin', camera_path='/World/camera'
+  )
 
   # Initial render
   image_hd_initial = engine.render()['color']

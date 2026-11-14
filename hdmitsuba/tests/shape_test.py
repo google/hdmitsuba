@@ -18,16 +18,16 @@ from __future__ import annotations
 
 import mitsuba as mi
 import numpy as np
-import pytest
-
 from pxr import Gf
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
 from pxr import UsdVol
 from pxr import Vt
-import usd_render
+import pytest
+
 from hdmitsuba.tests import test_helpers
+import usd_render
 
 
 @pytest.fixture(autouse=True)
@@ -153,8 +153,7 @@ def test_curve_transform():
       atol=0.05,
   )
   assert (
-      np.max(np.abs(image_hd_modified[..., :3] - image_original[..., :3]))
-      > 0.2
+      np.max(np.abs(image_hd_modified[..., :3] - image_original[..., :3])) > 0.2
   )
 
 
@@ -284,9 +283,7 @@ def test_modify_curve_transform_only():
       atol=0.05,
       engine=engine,
   )
-  assert (
-      np.max(np.abs(image_modified[..., :3] - image_original[..., :3])) > 0.2
-  )
+  assert np.max(np.abs(image_modified[..., :3] - image_original[..., :3])) > 0.2
 
 
 def test_curve_bspline_type():
@@ -397,9 +394,7 @@ def test_modify_implicit_surfaces():
       atol=0.05,
       engine=engine,
   )
-  assert (
-      np.max(np.abs(image_modified[..., :3] - image_original[..., :3])) > 0.2
-  )
+  assert np.max(np.abs(image_modified[..., :3] - image_original[..., :3])) > 0.2
 
 
 def test_modify_gaussian_splat_positions():

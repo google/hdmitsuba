@@ -192,7 +192,9 @@ def usd_to_mitsuba(
   # TODO: Modify this to also support specifying 'mitsuba:sampler:sample_count'.
   sample_count = 1
   if render_settings:
-    sample_count_attr = render_settings.GetPrim().GetAttribute('mitsuba:sample_count')
+    sample_count_attr = render_settings.GetPrim().GetAttribute(
+        'mitsuba:sample_count'
+    )
     if sample_count_attr.HasAuthoredValue():
       sample_count = sample_count_attr.Get(time)
 

@@ -22,7 +22,6 @@ from typing import Any
 import drjit as dr
 import mitsuba as mi
 import numpy as np
-
 from pxr import Usd
 from pxr import UsdVol
 
