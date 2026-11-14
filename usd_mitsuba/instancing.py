@@ -132,7 +132,9 @@ def convert_point_instancer(
         )
         # Like mesh prototypes, these carry no emitter, which Mitsuba does not
         # support on instances.
-        bsdf, _, _, interior_medium = material.convert_material(child_prim)
+        bsdf, _, _, interior_medium = material.convert_material(
+            child_prim, time=time
+        )
         for part in parts.values():
           part['to_world'] = child_to_prototype @ part['to_world']
           part['visibility'] = util.get_ray_visibility(child_prim, time)

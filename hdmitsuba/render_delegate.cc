@@ -346,8 +346,8 @@ VtDictionary HdMitsubaRenderDelegate::GetRenderStats() const {
 }
 
 TfTokenVector HdMitsubaRenderDelegate::GetMaterialRenderContexts() const {
-  return {TfToken("mitsuba"), HdMaterialSchemaTokens->universalRenderContext,
-          TfToken("glslfx")};
+  return {TfToken("mitsuba"), TfToken("mtlx"),
+          HdMaterialSchemaTokens->universalRenderContext, TfToken("glslfx")};
 }
 
 TfToken HdMitsubaRenderDelegate::GetMaterialBindingPurpose() const {
