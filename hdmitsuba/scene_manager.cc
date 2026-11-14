@@ -81,7 +81,10 @@
 #include <pxr/usd/sdf/path.h>
 
 #ifdef PXR_PYTHON_SUPPORT_ENABLED
+#include <pxr/base/tf/errorMark.h>
+#include <pxr/base/tf/pyInterpreter.h>
 #include <pxr/base/tf/pyInvoke.h>
+#include <pxr/base/tf/pyLock.h>
 #include <pxr/base/tf/pyUtils.h>
 #endif
 
@@ -149,7 +152,21 @@ void SyncMitsubaPythonVariant(const std::string& variant) {
   if (!TfPyIsInitialized()) {
     return;
   }
+  // Let Python find the Mitsuba modules that belong to the loaded Mitsuba
+  // library (they are in its build directory), unless Mitsuba is already
+  // imported.
+  {
+    TfPyLock lock;
+    TfPyRunSimpleString(
+        "import sys\n"
+        "if 'mitsuba' not in sys.modules: sys.path.insert(0, " +
+        TfPyRepr(
+            (mitsuba::util::library_path().parent_path() / "python").string()) +
+        ")");
+  }
+  TfErrorMark mark;
   if (!TfPyInvoke("mitsuba", "set_variant", variant)) {
+    mark.Clear();
     TF_WARN(
         "Failed to set Mitsuba Python variant '%s'; Python-defined plugins "
         "(e.g. volprim_rf_basic) will be unavailable.",
