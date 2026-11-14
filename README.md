@@ -143,6 +143,18 @@ pyrefly check
 
 *Note: Currently Pyrefly is configured to not check USD or Mitsuba types. It's a useful sanity check, but not a guarantee of overall code correctness. The rigor of the type checking may be expanded in the future.*
 
+## Python Code Formatting (Pyink)
+
+Python code follows the Google Python style (2-space indentation, 80 columns). We use [`pyink`](https://github.com/google/pyink) to format the code and [`isort`](https://pycqa.github.io/isort/) to sort imports. Both are configured in `pyproject.toml`, and CI checks that the code is formatted. Formatter output can change between releases, so install the versions pinned in the CI configuration:
+
+```bash
+pip install pyink==26.5.1 isort==9.0.2
+
+# Format all Python files
+pyink .
+isort .
+```
+
 
 ## Limitations and Future Work
 

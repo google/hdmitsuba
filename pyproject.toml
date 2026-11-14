@@ -13,3 +13,16 @@ testpaths = [
     "usd_mitsuba/tests",
     "render_engine",
 ]
+
+[tool.pyink]
+line-length = 80
+unstable = true
+pyink-indentation = 2
+pyink-use-majority-quotes = true
+extend-exclude = "/third_party/"
+
+[tool.isort]
+profile = "google"
+known_first_party = ["hdmitsuba", "usd_mitsuba", "usd_render"]
+skip_gitignore = true
+extend_skip = ["third_party"]
