@@ -407,8 +407,9 @@ NB_MODULE(geometry_ext, m) {
       "sample_world_transform",
       [](const UsdPrim& prim, UsdTimeCode time,
          std::pair<float, float> interval, bool uniform) {
-        return SampleTransform(
-                   prim, time, GfVec2f(interval.first, interval.second), uniform)
+        return SampleTransform(prim, time,
+                               GfVec2f(interval.first, interval.second),
+                               uniform)
             .samples;
       },
       nb::arg("prim"), nb::arg("time"), nb::arg("interval"),

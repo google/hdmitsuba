@@ -100,16 +100,16 @@ void HdMitsubaImplicitSurface::Sync(HdSceneDelegate* sceneDelegate,
   ImplicitSurface surface;
   surface.type = type_;
   if (type_ == HdPrimTypeTokens->sphere) {
-    surface.radius = GetValue(
-        HdSphereSchema::GetFromParent(prim_source).GetRadius(), 1.0f);
+    surface.radius =
+        GetValue(HdSphereSchema::GetFromParent(prim_source).GetRadius(), 1.0f);
   } else if (type_ == HdPrimTypeTokens->cylinder) {
     const HdCylinderSchema cylinder =
         HdCylinderSchema::GetFromParent(prim_source);
     surface.height = GetValue(cylinder.GetHeight(), 2.0f);
     // UsdGeomCylinder's `radius` is deprecated in favor of the radii of
     // UsdGeomCylinder_1, which UsdImaging also populates for the former.
-    surface.radius =
-        GetValue(cylinder.GetRadiusBottom(), GetValue(cylinder.GetRadius(), 1.0f));
+    surface.radius = GetValue(cylinder.GetRadiusBottom(),
+                              GetValue(cylinder.GetRadius(), 1.0f));
     if (GetValue(cylinder.GetRadiusTop(), surface.radius) != surface.radius &&
         !std::exchange(warned_tapered_, true)) {
       TF_WARN(
@@ -192,7 +192,8 @@ void HdMitsubaImplicitSurface::Sync(HdSceneDelegate* sceneDelegate,
     spec.transform = sceneDelegate->GetTransform(id);
     // Animated transforms, as well as transforms that the native shape does
     // not support, require wrapping the shape in a Mitsuba instance.
-    if (transform.IsAnimated() || !surface.SupportsTransform(transform.First())) {
+    if (transform.IsAnimated() ||
+        !surface.SupportsTransform(transform.First())) {
       spec.motion_wrapped = true;
       spec.instance_transforms.push_back(std::move(transform));
     }

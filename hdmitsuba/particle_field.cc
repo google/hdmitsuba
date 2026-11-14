@@ -71,8 +71,7 @@ void HdMitsubaParticleField::Sync(HdSceneDelegate* sceneDelegate,
 
   // 1. Visibility & Transform
   if (!GetPrimVisible(prim_source)) {
-    auto* mitsubaRenderParam =
-        static_cast<HdMitsubaRenderParam*>(renderParam);
+    auto* mitsubaRenderParam = static_cast<HdMitsubaRenderParam*>(renderParam);
     RemoveFromScene(mitsubaRenderParam->GetScene());
     *dirtyBits = HdChangeTracker::Clean;
     return;
@@ -153,8 +152,7 @@ void HdMitsubaParticleField::Sync(HdSceneDelegate* sceneDelegate,
   // The proxy mesh and the attribute buffers are sized from the particle count
   // and the SH layout, so a change to either has to go through a full rebuild.
   // Anything else can be pushed into the existing shape.
-  const bool needs_rebuild = !in_scene_ ||
-                             points_.size() != previous_count ||
+  const bool needs_rebuild = !in_scene_ || points_.size() != previous_count ||
                              sh_coeffs_.size() != previous_sh_size;
 
   // 3. Scene Sync

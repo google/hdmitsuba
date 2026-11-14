@@ -115,10 +115,12 @@ void RegisterHdMitsubaHydraPlugin(nb::module_& m) {
 
   // 1. Check build layout (plugInfo.json is in library_dir/hdmitsuba/)
   if (std::filesystem::exists(library_dir / "hdmitsuba" / "plugInfo.json")) {
-    pxr::PlugRegistry::GetInstance().RegisterPlugins((library_dir / "hdmitsuba").string());
+    pxr::PlugRegistry::GetInstance().RegisterPlugins(
+        (library_dir / "hdmitsuba").string());
     return;
   }
-  // 2. Check installed layout (prefix/lib/python/usd_render.so -> prefix/plugin/usd)
+  // 2. Check installed layout (prefix/lib/python/usd_render.so ->
+  // prefix/plugin/usd)
   std::filesystem::path plugin_path =
       library_dir / ".." / ".." / "plugin" / "usd";
   if (std::filesystem::exists(plugin_path / "plugInfo.json")) {
@@ -172,8 +174,7 @@ NB_MODULE(usd_render, m) {
           nb::arg("render_settings_path") = nb::none(),
           nb::arg("width") = nb::none(), nb::arg("camera_path") = nb::none(),
           nb::arg("refine_level_fallback") = nb::none(),
-          nb::arg("overrides") = nb::none(),
-          nb::arg("purposes") = nb::none(),
+          nb::arg("overrides") = nb::none(), nb::arg("purposes") = nb::none(),
           "Configures the Hydra rendering pipeline.")
       .def(
           "render",

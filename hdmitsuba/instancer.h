@@ -19,7 +19,6 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/synchronization/mutex.h>
-
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/vt/array.h>
 #include <pxr/imaging/hd/instancer.h>

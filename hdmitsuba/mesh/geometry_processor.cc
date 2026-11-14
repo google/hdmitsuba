@@ -238,11 +238,12 @@ std::optional<size_t> GeometryProcessor::ValidateTopology(
   if (min_count < 0 ||
       num_corners != static_cast<int64_t>(face_vertex_indices.size()) ||
       min_index < 0) {
-    TF_WARN("Mesh %s has an invalid topology (face vertex counts summing to "
-            "%lld, %zu face vertex indices in [%d, %d]). Removing it from the "
-            "scene.",
-            id.GetText(), static_cast<long long>(num_corners),
-            face_vertex_indices.size(), min_index, max_index);
+    TF_WARN(
+        "Mesh %s has an invalid topology (face vertex counts summing to "
+        "%lld, %zu face vertex indices in [%d, %d]). Removing it from the "
+        "scene.",
+        id.GetText(), static_cast<long long>(num_corners),
+        face_vertex_indices.size(), min_index, max_index);
     return std::nullopt;
   }
   return static_cast<size_t>(max_index) + 1;
@@ -252,9 +253,10 @@ bool GeometryProcessor::ValidatePointCount(const SdfPath& id,
                                            size_t num_referenced_points,
                                            size_t num_points) {
   if (num_points < num_referenced_points) {
-    TF_WARN("Mesh %s has face vertex indices up to %zu, but only %zu points. "
-            "Removing it from the scene.",
-            id.GetText(), num_referenced_points - 1, num_points);
+    TF_WARN(
+        "Mesh %s has face vertex indices up to %zu, but only %zu points. "
+        "Removing it from the scene.",
+        id.GetText(), num_referenced_points - 1, num_points);
     return false;
   }
   return true;
@@ -605,11 +607,10 @@ void GeometryProcessor::AssignFaceMaterials(
 std::string GeometryProcessor::MakeSubMeshId(const SdfPath& mesh_id,
                                              const SdfPath& material_id,
                                              size_t material_index) {
-  std::string mat_name =
-      material_id.IsEmpty()
-          ? "mat_" + std::to_string(material_index)
-          : absl::StrReplaceAll(material_id.GetAsString(),
-                                {{"/", "_"}, {":", "_"}});
+  std::string mat_name = material_id.IsEmpty()
+                             ? "mat_" + std::to_string(material_index)
+                             : absl::StrReplaceAll(material_id.GetAsString(),
+                                                   {{"/", "_"}, {":", "_"}});
   return absl::StrCat(mesh_id.GetAsString(), "#", mat_name);
 }
 

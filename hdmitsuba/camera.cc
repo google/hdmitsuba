@@ -22,9 +22,9 @@
 #include <drjit/math.h>
 #include <drjit/sphere.h>
 #include <pxr/base/gf/vec2f.h>
+#include <pxr/base/tf/staticTokens.h>
 #include <pxr/base/tf/token.h>
 #include <pxr/base/vt/types.h>
-#include <pxr/base/tf/staticTokens.h>
 #include <pxr/imaging/hd/camera.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
@@ -93,8 +93,8 @@ void HdMitsubaCamera::Sync(HdSceneDelegate* sceneDelegate,
             .GetWithDefault<std::string>("perspective");
     film_pixel_filter_type_ =
         sceneDelegate
-            ->GetCameraParamValue(
-                GetId(), HdMitsubaCameraTokens->sensorPixelFilterType)
+            ->GetCameraParamValue(GetId(),
+                                  HdMitsubaCameraTokens->sensorPixelFilterType)
             .GetWithDefault<std::string>("");
     target_shape_id_ = GetTargetShapeId(sceneDelegate, GetId());
   }

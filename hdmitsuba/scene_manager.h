@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -21,12 +22,11 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/synchronization/mutex.h>
 #include <mitsuba/core/object.h>
+#include <pxr/base/gf/rect2i.h>
 #include <pxr/base/tf/token.h>
 #include <pxr/base/vt/dictionary.h>
 #include <pxr/base/vt/types.h>
 #include <pxr/imaging/hd/aov.h>
-#include <optional>
-#include <pxr/base/gf/rect2i.h>
 #include <pxr/imaging/hd/camera.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
@@ -62,8 +62,7 @@ class SceneManager {
       const HdRenderPassAovBindingVector& aov_bindings) = 0;
 
   virtual void Render(
-      const HdRenderPass* render_pass,
-      const HdCamera* camera,
+      const HdRenderPass* render_pass, const HdCamera* camera,
       const std::optional<GfRect2i>& crop_window = std::nullopt) = 0;
 
   virtual bool IsConverged() const = 0;

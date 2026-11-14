@@ -108,8 +108,9 @@ TextureKey::UvMatrix ToUvMatrix(const dr::Matrix<float, 3>& m) {
 }
 
 // Converts a matrix-valued `to_uv` shader parameter to the 3x3 Mitsuba-space
-// matrix stored in TextureKey. 4x4 inputs are reduced with Transform::extract(),
-// which is what Properties::get<Transform3f>() would do with them anyway.
+// matrix stored in TextureKey. 4x4 inputs are reduced with
+// Transform::extract(), which is what Properties::get<Transform3f>() would do
+// with them anyway.
 std::optional<TextureKey::UvMatrix> UvMatrixFromValue(const VtValue& val) {
   if (auto t3 = ExtractTransform3f(val)) return ToUvMatrix(t3->matrix);
   if (auto t4 = ExtractTransform4f(val)) {
@@ -119,8 +120,8 @@ std::optional<TextureKey::UvMatrix> UvMatrixFromValue(const VtValue& val) {
 }
 
 ScalarAffineTransform3f UvMatrixToTransform(const TextureKey::UvMatrix& m) {
-  return ScalarAffineTransform3f(
-      dr::Matrix<float, 3>(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]));
+  return ScalarAffineTransform3f(dr::Matrix<float, 3>(
+      m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]));
 }
 
 TextureKey::UvMatrix ExtractUsdTransform2d(const HdMaterialNetwork2& network,
@@ -171,13 +172,12 @@ mitsuba::ref<mitsuba::Object> ApplyScaleBias(
   // are not clamped to `[0, 1]` in spectral variants. Per-channel values need
   // the `rgb()` color op, which is only reached by full images.
   mitsuba::Properties props("math");
-  props.set("expr",
-            s[0] == s[1] && s[1] == s[2] && b[0] == b[1] && b[1] == b[2]
-                ? tfm::format("fma(in[0], %.9g, %.9g)", s[0], b[0])
-                : tfm::format("rgb(fma(in[0].r, %.9g, %.9g), "
-                              "fma(in[0].g, %.9g, %.9g), "
-                              "fma(in[0].b, %.9g, %.9g))",
-                              s[0], b[0], s[1], b[1], s[2], b[2]));
+  props.set("expr", s[0] == s[1] && s[1] == s[2] && b[0] == b[1] && b[1] == b[2]
+                        ? tfm::format("fma(in[0], %.9g, %.9g)", s[0], b[0])
+                        : tfm::format("rgb(fma(in[0].r, %.9g, %.9g), "
+                                      "fma(in[0].g, %.9g, %.9g), "
+                                      "fma(in[0].b, %.9g, %.9g))",
+                                      s[0], b[0], s[1], b[1], s[2], b[2]));
   props.set("in0", texture);
   return CreateExpandedObject(props, variant, mitsuba::ObjectType::Texture);
 }
@@ -307,9 +307,12 @@ std::optional<TextureKey> ExtractTextureKey(const HdMaterialNetwork2& network,
   }
 
   auto set_string = [](const VtValue& v, std::string& dst) {
-    if (v.IsHolding<std::string>()) dst = v.Get<std::string>();
-    else if (v.IsHolding<TfToken>()) dst = v.Get<TfToken>().GetString();
-    else return false;
+    if (v.IsHolding<std::string>())
+      dst = v.Get<std::string>();
+    else if (v.IsHolding<TfToken>())
+      dst = v.Get<TfToken>().GetString();
+    else
+      return false;
     return true;
   };
 

@@ -572,8 +572,8 @@ PrimTranslator<Float, Spectrum>::ParsePreviewSurface(
   TranslatedMaterial res;
   // Leave the BSDF null for unsupported diffuse inputs (e.g. Ptex) so that the
   // geometry falls back to its displayColor.
-  if (auto it = preview_surface_node.inputConnections.find(
-          TfToken("diffuseColor"));
+  if (auto it =
+          preview_surface_node.inputConnections.find(TfToken("diffuseColor"));
       it != preview_surface_node.inputConnections.end() &&
       !it->second.empty()) {
     auto node_it = network2.nodes.find(it->second[0].upstreamNode);
@@ -739,8 +739,7 @@ PrimTranslator<Float, Spectrum>::ParsePreviewSurface(
   return res;
 }
 
-MI_VARIANT TranslatedMaterial
-PrimTranslator<Float, Spectrum>::BuildMaterial(
+MI_VARIANT TranslatedMaterial PrimTranslator<Float, Spectrum>::BuildMaterial(
     const MaterialSpec& spec,
     const TextureCache<Float, Spectrum>& texture_cache) {
   TranslatedMaterial res;
@@ -843,7 +842,8 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::SetTransformParameter(
 MI_VARIANT void PrimTranslator<Float, Spectrum>::SetSpectrumParameter(
     TraversalCallback& cb, std::string_view name, const GfVec3f& rgb) {
   using Color3f = mitsuba::Color<Float, 3>;
-  cb.set<Color3f>(absl::StrCat(name, ".value"), Color3f(rgb[0], rgb[1], rgb[2]));
+  cb.set<Color3f>(absl::StrCat(name, ".value"),
+                  Color3f(rgb[0], rgb[1], rgb[2]));
   auto it = cb.objects.find(name);
   if (TF_VERIFY(it != cb.objects.end(), "No spectrum object found for %.*s",
                 static_cast<int>(name.size()), name.data())) {
@@ -1021,8 +1021,7 @@ PrimTranslator<Float, Spectrum>::BuildLightProperties(const LightSpec& spec) {
     SetTransformProperty(props, AreaShapeTransform(spec));
     props.set("visibility", spec.visibility);
     props.set("emitter", CreateAreaEmitter(spec));
-    props.set("bsdf",
-              mitsuba::ref<mitsuba::Object>(DefaultBsdf("", "null")));
+    props.set("bsdf", mitsuba::ref<mitsuba::Object>(DefaultBsdf("", "null")));
     return props;
   };
 
@@ -1476,16 +1475,14 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateMeshInPlace(
   mesh->traverse(&cb);
 
   const bool update_topology_and_uvs =
-      (dirty_bits & (HdChangeTracker::DirtyTopology |
-                     HdChangeTracker::DirtyPrimvar |
-                     HdChangeTracker::DirtyNormals)) != 0 ||
-      vertex_count != mesh->vertex_count() ||
-      face_count != mesh->face_count();
+      (dirty_bits &
+       (HdChangeTracker::DirtyTopology | HdChangeTracker::DirtyPrimvar |
+        HdChangeTracker::DirtyNormals)) != 0 ||
+      vertex_count != mesh->vertex_count() || face_count != mesh->face_count();
 
   std::vector<std::string> keys = {"positions"};
-  cb.set<TensorXf32>(
-      "positions",
-      LoadFloatTensor<Mesh>(points_array.cdata(), vertex_count, 3));
+  cb.set<TensorXf32>("positions", LoadFloatTensor<Mesh>(points_array.cdata(),
+                                                        vertex_count, 3));
   if (update_topology_and_uvs) {
     cb.set<TensorXu32>("faces",
                        LoadFaceTensor<Mesh>(face_indices.cdata(), face_count));
@@ -1495,9 +1492,9 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateMeshInPlace(
   auto normals_it = primvars.find(HdTokens->normals);
   if (normals_it != primvars.end() && mesh->has_normals()) {
     const auto& normals_array = normals_it->second.UncheckedGet<VtVec3fArray>();
-    cb.set<TensorXf32>("normals",
-                       LoadFloatTensor<Mesh>(normals_array.cdata(),
-                                             normals_array.size(), 3));
+    cb.set<TensorXf32>(
+        "normals",
+        LoadFloatTensor<Mesh>(normals_array.cdata(), normals_array.size(), 3));
   }
   // Always add "normals" to the keys: This prevents Mitsuba from recomputing
   // the normals. We handle normal recomputation explicitly in the hydra
@@ -1717,8 +1714,7 @@ Storage LoadShCoefficients(const ParticleFieldSpec& spec) {
   if (!spec.sh_coeffs.empty()) {
     const size_t num_coeffs = (spec.sh_degree + 1) * (spec.sh_degree + 1);
     if (spec.sh_coeffs.size() == count * num_coeffs) {
-      return dr::load<Storage>(spec.sh_coeffs.cdata(),
-                               count * num_coeffs * 3);
+      return dr::load<Storage>(spec.sh_coeffs.cdata(), count * num_coeffs * 3);
     }
     TF_WARN(
         "SH coefficients size mismatch: %zu vs expected %zu. Defaulting to "
@@ -1744,9 +1740,8 @@ Storage LoadOpacities(const ParticleFieldSpec& spec) {
 
 }  // namespace
 
-MI_VARIANT mitsuba::ref<mitsuba::Shape<Float, Spectrum>>
-PrimTranslator<Float, Spectrum>::BuildParticleField(
-    const ParticleFieldSpec& spec) {
+MI_VARIANT mitsuba::ref<mitsuba::Shape<Float, Spectrum>> PrimTranslator<
+    Float, Spectrum>::BuildParticleField(const ParticleFieldSpec& spec) {
   const std::string id_str = spec.id.GetAsString();
   const size_t count = spec.points.size();
   if (count == 0 || !ParticleFieldSizesValid(spec, id_str)) {
@@ -1761,14 +1756,13 @@ PrimTranslator<Float, Spectrum>::BuildParticleField(
   props.set("data", mitsuba::Any(TensorXf32(
                         PackParticleField<FloatStorage>(spec, id_str),
                         {count, kEllipsoidStride})));
-  props.set("opacities",
-            mitsuba::Any(TensorXf32(LoadOpacities<FloatStorage>(spec),
-                                    {count, 1})));
+  props.set("opacities", mitsuba::Any(TensorXf32(
+                             LoadOpacities<FloatStorage>(spec), {count, 1})));
 
   FloatStorage sh_coeffs = LoadShCoefficients<FloatStorage>(spec);
   const size_t sh_width = dr::width(sh_coeffs) / count;
-  props.set("sh_coeffs", mitsuba::Any(TensorXf32(std::move(sh_coeffs),
-                                                 {count, sh_width})));
+  props.set("sh_coeffs",
+            mitsuba::Any(TensorXf32(std::move(sh_coeffs), {count, sh_width})));
 
   mitsuba::ref<mitsuba::Shape<Float, Spectrum>> shape =
       mitsuba::PluginManager::instance()
@@ -1853,10 +1847,9 @@ mitsuba::ref<mitsuba::Object> PointColorTexture(
                              index_props, Texture::Variant, Texture::Type));
   lut_props.set("filter_type", "nearest");
   lut_props.set("input_max", static_cast<float>(count) - 1.f);
-  lut_props.set("data",
-                mitsuba::Any(TensorXf32(
-                    dr::load<FloatStorage>(colors.cdata(), count * 3),
-                    {count, 3})));
+  lut_props.set("data", mitsuba::Any(TensorXf32(
+                            dr::load<FloatStorage>(colors.cdata(), count * 3),
+                            {count, 3})));
   return mitsuba::PluginManager::instance()->create_object(
       lut_props, Texture::Variant, Texture::Type);
 }
@@ -1901,8 +1894,8 @@ PrimTranslator<Float, Spectrum>::BuildPoints(
       bsdf_props.set("reflectance",
                      mitsuba::Color<float, 3>(color[0], color[1], color[2]));
     } else {
-      bsdf_props.set("reflectance", PointColorTexture<Float, Spectrum>(
-                                        points.colors, &props));
+      bsdf_props.set("reflectance",
+                     PointColorTexture<Float, Spectrum>(points.colors, &props));
     }
     props.set("bsdf", mitsuba::PluginManager::instance()->create_object(
                           bsdf_props, mitsuba::BSDF<Float, Spectrum>::Variant,

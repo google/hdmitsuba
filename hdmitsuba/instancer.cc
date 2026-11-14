@@ -217,17 +217,16 @@ std::optional<std::vector<float>> HdMitsubaInstancer::GetInstanceSampleTimes(
   if (interval[1] <= interval[0]) return std::nullopt;
   std::vector<HdSampledDataSourceHandle> sources;
   for (HdInstancer* inst = this; inst;
-       inst = GetDelegate()->GetRenderIndex().GetInstancer(
-           inst->GetParentId())) {
+       inst =
+           GetDelegate()->GetRenderIndex().GetInstancer(inst->GetParentId())) {
     HdContainerDataSourceHandle prim =
         GetPrimDataSource(GetDelegate(), inst->GetId());
     sources.push_back(HdXformSchema::GetFromParent(prim).GetMatrix());
     HdPrimvarsSchema primvars = HdPrimvarsSchema::GetFromParent(prim);
-    for (const TfToken& name :
-         {HdInstancerTokens->instanceTransforms,
-          HdInstancerTokens->instanceTranslations,
-          HdInstancerTokens->instanceScales,
-          HdInstancerTokens->instanceRotations}) {
+    for (const TfToken& name : {HdInstancerTokens->instanceTransforms,
+                                HdInstancerTokens->instanceTranslations,
+                                HdInstancerTokens->instanceScales,
+                                HdInstancerTokens->instanceRotations}) {
       sources.push_back(primvars.GetPrimvar(name).GetPrimvarValue());
     }
   }

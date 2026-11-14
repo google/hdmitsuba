@@ -134,7 +134,8 @@ struct ImplicitSurface {
   // shape holding a sphere per point.
   TfToken type;
   float radius = 1.0f;
-  float height = 2.0f;  // Cylinders only, which are centered and aligned with Z.
+  float height =
+      2.0f;  // Cylinders only, which are centered and aligned with Z.
   // Points only: the sphere centers, their per-point radii (if empty, all
   // spheres have `radius`), and optional per-point colors (the displayColor
   // primvar).
@@ -151,7 +152,8 @@ struct ImplicitSurface {
                    y = transform * Vector3f(0.f, 1.f, 0.f),
                    z = transform * Vector3f(0.f, 0.f, 1.f);
     const float lx = drjit::norm(x), ly = drjit::norm(y), lz = drjit::norm(z);
-    // Same tolerance as Mitsuba's checks in the `sphere` and `cylinder` plugins.
+    // Same tolerance as Mitsuba's checks in the `sphere` and `cylinder`
+    // plugins.
     constexpr float kEpsilon = 1e-4f;
     return std::abs(drjit::dot(x, y)) <= kEpsilon * lx * ly &&
            std::abs(drjit::dot(x, z)) <= kEpsilon * lx * lz &&

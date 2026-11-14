@@ -53,12 +53,12 @@
 #include "hdmitsuba/light.h"
 #include "hdmitsuba/material.h"
 #include "hdmitsuba/mesh.h"
+#include "hdmitsuba/particle_field.h"
 #include "hdmitsuba/render_buffer.h"
 #include "hdmitsuba/render_param.h"
 #include "hdmitsuba/render_pass.h"
 #include "hdmitsuba/render_settings.h"
 #include "hdmitsuba/scene_manager.h"
-#include "hdmitsuba/particle_field.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -73,9 +73,9 @@ const TfTokenVector& HdMitsubaRenderDelegate::GetSupportedRprimTypes() const {
                               HdPrimTypeTokens->particleField,
                               HdPrimTypeTokens->points}
           : new TfTokenVector{
-                HdPrimTypeTokens->mesh, HdPrimTypeTokens->basisCurves,
+                HdPrimTypeTokens->mesh,          HdPrimTypeTokens->basisCurves,
                 HdPrimTypeTokens->particleField, HdPrimTypeTokens->sphere,
-                HdPrimTypeTokens->cylinder, HdPrimTypeTokens->points};
+                HdPrimTypeTokens->cylinder,      HdPrimTypeTokens->points};
   return *kSupportedRprimTypes;
 }
 

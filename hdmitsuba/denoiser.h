@@ -14,13 +14,13 @@
 
 #pragma once
 
-#include <mitsuba/render/fwd.h>
-#include <pxr/pxr.h>
-
 #include <cstddef>
 #include <memory>
 #include <string>
 #include <vector>
+
+#include <mitsuba/render/fwd.h>
+#include <pxr/pxr.h>
 
 #include "hdmitsuba/render_buffer.h"
 

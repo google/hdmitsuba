@@ -86,8 +86,7 @@ void CopyFromHostToRenderBuffer(
 
   if (is_int) {
     int32_t* dst_int = static_cast<int32_t*>(dst_ptr);
-    const int copy_channels =
-        channels < dst_channels ? channels : dst_channels;
+    const int copy_channels = channels < dst_channels ? channels : dst_channels;
     for (size_t src_y = 0; src_y < crop_h; ++src_y) {
       size_t dst_y = (dst_height - 1) - (crop_y + src_y);
       const float* src_row =
@@ -238,8 +237,8 @@ void PerformBatchedCopy(
         Float gathered_float =
             dr::gather<Float>(tensor.array(), final_idx, valid_channel);
         if (dst_channels == 4 && dest.channels == 3) {
-          gathered_float = dr::select(
-              in_crop_channel && (channel_offsets == 3), 1.0f, gathered_float);
+          gathered_float = dr::select(in_crop_channel && (channel_offsets == 3),
+                                      1.0f, gathered_float);
         }
         dr::schedule(gathered_float);
         gathered_vars.push_back(std::move(gathered_float));

@@ -550,9 +550,10 @@ class IesEmitter final : public Emitter<Float, Spectrum> {
       Float theta = dr::safe_acos(local.z());
       Float cutoff = dr::deg_to_rad(m_cone_angle);
       Float start = cutoff * (1.f - m_cone_softness);
-      Float t = dr::select(
-          start < cutoff, dr::clip((theta - start) / (cutoff - start), 0.f, 1.f),
-          dr::select(theta > cutoff, 1.f, 0.f));
+      Float t =
+          dr::select(start < cutoff,
+                     dr::clip((theta - start) / (cutoff - start), 0.f, 1.f),
+                     dr::select(theta > cutoff, 1.f, 0.f));
       value *= 1.f - dr::square(t) * (3.f - 2.f * t);
     }
     UnpolarizedSpectrum result(value);

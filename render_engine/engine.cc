@@ -398,8 +398,8 @@ void RenderEngine::Configure(
   // Map USD purposes to Hydra render tags. Prims with the "default" purpose
   // carry the "geometry" render tag; the other purposes map 1:1.
   TfTokenVector render_tags;
-  for (const TfToken& purpose : purposes.value_or(TfTokenVector{
-           UsdGeomTokens->default_, UsdGeomTokens->render})) {
+  for (const TfToken& purpose : purposes.value_or(
+           TfTokenVector{UsdGeomTokens->default_, UsdGeomTokens->render})) {
     render_tags.push_back(purpose == UsdGeomTokens->default_
                               ? HdRenderTagTokens->geometry
                               : purpose);
@@ -572,8 +572,8 @@ void RenderEngine::Configure(
       params_delegate_->SetParameter(render_task_id_, HdTokens->params, params);
       params_delegate_->SetParameter(render_task_id_, HdTokens->collection,
                                      collection);
-      params_delegate_->SetParameter(
-          render_task_id_, HdTokens->renderTags, render_tags_);
+      params_delegate_->SetParameter(render_task_id_, HdTokens->renderTags,
+                                     render_tags_);
       tasks_.push_back(render_index_->GetTask(render_task_id_));
     }
     if (!rebuild_delegate) {
