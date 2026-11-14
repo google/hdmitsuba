@@ -1,0 +1,5 @@
+# Commits that only reformat code. Used by GitHub and by
+# `git config blame.ignoreRevsFile .git-blame-ignore-revs`.
+
+# Reformat Python code with pyink and isort
+a7e0d1c10a37d27a7b785ec9265c8fc2c2f9c6ee
