@@ -128,7 +128,7 @@ inline bool GetPrimVisible(const HdContainerDataSourceHandle& prim_source,
                            bool default_visible = true) {
   if (auto schema = HdVisibilitySchema::GetFromParent(prim_source)) {
     if (auto vis = schema.GetVisibility()) {
-      return vis->GetValue(0.0f).Get<bool>();
+      return vis->GetTypedValue(0.0f);
     }
   }
   return default_visible;
@@ -138,7 +138,7 @@ inline GfMatrix4d GetPrimTransform(
     const HdContainerDataSourceHandle& prim_source) {
   if (auto schema = HdXformSchema::GetFromParent(prim_source)) {
     if (auto matrix = schema.GetMatrix()) {
-      return matrix->GetValue(0.0f).Get<GfMatrix4d>();
+      return matrix->GetTypedValue(0.0f);
     }
   }
   return GfMatrix4d(1.0);
