@@ -21,19 +21,16 @@ import os
 import drjit as dr
 import mitsuba as mi
 import numpy as np
-import pytest
-
 from pxr import Gf
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
 from pxr import UsdLux
+import pytest
 
 from usd_mitsuba import light
 
-_EXR_PATH = os.path.abspath(
-    'hdmitsuba/test_assets/lights/textures/envmap.png'
-)
+_EXR_PATH = os.path.abspath('hdmitsuba/test_assets/lights/textures/envmap.png')
 _IES_PATH = os.path.abspath(
     'hdmitsuba/test_assets/lights/textures/ies/step.ies'
 )
@@ -45,8 +42,9 @@ def _set_mitsuba_variant():
 
 
 def _create_stage_with_light(
-    light_type: type[UsdLux.BoundableLightBase]
-    | type[UsdLux.NonboundableLightBase],
+    light_type: (
+        type[UsdLux.BoundableLightBase] | type[UsdLux.NonboundableLightBase]
+    ),
     name: str = 'light',
 ) -> tuple[Usd.Stage, Usd.Prim]:
   stage = Usd.Stage.CreateInMemory()
@@ -121,7 +119,9 @@ def test_dome_light_constant():
 
   assert emitter_dict['type'] == 'constant'
   np.testing.assert_allclose(
-      emitter_dict['radiance']['value'], mi.ScalarColor3f(0.75, 0.75, 0.75), atol=1e-6
+      emitter_dict['radiance']['value'],
+      mi.ScalarColor3f(0.75, 0.75, 0.75),
+      atol=1e-6,
   )
 
 
@@ -141,7 +141,8 @@ def test_dome_light_textured():
 def test_dome_light_textured_1x1():
   """USD scenes may provide 1x1 environment maps which Mitsuba supports directly."""
   path_1x1 = os.path.abspath(
-      'hdmitsuba/test_assets/lights/textures/envmap_1x1.png')
+      'hdmitsuba/test_assets/lights/textures/envmap_1x1.png'
+  )
   stage, prim = _create_stage_with_light(UsdLux.DomeLight)
   usd_light = UsdLux.DomeLight(prim)
   usd_light.GetTextureFileAttr().Set(Sdf.AssetPath(path_1x1))
@@ -243,8 +244,8 @@ def test_sphere_light_area():
   assert abs(dr.norm(scale) - 2.0) < 1e-6
 
   np.testing.assert_allclose(
-      emitter_dict['emitter']['radiance']['value'], mi.ScalarColor3f(
-          5.0, 0.0, 0.0)
+      emitter_dict['emitter']['radiance']['value'],
+      mi.ScalarColor3f(5.0, 0.0, 0.0),
   )
 
 
@@ -288,8 +289,8 @@ def test_rect_light():
   assert abs(sy - 2.0) < 1e-6  # 0.5 * 4.0
 
   np.testing.assert_allclose(
-      emitter_dict['emitter']['radiance']['value'], mi.ScalarColor3f(
-          0.0, 3.0, 0.0)
+      emitter_dict['emitter']['radiance']['value'],
+      mi.ScalarColor3f(0.0, 3.0, 0.0),
   )
 
 
@@ -352,8 +353,8 @@ def test_disk_light():
   assert abs(sx - 3.0) < 1e-6
 
   np.testing.assert_allclose(
-      emitter_dict['emitter']['radiance']['value'], mi.ScalarColor3f(
-          0.0, 0.0, 4.0)
+      emitter_dict['emitter']['radiance']['value'],
+      mi.ScalarColor3f(0.0, 0.0, 4.0),
   )
 
 

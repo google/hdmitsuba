@@ -21,7 +21,6 @@ from typing import Any
 import drjit as dr
 import mitsuba as mi
 import numpy as np
-
 from pxr import Gf
 from pxr import Tf
 from pxr import Usd
@@ -205,8 +204,10 @@ def get_implicit_surface_parts(
     return {
         '': {
             'type': 'rectangle',
-            'to_world': mi.ScalarTransform4f().scale(
-                mi.ScalarVector3f(width * 0.5, length * 0.5, 1)
+            'to_world': (
+                mi.ScalarTransform4f().scale(
+                    mi.ScalarVector3f(width * 0.5, length * 0.5, 1)
+                )
             ),
         }
     }

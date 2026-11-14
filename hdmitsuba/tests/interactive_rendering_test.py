@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import mitsuba as mi
 import numpy as np
-import pytest
 from pxr import Gf
 from pxr import Sdf
 from pxr import Tf
@@ -26,6 +25,8 @@ from pxr import Usd
 from pxr import UsdGeom
 from pxr import UsdLux
 from pxr import UsdRender
+import pytest
+
 import usd_render
 
 

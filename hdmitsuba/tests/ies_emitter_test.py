@@ -100,8 +100,10 @@ def test_uniform_ies_renders_like_plain_light(shape: str):
         'integrator': {'type': 'direct'},
         'sensor': {
             'type': 'orthographic',
-            'to_world': mi.ScalarTransform4f().look_at(
-                origin=[0, 0, 3], target=[0, 0, 0], up=[0, 1, 0]
+            'to_world': (
+                mi.ScalarTransform4f().look_at(
+                    origin=[0, 0, 3], target=[0, 0, 0], up=[0, 1, 0]
+                )
             ),
             'film': {'type': 'hdrfilm', 'width': 32, 'height': 32},
         },

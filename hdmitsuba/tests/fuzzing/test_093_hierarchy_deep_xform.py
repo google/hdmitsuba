@@ -18,12 +18,12 @@ from __future__ import annotations
 
 import mitsuba as mi
 import numpy as np
-
 from pxr import Usd  # type: ignore
 from pxr import UsdGeom  # type: ignore
-import usd_render
+
 from hdmitsuba.tests import test_helpers
 from usd_mitsuba import translator as usd_mitsuba
+import usd_render
 
 
 def test_deep_xform():
@@ -38,9 +38,7 @@ def test_deep_xform():
   scene_initial = mi.load_dict(usd_mitsuba.convert_to_mitsuba(stage))
   image_usd_initial = np.array(mi.render(scene_initial, spp=128))
   test_helpers.write_image(image_hd_initial, 'test_deep_xform_initial_hd.png')
-  test_helpers.write_image(
-      image_usd_initial, 'test_deep_xform_initial_usd.png'
-  )
+  test_helpers.write_image(image_usd_initial, 'test_deep_xform_initial_usd.png')
   test_helpers.robust_assert_close(
       image_hd_initial[..., :3], image_usd_initial, atol=0.2
   )
@@ -52,9 +50,7 @@ def test_deep_xform():
   image_hd_modified = engine.render()['color']
   scene_modified = mi.load_dict(usd_mitsuba.convert_to_mitsuba(stage))
   image_usd_modified = np.array(mi.render(scene_modified, spp=128))
-  test_helpers.write_image(
-      image_hd_modified, 'test_deep_xform_modified_hd.png'
-  )
+  test_helpers.write_image(image_hd_modified, 'test_deep_xform_modified_hd.png')
   test_helpers.write_image(
       image_usd_modified, 'test_deep_xform_modified_usd.png'
   )

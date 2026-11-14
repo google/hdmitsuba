@@ -15,11 +15,12 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 from pxr import Usd
 from pxr import UsdGeom
-from pxr import UsdRender
 from pxr import UsdLux
+from pxr import UsdRender
+import pytest
+
 import usd_render
 
 _RENDER_SETTINGS_PATH = '/Render/PrimarySettings'
@@ -38,8 +39,7 @@ def _create_stage() -> Usd.Stage:
   stage = Usd.Stage.CreateInMemory()
 
   mesh = UsdGeom.Mesh.Define(stage, '/mesh')
-  mesh.GetPointsAttr().Set(
-      [(-1, 0, -1), (1, 0, -1), (1, 0, 1), (-1, 0, 1)])
+  mesh.GetPointsAttr().Set([(-1, 0, -1), (1, 0, -1), (1, 0, 1), (-1, 0, 1)])
   mesh.GetFaceVertexCountsAttr().Set([4])
   mesh.GetFaceVertexIndicesAttr().Set([3, 2, 1, 0])
 
@@ -63,7 +63,7 @@ def test_instantiate_engine():
   assert engine is not None
 
 
-@pytest.mark.parametrize("delegate_id", _DELEGATES)
+@pytest.mark.parametrize('delegate_id', _DELEGATES)
 def test_basic_render(delegate_id: str):
   stage = _create_stage()
   engine = usd_render.RenderEngine(stage)
@@ -78,7 +78,7 @@ def test_basic_render(delegate_id: str):
   assert np.mean(images['color']) > 0.1
 
 
-@pytest.mark.parametrize("delegate_id", _DELEGATES)
+@pytest.mark.parametrize('delegate_id', _DELEGATES)
 def test_render_different_cameras(delegate_id: str):
   stage = _create_stage()
   engine = usd_render.RenderEngine(stage)
@@ -119,8 +119,8 @@ def test_render_different_cameras(delegate_id: str):
   assert np.mean(np.abs(color_image_new_cam - color_image_modified)) > 0.05
 
 
-@pytest.mark.parametrize("force_rebuild", [True, False])
-@pytest.mark.parametrize("delegate_id", _DELEGATES)
+@pytest.mark.parametrize('force_rebuild', [True, False])
+@pytest.mark.parametrize('delegate_id', _DELEGATES)
 def test_change_width(force_rebuild: bool, delegate_id: str):
   stage = _create_stage()
 
@@ -147,8 +147,10 @@ def test_change_width(force_rebuild: bool, delegate_id: str):
   assert images['color'].shape == (36, 50, 3)
 
 
-@pytest.mark.parametrize("delegate_id", _DELEGATES)
-def test_render_resolution_updates_on_camera_aspect_ratio_change(delegate_id: str):
+@pytest.mark.parametrize('delegate_id', _DELEGATES)
+def test_render_resolution_updates_on_camera_aspect_ratio_change(
+    delegate_id: str,
+):
   stage = _create_stage()
   camera = UsdGeom.Camera.Get(stage, '/World/camera')
   camera.GetHorizontalApertureAttr().Set(36.0)
@@ -182,8 +184,8 @@ def test_invalid_camera_throws():
   engine = usd_render.RenderEngine(stage)
   renderers = usd_render.get_registered_renderers()
   if not renderers:
-    pytest.skip("No renderers registered")
-  with pytest.raises(RuntimeError, match="No camera found"):
+    pytest.skip('No renderers registered')
+  with pytest.raises(RuntimeError, match='No camera found'):
     engine.configure(hydra_delegate_id=renderers[0])
 
 

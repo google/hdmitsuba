@@ -18,11 +18,11 @@ from __future__ import annotations
 
 import mitsuba as mi
 import numpy as np
-import pytest
-
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
+import pytest
+
 from usd_mitsuba import motion
 
 
@@ -45,9 +45,7 @@ def test_sample_world_transform():
       prim, Usd.TimeCode(0.5), (-0.5, 0.5)
   )
   assert isinstance(transform, mi.AnimatedTransform4f)
-  np.testing.assert_allclose(
-      mi.traverse(transform)["times"], [-0.5, -0.4, 0.5]
-  )
+  np.testing.assert_allclose(mi.traverse(transform)["times"], [-0.5, -0.4, 0.5])
   assert list(transform.eval(-0.5).translation()) == [0, 1, 0]
   assert list(transform.eval(0.5).translation()) == [1, 1, 0]
 
@@ -173,7 +171,9 @@ def test_sample_world_transform_snaps_uniform_keyframes():
   op.Set((0, 1, 0), 0.50005)
   op.Set((1, 0, 0), 1.0)
   to_world = motion.sample_world_transform(
-      stage.GetPrimAtPath("/Orbit"), Usd.TimeCode(0.5), (-0.5, 0.5),
+      stage.GetPrimAtPath("/Orbit"),
+      Usd.TimeCode(0.5),
+      (-0.5, 0.5),
       uniform=True,
   )
   times = mi.traverse(to_world)["times"]
@@ -197,4 +197,3 @@ def test_get_motion_interval():
     cam.GetShutterOpenAttr().Set(open_t)
     cam.GetShutterCloseAttr().Set(close_t)
   assert motion.get_motion_interval(stage, Usd.TimeCode(0.0)) == (-0.25, 0.5)
-

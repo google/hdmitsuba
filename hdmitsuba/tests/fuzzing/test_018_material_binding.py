@@ -18,15 +18,15 @@ from __future__ import annotations
 
 import mitsuba as mi
 import numpy as np
-
 from pxr import Gf  # type: ignore
 from pxr import Sdf  # type: ignore
 from pxr import Usd  # type: ignore
 from pxr import UsdGeom  # type: ignore
 from pxr import UsdShade  # type: ignore
-import usd_render
+
 from hdmitsuba.tests import test_helpers
 from usd_mitsuba import translator as usd_mitsuba
+import usd_render
 
 
 def test_material_binding_modification():
@@ -51,9 +51,7 @@ def test_material_binding_modification():
   )
 
   # Modification: Define new Material and rebind Cube
-  new_material = UsdShade.Material.Define(
-      stage, '/root/_materials/NewMaterial'
-  )
+  new_material = UsdShade.Material.Define(stage, '/root/_materials/NewMaterial')
   new_shader = UsdShade.Shader.Define(
       stage, '/root/_materials/NewMaterial/Shader'
   )

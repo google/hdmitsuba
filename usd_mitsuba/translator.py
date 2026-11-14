@@ -23,7 +23,6 @@ from typing import Any
 import drjit as dr
 import mitsuba as mi
 import numpy as np
-
 from pxr import Sdf
 from pxr import Tf
 from pxr import Usd
@@ -239,10 +238,7 @@ def _create_empty_mitsuba_curve(
   """
   # 4 points is the minimum required for B-splines.
   dummy_data = (
-      "-1.0 0.0 0.0 0.5\n"
-      "-0.5 0.0 0.0 0.5\n"
-      " 0.5 0.0 0.0 0.5\n"
-      " 1.5 0.0 0.0 0.5\n"
+      '-1.0 0.0 0.0 0.5\n-0.5 0.0 0.0 0.5\n 0.5 0.0 0.0 0.5\n 1.5 0.0 0.0 0.5\n'
   )
   with tempfile.NamedTemporaryFile(mode='w', suffix='.txt') as f:
     f.write(dummy_data)
@@ -500,7 +496,9 @@ def convert_to_mitsuba(
         or prim.IsA(UsdGeom.Cylinder_1)
     ):
       mi_scene_dict.update(
-          _convert_implicit_surface(prim, time, sensor_bindings, motion_interval)
+          _convert_implicit_surface(
+              prim, time, sensor_bindings, motion_interval
+          )
       )
     elif prim.IsA(UsdGeom.Points):
       mi_scene_dict.update(_convert_points(prim, time, motion_interval))
@@ -508,7 +506,8 @@ def convert_to_mitsuba(
       # A sensor bound to a shape is emitted as part of that shape.
       if camera.get_target_shape_path(prim) is None:
         mi_scene_dict[mi_id] = camera.usd_to_mitsuba(
-            UsdGeom.Camera(prim), time=time)
+            UsdGeom.Camera(prim), time=time
+        )
     elif prim.IsA(UsdLux.NonboundableLightBase) or prim.IsA(
         UsdLux.BoundableLightBase
     ):
@@ -516,5 +515,7 @@ def convert_to_mitsuba(
     elif prim.IsA(UsdGeom.Curves):
       mi_scene_dict[mi_id] = _convert_curves(prim, time)
     elif prim.IsA(UsdVol.ParticleField3DGaussianSplat):
-      mi_scene_dict.update(gaussian_splatting.convert_gaussian_splats(prim, time))
+      mi_scene_dict.update(
+          gaussian_splatting.convert_gaussian_splats(prim, time)
+      )
   return mi_scene_dict

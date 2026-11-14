@@ -18,15 +18,15 @@ from __future__ import annotations
 
 import mitsuba as mi
 import numpy as np
-import pytest
-
 from pxr import Gf
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
 from pxr import UsdLux
-import usd_render
+import pytest
+
 from hdmitsuba.tests import test_helpers
+import usd_render
 
 _CAMERA_PATH = '/root/Camera/Camera'
 _SPP = 256
@@ -38,7 +38,9 @@ def _set_mitsuba_variant():
   mi.set_variant('cuda_ad_rgb', 'llvm_ad_rgb')
 
 
-def _set_keyframes(stage: Usd.Stage, attr_path: str, start, end) -> Usd.Attribute:
+def _set_keyframes(
+    stage: Usd.Stage, attr_path: str, start, end
+) -> Usd.Attribute:
   attr = stage.GetAttributeAtPath(attr_path)
   if not attr:
     prim_path, op_name = attr_path.split('.xformOp:')
@@ -85,16 +87,51 @@ def _assert_hydra_equal_to_offline(
 @pytest.mark.parametrize(
     'scene_name,attr_path,start,end',
     [
-        ('point', '/root/Camera.xformOp:translate', (-1.5, -2, 2.5), (1.5, -2, 2.5)),
-        ('directional', '/root/Area.xformOp:rotateXYZ', (-60, 0, 0), (60, 0, 0)),
-        ('envmap', '/root/env_light.xformOp:rotateXYZ', (90, 0, 0), (90, 0, 300)),
+        (
+            'point',
+            '/root/Camera.xformOp:translate',
+            (-1.5, -2, 2.5),
+            (1.5, -2, 2.5),
+        ),
+        (
+            'directional',
+            '/root/Area.xformOp:rotateXYZ',
+            (-60, 0, 0),
+            (60, 0, 0),
+        ),
+        (
+            'envmap',
+            '/root/env_light.xformOp:rotateXYZ',
+            (90, 0, 0),
+            (90, 0, 300),
+        ),
         ('point', '/root/Area.xformOp:translate', (-2, 0, 1), (2, 0, 1)),
         ('spot', '/root/Area.xformOp:translate', (-2, 0, 1), (2, 0, 1)),
         ('sphere', '/root/Area.xformOp:translate', (-2, 0, 1), (2, 0, 1)),
-        ('point', '/root/Plane.xformOp:translate', (0.0, 0.0, -0.8), (0.0, 0.0, 0.8)),
-        ('point', '/root/Plane.xformOp:rotateXYZ', (-80.0, -80.0, 0.0), (80.0, 80.0, 0.0)),
-        ('point', '/root/Plane.xformOp:scale', (0.05, 0.05, 1.0), (2.0, 2.0, 1.0)),
-        ('geom_subsets', '/root/Cube.xformOp:translate', (-4.0, 0.0, 0.0), (2.0, -2.0, 1.0)),
+        (
+            'point',
+            '/root/Plane.xformOp:translate',
+            (0.0, 0.0, -0.8),
+            (0.0, 0.0, 0.8),
+        ),
+        (
+            'point',
+            '/root/Plane.xformOp:rotateXYZ',
+            (-80.0, -80.0, 0.0),
+            (80.0, 80.0, 0.0),
+        ),
+        (
+            'point',
+            '/root/Plane.xformOp:scale',
+            (0.05, 0.05, 1.0),
+            (2.0, 2.0, 1.0),
+        ),
+        (
+            'geom_subsets',
+            '/root/Cube.xformOp:translate',
+            (-4.0, 0.0, 0.0),
+            (2.0, -2.0, 1.0),
+        ),
     ],
 )
 def test_motion_blur(scene_name: str, attr_path: str, start, end):

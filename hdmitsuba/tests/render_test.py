@@ -18,16 +18,16 @@ from __future__ import annotations
 
 import mitsuba as mi
 import numpy as np
-import pytest
-
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
 from pxr import UsdLux
 from pxr import UsdRender
 from pxr import UsdShade
-import usd_render
+import pytest
+
 from hdmitsuba.tests import test_helpers
+import usd_render
 
 _RENDER_SETTINGS_PATH = '/renderSettings'
 
@@ -81,7 +81,7 @@ def _create_stage() -> Usd.Stage:
 @pytest.mark.parametrize(
     'renderer',
     ['HdEmbreeRendererPlugin', 'HdMitsubaRendererPlugin'],
-    ids=['HdEmbree', 'HdMitsuba']
+    ids=['HdEmbree', 'HdMitsuba'],
 )
 def test_render_simple_scene(renderer):
   stage = _create_stage()
@@ -120,12 +120,12 @@ def test_progressive_vs_non_progressive_convergence():
   # Configure non-progressive engine with 16 SPP
   engine = usd_render.RenderEngine(stage)
   engine.configure(
-      hydra_delegate_id="HdMitsubaRendererPlugin",
+      hydra_delegate_id='HdMitsubaRendererPlugin',
       width=16,
       overrides={
           'mitsuba:sample_count': 16,
           'enableInteractive': False,
-      }
+      },
   )
   images_single = engine.render()
   img_single = images_single['color']
@@ -133,12 +133,12 @@ def test_progressive_vs_non_progressive_convergence():
   # Configure progressive engine with 16 SPP (rendered as 16 x 1 SPP)
   engine_prog = usd_render.RenderEngine(stage)
   engine_prog.configure(
-      hydra_delegate_id="HdMitsubaRendererPlugin",
+      hydra_delegate_id='HdMitsubaRendererPlugin',
       width=16,
       overrides={
           'mitsuba:sample_count': 16,
           'enableInteractive': True,
-      }
+      },
   )
   images_prog = engine_prog.render()
   img_prog = images_prog['color']

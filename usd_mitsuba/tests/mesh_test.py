@@ -20,12 +20,12 @@ from typing import Any
 
 import mitsuba as mi
 import numpy as np
-import pytest
-
 from pxr import Gf
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
+import pytest
+
 from hdmitsuba import geometry_ext as geom_lib
 from usd_mitsuba import mesh as mesh_lib
 
@@ -89,8 +89,9 @@ def _get(sub: Any, name: str) -> np.ndarray:
 
 
 def test_scalar_displacement_is_applied_in_object_space():
-  transform = Gf.Matrix4d().SetScale(Gf.Vec3d(1, 1, 2)) * Gf.Matrix4d(
-  ).SetTranslate(Gf.Vec3d(0, 0, 1))
+  transform = Gf.Matrix4d().SetScale(
+      Gf.Vec3d(1, 1, 2)
+  ) * Gf.Matrix4d().SetTranslate(Gf.Vec3d(0, 0, 1))
   sub = _process(
       _uniform(0.5),
       transform,
@@ -106,9 +107,7 @@ def test_scalar_displacement_is_applied_in_object_space():
   # The normal-to-world transform scales z normals by 1/2, so the encoded
   # world-space normal is (0, 0, 1) / (1/2).
   np.testing.assert_allclose(_get(sub, '__n_disp_world'), [[0, 0, 2]] * 6)
-  np.testing.assert_allclose(
-      _get(sub, 'normals'), [[0, 0, 1]] * 6, atol=1e-5
-  )
+  np.testing.assert_allclose(_get(sub, 'normals'), [[0, 0, 1]] * 6, atol=1e-5)
 
 
 @pytest.mark.parametrize('displaced', [False, True])
@@ -165,7 +164,9 @@ def test_authored_vertex_normals_define_displacement_direction():
   offsets = _get(sub, 'points') - _get(sub, '__p_object')
   np.testing.assert_allclose(offsets, [n] * len(_POINTS), atol=1e-5)
   # The planar mesh is only translated, so the normals remain unchanged.
-  np.testing.assert_allclose(_get(sub, 'normals'), [n] * len(_POINTS), atol=1e-5)
+  np.testing.assert_allclose(
+      _get(sub, 'normals'), [n] * len(_POINTS), atol=1e-5
+  )
 
 
 def test_vector_displacement_uses_uv_tangent_frame_across_seams():

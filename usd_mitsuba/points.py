@@ -20,11 +20,11 @@ from typing import Any
 
 import mitsuba as mi
 import numpy as np
-
 from pxr import Tf
 from pxr import Usd
 from pxr import UsdGeom
 from pxr import UsdShade
+
 from usd_mitsuba import material
 from usd_mitsuba import util
 

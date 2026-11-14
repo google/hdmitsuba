@@ -18,13 +18,13 @@ from __future__ import annotations
 
 import mitsuba as mi
 import numpy as np
-
 from pxr import Usd  # type: ignore
 from pxr import UsdGeom  # type: ignore
 from pxr import UsdShade  # type: ignore
-import usd_render
+
 from hdmitsuba.tests import test_helpers
 from usd_mitsuba import translator as usd_mitsuba
+import usd_render
 
 
 def test_add_three_overlapping_shapes():
@@ -57,9 +57,7 @@ def test_add_three_overlapping_shapes():
     cloned = UsdGeom.Mesh.Define(stage, f'/root/OverlapCube_{i}')
     cloned.GetPointsAttr().Set(orig.GetPointsAttr().Get())
     cloned.GetFaceVertexCountsAttr().Set(orig.GetFaceVertexCountsAttr().Get())
-    cloned.GetFaceVertexIndicesAttr().Set(
-        orig.GetFaceVertexIndicesAttr().Get()
-    )
+    cloned.GetFaceVertexIndicesAttr().Set(orig.GetFaceVertexIndicesAttr().Get())
     cloned.GetExtentAttr().Set(orig.GetExtentAttr().Get())
     cloned.GetSubdivisionSchemeAttr().Set('none')
     if st_attr.IsValid():

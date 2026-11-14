@@ -18,14 +18,14 @@ from __future__ import annotations
 
 import mitsuba as mi
 import numpy as np
-import pytest
-
 from pxr import Gf
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdShade
-import usd_render
+import pytest
+
 from hdmitsuba.tests import test_helpers
+import usd_render
 
 
 @pytest.fixture(autouse=True)
@@ -160,9 +160,7 @@ def test_modify_material():
 
   # Modify the Material by disconnecting the texture of the diffuse ground.
   # "ModifyMaterial" step
-  shader = UsdShade.Shader.Get(
-      stage, '/root/_materials/ground/Principled_BSDF'
-  )
+  shader = UsdShade.Shader.Get(stage, '/root/_materials/ground/Principled_BSDF')
   assert shader is not None
   diffuse_color = shader.GetInput('diffuseColor')
   assert diffuse_color is not None
@@ -170,12 +168,8 @@ def test_modify_material():
   diffuse_color.Set(Gf.Vec3f(0.0, 0.0, 1.0))
 
   image_modified = engine.render()['color']
-  test_helpers.write_image(
-      image_original, 'test_modify_material_original.png'
-  )
-  test_helpers.write_image(
-      image_modified, 'test_modify_material_modified.png'
-  )
+  test_helpers.write_image(image_original, 'test_modify_material_original.png')
+  test_helpers.write_image(image_modified, 'test_modify_material_modified.png')
 
   assert np.mean(np.abs(image_modified - image_original)) > 0.02
 
@@ -246,4 +240,3 @@ def test_unused_texture_not_loaded(capfd):
   engine.render()
   err = capfd.readouterr().err
   assert 'no_roughness' in err and 'no_occlusion' not in err
-

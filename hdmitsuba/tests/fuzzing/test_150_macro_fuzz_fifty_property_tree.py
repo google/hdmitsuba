@@ -18,16 +18,16 @@ from __future__ import annotations
 
 import mitsuba as mi
 import numpy as np
-
 from pxr import Gf  # type: ignore
 from pxr import Usd  # type: ignore
 from pxr import UsdGeom  # type: ignore
 from pxr import UsdLux  # type: ignore
 from pxr import UsdShade  # type: ignore
 from pxr import Vt  # type: ignore
-import usd_render
+
 from hdmitsuba.tests import test_helpers
 from usd_mitsuba import translator as usd_mitsuba
+import usd_render
 
 
 def test_macro_fuzz_fifty_property_tree():
@@ -63,9 +63,7 @@ def test_macro_fuzz_fifty_property_tree():
   xform.AddTranslateOp(opSuffix='macro_t').Set((0.1, 0.1, 0.1))
 
   # 2. Materials properties
-  shader = UsdShade.Shader.Get(
-      stage, '/root/_materials/ground/Principled_BSDF'
-  )
+  shader = UsdShade.Shader.Get(stage, '/root/_materials/ground/Principled_BSDF')
   shader.GetInput('diffuseColor').Set(Gf.Vec3f(0.8, 0.2, 0.8))
   shader.GetInput('roughness').Set(0.2)
   shader.GetInput('metallic').Set(0.5)

@@ -16,14 +16,13 @@ from __future__ import annotations
 
 import mitsuba as mi
 import numpy as np
-import pytest
-
 from pxr import Gf
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
 from pxr import UsdVol
 from pxr import Vt
+import pytest
 
 from usd_mitsuba import gaussian_splatting
 from usd_mitsuba import translator
@@ -42,7 +41,9 @@ def test_convert_gaussian_splats():
 
   positions = Vt.Vec3fArray([Gf.Vec3f(1.0, 2.0, 3.0), Gf.Vec3f(4.0, 5.0, 6.0)])
   scales = Vt.Vec3fArray([Gf.Vec3f(0.1, 0.2, 0.3), Gf.Vec3f(0.4, 0.5, 0.6)])
-  orientations = Vt.QuatfArray([Gf.Quatf(1.0, 0, 0, 0), Gf.Quatf(0.7071, 0, 0.7071, 0)])
+  orientations = Vt.QuatfArray(
+      [Gf.Quatf(1.0, 0, 0, 0), Gf.Quatf(0.7071, 0, 0.7071, 0)]
+  )
   opacities = Vt.FloatArray([0.8, 0.9])
   sh_coeffs = Vt.Vec3fArray([Gf.Vec3f(1.0, 0.5, 0.2), Gf.Vec3f(0.1, 0.2, 0.3)])
 
@@ -59,8 +60,12 @@ def test_convert_gaussian_splats():
   splats_dict = res[splat_id]
   assert splats_dict['type'] == 'ellipsoidsmesh'
   assert splats_dict['extent_adaptive_clamping'] is True
-  assert np.allclose(np.array(splats_dict['centers']), [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
-  assert np.allclose(np.array(splats_dict['scales']), [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
+  assert np.allclose(
+      np.array(splats_dict['centers']), [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+  )
+  assert np.allclose(
+      np.array(splats_dict['scales']), [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
+  )
   assert np.allclose(np.array(splats_dict['opacities']), [[0.8], [0.9]])
   assert splats_dict['sh_coeffs'].shape == (2, 3)
 
@@ -102,4 +107,3 @@ def test_convert_gaussian_splats_adaptive_clamping_and_opacity_floor():
   shape = mi.load_dict(splats_dict)
   params = mi.traverse(shape)
   assert not np.any(np.isnan(np.array(params['data'])))
-

@@ -21,14 +21,13 @@ from typing import Any
 
 import mitsuba as mi
 import numpy as np
-
 from pxr import Gf
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdRender
 
-import usd_render
 from usd_mitsuba import translator as usd_mitsuba
+import usd_render
 
 _RENDER_SETTINGS_PATH = '/Render/PrimarySettings'
 

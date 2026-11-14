@@ -17,19 +17,20 @@
 from __future__ import annotations
 
 import os
+
 import mitsuba as mi
 import numpy as np
-import pytest
-
+from pxr import Gf
+from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
 from pxr import UsdLux
 from pxr import UsdShade
 from pxr import Vt
-from pxr import Gf
-from pxr import Sdf
-import usd_render
+import pytest
+
 from hdmitsuba.tests import test_helpers
+import usd_render
 
 
 @pytest.fixture(autouse=True)
@@ -48,8 +49,12 @@ def _create_instanced_stage(tmp_path) -> str:
   instancer = UsdGeom.PointInstancer.Define(stage, '/root/Instancer')
 
   # Copy /root/Cube to /root/Instancer/ProtoCube
-  Sdf.CopySpec(stage.GetRootLayer(), '/root/Cube',
-               stage.GetRootLayer(), '/root/Instancer/ProtoCube')
+  Sdf.CopySpec(
+      stage.GetRootLayer(),
+      '/root/Cube',
+      stage.GetRootLayer(),
+      '/root/Instancer/ProtoCube',
+  )
   stage.RemovePrim('/root/Cube')
 
   instancer.GetPrototypesRel().SetTargets(['/root/Instancer/ProtoCube'])
@@ -72,10 +77,12 @@ def _create_flattened_stage(tmp_path) -> str:
   stage = Usd.Stage.Open(anon_layer)
 
   # Copy /root/Cube to /root/Cube1 and /root/Cube2
-  Sdf.CopySpec(stage.GetRootLayer(), '/root/Cube',
-               stage.GetRootLayer(), '/root/Cube1')
-  Sdf.CopySpec(stage.GetRootLayer(), '/root/Cube',
-               stage.GetRootLayer(), '/root/Cube2')
+  Sdf.CopySpec(
+      stage.GetRootLayer(), '/root/Cube', stage.GetRootLayer(), '/root/Cube1'
+  )
+  Sdf.CopySpec(
+      stage.GetRootLayer(), '/root/Cube', stage.GetRootLayer(), '/root/Cube2'
+  )
   stage.RemovePrim('/root/Cube')
 
   cube1 = UsdGeom.Xformable.Get(stage, '/root/Cube1')
@@ -120,10 +127,12 @@ def _create_modified_flattened_stage(tmp_path) -> str:
   anon_layer.TransferContent(layer)
   stage = Usd.Stage.Open(anon_layer)
 
-  Sdf.CopySpec(stage.GetRootLayer(), '/root/Cube',
-               stage.GetRootLayer(), '/root/Cube1')
-  Sdf.CopySpec(stage.GetRootLayer(), '/root/Cube',
-               stage.GetRootLayer(), '/root/Cube2')
+  Sdf.CopySpec(
+      stage.GetRootLayer(), '/root/Cube', stage.GetRootLayer(), '/root/Cube1'
+  )
+  Sdf.CopySpec(
+      stage.GetRootLayer(), '/root/Cube', stage.GetRootLayer(), '/root/Cube2'
+  )
   stage.RemovePrim('/root/Cube')
 
   cube1 = UsdGeom.Xformable.Get(stage, '/root/Cube1')
@@ -174,18 +183,26 @@ def _create_native_instanced_stage(tmp_path) -> str:
   stage = Usd.Stage.Open(anon_layer)
 
   stage.DefinePrim('/root/Prototypes', 'Scope')
-  Sdf.CopySpec(stage.GetRootLayer(), '/root/Cube',
-               stage.GetRootLayer(), '/root/Prototypes/CubePrototype')
+  Sdf.CopySpec(
+      stage.GetRootLayer(),
+      '/root/Cube',
+      stage.GetRootLayer(),
+      '/root/Prototypes/CubePrototype',
+  )
   stage.RemovePrim('/root/Cube')
 
   instance1 = stage.DefinePrim('/root/Instance1', 'Xform')
   instance1.SetInstanceable(True)
-  instance1.GetReferences().AddInternalReference('/root/Prototypes/CubePrototype')
+  instance1.GetReferences().AddInternalReference(
+      '/root/Prototypes/CubePrototype'
+  )
   UsdGeom.Xformable(instance1).AddTranslateOp().Set(Gf.Vec3d(-1.5, 0, 0))
 
   instance2 = stage.DefinePrim('/root/Instance2', 'Xform')
   instance2.SetInstanceable(True)
-  instance2.GetReferences().AddInternalReference('/root/Prototypes/CubePrototype')
+  instance2.GetReferences().AddInternalReference(
+      '/root/Prototypes/CubePrototype'
+  )
   UsdGeom.Xformable(instance2).AddTranslateOp().Set(Gf.Vec3d(1.5, 0, 0))
 
   stage.GetPrimAtPath('/root/Prototypes').SetActive(False)
@@ -219,7 +236,9 @@ def test_native_instancing(tmp_path):
   np.testing.assert_allclose(img_inst, img_flat, atol=0.05)
 
 
-def _create_custom_flattened_stage(tmp_path, positions: list[Gf.Vec3d], name: str = 'flattened') -> str:
+def _create_custom_flattened_stage(
+    tmp_path, positions: list[Gf.Vec3d], name: str = 'flattened'
+) -> str:
   cube_path = f'{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda'
   layer = Sdf.Layer.FindOrOpen(cube_path)
   anon_layer = Sdf.Layer.CreateAnonymous()
@@ -227,8 +246,12 @@ def _create_custom_flattened_stage(tmp_path, positions: list[Gf.Vec3d], name: st
   stage = Usd.Stage.Open(anon_layer)
 
   for i in range(len(positions)):
-    Sdf.CopySpec(stage.GetRootLayer(), '/root/Cube',
-                 stage.GetRootLayer(), f'/root/Cube{i}')
+    Sdf.CopySpec(
+        stage.GetRootLayer(),
+        '/root/Cube',
+        stage.GetRootLayer(),
+        f'/root/Cube{i}',
+    )
   stage.RemovePrim('/root/Cube')
 
   for i, pos in enumerate(positions):
@@ -248,25 +271,35 @@ def _create_nested_instanced_stage(tmp_path) -> str:
   stage = Usd.Stage.Open(anon_layer)
 
   parent_instancer = UsdGeom.PointInstancer.Define(
-      stage, '/root/ParentInstancer')
+      stage, '/root/ParentInstancer'
+  )
 
   stage.DefinePrim('/root/ParentInstancer/ChildInstancer', 'Scope')
-  Sdf.CopySpec(stage.GetRootLayer(), '/root/Cube', stage.GetRootLayer(),
-               '/root/ParentInstancer/ChildInstancer/ProtoCube')
+  Sdf.CopySpec(
+      stage.GetRootLayer(),
+      '/root/Cube',
+      stage.GetRootLayer(),
+      '/root/ParentInstancer/ChildInstancer/ProtoCube',
+  )
   stage.RemovePrim('/root/Cube')
 
   child_instancer = UsdGeom.PointInstancer.Define(
-      stage, '/root/ParentInstancer/ChildInstancer/Instancer')
+      stage, '/root/ParentInstancer/ChildInstancer/Instancer'
+  )
   child_instancer.GetPrototypesRel().SetTargets(
-      ['/root/ParentInstancer/ChildInstancer/ProtoCube'])
+      ['/root/ParentInstancer/ChildInstancer/ProtoCube']
+  )
   child_instancer.GetPositionsAttr().Set(
-      Vt.Vec3fArray([Gf.Vec3f(0, -0.5, 0), Gf.Vec3f(0, 0.5, 0)]))
+      Vt.Vec3fArray([Gf.Vec3f(0, -0.5, 0), Gf.Vec3f(0, 0.5, 0)])
+  )
   child_instancer.GetProtoIndicesAttr().Set(Vt.IntArray([0, 0]))
 
   parent_instancer.GetPrototypesRel().SetTargets(
-      ['/root/ParentInstancer/ChildInstancer/Instancer'])
+      ['/root/ParentInstancer/ChildInstancer/Instancer']
+  )
   parent_instancer.GetPositionsAttr().Set(
-      Vt.Vec3fArray([Gf.Vec3f(-2.0, 0, 0), Gf.Vec3f(2.0, 0, 0)]))
+      Vt.Vec3fArray([Gf.Vec3f(-2.0, 0, 0), Gf.Vec3f(2.0, 0, 0)])
+  )
   parent_instancer.GetProtoIndicesAttr().Set(Vt.IntArray([0, 0]))
 
   output_path = os.path.join(tmp_path, 'nested_instanced.usda')
@@ -282,18 +315,26 @@ def _create_nested_flattened_stage(tmp_path) -> str:
   stage = Usd.Stage.Open(anon_layer)
 
   for i in range(1, 5):
-    Sdf.CopySpec(stage.GetRootLayer(), '/root/Cube',
-                 stage.GetRootLayer(), f'/root/Cube{i}')
+    Sdf.CopySpec(
+        stage.GetRootLayer(),
+        '/root/Cube',
+        stage.GetRootLayer(),
+        f'/root/Cube{i}',
+    )
   stage.RemovePrim('/root/Cube')
 
-  UsdGeom.Xformable.Get(
-      stage, '/root/Cube1').AddTranslateOp().Set(Gf.Vec3d(-2.0, -0.5, 0))
-  UsdGeom.Xformable.Get(
-      stage, '/root/Cube2').AddTranslateOp().Set(Gf.Vec3d(-2.0, 0.5, 0))
-  UsdGeom.Xformable.Get(
-      stage, '/root/Cube3').AddTranslateOp().Set(Gf.Vec3d(2.0, -0.5, 0))
-  UsdGeom.Xformable.Get(
-      stage, '/root/Cube4').AddTranslateOp().Set(Gf.Vec3d(2.0, 0.5, 0))
+  UsdGeom.Xformable.Get(stage, '/root/Cube1').AddTranslateOp().Set(
+      Gf.Vec3d(-2.0, -0.5, 0)
+  )
+  UsdGeom.Xformable.Get(stage, '/root/Cube2').AddTranslateOp().Set(
+      Gf.Vec3d(-2.0, 0.5, 0)
+  )
+  UsdGeom.Xformable.Get(stage, '/root/Cube3').AddTranslateOp().Set(
+      Gf.Vec3d(2.0, -0.5, 0)
+  )
+  UsdGeom.Xformable.Get(stage, '/root/Cube4').AddTranslateOp().Set(
+      Gf.Vec3d(2.0, 0.5, 0)
+  )
 
   output_path = os.path.join(tmp_path, 'nested_flattened.usda')
   stage.GetRootLayer().Export(output_path)
@@ -329,8 +370,12 @@ def _create_scale_rotate_instanced_stage(tmp_path) -> str:
   stage = Usd.Stage.Open(anon_layer)
 
   instancer = UsdGeom.PointInstancer.Define(stage, '/root/Instancer')
-  Sdf.CopySpec(stage.GetRootLayer(), '/root/Cube',
-               stage.GetRootLayer(), '/root/Instancer/ProtoCube')
+  Sdf.CopySpec(
+      stage.GetRootLayer(),
+      '/root/Cube',
+      stage.GetRootLayer(),
+      '/root/Instancer/ProtoCube',
+  )
   stage.RemovePrim('/root/Cube')
   instancer.GetPrototypesRel().SetTargets(['/root/Instancer/ProtoCube'])
 
@@ -357,20 +402,26 @@ def _create_scale_rotate_flattened_stage(tmp_path) -> str:
   anon_layer.TransferContent(layer)
   stage = Usd.Stage.Open(anon_layer)
 
-  Sdf.CopySpec(stage.GetRootLayer(), '/root/Cube',
-               stage.GetRootLayer(), '/root/Cube1')
-  Sdf.CopySpec(stage.GetRootLayer(), '/root/Cube',
-               stage.GetRootLayer(), '/root/Cube2')
+  Sdf.CopySpec(
+      stage.GetRootLayer(), '/root/Cube', stage.GetRootLayer(), '/root/Cube1'
+  )
+  Sdf.CopySpec(
+      stage.GetRootLayer(), '/root/Cube', stage.GetRootLayer(), '/root/Cube2'
+  )
   stage.RemovePrim('/root/Cube')
 
   cube1 = UsdGeom.Xformable.Get(stage, '/root/Cube1')
   cube1.AddTranslateOp().Set(Gf.Vec3d(-2.0, 0, 0))
-  cube1.AddOrientOp().Set(Gf.Quatf(Gf.Rotation(Gf.Vec3d(0, 0, 1), 45).GetQuat()))
+  cube1.AddOrientOp().Set(
+      Gf.Quatf(Gf.Rotation(Gf.Vec3d(0, 0, 1), 45).GetQuat())
+  )
   cube1.AddScaleOp().Set(Gf.Vec3d(1.0, 2.0, 0.5))
 
   cube2 = UsdGeom.Xformable.Get(stage, '/root/Cube2')
   cube2.AddTranslateOp().Set(Gf.Vec3d(2.0, 0, 0))
-  cube2.AddOrientOp().Set(Gf.Quatf(Gf.Rotation(Gf.Vec3d(0, 1, 0), 90).GetQuat()))
+  cube2.AddOrientOp().Set(
+      Gf.Quatf(Gf.Rotation(Gf.Vec3d(0, 1, 0), 90).GetQuat())
+  )
   cube2.AddScaleOp().Set(Gf.Vec3d(0.5, 1.0, 2.0))
 
   output_path = os.path.join(tmp_path, 'scale_rotate_flattened.usda')
@@ -395,7 +446,8 @@ def test_instancing_scale_rotate(tmp_path):
   engine_flat.configure(hydra_delegate_id='HdMitsubaRendererPlugin')
   img_flat = engine_flat.render()['color']
   test_helpers.write_image(
-      img_flat, 'test_instancing_scale_rotate_flattened.png')
+      img_flat, 'test_instancing_scale_rotate_flattened.png'
+  )
 
   np.testing.assert_allclose(img_inst, img_flat, atol=0.05)
 
@@ -408,19 +460,29 @@ def _create_multi_proto_instanced_stage(tmp_path) -> str:
   stage = Usd.Stage.Open(anon_layer)
 
   instancer = UsdGeom.PointInstancer.Define(stage, '/root/Instancer')
-  Sdf.CopySpec(stage.GetRootLayer(), '/root/Cube',
-               stage.GetRootLayer(), '/root/Instancer/ProtoCube1')
-  Sdf.CopySpec(stage.GetRootLayer(), '/root/Cube',
-               stage.GetRootLayer(), '/root/Instancer/ProtoCube2')
+  Sdf.CopySpec(
+      stage.GetRootLayer(),
+      '/root/Cube',
+      stage.GetRootLayer(),
+      '/root/Instancer/ProtoCube1',
+  )
+  Sdf.CopySpec(
+      stage.GetRootLayer(),
+      '/root/Cube',
+      stage.GetRootLayer(),
+      '/root/Instancer/ProtoCube2',
+  )
   slab = UsdGeom.Xformable.Get(stage, '/root/Instancer/ProtoCube2')
   slab.AddScaleOp().Set(Gf.Vec3d(1.0, 0.2, 1.0))
   stage.RemovePrim('/root/Cube')
 
   instancer.GetPrototypesRel().SetTargets(
-      ['/root/Instancer/ProtoCube1', '/root/Instancer/ProtoCube2'])
+      ['/root/Instancer/ProtoCube1', '/root/Instancer/ProtoCube2']
+  )
 
   positions = Vt.Vec3fArray(
-      [Gf.Vec3f(-2.0, 0, 0), Gf.Vec3f(0, 0, 0), Gf.Vec3f(2.0, 0, 0)])
+      [Gf.Vec3f(-2.0, 0, 0), Gf.Vec3f(0, 0, 0), Gf.Vec3f(2.0, 0, 0)]
+  )
   proto_indices = Vt.IntArray([0, 1, 0])
 
   instancer.GetPositionsAttr().Set(positions)
@@ -438,23 +500,28 @@ def _create_multi_proto_flattened_stage(tmp_path) -> str:
   anon_layer.TransferContent(layer)
   stage = Usd.Stage.Open(anon_layer)
 
-  Sdf.CopySpec(stage.GetRootLayer(), '/root/Cube',
-               stage.GetRootLayer(), '/root/Cube1')
-  Sdf.CopySpec(stage.GetRootLayer(), '/root/Cube',
-               stage.GetRootLayer(), '/root/Cube2')
-  Sdf.CopySpec(stage.GetRootLayer(), '/root/Cube',
-               stage.GetRootLayer(), '/root/Cube3')
+  Sdf.CopySpec(
+      stage.GetRootLayer(), '/root/Cube', stage.GetRootLayer(), '/root/Cube1'
+  )
+  Sdf.CopySpec(
+      stage.GetRootLayer(), '/root/Cube', stage.GetRootLayer(), '/root/Cube2'
+  )
+  Sdf.CopySpec(
+      stage.GetRootLayer(), '/root/Cube', stage.GetRootLayer(), '/root/Cube3'
+  )
   stage.RemovePrim('/root/Cube')
 
-  UsdGeom.Xformable.Get(
-      stage, '/root/Cube1').AddTranslateOp().Set(Gf.Vec3d(-2.0, 0, 0))
+  UsdGeom.Xformable.Get(stage, '/root/Cube1').AddTranslateOp().Set(
+      Gf.Vec3d(-2.0, 0, 0)
+  )
 
   cube2 = UsdGeom.Xformable.Get(stage, '/root/Cube2')
   cube2.AddTranslateOp().Set(Gf.Vec3d(0, 0, 0))
   cube2.AddScaleOp().Set(Gf.Vec3d(1.0, 0.2, 1.0))
 
-  UsdGeom.Xformable.Get(
-      stage, '/root/Cube3').AddTranslateOp().Set(Gf.Vec3d(2.0, 0, 0))
+  UsdGeom.Xformable.Get(stage, '/root/Cube3').AddTranslateOp().Set(
+      Gf.Vec3d(2.0, 0, 0)
+  )
 
   output_path = os.path.join(tmp_path, 'multi_proto_flattened.usda')
   stage.GetRootLayer().Export(output_path)
@@ -478,7 +545,8 @@ def test_multiple_prototypes(tmp_path):
   engine_flat.configure(hydra_delegate_id='HdMitsubaRendererPlugin')
   img_flat = engine_flat.render()['color']
   test_helpers.write_image(
-      img_flat, 'test_instancing_multi_proto_flattened.png')
+      img_flat, 'test_instancing_multi_proto_flattened.png'
+  )
 
   np.testing.assert_allclose(img_inst, img_flat, atol=0.05)
 
@@ -491,13 +559,18 @@ def _create_invisible_instanced_stage(tmp_path) -> str:
   stage = Usd.Stage.Open(anon_layer)
 
   instancer = UsdGeom.PointInstancer.Define(stage, '/root/Instancer')
-  Sdf.CopySpec(stage.GetRootLayer(), '/root/Cube',
-               stage.GetRootLayer(), '/root/Instancer/ProtoCube')
+  Sdf.CopySpec(
+      stage.GetRootLayer(),
+      '/root/Cube',
+      stage.GetRootLayer(),
+      '/root/Instancer/ProtoCube',
+  )
   stage.RemovePrim('/root/Cube')
   instancer.GetPrototypesRel().SetTargets(['/root/Instancer/ProtoCube'])
 
   positions = Vt.Vec3fArray(
-      [Gf.Vec3f(-2.0, 0, 0), Gf.Vec3f(0, 0, 0), Gf.Vec3f(2.0, 0, 0)])
+      [Gf.Vec3f(-2.0, 0, 0), Gf.Vec3f(0, 0, 0), Gf.Vec3f(2.0, 0, 0)]
+  )
   proto_indices = Vt.IntArray([0, 0, 0])
   instancer.GetPositionsAttr().Set(positions)
   instancer.GetProtoIndicesAttr().Set(proto_indices)
@@ -515,16 +588,20 @@ def _create_invisible_flattened_stage(tmp_path) -> str:
   anon_layer.TransferContent(layer)
   stage = Usd.Stage.Open(anon_layer)
 
-  Sdf.CopySpec(stage.GetRootLayer(), '/root/Cube',
-               stage.GetRootLayer(), '/root/Cube1')
-  Sdf.CopySpec(stage.GetRootLayer(), '/root/Cube',
-               stage.GetRootLayer(), '/root/Cube3')
+  Sdf.CopySpec(
+      stage.GetRootLayer(), '/root/Cube', stage.GetRootLayer(), '/root/Cube1'
+  )
+  Sdf.CopySpec(
+      stage.GetRootLayer(), '/root/Cube', stage.GetRootLayer(), '/root/Cube3'
+  )
   stage.RemovePrim('/root/Cube')
 
-  UsdGeom.Xformable.Get(
-      stage, '/root/Cube1').AddTranslateOp().Set(Gf.Vec3d(-2.0, 0, 0))
-  UsdGeom.Xformable.Get(
-      stage, '/root/Cube3').AddTranslateOp().Set(Gf.Vec3d(2.0, 0, 0))
+  UsdGeom.Xformable.Get(stage, '/root/Cube1').AddTranslateOp().Set(
+      Gf.Vec3d(-2.0, 0, 0)
+  )
+  UsdGeom.Xformable.Get(stage, '/root/Cube3').AddTranslateOp().Set(
+      Gf.Vec3d(2.0, 0, 0)
+  )
 
   output_path = os.path.join(tmp_path, 'invisible_flattened.usda')
   stage.GetRootLayer().Export(output_path)
@@ -565,7 +642,8 @@ def test_change_instance_count(tmp_path):
   # 1. Add an instance (change count from 2 to 3)
   instancer = UsdGeom.PointInstancer.Get(stage, '/root/Instancer')
   positions_3 = Vt.Vec3fArray(
-      [Gf.Vec3f(-1.5, 0, 0), Gf.Vec3f(1.5, 0, 0), Gf.Vec3f(0.0, 1.0, 0)])
+      [Gf.Vec3f(-1.5, 0, 0), Gf.Vec3f(1.5, 0, 0), Gf.Vec3f(0.0, 1.0, 0)]
+  )
   proto_indices_3 = Vt.IntArray([0, 0, 0])
   instancer.GetPositionsAttr().Set(positions_3)
   instancer.GetProtoIndicesAttr().Set(proto_indices_3)
@@ -615,9 +693,11 @@ def test_instancing_emitter_warning(tmp_path, capfd):
 
   # Make the material of the prototype emissive
   shader = UsdShade.Shader.Get(
-      stage, '/root/_materials/Material/Principled_BSDF')
+      stage, '/root/_materials/Material/Principled_BSDF'
+  )
   shader.CreateInput('emissiveColor', Sdf.ValueTypeNames.Color3f).Set(
-      Gf.Vec3f(1.0, 1.0, 1.0))
+      Gf.Vec3f(1.0, 1.0, 1.0)
+  )
 
   test_helpers.create_render_settings(stage, resolution=(256, 256))
   engine = usd_render.RenderEngine(stage)
@@ -627,7 +707,7 @@ def test_instancing_emitter_warning(tmp_path, capfd):
   engine.render()
 
   captured = capfd.readouterr()
-  assert "is instanced but has an emitter attached" in captured.err
+  assert 'is instanced but has an emitter attached' in captured.err
 
 
 def _render_after_parent_edit(child_path: str) -> np.ndarray:
@@ -644,7 +724,8 @@ def _render_after_parent_edit(child_path: str) -> np.ndarray:
   test_helpers.create_render_settings(stage, resolution=(64, 64))
   engine = usd_render.RenderEngine(stage)
   engine.configure(
-      hydra_delegate_id='HdMitsubaRendererPlugin', camera_path='/camera')
+      hydra_delegate_id='HdMitsubaRendererPlugin', camera_path='/camera'
+  )
   engine.render()
   mesh = UsdGeom.Mesh.Get(stage, '/mesh')
   mesh.GetFaceVertexCountsAttr().Set([3])
@@ -656,4 +737,6 @@ def test_parent_edit_preserves_nested_prims():
   """Editing a mesh must not affect the rendering of prims nested under it."""
   np.testing.assert_allclose(
       _render_after_parent_edit('/mesh/child'),
-      _render_after_parent_edit('/child'), atol=1e-4)
+      _render_after_parent_edit('/child'),
+      atol=1e-4,
+  )

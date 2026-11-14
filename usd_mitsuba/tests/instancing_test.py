@@ -16,13 +16,13 @@ from __future__ import annotations
 
 import mitsuba as mi
 import numpy as np
-import pytest
-
 from pxr import Gf
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
 from pxr import Vt
+import pytest
+
 from usd_mitsuba import translator
 
 
@@ -33,12 +33,14 @@ def _set_mitsuba_variant():
 
 def _create_quad_mesh(stage: Usd.Stage, path: str) -> UsdGeom.Mesh:
   mesh = UsdGeom.Mesh.Define(stage, Sdf.Path(path))
-  mesh.GetPointsAttr().Set(Vt.Vec3fArray([
-      Gf.Vec3f(-1, -1, 0),
-      Gf.Vec3f(1, -1,  0),
-      Gf.Vec3f(1, 1, 0),
-      Gf.Vec3f(-1, 1, 0),
-  ]))
+  mesh.GetPointsAttr().Set(
+      Vt.Vec3fArray([
+          Gf.Vec3f(-1, -1, 0),
+          Gf.Vec3f(1, -1, 0),
+          Gf.Vec3f(1, 1, 0),
+          Gf.Vec3f(-1, 1, 0),
+      ])
+  )
   mesh.GetFaceVertexCountsAttr().Set(Vt.IntArray([4]))
   mesh.GetFaceVertexIndicesAttr().Set(Vt.IntArray([0, 1, 2, 3]))
   return mesh
@@ -53,7 +55,8 @@ def test_translate_point_instancer():
   # Create instancer
   instancer = UsdGeom.PointInstancer.Define(stage, "/root/Instancer")
   instancer.GetPrototypesRel().SetTargets(
-      [Sdf.Path("/root/Prototypes/ProtoQuad")])
+      [Sdf.Path("/root/Prototypes/ProtoQuad")]
+  )
 
   positions = Vt.Vec3fArray([Gf.Vec3f(-2.0, 0.5, 0), Gf.Vec3f(2.0, -0.5, 0)])
   proto_indices = Vt.IntArray([0, 0])
@@ -84,7 +87,8 @@ def test_translate_point_instancer():
   # Verify transform of instance 0
   expected_trans0 = mi.ScalarTransform4f().translate([-2.0, 0.5, 0.0])
   np.testing.assert_allclose(
-      inst0["to_world"].matrix, expected_trans0.matrix, atol=1e-6)
+      inst0["to_world"].matrix, expected_trans0.matrix, atol=1e-6
+  )
 
   inst1_id = "instance__root_Instancer_0_1"
   assert inst1_id in scene_dict
@@ -95,7 +99,8 @@ def test_translate_point_instancer():
   # Verify transform of instance 1
   expected_trans1 = mi.ScalarTransform4f().translate([2.0, -0.5, 0.0])
   np.testing.assert_allclose(
-      inst1["to_world"].matrix, expected_trans1.matrix, atol=1e-6)
+      inst1["to_world"].matrix, expected_trans1.matrix, atol=1e-6
+  )
 
   # Verify we can load the scene (at least the geometry part)
   # We need to add a dummy integrator to make it a valid scene if we load it.
@@ -117,13 +122,15 @@ def test_translate_native_instancing():
   instance1 = UsdGeom.Xform.Define(stage, "/World/ChairInstance1")
   instance1.GetPrim().SetInstanceable(True)
   instance1.GetPrim().GetReferences().AddInternalReference(
-      Sdf.Path("/Prototypes/Chair"))
+      Sdf.Path("/Prototypes/Chair")
+  )
   instance1.AddTranslateOp().Set(Gf.Vec3f(0, 0, 0))
 
   instance2 = UsdGeom.Xform.Define(stage, "/World/ChairInstance2")
   instance2.GetPrim().SetInstanceable(True)
   instance2.GetPrim().GetReferences().AddInternalReference(
-      Sdf.Path("/Prototypes/Chair"))
+      Sdf.Path("/Prototypes/Chair")
+  )
   instance2.AddTranslateOp().Set(Gf.Vec3f(2.0, 0, 0))
 
   # Deactivate the prototypes scope
@@ -143,11 +150,11 @@ def test_translate_native_instancing():
   assert isinstance(mesh2, mi.Mesh)
 
   params1 = mi.traverse(mesh1)
-  positions1 = np.array(params1['positions']).reshape(-1, 3)
+  positions1 = np.array(params1["positions"]).reshape(-1, 3)
   centroid1 = np.mean(positions1, axis=0)
 
   params2 = mi.traverse(mesh2)
-  positions2 = np.array(params2['positions']).reshape(-1, 3)
+  positions2 = np.array(params2["positions"]).reshape(-1, 3)
   centroid2 = np.mean(positions2, axis=0)
 
   np.testing.assert_allclose(centroid1, [0.0, 0.5, 0.0], atol=1e-6)

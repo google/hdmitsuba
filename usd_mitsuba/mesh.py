@@ -21,12 +21,12 @@ from typing import Any
 
 import mitsuba as mi
 import numpy as np
-
 from pxr import Gf
 from pxr import Sdf
 from pxr import Usd
-from pxr import UsdLux
 from pxr import UsdGeom
+from pxr import UsdLux
+
 from hdmitsuba import geometry_ext as geom_lib
 from usd_mitsuba import camera
 from usd_mitsuba import light
@@ -60,9 +60,7 @@ def _to_mitsuba_mesh(
   # Without (authored or computed) normals the mesh is flat shaded. Requesting
   # face normals keeps Mitsuba from deriving smooth shading normals of its own.
   properties['face_normals'] = not has_vertex_normals
-  texture_coordinates = (
-      np.array(primvars['st']) if 'st' in primvars else None
-  )
+  texture_coordinates = np.array(primvars['st']) if 'st' in primvars else None
 
   normals = mi.TensorXf()
   if has_vertex_normals:
@@ -156,8 +154,7 @@ def convert_mesh(
       motion_transform = motion.to_mitsuba_transform(samples)
 
   displacements = [
-      (mat.displacement, mat.requires_uv, mat.is_vector)
-      for mat in materials
+      (mat.displacement, mat.requires_uv, mat.is_vector) for mat in materials
   ]
   requested_attrs = {
       name for mat in materials for name, _ in mat.mesh_attributes

@@ -16,13 +16,13 @@ from __future__ import annotations
 
 import mitsuba as mi
 import numpy as np
-import pytest
-
 from pxr import Gf
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
 from pxr import UsdRender
+import pytest
+
 from usd_mitsuba import camera
 
 _APERTURE_SIZE = (36.0, 18.0)
@@ -103,14 +103,18 @@ def test_convert_to_mitsuba():
   np.testing.assert_allclose(mitsuba_camera["far_clip"], 12000.0)
   mi_matrix = mitsuba_camera["to_world"].matrix
 
-  assert abs(mitsuba_camera["principal_point_offset_x"] -
-             2.3 / _APERTURE_SIZE[0]) < 1e-6
-  assert abs(-mitsuba_camera["principal_point_offset_y"] - -
-             1.5 / _APERTURE_SIZE[1]) < 1e-6
-
-  np.testing.assert_allclose(
-      mi_matrix, np.array(transform_matrix).T, atol=1e-4
+  assert (
+      abs(mitsuba_camera["principal_point_offset_x"] - 2.3 / _APERTURE_SIZE[0])
+      < 1e-6
   )
+  assert (
+      abs(
+          -mitsuba_camera["principal_point_offset_y"] - -1.5 / _APERTURE_SIZE[1]
+      )
+      < 1e-6
+  )
+
+  np.testing.assert_allclose(mi_matrix, np.array(transform_matrix).T, atol=1e-4)
   assert mitsuba_camera["film"]["type"] == "hdrfilm"
   assert mitsuba_camera["film"]["width"] == 200
   assert mitsuba_camera["film"]["height"] == 100
@@ -122,7 +126,7 @@ def test_convert_to_mitsuba():
         (Usd.TimeCode(0), Gf.Vec3d(0, 5, 10), -50),
         (Usd.TimeCode(1), Gf.Vec3d(10, 20, 30), -70),
     ],
-    ids=["transformation_at_time_0", "transformation_at_time_1"]
+    ids=["transformation_at_time_0", "transformation_at_time_1"],
 )
 def test_convert_to_mitsuba_with_time(
     time, expected_translation, expected_x_rotation
@@ -174,4 +178,3 @@ def test_convert_to_mitsuba_with_crop():
   assert film["crop_offset_y"] == 60
   assert film["crop_width"] == 100
   assert film["crop_height"] == 30
-

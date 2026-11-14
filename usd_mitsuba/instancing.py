@@ -22,6 +22,7 @@ from typing import Any
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
+
 from hdmitsuba import geometry_ext as geom_lib
 from usd_mitsuba import material
 from usd_mitsuba import mesh
@@ -44,7 +45,9 @@ def get_prototype_paths(stage: Usd.Stage) -> set[Sdf.Path]:
   prototype_paths = set()
   for prim in stage.TraverseAll():
     if prim.IsA(UsdGeom.PointInstancer):
-      for target in UsdGeom.PointInstancer(prim).GetPrototypesRel().GetTargets():
+      for target in (
+          UsdGeom.PointInstancer(prim).GetPrototypesRel().GetTargets()
+      ):
         if proto_prim := stage.GetPrimAtPath(target):
           for p in Usd.PrimRange(proto_prim):
             prototype_paths.add(p.GetPath())
@@ -93,9 +96,12 @@ def convert_point_instancer(
     if not proto_prim:
       continue
 
-    proto_to_local_transform = UsdGeom.Xformable(
-        proto_prim).ComputeLocalToWorldTransform(time).GetInverse()
-    group_id = f"proto_group_{instancer_id}_{proto_idx}"
+    proto_to_local_transform = (
+        UsdGeom.Xformable(proto_prim)
+        .ComputeLocalToWorldTransform(time)
+        .GetInverse()
+    )
+    group_id = f'proto_group_{instancer_id}_{proto_idx}'
     group_dict: dict[str, Any] = {'type': 'shapegroup'}
     shape_idx = 0
     # TODO(vicini): Support curves in prototypes.
@@ -123,7 +129,7 @@ def convert_point_instancer(
             custom_transform=relative_trans,
         )
         for _, mesh_obj in meshes.items():
-          group_dict[f"shape_{shape_idx}"] = mesh_obj
+          group_dict[f'shape_{shape_idx}'] = mesh_obj
           shape_idx += 1
       elif parts := util.get_implicit_surface_parts(child_prim, time):
         child_to_prototype = util.to_mitsuba_transform(
@@ -147,9 +153,7 @@ def convert_point_instancer(
             UsdGeom.Xformable(child_prim).ComputeLocalToWorldTransform(time)
             * proto_to_local_transform
         )
-        if shape := points.convert_points(
-            child_prim, time, child_to_prototype
-        ):
+        if shape := points.convert_points(child_prim, time, child_to_prototype):
           group_dict[f'shape_{shape_idx}'] = shape
           shape_idx += 1
     if shape_idx > 0:
@@ -161,7 +165,7 @@ def convert_point_instancer(
     proto_idx = proto_indices[inst_idx]
     if proto_idx not in shape_groups:
       continue
-    inst_id = f"instance_{instancer_id}_{proto_idx}_{inst_idx}"
+    inst_id = f'instance_{instancer_id}_{proto_idx}_{inst_idx}'
     mi_scene_dict[inst_id] = {
         'type': 'instance',
         'shapegroup': {

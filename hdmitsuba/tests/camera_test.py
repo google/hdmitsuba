@@ -18,14 +18,14 @@ from __future__ import annotations
 
 import mitsuba as mi
 import numpy as np
-import pytest
-
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
 from pxr import UsdLux
 from pxr import UsdRender
 from pxr import UsdShade
+import pytest
+
 from hdmitsuba.tests import test_helpers
 from usd_mitsuba import translator as usd_mitsuba
 import usd_render
@@ -129,9 +129,7 @@ def test_compare_to_hdembree():
   )
   mitsuba_image = engine.render()['color']
 
-  test_helpers.write_image(
-      embree_image, 'test_compare_to_hdembree_embree.png'
-  )
+  test_helpers.write_image(embree_image, 'test_compare_to_hdembree_embree.png')
   test_helpers.write_image(
       mitsuba_image, 'test_compare_to_hdembree_mitsuba.png'
   )
@@ -231,8 +229,9 @@ def test_camera_update_focal_length():
   )
 
   # Apply focal length change and different translation
-  _modify_camera(stage, '/camera', focal_length_scale=1.4,
-                 translation=(0.4, -0.4, 0.4))
+  _modify_camera(
+      stage, '/camera', focal_length_scale=1.4, translation=(0.4, -0.4, 0.4)
+  )
   outputs = engine.render()
   image2 = outputs['color']
   test_helpers.write_image(image2, 'test_camera_update_focal_length.png')
