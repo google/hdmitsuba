@@ -93,6 +93,8 @@
 #include "hdmitsuba/framebuffer.h"
 #include "hdmitsuba/ies_emitter.h"
 #include "hdmitsuba/kernel_freezing.h"
+#include "hdmitsuba/materialx/translator.h"
+#include "hdmitsuba/materialx/vm.h"
 #include "hdmitsuba/mesh/displacement.h"
 #include "hdmitsuba/mesh/geometry_processor.h"
 #include "hdmitsuba/prim_translator.h"
@@ -118,6 +120,8 @@ using mitsuba::ref;
 using mitsuba::Scene;
 using mitsuba::Spectrum;
 using mitsuba::Thread;
+using mitsuba::mtlx::CopyMaterialXParameters;
+using mitsuba::mtlx::MaterialXCopy;
 namespace dr = drjit;
 
 namespace {
@@ -900,10 +904,10 @@ class SceneModel final : public SceneManager {
   uint32_t UpdateMaterialStructure(const SdfPath& id,
                                    TranslatedMaterial& trans) {
     uint32_t dirty_flags = 0;
-    auto update = [&](auto& map, auto* val) {
+    auto update = [&](auto& map, auto* val, auto&& same) {
       if (val) {
-        auto it = map.find(id);
-        if (it == map.end() || it->second != *val) {
+        if (auto it = map.find(id);
+            it == map.end() || !same(it->second, *val)) {
           map[id] = std::move(*val);
           dirty_flags |= DirtyFlags::kNeedsStructureRebuild;
         }
@@ -911,14 +915,26 @@ class SceneModel final : public SceneManager {
         dirty_flags |= DirtyFlags::kNeedsStructureRebuild;
       }
     };
+    auto eq = [](const auto& a, const auto& b) { return a == b; };
     update(displacements_,
-           trans.displacement.texture ? &trans.displacement : nullptr);
-    update(material_emitters_,
-           trans.shape_emitter_props ? &*trans.shape_emitter_props : nullptr);
+           trans.displacement.texture ? &trans.displacement : nullptr, eq);
+    // Emitters share the radiance texture of the stored properties, so
+    // parameter edits are copied into it without rebuilding the emitters.
+    update(
+        material_emitters_,
+        trans.shape_emitter_props ? &*trans.shape_emitter_props : nullptr,
+        [](const mitsuba::Properties& old_p, const mitsuba::Properties& new_p) {
+          return old_p == new_p ||
+                 CopyMaterialXParameters<Float, Spectrum>(
+                     old_p.try_get<mitsuba::Object>("radiance"),
+                     new_p.try_get<mitsuba::Object>("radiance")) !=
+                     MaterialXCopy::kIncompatible;
+        });
     update(mesh_attributes_,
-           !trans.mesh_attributes.empty() ? &trans.mesh_attributes : nullptr);
+           !trans.mesh_attributes.empty() ? &trans.mesh_attributes : nullptr,
+           eq);
     update(interior_media_,
-           trans.interior_medium ? &trans.interior_medium : nullptr);
+           trans.interior_medium ? &trans.interior_medium : nullptr, eq);
     return dirty_flags;
   }
 
@@ -999,14 +1015,20 @@ class SceneModel final : public SceneManager {
           res = PrimTranslator::BuildMaterial(*spec, texture_cache_);
         },
         [&](MaterialSpec* spec, TranslatedMaterial& trans) {
+          uint32_t dirty = UpdateMaterialStructure(spec->id, trans);
           if (trans.bsdf) {
-            bsdfs_[spec->id] = dynamic_cast<BSDF*>(trans.bsdf.get());
-          } else {
-            bsdfs_.erase(spec->id);
+            auto bsdf_it = bsdfs_.find(spec->id);
+            if (bsdf_it == bsdfs_.end() ||
+                !IsMaterialXNetwork(spec->network2)) {
+              bsdfs_[spec->id] = dynamic_cast<BSDF*>(trans.bsdf.get());
+              dirty |= DirtyFlags::kMaterialUpdated;
+            }
+          } else if (bsdfs_.erase(spec->id) > 0) {
+            dirty |= DirtyFlags::kMaterialUpdated;
           }
-          material_dirty_flags_[spec->id] |=
-              UpdateMaterialStructure(spec->id, trans) |
-              DirtyFlags::kMaterialUpdated;
+          if (dirty != DirtyFlags::kClean) {
+            material_dirty_flags_[spec->id] |= dirty;
+          }
           return false;
         });
   }
@@ -1867,6 +1889,7 @@ SceneManager* SceneManager::CreateSceneManager(const std::string& variant) {
 
 SceneManager::SceneManager() {
   RegisterIesEmitter();
+  mitsuba::mtlx::RegisterMaterialXExprTexture();
   absl::MutexLock lock(lifecycle_mutex_);
 
   // Try to determine if static initialization is already done or not.

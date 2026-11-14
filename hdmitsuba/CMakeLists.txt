@@ -26,6 +26,9 @@ add_library(hdMitsuba SHARED
   ies_emitter.cc
   light.cc
   instancer.cc
+  materialx/compiler.cc
+  materialx/translator.cc
+  materialx/vm.cc
   mesh.cc
   mesh/geometry_processor.cc
   mesh/subdivision.cc
@@ -65,6 +68,7 @@ target_link_libraries(hdMitsuba
     arch
     gf
     hd
+    hdMtlx
     hdsi
     hdx
     pxOsd

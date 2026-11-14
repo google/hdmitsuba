@@ -19,9 +19,15 @@
 #include <vector>
 
 #include <absl/container/flat_hash_set.h>
+#include <absl/strings/match.h>
 #include <mitsuba/core/config.h>
 #include <mitsuba/core/logger.h>
 #include <mitsuba/core/object.h>
+#include <mitsuba/core/plugin.h>
+#include <mitsuba/core/properties.h>
+#include <mitsuba/core/spectrum.h>
+#include <mitsuba/render/bsdf.h>
+#include <mitsuba/render/emitter.h>
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/set.h>
@@ -35,11 +41,14 @@
 #include <pxr/base/vt/types.h>
 #include <pxr/base/vt/value.h>
 #include <pxr/imaging/hd/enums.h>
+#include <pxr/imaging/hd/material.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/imaging/hd/tokens.h>
 #include <pxr/imaging/pxOsd/meshTopology.h>
 #include <pxr/imaging/pxOsd/subdivTags.h>
 #include <pxr/imaging/pxOsd/tokens.h>
+#include <pxr/usd/ar/resolverContextBinder.h>
+#include <pxr/usd/ar/resolverScopedCache.h>
 #include <pxr/usd/sdf/path.h>
 #include <pxr/usd/usd/prim.h>
 #include <pxr/usd/usd/primFlags.h>
@@ -48,18 +57,24 @@
 #include <pxr/usd/usdGeom/primvarsAPI.h>
 #include <pxr/usd/usdGeom/subset.h>
 #include <pxr/usd/usdGeom/xformCache.h>
+#include <pxr/usd/usdShade/material.h>
+#include <pxr/usd/usdShade/shader.h>
 #include <pxr/usd/usdSkel/cache.h>
 #include <pxr/usd/usdSkel/root.h>
 #include <pxr/usd/usdSkel/skeletonQuery.h>
 #include <pxr/usd/usdSkel/skinningQuery.h>
 #include <pxr/usd/usdSkel/utils.h>
+#include <pxr/usdImaging/usdImaging/materialParamUtils.h>
 
 #include "hdmitsuba/ies_emitter.h"
+#include "hdmitsuba/materialx/translator.h"
+#include "hdmitsuba/materialx/vm.h"
 #include "hdmitsuba/mesh/displacement.h"
 #include "hdmitsuba/mesh/geometry_processor.h"
 #include "hdmitsuba/mesh/subdivision.h"
 #include "hdmitsuba/motion.h"
 #include "hdmitsuba/prim_translator.h"
+#include "hdmitsuba/texture_cache.h"
 #include "hdmitsuba/utils.h"
 #include "nanobind/usd.h"
 
@@ -367,8 +382,79 @@ void AddMeshAttributes(const nb::object& mesh, const SubMeshOutput& sub,
       sub.primvars, mesh_attributes);
 }
 
+namespace {
+
+nb::object CastMitsubaObject(mitsuba::Object* obj) {
+  if (!obj) return nb::none();
+  using Caster = nb::object (*)(mitsuba::Object*);
+  return reinterpret_cast<Caster>(
+      nb::borrow<nb::capsule>(
+          nb::module_::import_("mitsuba.mitsuba_ext").attr("cast_object"))
+          .data())(obj);
+}
+
+HdMaterialNetwork2 BuildMaterialNetwork(const UsdPrim& prim, UsdTimeCode time) {
+  UsdShadeMaterial material(prim);
+  if (!material) return {};
+  static const TfTokenVector kContexts = {TfToken("mitsuba"), TfToken("mtlx"),
+                                          TfToken("")};
+  static const TfTokenVector kSourceTypes = {TfToken("mtlx"), TfToken("")};
+  HdMaterialNetwork2 net;
+  auto add_terminal = [&](const UsdShadeShader& shader,
+                          const TfToken& terminal) {
+    if (!shader) return;
+    TfToken id;
+    if (shader.GetShaderId(&id) &&
+        absl::StartsWith(id.GetString(), "mitsuba_")) {
+      return;
+    }
+    // Build each terminal in isolation so an SdrRegistry miss on one terminal
+    // does not discard valid nodes from the other.
+    HdMaterialNetworkMap network_map;
+    UsdImagingBuildHdMaterialNetworkFromTerminal(shader.GetPrim(), terminal,
+                                                 kSourceTypes, kContexts,
+                                                 &network_map, time);
+    bool is_volume = false;
+    HdMaterialNetwork2 term_net =
+        HdConvertToHdMaterialNetwork2(network_map, &is_volume);
+    net.nodes.merge(std::move(term_net.nodes));
+    net.terminals.merge(std::move(term_net.terminals));
+  };
+  add_terminal(material.ComputeSurfaceSource(kContexts),
+               HdMaterialTerminalTokens->surface);
+  return net;
+}
+
+template <typename Float, typename Spectrum>
+nb::object TranslateMaterialXImpl(const SdfPath& id,
+                                  const HdMaterialNetwork2& net,
+                                  bool double_sided) {
+  absl::flat_hash_set<TextureKey> keys;
+  DiscoverMaterialXTextures(net, [&](const TextureKey& k) { keys.insert(k); });
+  TextureCache<Float, Spectrum> texture_cache;
+  texture_cache.Preload(keys);
+  TranslatedMaterial trans = TranslateMaterialXNetwork(
+      id, net, [&](const TextureKey& k) { return texture_cache.Find(k); },
+      mitsuba::BSDF<Float, Spectrum>::Variant);
+  mitsuba::ref<mitsuba::Object> emitter;
+  if (trans.shape_emitter_props) {
+    if (double_sided) {
+      trans.shape_emitter_props->set("twosided", true, false);
+    }
+    emitter = mitsuba::PluginManager::instance()->create_object(
+        *trans.shape_emitter_props, mitsuba::Emitter<Float, Spectrum>::Variant,
+        mitsuba::Emitter<Float, Spectrum>::Type);
+  }
+  return nb::make_tuple(CastMitsubaObject(trans.bsdf.get()),
+                        CastMitsubaObject(emitter.get()),
+                        trans.mesh_attributes);
+}
+
+}  // namespace
+
 NB_MODULE(geometry_ext, m) {
   PXR_NS::RegisterIesEmitter();
+  mitsuba::mtlx::RegisterMaterialXExprTexture();
   m.doc() = "Python bindings for hdmitsuba geometry processing utilities.";
 
   nb::class_<SubMeshOutput>(m, "SubMeshOutput")
@@ -423,4 +509,26 @@ NB_MODULE(geometry_ext, m) {
           }
           return out;
         });
+  m.def(
+      "translate_materialx",
+      [](const UsdPrim& prim, UsdTimeCode time,
+         bool double_sided) -> nb::object {
+        if (!prim || !prim.GetStage()) return nb::none();
+        ArResolverContextBinder binder(
+            prim.GetStage()->GetPathResolverContext());
+        ArResolverScopedCache resolver_cache;
+        HdMaterialNetwork2 net = BuildMaterialNetwork(prim, time);
+        if (!IsMaterialXNetwork(net)) return nb::none();
+        using mitsuba::ClassName;
+        using mitsuba::Color;
+        using mitsuba::Error;
+        using mitsuba::Spectrum;
+        namespace dr = drjit;
+        return MI_INVOKE_VARIANT(ActiveVariant(), TranslateMaterialXImpl,
+                                 prim.GetPath(), net, double_sided);
+      },
+      nb::arg("prim"), nb::arg("time"), nb::arg("double_sided") = false,
+      "Translates a MaterialX UsdShadeMaterial prim into a "
+      "`(bsdf, emitter, mesh_attributes)` tuple, or None if the material has "
+      "no MaterialX nodes.");
 }

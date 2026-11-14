@@ -36,5 +36,6 @@ replace-imports-with-any = [
     "pxr.Tf",
     "pxr.Trace",
     "hdmitsuba.geometry_ext",
-    "mitsuba"
+    "mitsuba",
+    "MaterialX"
 ]

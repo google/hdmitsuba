@@ -636,7 +636,9 @@ class MeshMaterial:
 
 
 def convert_mesh_material(
-    prim: Usd.Prim, double_sided: bool = False
+    prim: Usd.Prim,
+    double_sided: bool = False,
+    time: Usd.TimeCode = Usd.TimeCode.Default(),
 ) -> MeshMaterial:
   """Parses a USD geometry prim and returns Mitsuba material properties.
 
@@ -649,6 +651,7 @@ def convert_mesh_material(
   Args:
     prim: The USD prim to extract the material from.
     double_sided: Whether the emitter of an emissive material is two-sided.
+    time: The time code to evaluate the material at.
 
   Returns:
     The converted material.
@@ -657,11 +660,20 @@ def convert_mesh_material(
   bsdf, emitter, displacement, interior_medium = None, None, None, None
   mesh_attributes = set()
   # Like hdMitsuba, resolve the "full" purpose (falling back to allPurpose).
-  material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial(
-      UsdShade.Tokens.full
-  )
+  if prim.IsA(UsdShade.Material):
+    material = UsdShade.Material(prim)
+  else:
+    material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial(
+        UsdShade.Tokens.full
+    )
   if material:
-    if shader := find_shader(_get_surface_output(material)):
+    if mtlx := geom_lib.translate_materialx(
+        material.GetPrim(), time, double_sided
+    ):
+      bsdf, emitter, raw_attrs = mtlx
+      mesh_attributes.update(raw_attrs)
+
+    if bsdf is None and (shader := find_shader(_get_surface_output(material))):
       if shader.GetShaderId() == 'UsdPreviewSurface':
         bsdf_dict, emitter_dict = usd_preview_surface_to_mitsuba(
             shader, mesh_attributes
@@ -721,6 +733,7 @@ def convert_mesh_material(
 def convert_material(
     prim: Usd.Prim,
     double_sided: bool = False,
+    time: Usd.TimeCode = Usd.TimeCode.Default(),
 ) -> tuple[
     mi.BSDF | None, mi.Emitter | None, mi.Texture | None, mi.Medium | None
 ]:
@@ -731,12 +744,13 @@ def convert_material(
   Args:
     prim: The USD prim to extract the material from.
     double_sided: Whether the emitter of an emissive material is two-sided.
+    time: The time code to evaluate MaterialX shaders at.
 
   Returns:
     A tuple of the Mitsuba BSDF, emitter, displacement texture, and interior
     medium (each may be None if not found).
   """
-  mat = convert_mesh_material(prim, double_sided)
+  mat = convert_mesh_material(prim, double_sided, time)
   return mat.bsdf, mat.emitter, mat.displacement, mat.interior_medium
 
 

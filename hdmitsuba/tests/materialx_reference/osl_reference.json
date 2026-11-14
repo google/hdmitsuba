@@ -1,0 +1,517 @@
+{
+  "materialx_version": "1.39.5",
+  "osl_version": "1.14.12.0",
+  "generator": "generate_osl_reference.py",
+  "nodedefs": [
+    {"nodedef": "ND_UsdTransform2d", "samples": [
+      {"inputs": {"in": "0, 0", "rotation": "0", "scale": "1, 1", "translation": "0, 0"}, "expected": {"out": [0.0, 0.0]}},
+      {"inputs": {"in": "0.843, 0.279", "rotation": "1.01", "scale": "0.542, -0.63", "translation": "0.896, -0.788"}, "expected": {"out": [1.3559333, -0.95568883]}},
+      {"inputs": {"in": "1.546, -0.934", "rotation": "-0.698", "scale": "1.851, 1.834", "translation": "1.059, -0.804"}, "expected": {"out": [3.8995662, -2.5516896]}},
+      {"inputs": {"in": "-0.64, 0.752", "rotation": "0.01", "scale": "-0.349, -0.243", "translation": "-0.16, 0.626"}, "expected": {"out": [0.063391894, 0.443303]}}
+    ]},
+    {"nodedef": "ND_acescg_to_lin_rec709_color3", "samples": [
+      {"inputs": {"in": "0.0, 0.0, 0.0"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"in": "1.765, 1.602, 1.465"}, "expected": {"out": [1.8913298, 1.582215, 1.4401304]}},
+      {"inputs": {"in": "-0.334, -0.788, 0.119"}, "expected": {"out": [-0.08942268, -0.85670406, 0.24684823]}},
+      {"inputs": {"in": "0.237, -0.433, 0.069"}, "expected": {"out": [0.6675882, -0.52556706, 0.12970993]}}
+    ]},
+    {"nodedef": "ND_artistic_ior", "samples": [
+      {"inputs": {"reflectivity": "0.944, 0.776, 0.373", "edge_color": "0.998, 0.981, 0.751"}, "expected": {"extinction": [3.2567527, 2.353898, 1.768764], "ior": [0.16757539, 0.4238123, 1.3732965]}},
+      {"inputs": {"reflectivity": "0.703, 0.932, 0.201", "edge_color": "0.355, 0.329, 0.08"}, "expected": {"extinction": [5.3940988, 26.679863, 0.57215023], "ior": [7.4021025, 38.128357, 2.4685514]}},
+      {"inputs": {"reflectivity": "0.932, 0.637, 0.699", "edge_color": "0.901, 0.082, 0.549"}, "expected": {"extinction": [16.981773, 2.3992324, 5.533029], "ior": [5.655497, 8.194822, 5.1483483]}},
+      {"inputs": {"reflectivity": "0.435, 0.54, 0.443", "edge_color": "0.318, 0.239, 0.59"}, "expected": {"extinction": [2.1501126, 2.703505, 2.3682408], "ior": [3.4496126, 5.050471, 2.2697651]}}
+    ]},
+    {"nodedef": "ND_blackbody", "samples": [
+      {"inputs": {"temperature": "5000.0"}, "expected": {"out": [1.2142446, 0.9602903, 0.7626612]}},
+      {"inputs": {"temperature": "5127.53"}, "expected": {"out": [1.1950996, 0.9633148, 0.78906655]}},
+      {"inputs": {"temperature": "9827.493"}, "expected": {"out": [0.877409, 0.9943679, 1.4169582]}},
+      {"inputs": {"temperature": "5013.075"}, "expected": {"out": [1.2122273, 0.96061337, 0.7654012]}}
+    ]},
+    {"nodedef": "ND_burn_color3", "samples": [
+      {"inputs": {"fg": "0.0, 0.0, 0.0", "bg": "0.0, 0.0, 0.0", "mix": "1.0"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"fg": "0.725, 1.857, 0.427", "bg": "0.885, 0.229, 0.82", "mix": "0.653"}, "expected": {"out": [0.85651565, 0.46134666, 0.66227066]}},
+      {"inputs": {"fg": "0.201, 0.003, 0.092", "bg": "1.157, -0.246, 1.41", "mix": "0.716"}, "expected": {"out": [1.6038516, -296.73254, 4.307309]}},
+      {"inputs": {"fg": "0.298, 1.373, 1.239", "bg": "1.307, -0.236, 1.946", "mix": "0.163"}, "expected": {"out": [1.4248819, -0.18126762, 1.9162557]}}
+    ]},
+    {"nodedef": "ND_cellnoise2d_float", "samples": [
+      {"inputs": {"texcoord": "-0.926, -1.992"}, "expected": {"out": [0.44904366]}},
+      {"inputs": {"texcoord": "-0.386, 0.714"}, "expected": {"out": [0.11411408]}},
+      {"inputs": {"texcoord": "-1.506, -1.156"}, "expected": {"out": [0.1907106]}},
+      {"inputs": {"texcoord": "1.917, 1.698"}, "expected": {"out": [0.24146889]}}
+    ]},
+    {"nodedef": "ND_cellnoise3d_float", "samples": [
+      {"inputs": {"position": "-1.576, -3.709, 3.382"}, "expected": {"out": [0.027122773]}},
+      {"inputs": {"position": "0.001, -1.063, -1.715"}, "expected": {"out": [0.04305104]}},
+      {"inputs": {"position": "-1.371, 1.853, 3.783"}, "expected": {"out": [0.37547174]}},
+      {"inputs": {"position": "-3.432, -0.232, 1.622"}, "expected": {"out": [0.34993058]}}
+    ]},
+    {"nodedef": "ND_checkerboard_color3", "samples": [
+      {"inputs": {"color1": "1.0, 1.0, 1.0", "color2": "0.0, 0.0, 0.0", "uvtiling": "8, 8", "uvoffset": "0, 0", "texcoord": "0.545, 1.032"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"color1": "1.532, 1.915, -0.277", "color2": "0.403, 1.274, -0.368", "uvtiling": "1.662, 0.196", "uvoffset": "-0.937, -0.4", "texcoord": "1.56, -1.854"}, "expected": {"out": [1.532, 1.915, -0.277]}},
+      {"inputs": {"color1": "0.151, -0.584, 1.89", "color2": "-0.608, 0.227, 1.188", "uvtiling": "-0.468, 1.597", "uvoffset": "0.323, 1.63", "texcoord": "-0.075, -1.69"}, "expected": {"out": [-0.608, 0.227, 1.188]}},
+      {"inputs": {"color1": "0.466, 1.499, -0.844", "color2": "1.598, -0.819, 1.773", "uvtiling": "-0.006, 0.929", "uvoffset": "1.606, 1.376", "texcoord": "0.585, -0.301"}, "expected": {"out": [1.598, -0.819, 1.773]}}
+    ]},
+    {"nodedef": "ND_circle_float", "samples": [
+      {"inputs": {"texcoord": "0.393, 0.843", "center": "0, 0", "radius": "0.5"}, "expected": {"out": [0.0]}},
+      {"inputs": {"texcoord": "0.533, 0.916", "center": "0.431, 0.26", "radius": "0.23"}, "expected": {"out": [0.0]}},
+      {"inputs": {"texcoord": "0.526, 0.524", "center": "0.423, 0.422", "radius": "0.333"}, "expected": {"out": [1.0]}},
+      {"inputs": {"texcoord": "0.335, 0.535", "center": "0.28, 0.373", "radius": "0.191"}, "expected": {"out": [1.0]}}
+    ]},
+    {"nodedef": "ND_cloverleaf_float", "samples": [
+      {"inputs": {"texcoord": "0.269, 0.108", "center": "0, 0", "radius": "0.5"}, "expected": {"out": [1.0]}},
+      {"inputs": {"texcoord": "0.09, 0.247", "center": "0.282, 0.669", "radius": "0.563"}, "expected": {"out": [1.0]}},
+      {"inputs": {"texcoord": "0.962, 0.599", "center": "0.653, 0.701", "radius": "0.247"}, "expected": {"out": [0.0]}},
+      {"inputs": {"texcoord": "0.465, 0.316", "center": "0.297, 0.72", "radius": "0.296"}, "expected": {"out": [0.0]}}
+    ]},
+    {"nodedef": "ND_colorcorrect_color3", "samples": [
+      {"inputs": {"in": "1, 1, 1", "hue": "0", "saturation": "1", "gamma": "1", "lift": "0", "gain": "1", "contrast": "1", "contrastpivot": "0.5", "exposure": "0"}, "expected": {"out": [1.0, 1.0, 1.0]}},
+      {"inputs": {"in": "-0.673, -0.676, 0.236", "hue": "0.253", "saturation": "0.977", "gamma": "1.131", "lift": "0.801", "gain": "0.124", "contrast": "0.47", "contrastpivot": "0.166", "exposure": "-0.665"}, "expected": {"out": [0.0868577, 0.07979846, 0.082834676]}},
+      {"inputs": {"in": "-0.633, 0.048, -0.578", "hue": "0.11", "saturation": "0.613", "gamma": "1.641", "lift": "0.998", "gain": "0.676", "contrast": "0.315", "contrastpivot": "0.804", "exposure": "0.037"}, "expected": {"out": [0.7828152, 0.7830331, 0.78295255]}},
+      {"inputs": {"in": "0.949, -0.806, -0.589", "hue": "0.241", "saturation": "0.245", "gamma": "0.686", "lift": "0.267", "gain": "0.852", "contrast": "0.139", "contrastpivot": "0.651", "exposure": "-0.005"}, "expected": {"out": [0.6334785, 0.64824337, 0.6073911]}}
+    ]},
+    {"nodedef": "ND_contrast_color3", "samples": [
+      {"inputs": {"in": "0.0, 0.0, 0.0", "amount": "1.0, 1.0, 1.0", "pivot": "0.5, 0.5, 0.5"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"in": "-0.318, 1.632, 1.673", "amount": "-0.078, -0.009, -0.894", "pivot": "1.371, -0.433, 1.79"}, "expected": {"out": [1.502742, -0.451585, 1.894598]}},
+      {"inputs": {"in": "-0.997, 1.972, -0.017", "amount": "0.39, 0.682, 0.985", "pivot": "1.376, 1.357, 1.403"}, "expected": {"out": [0.45053005, 1.77643, 0.0042999983]}},
+      {"inputs": {"in": "-0.602, 0.408, 1.998", "amount": "-0.711, -0.286, 0.37", "pivot": "-0.939, 1.656, 1.289"}, "expected": {"out": [-1.178607, 2.012928, 1.5513301]}}
+    ]},
+    {"nodedef": "ND_crosshatch_color3", "samples": [
+      {"inputs": {"texcoord": "1.336, 1.606", "uvtiling": "1.0, 1.0", "uvoffset": "0.0, 0.0", "thickness": "0.05", "staggered": "false"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"texcoord": "1.168, 0.12", "uvtiling": "1.083, -0.563", "uvoffset": "-0.043, 0.249", "thickness": "-0.221", "staggered": "true"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"texcoord": "-1.432, -1.571", "uvtiling": "-0.71, 0.879", "uvoffset": "-0.429, 0.639", "thickness": "0.3", "staggered": "true"}, "expected": {"out": [1.0, 1.0, 1.0]}},
+      {"inputs": {"texcoord": "1.585, -1.428", "uvtiling": "0.606, -0.463", "uvoffset": "0.7, 0.151", "thickness": "0.967", "staggered": "false"}, "expected": {"out": [1.0, 1.0, 1.0]}}
+    ]},
+    {"nodedef": "ND_difference_color3", "samples": [
+      {"inputs": {"fg": "0.0, 0.0, 0.0", "bg": "0.0, 0.0, 0.0", "mix": "1.0"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"fg": "-0.012, -0.649, 1.615", "bg": "-0.907, 1.228, 0.566", "mix": "0.463"}, "expected": {"out": [-0.072674006, 1.5284871, 0.789629]}},
+      {"inputs": {"fg": "1.82, -0.102, 0.731", "bg": "-0.308, -0.463, -0.414", "mix": "0.038"}, "expected": {"out": [-0.215432, -0.431688, -0.35475802]}},
+      {"inputs": {"fg": "-0.164, -0.929, 0.797", "bg": "0.233, 1.65, 0.494", "mix": "0.422"}, "expected": {"out": [0.302208, 2.042038, 0.413398]}}
+    ]},
+    {"nodedef": "ND_disjointover_color4", "samples": [
+      {"inputs": {"fg": "0.0, 0.0, 0.0, 0.0", "bg": "0.0, 0.0, 0.0, 0.0", "mix": "1.0"}, "expected": {"out": [0.0, 0.0, 0.0, 0.0]}},
+      {"inputs": {"fg": "1.908, 1.74, -0.995, -0.934", "bg": "-0.975, 0.553, 1.08, 0.208", "mix": "0.747"}, "expected": {"out": [0.45027596, 1.85278, 0.33673507, -0.48969796]}},
+      {"inputs": {"fg": "1.727, 1.492, 0.128, -0.633", "bg": "0.016, -0.924, 0.519, -0.474", "mix": "0.97"}, "expected": {"out": [1.6911901, 0.52324003, 0.64316005, -1.0880101]}},
+      {"inputs": {"fg": "-0.955, 0.272, 0.648, 0.081", "bg": "1.235, -0.933, 0.275, -0.461", "mix": "0.094"}, "expected": {"out": [1.14523, -0.9074321, 0.335912, -0.453386]}}
+    ]},
+    {"nodedef": "ND_dodge_color3", "samples": [
+      {"inputs": {"fg": "0.0, 0.0, 0.0", "bg": "0.0, 0.0, 0.0", "mix": "1.0"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"fg": "1.475, -0.797, -0.977", "bg": "0.233, 0.572, 1.615", "mix": "0.631"}, "expected": {"out": [-0.22354509, 0.41192055, 1.1113954]}},
+      {"inputs": {"fg": "0.263, 1.578, 1.154", "bg": "0.654, 1.985, 1.316", "mix": "0.724"}, "expected": {"out": [0.822968, -1.9385415, -5.8236914]}},
+      {"inputs": {"fg": "1.521, 0.465, 0.875", "bg": "1.661, 0.044, 0.534", "mix": "0.526"}, "expected": {"out": [-0.88962644, 0.064115815, 2.5001879]}}
+    ]},
+    {"nodedef": "ND_fractal2d_float", "samples": [
+      {"inputs": {"amplitude": "1.0", "octaves": "3", "lacunarity": "2.0", "diminish": "0.5", "texcoord": "0.668, -1.754"}, "expected": {"out": [-0.394685]}},
+      {"inputs": {"amplitude": "-0.125", "octaves": "1", "lacunarity": "1.513", "diminish": "0.701", "texcoord": "1.172, 0.077"}, "expected": {"out": [0.0002159708]}},
+      {"inputs": {"amplitude": "-0.575", "octaves": "2", "lacunarity": "1.982", "diminish": "0.61", "texcoord": "1.429, -1.797"}, "expected": {"out": [0.1847226]}},
+      {"inputs": {"amplitude": "1.369", "octaves": "5", "lacunarity": "2.728", "diminish": "0.493", "texcoord": "-0.933, -0.785"}, "expected": {"out": [-0.077500395]}}
+    ]},
+    {"nodedef": "ND_fractal2d_vector2", "samples": [
+      {"inputs": {"amplitude": "1.0, 1.0", "octaves": "3", "lacunarity": "2.0", "diminish": "0.5", "texcoord": "0.153, -1.5"}, "expected": {"out": [-0.0775962, 0.2820763]}},
+      {"inputs": {"amplitude": "-0.042, -0.824", "octaves": "2", "lacunarity": "1.897", "diminish": "0.465", "texcoord": "1.989, 0.052"}, "expected": {"out": [-0.004339885, 0.08196666]}},
+      {"inputs": {"amplitude": "0.959, 1.129", "octaves": "3", "lacunarity": "2.615", "diminish": "0.552", "texcoord": "0.287, 1.756"}, "expected": {"out": [-0.6957934, 0.3490318]}},
+      {"inputs": {"amplitude": "1.823, -0.698", "octaves": "5", "lacunarity": "2.03", "diminish": "0.511", "texcoord": "0.564, 0.694"}, "expected": {"out": [0.24546172, 0.19786292]}}
+    ]},
+    {"nodedef": "ND_fractal2d_vector3", "samples": [
+      {"inputs": {"amplitude": "1.0, 1.0, 1.0", "octaves": "3", "lacunarity": "2.0", "diminish": "0.5", "texcoord": "0.856, 1.319"}, "expected": {"out": [-0.41113347, 0.1432738, 0.25803283]}},
+      {"inputs": {"amplitude": "0.229, -0.346, 1.706", "octaves": "5", "lacunarity": "2.145", "diminish": "0.321", "texcoord": "-1.695, 1.636"}, "expected": {"out": [0.015037626, 0.062205967, -1.1537305]}},
+      {"inputs": {"amplitude": "-0.343, -0.407, 0.191", "octaves": "2", "lacunarity": "2.649", "diminish": "0.65", "texcoord": "-0.698, -0.216"}, "expected": {"out": [0.026467424, -0.06411725, -0.12616225]}},
+      {"inputs": {"amplitude": "1.038, 0.458, -0.949", "octaves": "1", "lacunarity": "2.264", "diminish": "0.422", "texcoord": "-0.131, -1.874"}, "expected": {"out": [0.07565607, -0.12898321, -0.11093762]}}
+    ]},
+    {"nodedef": "ND_fractal2d_vector4", "samples": [
+      {"inputs": {"amplitude": "1.0, 1.0, 1.0, 1.0", "octaves": "3", "lacunarity": "2.0", "diminish": "0.5", "texcoord": "1.594, 1.867"}, "expected": {"out": [0.4402561, 0.4510159, 0.22174993, 0.42334327]}},
+      {"inputs": {"amplitude": "-0.92, -0.371, 0.778, 1.587", "octaves": "4", "lacunarity": "2.018", "diminish": "0.728", "texcoord": "-0.426, 1.912"}, "expected": {"out": [-0.19055167, 0.07293921, -0.037042607, -1.3219545]}},
+      {"inputs": {"amplitude": "0.054, 0.308, 0.909, -0.814", "octaves": "6", "lacunarity": "2.622", "diminish": "0.724", "texcoord": "0.28, -1.552"}, "expected": {"out": [0.00032786807, -0.3231046, 0.897284, -0.17573571]}},
+      {"inputs": {"amplitude": "0.143, -0.991, 1.714, -0.797", "octaves": "4", "lacunarity": "2.678", "diminish": "0.753", "texcoord": "1.076, 0.154"}, "expected": {"out": [0.035927407, -0.29502866, -1.5737362, -0.21156873]}}
+    ]},
+    {"nodedef": "ND_fractal3d_float", "samples": [
+      {"inputs": {"amplitude": "1.0", "octaves": "3", "lacunarity": "2.0", "diminish": "0.5", "position": "0.542, -0.599, -0.053"}, "expected": {"out": [0.27990383]}},
+      {"inputs": {"amplitude": "-0.697", "octaves": "2", "lacunarity": "2.302", "diminish": "0.527", "position": "-2.974, -0.834, -2.353"}, "expected": {"out": [-0.013570104]}},
+      {"inputs": {"amplitude": "-0.038", "octaves": "2", "lacunarity": "1.601", "diminish": "0.624", "position": "1.345, 1.719, -1.452"}, "expected": {"out": [0.0015978107]}},
+      {"inputs": {"amplitude": "-0.135", "octaves": "3", "lacunarity": "2.036", "diminish": "0.446", "position": "0.253, -1.952, 0.958"}, "expected": {"out": [0.018096663]}}
+    ]},
+    {"nodedef": "ND_fractal3d_vector2", "samples": [
+      {"inputs": {"amplitude": "1.0, 1.0", "octaves": "3", "lacunarity": "2.0", "diminish": "0.5", "position": "-1.753, -0.327, -1.557"}, "expected": {"out": [0.7276833, 0.29577765]}},
+      {"inputs": {"amplitude": "0.97, -0.228", "octaves": "3", "lacunarity": "1.765", "diminish": "0.423", "position": "2.552, -0.363, -0.223"}, "expected": {"out": [0.013096317, -0.052868634]}},
+      {"inputs": {"amplitude": "0.876, 0.646", "octaves": "5", "lacunarity": "2.773", "diminish": "0.61", "position": "-1.251, -0.712, -2.921"}, "expected": {"out": [0.51402926, -0.20991273]}},
+      {"inputs": {"amplitude": "-0.238, 0.813", "octaves": "2", "lacunarity": "2.084", "diminish": "0.464", "position": "-3.348, -3.059, 0.886"}, "expected": {"out": [0.055778082, -0.48349583]}}
+    ]},
+    {"nodedef": "ND_fractal3d_vector3", "samples": [
+      {"inputs": {"amplitude": "1.0, 1.0, 1.0", "octaves": "3", "lacunarity": "2.0", "diminish": "0.5", "position": "1.946, 2.255, -1.93"}, "expected": {"out": [-0.323259, -0.2391545, 0.46135366]}},
+      {"inputs": {"amplitude": "0.856, 1.868, 1.965", "octaves": "2", "lacunarity": "1.634", "diminish": "0.3", "position": "-2.627, -3.31, 2.477"}, "expected": {"out": [0.07521673, 1.1347561, 0.2859039]}},
+      {"inputs": {"amplitude": "0.504, 0.355, -0.24", "octaves": "2", "lacunarity": "1.609", "diminish": "0.575", "position": "-2.963, 3.191, 2.725"}, "expected": {"out": [0.11137905, -0.0074925735, -0.13065133]}},
+      {"inputs": {"amplitude": "-0.873, -0.135, 0.704", "octaves": "5", "lacunarity": "2.909", "diminish": "0.753", "position": "-1.268, 1.674, 3.277"}, "expected": {"out": [0.32686225, 0.10579771, 0.17993505]}}
+    ]},
+    {"nodedef": "ND_fractal3d_vector4", "samples": [
+      {"inputs": {"amplitude": "1.0, 1.0, 1.0, 1.0", "octaves": "3", "lacunarity": "2.0", "diminish": "0.5", "position": "-2.099, 0.022, -1.822"}, "expected": {"out": [0.22010264, 0.13543819, 0.11387159, 0.1828793]}},
+      {"inputs": {"amplitude": "0.094, 0.739, 0.594, -0.476", "octaves": "5", "lacunarity": "2.671", "diminish": "0.38", "position": "-0.111, 0.111, -3.378"}, "expected": {"out": [0.0053227954, 0.28441176, 0.08253505, -0.06952213]}},
+      {"inputs": {"amplitude": "1.422, -0.071, 0.515, 0.355", "octaves": "2", "lacunarity": "2.832", "diminish": "0.365", "position": "-2.881, -2.783, -1.724"}, "expected": {"out": [-0.13978668, -0.036702838, 0.08067307, 0.14268734]}},
+      {"inputs": {"amplitude": "0.93, -0.826, -0.151, 0.811", "octaves": "5", "lacunarity": "1.913", "diminish": "0.407", "position": "-1.644, -1.07, 2.039"}, "expected": {"out": [0.025884425, 0.16503492, 0.032650728, 0.18913417]}}
+    ]},
+    {"nodedef": "ND_glossiness_anisotropy", "samples": [
+      {"inputs": {"glossiness": "1.0", "anisotropy": "0.0"}, "expected": {"out": [1e-08, 1e-08]}},
+      {"inputs": {"glossiness": "0.854", "anisotropy": "0.135"}, "expected": {"out": [0.022919115, 0.019825034]}},
+      {"inputs": {"glossiness": "0.232", "anisotropy": "0.058"}, "expected": {"out": [0.60771084, 0.57246363]}},
+      {"inputs": {"glossiness": "0.106", "anisotropy": "0.101"}, "expected": {"out": [0.8429371, 0.7578005]}}
+    ]},
+    {"nodedef": "ND_grid_color3", "samples": [
+      {"inputs": {"texcoord": "-0.811, 1.567", "uvtiling": "1.0, 1.0", "uvoffset": "0.0, 0.0", "thickness": "0.05", "staggered": "false"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"texcoord": "0.43, -1.915", "uvtiling": "0.32, 0.227", "uvoffset": "-0.055, -0.776", "thickness": "1.597", "staggered": "true"}, "expected": {"out": [1.0, 1.0, 1.0]}},
+      {"inputs": {"texcoord": "0.893, 1.011", "uvtiling": "-0.145, 0.844", "uvoffset": "0.61, 0.898", "thickness": "-0.782", "staggered": "false"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"texcoord": "-1.989, 0.935", "uvtiling": "1.275, 1.796", "uvoffset": "0.7, 1.25", "thickness": "-0.682", "staggered": "true"}, "expected": {"out": [0.0, 0.0, 0.0]}}
+    ]},
+    {"nodedef": "ND_hexagon_float", "samples": [
+      {"inputs": {"texcoord": "0.049, 0.565", "center": "0, 0", "radius": "0.5"}, "expected": {"out": [0.0]}},
+      {"inputs": {"texcoord": "0.566, 0.271", "center": "0.42, 0.391", "radius": "0.506"}, "expected": {"out": [1.0]}},
+      {"inputs": {"texcoord": "0.406, 0.913", "center": "0.517, 0.249", "radius": "0.407"}, "expected": {"out": [0.0]}},
+      {"inputs": {"texcoord": "0.943, 0.486", "center": "0.673, 0.299", "radius": "0.439"}, "expected": {"out": [1.0]}}
+    ]},
+    {"nodedef": "ND_hsvadjust_color3", "samples": [
+      {"inputs": {"in": "0.0, 0.0, 0.0", "amount": "0.0, 1.0, 1.0"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"in": "0.454, 0.669, 0.167", "amount": "0.94, 0.809, 0.459"}, "expected": {"out": [0.2943418, 0.307071, 0.12066284]}},
+      {"inputs": {"in": "0.343, 0.585, 0.269", "amount": "0.593, 0.602, 0.337"}, "expected": {"out": [0.197145, 0.1330368, 0.1763853]}},
+      {"inputs": {"in": "0.996, 0.23, 0.493", "amount": "0.694, 0.309, 0.038"}, "expected": {"out": [0.028853629, 0.030466696, 0.037848]}}
+    ]},
+    {"nodedef": "ND_hsvtorgb_color3", "samples": [
+      {"inputs": {"in": "0.0, 0.0, 0.0"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"in": "0.245, 0.491, 0.072"}, "expected": {"out": [0.055384558, 0.072, 0.036647998]}},
+      {"inputs": {"in": "0.3, 0.849, 0.912"}, "expected": {"out": [0.29256955, 0.912, 0.13771202]}},
+      {"inputs": {"in": "0.352, 0.878, 0.246"}, "expected": {"out": [0.030011995, 0.246, 0.054202646]}}
+    ]},
+    {"nodedef": "ND_hsvtorgb_color4", "samples": [
+      {"inputs": {"in": "0.0, 0.0, 0.0, 0.0"}, "expected": {"out": [0.0, 0.0, 0.0, 0.0]}},
+      {"inputs": {"in": "0.776, 0.75, 0.381, 0.814"}, "expected": {"out": [0.28270206, 0.09525, 0.381, 0.814]}},
+      {"inputs": {"in": "0.587, 0.587, 0.517, 0.361"}, "expected": {"out": [0.213521, 0.35858396, 0.517, 0.361]}},
+      {"inputs": {"in": "0.009, 0.586, 0.339, 0.493"}, "expected": {"out": [0.339, 0.15107329, 0.14034599, 0.493]}}
+    ]},
+    {"nodedef": "ND_in_color4", "samples": [
+      {"inputs": {"fg": "0.0, 0.0, 0.0, 0.0", "bg": "0.0, 0.0, 0.0, 0.0", "mix": "1.0"}, "expected": {"out": [0.0, 0.0, 0.0, 0.0]}},
+      {"inputs": {"fg": "0.242, 0.31, 1.632, -0.883", "bg": "0.69, -0.603, 1.445, 0.837", "mix": "0.326"}, "expected": {"out": [0.53109264, -0.3218348, 1.4192408, 0.32320088]}},
+      {"inputs": {"fg": "0.559, 0.196, -0.723, -0.505", "bg": "-0.305, -0.25, 1.902, 0.727", "mix": "0.411"}, "expected": {"out": [-0.012617469, -0.08868578, 0.90424776, 0.2773105]}},
+      {"inputs": {"fg": "0.746, -0.318, 1.706, 1.008", "bg": "1.788, 1.226, 1.707, -0.291", "mix": "0.362"}, "expected": {"out": [1.0621588, 0.81568676, 0.90935254, -0.29184276]}}
+    ]},
+    {"nodedef": "ND_line_float", "samples": [
+      {"inputs": {"texcoord": "0.579, 0.082", "center": "0, 0", "radius": "0.1", "point1": "0.25, 0.25", "point2": "0.75, 0.75"}, "expected": {"out": [0.0]}},
+      {"inputs": {"texcoord": "0.881, 0.717", "center": "0.015, -0.001", "radius": "0.09", "point1": "0.439, 0.82", "point2": "0.719, 0.898"}, "expected": {"out": [0.0]}},
+      {"inputs": {"texcoord": "0.284, 0.558", "center": "1.72, 0.531", "radius": "0.16", "point1": "0.355, 0.126", "point2": "0.747, 0.467"}, "expected": {"out": [0.0]}},
+      {"inputs": {"texcoord": "0.838, 0.411", "center": "1.159, 1.394", "radius": "0.281", "point1": "0.355, 0.755", "point2": "0.129, 0.669"}, "expected": {"out": [0.0]}}
+    ]},
+    {"nodedef": "ND_luminance_color3", "samples": [
+      {"inputs": {"in": "0.0, 0.0, 0.0", "lumacoeffs": "0.2722287, 0.6740818, 0.0536895"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"in": "-0.003, -0.627, 1.539", "lumacoeffs": "0.979, 0.163, -0.572"}, "expected": {"out": [-0.98544604, -0.98544604, -0.98544604]}},
+      {"inputs": {"in": "0.453, -0.703, -0.24", "lumacoeffs": "1.499, -0.06, 1.356"}, "expected": {"out": [0.395787, 0.395787, 0.395787]}},
+      {"inputs": {"in": "-0.949, -0.115, 1.677", "lumacoeffs": "0.616, 0.067, 1.562"}, "expected": {"out": [2.0271852, 2.0271852, 2.0271852]}}
+    ]},
+    {"nodedef": "ND_luminance_color4", "samples": [
+      {"inputs": {"in": "0.0, 0.0, 0.0, 0.0", "lumacoeffs": "0.2722287, 0.6740818, 0.0536895"}, "expected": {"out": [0.0, 0.0, 0.0, 0.0]}},
+      {"inputs": {"in": "-0.484, 0.982, 1.249, -0.442", "lumacoeffs": "1.012, 1.342, 0.373"}, "expected": {"out": [1.293913, 1.293913, 1.293913, -0.442]}},
+      {"inputs": {"in": "0.595, -0.058, -0.779, 0.141", "lumacoeffs": "1.85, -0.31, 0.483"}, "expected": {"out": [0.74247307, 0.74247307, 0.74247307, 0.141]}},
+      {"inputs": {"in": "0.949, 1.879, 1.395, 0.806", "lumacoeffs": "1.801, -0.823, -0.284"}, "expected": {"out": [-0.233448, -0.233448, -0.233448, 0.806]}}
+    ]},
+    {"nodedef": "ND_mask_color4", "samples": [
+      {"inputs": {"fg": "0.0, 0.0, 0.0, 0.0", "bg": "0.0, 0.0, 0.0, 0.0", "mix": "1.0"}, "expected": {"out": [0.0, 0.0, 0.0, 0.0]}},
+      {"inputs": {"fg": "-0.215, 0.04, 1.782, 0.955", "bg": "-0.855, -0.027, -0.368, 0.975", "mix": "0.792"}, "expected": {"out": [-0.8245278, -0.026037721, -0.35488445, 0.940251]}},
+      {"inputs": {"fg": "0.863, 1.211, 0.207, 1.436", "bg": "0.212, 0.641, 0.556, 0.929", "mix": "0.329"}, "expected": {"out": [0.24241012, 0.7329476, 0.6357548, 1.0622594]}},
+      {"inputs": {"fg": "1.342, 1.943, 0.063, 1.349", "bg": "1.181, -0.776, -0.978, 0.347", "mix": "0.203"}, "expected": {"out": [1.2646702, -0.8309773, -1.0472883, 0.3715839]}}
+    ]},
+    {"nodedef": "ND_matte_color4", "samples": [
+      {"inputs": {"fg": "0.0, 0.0, 0.0, 0.0", "bg": "0.0, 0.0, 0.0, 0.0", "mix": "1.0"}, "expected": {"out": [0.0, 0.0, 0.0, 0.0]}},
+      {"inputs": {"fg": "1.843, -0.188, 1.686, 1.145", "bg": "0.717, 0.702, 1.815, 0.047", "mix": "0.593"}, "expected": {"out": [1.481537, 0.09770337, 1.727411, 0.69407266]}},
+      {"inputs": {"fg": "1.924, 1.768, 1.443, -0.109", "bg": "1.715, 0.314, 1.189, 1.515", "mix": "0.402"}, "expected": {"out": [1.705842, 0.25028863, 1.1778703, 1.5375662]}},
+      {"inputs": {"fg": "-0.289, 0.136, 0.913, -0.515", "bg": "1.621, 0.987, 0.692, 0.774", "mix": "0.609"}, "expected": {"out": [2.220043, 1.2539034, 0.6226866, 0.70311844]}}
+    ]},
+    {"nodedef": "ND_minus_color3", "samples": [
+      {"inputs": {"fg": "0.0, 0.0, 0.0", "bg": "0.0, 0.0, 0.0", "mix": "1.0"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"fg": "1.817, 0.419, -0.999", "bg": "1.823, 0.55, 0.133", "mix": "0.563"}, "expected": {"out": [0.8000289, 0.314103, 0.69543695]}},
+      {"inputs": {"fg": "0.196, 1.27, 0.647", "bg": "0.829, -0.727, 0.898", "mix": "0.59"}, "expected": {"out": [0.71336, -1.4763, 0.51627004]}},
+      {"inputs": {"fg": "-0.343, -0.989, 0.561", "bg": "1.582, -0.56, 1.914", "mix": "0.623"}, "expected": {"out": [1.795689, 0.05614704, 1.564497]}}
+    ]},
+    {"nodedef": "ND_noise2d_color3", "samples": [
+      {"inputs": {"amplitude": "1.0, 1.0, 1.0", "pivot": "0.0", "texcoord": "1.513, 1.073"}, "expected": {"out": [-0.3195817, -0.22298361, 0.5685637]}},
+      {"inputs": {"amplitude": "1.842, 0.723, -0.111", "pivot": "-0.918", "texcoord": "0.007, -0.784"}, "expected": {"out": [-0.5729819, -0.75526327, -0.8931605]}},
+      {"inputs": {"amplitude": "1.01, 1.627, 0.023", "pivot": "1.219", "texcoord": "1.861, -1.999"}, "expected": {"out": [1.0241507, 1.5327879, 1.214311]}},
+      {"inputs": {"amplitude": "0.724, -0.326, 0.056", "pivot": "0.061", "texcoord": "0.165, -1.157"}, "expected": {"out": [-0.120085955, 0.1716172, 0.07783322]}}
+    ]},
+    {"nodedef": "ND_noise2d_color4", "samples": [
+      {"inputs": {"amplitude": "1.0, 1.0, 1.0, 1.0", "pivot": "0.0", "texcoord": "1.743, -1.371"}, "expected": {"out": [-0.6805399, -0.17949459, 0.30964422, 0.15649594]}},
+      {"inputs": {"amplitude": "1.164, 1.964, 1.841, -0.341", "pivot": "1.192", "texcoord": "-0.987, -0.245"}, "expected": {"out": [1.4574168, 1.1265994, 0.9878498, 1.0558912]}},
+      {"inputs": {"amplitude": "-0.53, -0.585, 1.998, -0.895", "pivot": "-0.827", "texcoord": "-0.785, 0.072"}, "expected": {"out": [-0.68860716, -0.9684854, -1.4184866, -0.93147516]}},
+      {"inputs": {"amplitude": "-0.602, 1.564, 1.442, 1.015", "pivot": "1.041", "texcoord": "-0.981, 0.467"}, "expected": {"out": [0.9711485, 1.809207, 1.0638843, 0.5279292]}}
+    ]},
+    {"nodedef": "ND_noise2d_float", "samples": [
+      {"inputs": {"amplitude": "1.0", "pivot": "0.0", "texcoord": "1.835, 1.021"}, "expected": {"out": [-0.09846941]}},
+      {"inputs": {"amplitude": "0.779", "pivot": "-0.78", "texcoord": "1.385, 1.028"}, "expected": {"out": [-1.0247686]}},
+      {"inputs": {"amplitude": "0.18", "pivot": "1.954", "texcoord": "1.119, -0.624"}, "expected": {"out": [2.0495388]}},
+      {"inputs": {"amplitude": "0.101", "pivot": "-0.382", "texcoord": "0.908, 0.143"}, "expected": {"out": [-0.40399066]}}
+    ]},
+    {"nodedef": "ND_noise3d_color3", "samples": [
+      {"inputs": {"amplitude": "1.0, 1.0, 1.0", "pivot": "0.0", "position": "0.412, -0.544, -3.651"}, "expected": {"out": [-0.376442, 0.04391447, 0.063985676]}},
+      {"inputs": {"amplitude": "-0.991, -0.574, -0.459", "pivot": "1.593", "position": "-0.13, 0.82, -2.307"}, "expected": {"out": [1.1330168, 1.7309968, 1.4286432]}},
+      {"inputs": {"amplitude": "0.912, 0.464, -0.749", "pivot": "-0.428", "position": "2.08, 1.42, 0.36"}, "expected": {"out": [-0.1552509, -0.40600014, -0.5788317]}},
+      {"inputs": {"amplitude": "0.076, 1.344, 0.665", "pivot": "0.955", "position": "1.956, -1.896, -2.281"}, "expected": {"out": [0.9419964, 0.9016396, 1.1445674]}}
+    ]},
+    {"nodedef": "ND_noise3d_color4", "samples": [
+      {"inputs": {"amplitude": "1.0, 1.0, 1.0, 1.0", "pivot": "0.0", "position": "0.722, 2.029, 3.359"}, "expected": {"out": [-0.09634497, -0.4252191, 0.14424524, 0.17658427]}},
+      {"inputs": {"amplitude": "1.626, -0.292, -0.826, 1.102", "pivot": "0.116", "position": "-3.92, 1.654, -0.45"}, "expected": {"out": [-0.8158339, 0.2341081, -0.09588045, 0.07144023]}},
+      {"inputs": {"amplitude": "-0.958, 1.581, 0.912, -0.361", "pivot": "1.221", "position": "-1.874, 1.939, -2.279"}, "expected": {"out": [0.7793883, 1.1717756, 1.2692765, 1.1685944]}},
+      {"inputs": {"amplitude": "0.706, 0.401, -0.701, 1.363", "pivot": "0.483", "position": "1.119, 2.602, -1.96"}, "expected": {"out": [0.69466555, 0.67190045, 0.15545458, 0.1291584]}}
+    ]},
+    {"nodedef": "ND_noise3d_float", "samples": [
+      {"inputs": {"amplitude": "1.0", "pivot": "0.0", "position": "3.208, -2.282, -1.15"}, "expected": {"out": [0.4429518]}},
+      {"inputs": {"amplitude": "-0.605", "pivot": "1.086", "position": "3.125, 3.94, -2.028"}, "expected": {"out": [1.0227863]}},
+      {"inputs": {"amplitude": "-0.665", "pivot": "0.939", "position": "0.721, -3.558, -1.043"}, "expected": {"out": [0.78427184]}},
+      {"inputs": {"amplitude": "1.022", "pivot": "1.222", "position": "0.338, -2.081, -0.917"}, "expected": {"out": [1.2941976]}}
+    ]},
+    {"nodedef": "ND_normalmap_float", "samples": [
+      {"inputs": {"in": "0.5, 0.5, 1.0", "scale": "1.0", "normal": "0.475987, -0.825977, 0.301992", "tangent": "0.871728, 0.397706, -0.286216", "bitangent": "0.116304, 0.39949, 0.90933"}, "expected": {"out": [0.4759868, -0.8259767, 0.30199188]}},
+      {"inputs": {"in": "0.021, 1.952, 0.684", "scale": "1.57", "normal": "-0.208976, -0.728918, 0.651926", "tangent": "0.881685, -0.42882, -0.196836", "bitangent": "0.423036, 0.53366, 0.732289"}, "expected": {"out": [0.109184876, 0.58355254, 0.8047019]}},
+      {"inputs": {"in": "0.173, 1.012, -0.236", "scale": "0.914", "normal": "-0.222957, -0.423918, 0.877829", "tangent": "-0.28278, 0.889902, 0.357925", "bitangent": "-0.932913, -0.16843, -0.318285"}, "expected": {"out": [-0.20386909, -0.035563693, -0.97835195]}},
+      {"inputs": {"in": "-0.491, 1.41, 1.589", "scale": "0.41", "normal": "-0.79516, 0.578116, 0.183037", "tangent": "-0.353915, -0.197335, -0.914223", "bitangent": "-0.492407, -0.791733, 0.361517"}, "expected": {"out": [-0.74204606, 0.33942613, 0.57806367]}}
+    ]},
+    {"nodedef": "ND_normalmap_vector2", "samples": [
+      {"inputs": {"in": "0.5, 0.5, 1.0", "scale": "1.0, 1.0", "normal": "0.822248, 0.504152, 0.26408", "tangent": "0.430341, -0.854403, 0.291208", "bitangent": "0.372444, -0.125801, -0.919489"}, "expected": {"out": [0.82224834, 0.50415224, 0.2640801]}},
+      {"inputs": {"in": "1.708, 0.289, 1.958", "scale": "1.527, -0.521", "normal": "-0.129049, 0.676256, 0.725275", "tangent": "0.960282, 0.267691, -0.078735", "bitangent": "-0.247395, 0.686308, -0.683942"}, "expected": {"out": [0.66105485, 0.6607206, 0.35560495]}},
+      {"inputs": {"in": "0.229, 1.452, -0.357", "scale": "0.396, 0.276", "normal": "0.533947, 0.410959, 0.738927", "tangent": "0.724265, 0.228639, -0.650511", "bitangent": "-0.436281, 0.882517, -0.175562"}, "expected": {"out": [-0.7199478, -0.16044438, -0.67522794]}},
+      {"inputs": {"in": "1.834, 1.834, 1.182", "scale": "-0.908, 0.741", "normal": "0.473902, 0.818831, 0.323933", "tangent": "0.860821, -0.353298, -0.36629", "bitangent": "-0.185485, 0.452434, -0.872295"}, "expected": {"out": [-0.529305, 0.84048057, -0.11588163]}}
+    ]},
+    {"nodedef": "ND_open_pbr_anisotropy", "samples": [
+      {"inputs": {"roughness": "0.0", "anisotropy": "0.0"}, "expected": {"out": [0.0, 0.0]}},
+      {"inputs": {"roughness": "0.655", "anisotropy": "0.846"}, "expected": {"out": [0.5996638, 0.09234822]}},
+      {"inputs": {"roughness": "0.117", "anisotropy": "0.261"}, "expected": {"out": [0.015569151, 0.011505602]}},
+      {"inputs": {"roughness": "0.775", "anisotropy": "0.398"}, "expected": {"out": [0.7277219, 0.4380886]}}
+    ]},
+    {"nodedef": "ND_open_pbr_surface_to_standard_surface", "samples": [
+      {"inputs": {"base_weight": "1.0", "base_color": "0.8, 0.8, 0.8", "base_diffuse_roughness": "0.0", "base_metalness": "0.0", "specular_weight": "1.0", "specular_color": "1, 1, 1", "specular_roughness": "0.3", "specular_ior": "1.5", "specular_roughness_anisotropy": "0.0", "transmission_weight": "0.0", "transmission_color": "1, 1, 1", "transmission_depth": "0.0", "transmission_scatter": "0, 0, 0", "transmission_scatter_anisotropy": "0.0", "transmission_dispersion_scale": "0.0", "subsurface_weight": "0", "subsurface_color": "0.8, 0.8, 0.8", "subsurface_radius": "1.0", "subsurface_radius_scale": "1.0, 0.5, 0.25", "subsurface_scatter_anisotropy": "0.0", "fuzz_weight": "0.0", "fuzz_color": "1, 1, 1", "fuzz_roughness": "0.5", "coat_weight": "0.0", "coat_color": "1, 1, 1", "coat_roughness": "0.0", "coat_roughness_anisotropy": "0.0", "coat_ior": "1.6", "coat_darkening": "1.0", "thin_film_weight": "0", "thin_film_thickness": "0.5", "thin_film_ior": "1.4", "emission_luminance": "0.0", "emission_color": "1, 1, 1", "geometry_opacity": "1", "geometry_thin_walled": "false"}, "expected": {"base_color_out": [0.8, 0.8, 0.8], "base_out": [1.0], "coat_IOR_out": [1.6], "coat_affect_roughness_out": [1.0], "coat_anisotropy_out": [0.0], "coat_color_out": [1.0, 1.0, 1.0], "coat_out": [0.0], "coat_roughness_out": [0.0], "diffuse_roughness_out": [0.0], "emission_color_out": [1.0, 1.0, 1.0], "emission_out": [0.0], "metalness_out": [0.0], "opacity_out": [1.0, 1.0, 1.0], "sheen_color_out": [1.0, 1.0, 1.0], "sheen_out": [0.0], "sheen_roughness_out": [0.17677602], "specular_IOR_out": [1.5], "specular_anisotropy_out": [0.0], "specular_color_out": [1.0, 1.0, 1.0], "specular_out": [1.0], "specular_roughness_out": [0.3], "subsurface_anisotropy_out": [0.0], "subsurface_color_out": [0.8, 0.8, 0.8], "subsurface_out": [0.0], "subsurface_radius_out": [1.0, 0.5, 0.25], "subsurface_scale_out": [1.0], "thin_film_IOR_out": [1.4], "thin_film_thickness_out": [0.0], "thin_walled_out": [0.0], "transmission_color_out": [1.0, 1.0, 1.0], "transmission_depth_out": [0.0], "transmission_dispersion_out": [0.0], "transmission_out": [0.0], "transmission_scatter_anisotropy_out": [0.0], "transmission_scatter_out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"base_weight": "0.709", "base_color": "0.211, 0.594, 0.904", "base_diffuse_roughness": "0.7", "base_metalness": "0.355", "specular_weight": "0.67", "specular_color": "0.483, 0.577, 0.408", "specular_roughness": "0.928", "specular_ior": "0.738", "specular_roughness_anisotropy": "0.329", "transmission_weight": "0.155", "transmission_color": "0.957, 0.949, 0.964", "transmission_depth": "0.827", "transmission_scatter": "0.401, 0.574, 0.84", "transmission_scatter_anisotropy": "0.463", "transmission_dispersion_scale": "0.311", "subsurface_weight": "0.668", "subsurface_color": "0.329, 0.949, 0.748", "subsurface_radius": "0.158", "subsurface_radius_scale": "0.084, 0.811, 0.291", "subsurface_scatter_anisotropy": "0.919", "fuzz_weight": "0.855", "fuzz_color": "0.761, 0.375, 0.483", "fuzz_roughness": "0.255", "coat_weight": "0.108", "coat_color": "0.272, 0.101, 0.331", "coat_roughness": "0.958", "coat_roughness_anisotropy": "0.49", "coat_ior": "0.167", "coat_darkening": "0.742", "thin_film_weight": "0.709", "thin_film_thickness": "0.926", "thin_film_ior": "0.425", "emission_luminance": "0.301", "emission_color": "0.529, 0.466, 0.786", "geometry_opacity": "0.565", "geometry_thin_walled": "true"}, "expected": {"base_color_out": [0.25437203, 0.61481935, 0.92864156], "base_out": [0.709], "coat_IOR_out": [0.167], "coat_affect_roughness_out": [1.0], "coat_anisotropy_out": [0.49], "coat_color_out": [0.272, 0.101, 0.331], "coat_out": [0.108], "coat_roughness_out": [0.958], "diffuse_roughness_out": [0.7], "emission_color_out": [0.529, 0.466, 0.786], "emission_out": [0.301], "metalness_out": [0.355], "opacity_out": [0.565, 0.565, 0.565], "sheen_color_out": [0.761, 0.375, 0.483], "sheen_out": [0.855], "sheen_roughness_out": [0.032836177], "specular_IOR_out": [0.738], "specular_anisotropy_out": [0.329], "specular_color_out": [0.483, 0.577, 0.408], "specular_out": [0.67], "specular_roughness_out": [0.93124], "subsurface_anisotropy_out": [0.919], "subsurface_color_out": [0.3966275, 0.9822619, 0.7683893], "subsurface_out": [0.668], "subsurface_radius_out": [0.084, 0.811, 0.291], "subsurface_scale_out": [0.158], "thin_film_IOR_out": [0.425], "thin_film_thickness_out": [926.0], "thin_walled_out": [1.0], "transmission_color_out": [0.957, 0.949, 0.964], "transmission_depth_out": [0.827], "transmission_dispersion_out": [0.311], "transmission_out": [0.155], "transmission_scatter_anisotropy_out": [0.463], "transmission_scatter_out": [0.401, 0.574, 0.84]}},
+      {"inputs": {"base_weight": "0.186", "base_color": "0.332, 0.377, 0.336", "base_diffuse_roughness": "0.423", "base_metalness": "0.029", "specular_weight": "0.816", "specular_color": "0.553, 0.206, 0.847", "specular_roughness": "0.988", "specular_ior": "0.969", "specular_roughness_anisotropy": "0.759", "transmission_weight": "0.781", "transmission_color": "0.556, 0.317, 0.641", "transmission_depth": "0.41", "transmission_scatter": "0.892, 0.439, 0.997", "transmission_scatter_anisotropy": "0.657", "transmission_dispersion_scale": "0.711", "subsurface_weight": "0.357", "subsurface_color": "0.769, 0.713, 0.149", "subsurface_radius": "0.484", "subsurface_radius_scale": "0.66, 0.782, 0.59", "subsurface_scatter_anisotropy": "0.209", "fuzz_weight": "0.51", "fuzz_color": "0.861, 0.816, 0.531", "fuzz_roughness": "0.552", "coat_weight": "0.113", "coat_color": "0.946, 0.267, 0.045", "coat_roughness": "0.029", "coat_roughness_anisotropy": "0.538", "coat_ior": "0.064", "coat_darkening": "0.016", "thin_film_weight": "0.968", "thin_film_thickness": "0.289", "thin_film_ior": "0.041", "emission_luminance": "0.724", "emission_color": "0.049, 0.193, 0.041", "geometry_opacity": "0.514", "geometry_thin_walled": "false"}, "expected": {"base_color_out": [0.332622, 0.3776798, 0.337542], "base_out": [0.186], "coat_IOR_out": [0.064], "coat_affect_roughness_out": [1.0], "coat_anisotropy_out": [0.538], "coat_color_out": [0.946, 0.267, 0.045], "coat_out": [0.113], "coat_roughness_out": [0.029], "diffuse_roughness_out": [0.423], "emission_color_out": [0.049, 0.193, 0.041], "emission_out": [0.724], "metalness_out": [0.029], "opacity_out": [0.514, 0.514, 0.514], "sheen_color_out": [0.861, 0.816, 0.531], "sheen_out": [0.51], "sheen_roughness_out": [0.22638486], "specular_IOR_out": [0.969], "specular_anisotropy_out": [0.759], "specular_color_out": [0.553, 0.206, 0.847], "specular_out": [0.816], "specular_roughness_out": [0.879633], "subsurface_anisotropy_out": [0.209], "subsurface_color_out": [0.7704407, 0.7142857, 0.14968382], "subsurface_out": [0.357], "subsurface_radius_out": [0.66, 0.782, 0.59], "subsurface_scale_out": [0.484], "thin_film_IOR_out": [0.041], "thin_film_thickness_out": [289.0], "thin_walled_out": [0.0], "transmission_color_out": [0.556, 0.317, 0.641], "transmission_depth_out": [0.41], "transmission_dispersion_out": [0.711], "transmission_out": [0.781], "transmission_scatter_anisotropy_out": [0.657], "transmission_scatter_out": [0.892, 0.439, 0.997]}},
+      {"inputs": {"base_weight": "0.39", "base_color": "0.616, 0.681, 0.099", "base_diffuse_roughness": "0.118", "base_metalness": "0.461", "specular_weight": "0.234", "specular_color": "0.886, 0.372, 0.435", "specular_roughness": "0.671", "specular_ior": "0.238", "specular_roughness_anisotropy": "0.948", "transmission_weight": "0.446", "transmission_color": "0.282, 0.775, 0.613", "transmission_depth": "0.966", "transmission_scatter": "0.791, 0.685, 0.125", "transmission_scatter_anisotropy": "0.332", "transmission_dispersion_scale": "0.147", "subsurface_weight": "0.445", "subsurface_color": "0.393, 0.548, 0.492", "subsurface_radius": "0.948", "subsurface_radius_scale": "0.241, 0.392, 0.253", "subsurface_scatter_anisotropy": "0.004", "fuzz_weight": "0.593", "fuzz_color": "0.735, 0.028, 0.279", "fuzz_roughness": "0.271", "coat_weight": "0.901", "coat_color": "0.962, 0.658, 0.933", "coat_roughness": "0.651", "coat_roughness_anisotropy": "0.755", "coat_ior": "0.031", "coat_darkening": "0.027", "thin_film_weight": "0.523", "thin_film_thickness": "0.093", "thin_film_ior": "0.51", "emission_luminance": "0.317", "emission_color": "0.649, 0.005, 0.772", "geometry_opacity": "0.628", "geometry_thin_walled": "false"}, "expected": {"base_color_out": [0.64378333, 0.70449865, 0.11116685], "base_out": [0.39], "coat_IOR_out": [0.031], "coat_affect_roughness_out": [1.0], "coat_anisotropy_out": [0.755], "coat_color_out": [0.962, 0.658, 0.933], "coat_out": [0.901], "coat_roughness_out": [0.651], "diffuse_roughness_out": [0.118], "emission_color_out": [0.649, 0.005, 0.772], "emission_out": [0.317], "metalness_out": [0.461], "opacity_out": [0.628, 0.628, 0.628], "sheen_color_out": [0.735, 0.028, 0.279], "sheen_out": [0.593], "sheen_roughness_out": [0.038231872], "specular_IOR_out": [0.238], "specular_anisotropy_out": [0.948], "specular_color_out": [0.886, 0.372, 0.435], "specular_out": [0.234], "specular_roughness_out": [0.65297997], "subsurface_anisotropy_out": [0.004], "subsurface_color_out": [0.4107254, 0.5669093, 0.5524656], "subsurface_out": [0.445], "subsurface_radius_out": [0.241, 0.392, 0.253], "subsurface_scale_out": [0.948], "thin_film_IOR_out": [0.51], "thin_film_thickness_out": [93.0], "thin_walled_out": [0.0], "transmission_color_out": [0.282, 0.775, 0.613], "transmission_depth_out": [0.966], "transmission_dispersion_out": [0.147], "transmission_out": [0.446], "transmission_scatter_anisotropy_out": [0.332], "transmission_scatter_out": [0.791, 0.685, 0.125]}}
+    ]},
+    {"nodedef": "ND_out_color4", "samples": [
+      {"inputs": {"fg": "0.0, 0.0, 0.0, 0.0", "bg": "0.0, 0.0, 0.0, 0.0", "mix": "1.0"}, "expected": {"out": [0.0, 0.0, 0.0, 0.0]}},
+      {"inputs": {"fg": "0.862, 1.39, -0.858, 0.233", "bg": "1.387, 1.568, 0.11, 1.576", "mix": "0.947"}, "expected": {"out": [-0.3966859, -0.6751021, 0.47384495, -0.04356701]}},
+      {"inputs": {"fg": "0.522, 0.082, 1.778, -0.187", "bg": "1.987, 0.789, 1.618, 0.902", "mix": "0.741"}, "expected": {"out": [0.5525396, 0.21030568, 0.5481768, 0.22003844]}},
+      {"inputs": {"fg": "0.013, -0.711, -0.82, 0.63", "bg": "0.406, -0.06, -0.258, -0.848", "mix": "0.932"}, "expected": {"out": [0.049998373, -1.2286611, -1.4298595, 1.0274077]}}
+    ]},
+    {"nodedef": "ND_over_color4", "samples": [
+      {"inputs": {"fg": "0.0, 0.0, 0.0, 0.0", "bg": "0.0, 0.0, 0.0, 0.0", "mix": "1.0"}, "expected": {"out": [0.0, 0.0, 0.0, 0.0]}},
+      {"inputs": {"fg": "0.099, 0.806, 1.563, 0.73", "bg": "-0.293, 0.887, 1.879, 0.244", "mix": "0.805"}, "expected": {"out": [-0.041123547, 1.0145845, 2.0330205, 0.6882634]}},
+      {"inputs": {"fg": "1.212, 1.184, 1.657, 1.234", "bg": "1.531, 1.917, -0.396, 1.336", "mix": "0.643"}, "expected": {"out": [1.0955257, 1.1572454, 0.983662, 1.0693967]}},
+      {"inputs": {"fg": "0.258, -0.739, -0.331, 1.477", "bg": "0.091, -0.806, 0.98, 1.455", "mix": "0.523"}, "expected": {"out": [0.15563914, -0.5698854, 0.049865425, 1.1035256]}}
+    ]},
+    {"nodedef": "ND_overlay_color3", "samples": [
+      {"inputs": {"fg": "0.0, 0.0, 0.0", "bg": "0.0, 0.0, 0.0", "mix": "1.0"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"fg": "0.266, 0.403, -0.631", "bg": "1.125, 1.928, 0.953", "mix": "0.572"}, "expected": {"out": [1.158462, 2.0309782, 0.89218843]}},
+      {"inputs": {"fg": "1.223, 0.865, -0.232", "bg": "0.459, 1.49, 0.443", "mix": "0.472"}, "expected": {"out": [0.77227306, 1.3211656, 0.13688345]}},
+      {"inputs": {"fg": "1.735, -0.771, 1.429", "bg": "-0.609, 1.837, -0.926", "mix": "0.358"}, "expected": {"out": [-1.1475143, 2.5987, -1.5419419]}}
+    ]},
+    {"nodedef": "ND_place2d_vector2", "samples": [
+      {"inputs": {"texcoord": "0.0, 0.0", "pivot": "0.0,0.0", "scale": "1.0,1.0", "rotate": "0.0", "offset": "0.0,0.0", "operationorder": "0"}, "expected": {"out": [0.0, 0.0]}},
+      {"inputs": {"texcoord": "-0.198, 0.047", "pivot": "1.357, 0.525", "scale": "1.022, 0.878", "rotate": "-38.035", "offset": "1.814, 1.522", "operationorder": "1"}, "expected": {"out": [-0.033660173, -3.6333761]}},
+      {"inputs": {"texcoord": "-1.629, -1.846", "pivot": "0.542, 0.071", "scale": "1.021, 1.017", "rotate": "93.338", "offset": "-0.103, 0.71", "operationorder": "1"}, "expected": {"out": [-1.9086671, 2.2513852]}},
+      {"inputs": {"texcoord": "0.1, -1.618", "pivot": "-0.831, 0.066", "scale": "0.363, 1.954", "rotate": "-177.062", "offset": "1.158, 0.102", "operationorder": "1"}, "expected": {"out": [0.045704067, 0.9728667]}}
+    ]},
+    {"nodedef": "ND_plus_color3", "samples": [
+      {"inputs": {"fg": "0.0, 0.0, 0.0", "bg": "0.0, 0.0, 0.0", "mix": "1.0"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"fg": "0.833, -0.189, -0.521", "bg": "0.51, -0.891, 0.197", "mix": "0.348"}, "expected": {"out": [0.79988396, -0.9567719, 0.015691996]}},
+      {"inputs": {"fg": "0.912, 1.961, -0.627", "bg": "-0.893, 0.18, 0.489", "mix": "0.836"}, "expected": {"out": [-0.13056798, 1.8193961, -0.035172]}},
+      {"inputs": {"fg": "0.929, 0.258, -0.534", "bg": "0.483, -0.229, 0.805", "mix": "0.088"}, "expected": {"out": [0.564752, -0.206296, 0.758008]}}
+    ]},
+    {"nodedef": "ND_premult_color4", "samples": [
+      {"inputs": {"in": "0.0, 0.0, 0.0, 1.0"}, "expected": {"out": [0.0, 0.0, 0.0, 1.0]}},
+      {"inputs": {"in": "0.33, 0.427, 0.486, 1.257"}, "expected": {"out": [0.41481, 0.536739, 0.610902, 1.257]}},
+      {"inputs": {"in": "1.645, 0.38, 1.035, -0.518"}, "expected": {"out": [-0.85211, -0.19684, -0.53613, -0.518]}},
+      {"inputs": {"in": "-0.927, 0.142, 0.209, 0.598"}, "expected": {"out": [-0.55434596, 0.084916, 0.124982, 0.598]}}
+    ]},
+    {"nodedef": "ND_ramp", "samples": [
+      {"inputs": {"texcoord": "-1.715, 0.664", "type": "0", "interpolation": "1", "num_intervals": "2", "interval1": "0", "color1": "0,0,0,1", "interval2": "1", "color2": "1,1,1,1", "interval3": "1", "color3": "1,1,1,1", "interval4": "1", "color4": "1,1,1,1", "interval5": "1", "color5": "1,1,1,1", "interval6": "1", "color6": "1,1,1,1", "interval7": "1", "color7": "1,1,1,1", "interval8": "1", "color8": "1,1,1,1", "interval9": "1", "color9": "1,1,1,1", "interval10": "1", "color10": "1,1,1,1"}, "expected": {"out": [0.0, 0.0, 0.0, 1.0]}},
+      {"inputs": {"texcoord": "1.162, 1.124", "type": "0", "interpolation": "2", "num_intervals": "7", "interval1": "0.058", "color1": "0.822, 0.66, 0.891, 0.065", "interval2": "0.095", "color2": "0.885, 0.307, 0.475, 0.981", "interval3": "0.103", "color3": "0.1, 0.832, 0.844, 0.012", "interval4": "0.148", "color4": "0.215, 0.55, 0.992, 0.373", "interval5": "0.258", "color5": "0.854, 0.252, 0.187, 0.473", "interval6": "0.282", "color6": "0.545, 0.577, 0.762, 0.262", "interval7": "0.434", "color7": "0.025, 0.822, 0.106, 0.042", "interval8": "0.557", "color8": "0.346, 0.082, 0.418, 0.034", "interval9": "0.678", "color9": "0.025, 0.328, 0.487, 0.99", "interval10": "0.962", "color10": "0.825, 0.558, 0.143, 0.235"}, "expected": {"out": [0.025, 0.822, 0.106, 0.042]}},
+      {"inputs": {"texcoord": "-0.324, 1.831", "type": "1", "interpolation": "0", "num_intervals": "5", "interval1": "0.12", "color1": "0.99, 0.878, 0.004, 0.246", "interval2": "0.124", "color2": "0.457, 0.043, 0.854, 0.552", "interval3": "0.131", "color3": "0.466, 0.389, 0.137, 0.209", "interval4": "0.154", "color4": "0.977, 0.074, 0.797, 0.472", "interval5": "0.159", "color5": "0.885, 0.407, 0.826, 0.663", "interval6": "0.539", "color6": "0.78, 0.858, 0.891, 0.817", "interval7": "0.662", "color7": "0.977, 0.16, 0.669, 0.085", "interval8": "0.873", "color8": "0.015, 0.687, 0.066, 0.109", "interval9": "0.876", "color9": "0.935, 0.162, 0.896, 0.363", "interval10": "0.887", "color10": "0.682, 0.236, 0.996, 0.488"}, "expected": {"out": [0.885, 0.407, 0.826, 0.663]}},
+      {"inputs": {"texcoord": "-0.085, -1.397", "type": "2", "interpolation": "1", "num_intervals": "3", "interval1": "0.022", "color1": "0.516, 0.087, 0.269, 0.939", "interval2": "0.043", "color2": "0.956, 0.893, 0.015, 0.655", "interval3": "0.42", "color3": "0.921, 0.958, 0.469, 0.538", "interval4": "0.44", "color4": "0.131, 0.639, 0.868, 0.616", "interval5": "0.489", "color5": "0.067, 0.076, 0.404, 0.463", "interval6": "0.517", "color6": "0.046, 0.597, 0.018, 0.14", "interval7": "0.667", "color7": "0.355, 0.555, 0.193, 0.344", "interval8": "0.735", "color8": "0.597, 0.132, 0.841, 0.32", "interval9": "0.748", "color9": "0.547, 0.65, 0.632, 0.908", "interval10": "0.769", "color10": "0.753, 0.306, 0.214, 0.05"}, "expected": {"out": [0.921, 0.958, 0.469, 0.538]}}
+    ]},
+    {"nodedef": "ND_ramp4_color3", "samples": [
+      {"inputs": {"valuetl": "0.0, 0.0, 0.0", "valuetr": "0.0, 0.0, 0.0", "valuebl": "0.0, 0.0, 0.0", "valuebr": "0.0, 0.0, 0.0", "texcoord": "0.653, 0.289"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"valuetl": "0.158, 1.309, 1.336", "valuetr": "-0.871, 1.526, -0.572", "valuebl": "0.322, 1.971, -0.955", "valuebr": "1.785, 1.428, 0.138", "texcoord": "0.215, 0.355"}, "expected": {"out": [0.38812306, 1.6772518, -0.1357513]}},
+      {"inputs": {"valuetl": "-0.486, 0.701, 0.815", "valuetr": "-0.781, 0.319, -0.967", "valuebl": "1.524, 0.629, -0.239", "valuebr": "1.049, -0.693, -0.068", "texcoord": "0.843, 0.008"}, "expected": {"out": [1.108709, -0.47853064, -0.09958604]}},
+      {"inputs": {"valuetl": "-0.475, -0.842, -0.194", "valuetr": "0.017, -0.896, 0.633", "valuebl": "0.563, 1.732, 0.663", "valuebr": "-0.6, -0.401, 1.119", "texcoord": "0.373, 0.923"}, "expected": {"out": [-0.2590912, -0.72365487, 0.16980451]}}
+    ]},
+    {"nodedef": "ND_ramplr_color3", "samples": [
+      {"inputs": {"valuel": "0.0, 0.0, 0.0", "valuer": "0.0, 0.0, 0.0", "texcoord": "0.283, 0.291"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"valuel": "0.919, -0.686, -0.46", "valuer": "1.413, 0.179, 0.874", "texcoord": "0.404, 0.088"}, "expected": {"out": [1.118576, -0.33653998, 0.07893601]}},
+      {"inputs": {"valuel": "0.988, -0.646, 0.012", "valuer": "1.786, 0.722, -0.969", "texcoord": "0.083, 0.383"}, "expected": {"out": [1.0542339, -0.53245604, -0.069423]}},
+      {"inputs": {"valuel": "1.722, 0.846, 1.164", "valuer": "-0.341, -0.277, 0.652", "texcoord": "0.18, 0.692"}, "expected": {"out": [1.35066, 0.64386, 1.07184]}}
+    ]},
+    {"nodedef": "ND_ramptb_color3", "samples": [
+      {"inputs": {"valuet": "0.0, 0.0, 0.0", "valueb": "0.0, 0.0, 0.0", "texcoord": "0.771, 0.75"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"valuet": "-0.752, 0.582, 0.52", "valueb": "-0.174, 1.899, -0.505", "texcoord": "0.168, 0.213"}, "expected": {"out": [-0.29711399, 1.618479, -0.286675]}},
+      {"inputs": {"valuet": "1.709, 0.337, 1.633", "valueb": "1.107, 1.069, -0.895", "texcoord": "0.253, 0.061"}, "expected": {"out": [1.143722, 1.024348, -0.740792]}},
+      {"inputs": {"valuet": "-0.255, 1.564, -0.242", "valueb": "1.696, 1.536, -0.46", "texcoord": "0.799, 0.514"}, "expected": {"out": [0.693186, 1.550392, -0.347948]}}
+    ]},
+    {"nodedef": "ND_randomcolor_float", "samples": [
+      {"inputs": {"in": "0.0", "huelow": "0", "huehigh": "1", "saturationlow": "0.825", "saturationhigh": "1", "brightnesslow": "1", "brightnesshigh": "1", "seed": "0"}, "expected": {"out": [0.18374091, 0.027212858, 1.0]}},
+      {"inputs": {"in": "3.947", "huelow": "0.743", "huehigh": "0.83", "saturationlow": "0.006", "saturationhigh": "0.695", "brightnesslow": "0.11", "brightnesshigh": "0.695", "seed": "3"}, "expected": {"out": [0.26735425, 0.16964428, 0.29261973]}},
+      {"inputs": {"in": "9.859", "huelow": "0.099", "huehigh": "0.942", "saturationlow": "0.305", "saturationhigh": "0.959", "brightnesslow": "0.761", "brightnesshigh": "0.851", "seed": "3"}, "expected": {"out": [0.48624092, 0.7636956, 0.6067758]}},
+      {"inputs": {"in": "8.265", "huelow": "0.003", "huehigh": "0.282", "saturationlow": "0.121", "saturationhigh": "0.245", "brightnesslow": "0.157", "brightnesshigh": "0.756", "seed": "1"}, "expected": {"out": [0.6914289, 0.7311913, 0.623008]}}
+    ]},
+    {"nodedef": "ND_randomfloat_float", "samples": [
+      {"inputs": {"in": "0.0", "min": "0.0", "max": "1.0", "seed": "0"}, "expected": {"out": [0.86031276]}},
+      {"inputs": {"in": "-0.779", "min": "0.882", "max": "1.047", "seed": "1"}, "expected": {"out": [0.8901787]}},
+      {"inputs": {"in": "-0.057", "min": "0.97", "max": "1.754", "seed": "2"}, "expected": {"out": [1.0305521]}},
+      {"inputs": {"in": "0.598", "min": "-0.072", "max": "1.411", "seed": "3"}, "expected": {"out": [1.0359997]}}
+    ]},
+    {"nodedef": "ND_range_color3", "samples": [
+      {"inputs": {"in": "0.0, 0.0, 0.0", "inlow": "0.0, 0.0, 0.0", "inhigh": "1.0, 1.0, 1.0", "gamma": "1.0, 1.0, 1.0", "outlow": "0.0, 0.0, 0.0", "outhigh": "1.0, 1.0, 1.0", "doclamp": "false"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"in": "-0.281, 0.118, 0.447", "inlow": "-0.784, -0.398, 0.196", "inhigh": "1.592, -0.923, 0.92", "gamma": "0.712, 0.967, 2.153", "outlow": "-0.984, 1.53, -0.984", "outhigh": "0.005, 1.902, -0.231", "doclamp": "false"}, "expected": {"out": [-0.8722685, 1.1645927, -0.52362496]}},
+      {"inputs": {"in": "0.808, 1.696, 0.081", "inlow": "0.261, -0.222, 1.079", "inhigh": "0.62, 0.786, 1.52", "gamma": "2.207, 0.437, 2.498", "outlow": "-0.074, -0.68, 0.812", "outhigh": "1.372, 0.77, 1.236", "doclamp": "true"}, "expected": {"out": [1.372, 0.77, 0.812]}},
+      {"inputs": {"in": "1.16, 1.381, 0.914", "inlow": "-0.888, -0.099, 1.549", "inhigh": "0.283, 1.591, 0.675", "gamma": "1.86, 1.813, 1.498", "outlow": "1.339, 1.813, 0.265", "outhigh": "1.792, 1.986, 0.799", "doclamp": "false"}, "expected": {"out": [1.9508154, 1.9737909, 0.69644415]}}
+    ]},
+    {"nodedef": "ND_reflect_vector3", "samples": [
+      {"inputs": {"in": "1.0, 0.0, 0.0", "normal": "-0.621, 0.783, -0.017"}, "expected": {"out": [0.22871804, 0.97248596, -0.021114001]}},
+      {"inputs": {"in": "-0.977, 1.855, -0.745", "normal": "0.441, 0.801, 0.404"}, "expected": {"out": [-1.6420438, 0.64706325, -1.3542466]}},
+      {"inputs": {"in": "0.664, 1.8, -0.621", "normal": "0.316, -0.943, 0.104"}, "expected": {"out": [1.6449652, -1.1273739, -0.2981507]}},
+      {"inputs": {"in": "0.408, 1.856, 0.293", "normal": "-0.243, -0.132, 0.961"}, "expected": {"out": [0.37759438, 1.8394834, 0.41324604]}}
+    ]},
+    {"nodedef": "ND_refract_vector3", "samples": [
+      {"inputs": {"in": "1.0, 0.0, 0.0", "normal": "-0.159, -0.984, 0.08", "ior": "1.0"}, "expected": {"out": [1.0, 4.398823e-08, -3.5762786e-09]}},
+      {"inputs": {"in": "0.16, -0.744, 1.591", "normal": "-0.071, 0.993, -0.09", "ior": "1.513"}, "expected": {"out": [0.19817863, -0.5116712, 2.3515334]}},
+      {"inputs": {"in": "-0.772, 1.966, -0.616", "normal": "-0.714, 0.676, -0.179", "ior": "1.659"}, "expected": {"out": [3.2370935, -1.0158022, 0.1106801]}},
+      {"inputs": {"in": "0.112, 1.359, 1.886", "normal": "0.168, 0.85, 0.499", "ior": "1.914"}, "expected": {"out": [-1.0881352, -3.9889205, -0.2589407]}}
+    ]},
+    {"nodedef": "ND_rgbtohsv_color3", "samples": [
+      {"inputs": {"in": "0.0, 0.0, 0.0"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"in": "0.808, 0.541, 0.75"}, "expected": {"out": [0.86953807, 0.33044556, 0.808]}},
+      {"inputs": {"in": "0.953, 0.996, 0.848"}, "expected": {"out": [0.21509008, 0.14859438, 0.996]}},
+      {"inputs": {"in": "0.679, 0.692, 0.577"}, "expected": {"out": [0.1855072, 0.1661849, 0.692]}}
+    ]},
+    {"nodedef": "ND_rgbtohsv_color4", "samples": [
+      {"inputs": {"in": "0.0, 0.0, 0.0, 0.0"}, "expected": {"out": [0.0, 0.0, 0.0, 0.0]}},
+      {"inputs": {"in": "0.358, 0.033, 0.893, 0.752"}, "expected": {"out": [0.7296512, 0.9630459, 0.893, 0.752]}},
+      {"inputs": {"in": "0.432, 0.736, 0.778, 0.908"}, "expected": {"out": [0.52023125, 0.44473007, 0.778, 0.908]}},
+      {"inputs": {"in": "0.923, 0.098, 0.895, 0.179"}, "expected": {"out": [0.8389899, 0.8938245, 0.923, 0.179]}}
+    ]},
+    {"nodedef": "ND_rotate2d_vector2", "samples": [
+      {"inputs": {"in": "0.0, 0.0", "amount": "0.0"}, "expected": {"out": [0.0, 0.0]}},
+      {"inputs": {"in": "-0.513, 0.112", "amount": "-108.367"}, "expected": {"out": [0.05535306, -0.5221581]}},
+      {"inputs": {"in": "-0.782, 1.818", "amount": "17.548"}, "expected": {"out": [-0.19747394, 1.9691755]}},
+      {"inputs": {"in": "-0.069, -0.817", "amount": "72.53"}, "expected": {"out": [-0.8000295, -0.17945132]}}
+    ]},
+    {"nodedef": "ND_rotate3d_vector3", "samples": [
+      {"inputs": {"in": "0.0, 0.0, 0.0", "amount": "0.0", "axis": "0.0, 1.0, 0.0"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"in": "1.933, -0.296, 1.484", "amount": "88.449", "axis": "0.894, -0.397, -0.208"}, "expected": {"out": [2.039452, 1.1264348, -0.7733958]}},
+      {"inputs": {"in": "1.542, -0.652, 1.725", "amount": "-54.944", "axis": "0.449, 0.755, 0.477"}, "expected": {"out": [2.4025958, -0.077435076, 0.0054946244]}},
+      {"inputs": {"in": "1.858, 0.764, -0.521", "amount": "58.541", "axis": "0.697, 0.637, -0.329"}, "expected": {"out": [1.6893376, 1.2053521, -0.023785353]}}
+    ]},
+    {"nodedef": "ND_roughness_anisotropy", "samples": [
+      {"inputs": {"roughness": "0.0", "anisotropy": "0.0"}, "expected": {"out": [1e-08, 1e-08]}},
+      {"inputs": {"roughness": "0.607", "anisotropy": "0.084"}, "expected": {"out": [0.38497245, 0.35263476]}},
+      {"inputs": {"roughness": "0.31", "anisotropy": "0.423"}, "expected": {"out": [0.1265131, 0.07299806]}},
+      {"inputs": {"roughness": "0.869", "anisotropy": "0.127"}, "expected": {"out": [0.80822533, 0.7055807]}}
+    ]},
+    {"nodedef": "ND_roughness_dual", "samples": [
+      {"inputs": {"roughness": "0.0, 0.0"}, "expected": {"out": [1e-08, 1e-08]}},
+      {"inputs": {"roughness": "0.768, 0.133"}, "expected": {"out": [0.589824, 0.017689]}},
+      {"inputs": {"roughness": "0.517, 0.672"}, "expected": {"out": [0.267289, 0.45158398]}},
+      {"inputs": {"roughness": "0.528, 0.434"}, "expected": {"out": [0.278784, 0.18835598]}}
+    ]},
+    {"nodedef": "ND_saturate_color3", "samples": [
+      {"inputs": {"in": "0.0, 0.0, 0.0", "amount": "1.0", "lumacoeffs": "0.2722287, 0.6740818, 0.0536895"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"in": "-0.108, 1.682, -0.711", "amount": "0.824", "lumacoeffs": "0.403, 1.367, 1.174"}, "expected": {"out": [0.16111383, 1.636074, -0.33575818]}},
+      {"inputs": {"in": "1.319, 1.17, -0.991", "amount": "-0.293", "lumacoeffs": "0.698, 0.056, -0.265"}, "expected": {"out": [1.2282276, 1.2718846, 1.9050577]}},
+      {"inputs": {"in": "-0.725, -0.594, 0.4", "amount": "-0.059", "lumacoeffs": "-0.911, -0.078, -0.063"}, "expected": {"out": [0.7645968, 0.7568678, 0.69822186]}}
+    ]},
+    {"nodedef": "ND_screen_color3", "samples": [
+      {"inputs": {"fg": "0.0, 0.0, 0.0", "bg": "0.0, 0.0, 0.0", "mix": "1.0"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"fg": "-0.699, 1.2, -0.316", "bg": "1.585, -0.658, 0.61", "mix": "0.979"}, "expected": {"out": [1.9853278, 1.2898184, 0.48934805]}},
+      {"inputs": {"fg": "1.586, 0.126, -0.589", "bg": "1.002, 0.418, 0.733", "mix": "0.61"}, "expected": {"out": [1.0000651, 0.4627325, 0.6370696]}},
+      {"inputs": {"fg": "-0.003, 0.126, -0.106", "bg": "0.928, 0.117, 1.588", "mix": "0.842"}, "expected": {"out": [0.92781806, 0.21067919, 1.6404802]}}
+    ]},
+    {"nodedef": "ND_splitlr_color3", "samples": [
+      {"inputs": {"valuel": "0.0, 0.0, 0.0", "valuer": "0.0, 0.0, 0.0", "center": "0.5", "texcoord": "0.19, 0.933"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"valuel": "1.958, -0.82, 0.009", "valuer": "-0.284, 0.955, 0.377", "center": "0.202", "texcoord": "0.361, 0.887"}, "expected": {"out": [-0.284, 0.955, 0.377]}},
+      {"inputs": {"valuel": "-0.088, -0.51, 1.459", "valuer": "0.2, 0.744, 1.722", "center": "0.766", "texcoord": "0.904, 0.224"}, "expected": {"out": [0.2, 0.744, 1.722]}},
+      {"inputs": {"valuel": "1.12, 0.783, 0.871", "valuer": "1.582, 1.848, 1.096", "center": "0.331", "texcoord": "0.377, 0.789"}, "expected": {"out": [1.582, 1.848, 1.096]}}
+    ]},
+    {"nodedef": "ND_splittb_color3", "samples": [
+      {"inputs": {"valuet": "0.0, 0.0, 0.0", "valueb": "0.0, 0.0, 0.0", "center": "0.5", "texcoord": "0.346, 0.24"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"valuet": "-0.814, 1.676, -0.646", "valueb": "-0.347, -0.044, 0.018", "center": "0.69", "texcoord": "0.227, 0.623"}, "expected": {"out": [-0.347, -0.044, 0.018]}},
+      {"inputs": {"valuet": "0.19, 0.106, -0.909", "valueb": "-0.722, 0.81, 0.981", "center": "0.422", "texcoord": "0.256, 0.663"}, "expected": {"out": [0.19, 0.106, -0.909]}},
+      {"inputs": {"valuet": "-0.856, 1.348, 1.247", "valueb": "-0.015, 0.911, 1.121", "center": "0.423", "texcoord": "0.163, 0.725"}, "expected": {"out": [-0.856, 1.348, 1.247]}}
+    ]},
+    {"nodedef": "ND_srgb_texture_to_lin_rec709_color3", "samples": [
+      {"inputs": {"in": "0.0, 0.0, 0.0"}, "expected": {"out": [0.0, 0.0, 0.0]}},
+      {"inputs": {"in": "0.822, -0.08, -0.8"}, "expected": {"out": [0.64179116, -0.0061919503, -0.061919507]}},
+      {"inputs": {"in": "1.948, -0.532, 1.071"}, "expected": {"out": [4.6583014, -0.04117647, 1.1691908]}},
+      {"inputs": {"in": "-0.393, 1.959, 0.528"}, "expected": {"out": [-0.030417956, 4.7199345, 0.2408788]}}
+    ]},
+    {"nodedef": "ND_standard_surface_to_UsdPreviewSurface", "samples": [
+      {"inputs": {"metalness": "0", "base": "1", "base_color": "0.8, 0.8, 0.8", "specular": "1", "specular_color": "1, 1, 1", "specular_IOR": "1.5", "specular_roughness": "0.2", "coat": "0", "coat_color": "1, 1, 1", "coat_roughness": "0.1", "subsurface": "0", "subsurface_color": "1, 1, 1", "emission": "0", "emission_color": "1, 1, 1", "opacity": "1, 1, 1", "normal": "0.5, 0.5, 1.0"}, "expected": {"clearcoatRoughness_out": [0.1], "clearcoat_out": [0.0], "diffuseColor_out": [0.8, 0.8, 0.8], "emissiveColor_out": [0.0, 0.0, 0.0], "ior_out": [1.5], "metallic_out": [0.0], "normal_out": [0.0, 0.0, 1.0], "opacity_out": [1.0], "roughness_out": [0.2]}},
+      {"inputs": {"metalness": "0.069", "base": "0.827", "base_color": "0.018, 0.371, 0.788", "specular": "0.427", "specular_color": "0.79, 0.593, 0.734", "specular_IOR": "0.525", "specular_roughness": "0.72", "coat": "0.866", "coat_color": "0.406, 0.269, 0.735", "coat_roughness": "0.715", "subsurface": "0.495", "subsurface_color": "0.606, 0.79, 0.433", "emission": "0.337", "emission_color": "0.58, 0.3, 0.16", "opacity": "0.452, 0.479, 0.583", "normal": "0.712, 0.341, 0.613"}, "expected": {"clearcoatRoughness_out": [0.715], "clearcoat_out": [0.40702], "diffuseColor_out": [0.14931467, 0.20035417, 0.41871935], "emissiveColor_out": [0.0949146, 0.037099052, 0.0415459], "ior_out": [0.525], "metallic_out": [0.069], "normal_out": [0.42400003, -0.31800002, 0.22599995], "opacity_out": [0.5046667], "roughness_out": [0.72]}},
+      {"inputs": {"metalness": "0.645", "base": "0.127", "base_color": "0.507, 0.155, 0.61", "specular": "0.111", "specular_color": "0.067, 0.539, 0.314", "specular_IOR": "0.742", "specular_roughness": "0.644", "coat": "0.634", "coat_color": "0.214, 0.673, 0.075", "coat_roughness": "0.394", "subsurface": "0.849", "subsurface_color": "0.557, 0.523, 0.57", "emission": "0.231", "emission_color": "0.497, 0.896, 0.674", "opacity": "0.54, 0.1, 0.374", "normal": "0.986, 0.08, 0.149"}, "expected": {"clearcoatRoughness_out": [0.394], "clearcoat_out": [0.20330268], "diffuseColor_out": [0.2421167, 0.35432836, 0.20496695], "emissiveColor_out": [0.057595912, 0.16406615, 0.064387254], "ior_out": [0.742], "metallic_out": [0.645], "normal_out": [0.972, -0.84000003, -0.702], "opacity_out": [0.338], "roughness_out": [0.644]}},
+      {"inputs": {"metalness": "0.849", "base": "0.101", "base_color": "0.443, 0.137, 0.553", "specular": "0.085", "specular_color": "0.763, 0.089, 0.153", "specular_IOR": "0.469", "specular_roughness": "0.169", "coat": "0.608", "coat_color": "0.947, 0.87, 0.338", "coat_roughness": "0.312", "subsurface": "0.07", "subsurface_color": "0.494, 0.765, 0.435", "emission": "0.584", "emission_color": "0.648, 0.546, 0.55", "opacity": "0.907, 0.718, 0.925", "normal": "0.637, 0.041, 0.77"}, "expected": {"clearcoatRoughness_out": [0.312], "clearcoat_out": [0.43674666], "diffuseColor_out": [0.07373582, 0.0611687, 0.049230322], "emissiveColor_out": [0.3662374, 0.29366097, 0.1919183], "ior_out": [0.469], "metallic_out": [0.849], "normal_out": [0.27400005, -0.918, 0.53999996], "opacity_out": [0.85], "roughness_out": [0.169]}}
+    ]},
+    {"nodedef": "ND_standard_surface_to_open_pbr_surface", "samples": [
+      {"inputs": {"base": "0.8", "base_color": "1.0, 1.0, 1.0", "diffuse_roughness": "0", "metalness": "0", "specular": "1", "specular_color": "1, 1, 1", "specular_roughness": "0.2", "specular_IOR": "1.5", "specular_anisotropy": "0", "transmission": "0", "transmission_color": "1, 1, 1", "transmission_depth": "0", "transmission_scatter": "0, 0, 0", "transmission_scatter_anisotropy": "0", "transmission_dispersion": "0", "subsurface": "0", "subsurface_color": "1, 1, 1", "subsurface_radius": "1, 1, 1", "subsurface_scale": "1", "subsurface_anisotropy": "0", "sheen": "0", "sheen_color": "1, 1, 1", "sheen_roughness": "0.3", "coat": "0", "coat_color": "1, 1, 1", "coat_roughness": "0.1", "coat_anisotropy": "0.0", "coat_IOR": "1.5", "coat_affect_roughness": "0", "thin_film_thickness": "0", "thin_film_IOR": "1.5", "emission": "0", "emission_color": "1, 1, 1", "opacity": "1, 1, 1", "thin_walled": "false"}, "expected": {"base_color_out": [1.0, 1.0, 1.0], "base_diffuse_roughness_out": [0.0], "base_metalness_out": [0.0], "base_weight_out": [0.8], "coat_color_out": [1.0, 1.0, 1.0], "coat_darkening_out": [0.0], "coat_ior_out": [1.5], "coat_roughness_anisotropy_out": [0.0], "coat_roughness_out": [0.1], "coat_weight_out": [0.0], "emission_color_out": [1.0, 1.0, 1.0], "emission_luminance_out": [0.0], "fuzz_color_out": [1.0, 1.0, 1.0], "fuzz_roughness_out": [0.61780345], "fuzz_weight_out": [0.0], "geometry_opacity_out": [1.0], "geometry_thin_walled_out": [0.0], "specular_color_out": [1.0, 1.0, 1.0], "specular_ior_out": [1.5], "specular_roughness_anisotropy_out": [0.0], "specular_roughness_out": [0.2], "specular_weight_out": [1.0], "subsurface_color_out": [1.0, 1.0, 1.0], "subsurface_radius_out": [1.0], "subsurface_radius_scale_out": [1.0, 1.0, 1.0], "subsurface_scatter_anisotropy_out": [0.0], "subsurface_weight_out": [0.0], "thin_film_ior_out": [1.5], "thin_film_thickness_out": [0.0], "thin_film_weight_out": [0.0], "transmission_color_out": [1.0, 1.0, 1.0], "transmission_depth_out": [0.0], "transmission_dispersion_scale_out": [0.0], "transmission_scatter_anisotropy_out": [0.0], "transmission_scatter_out": [0.0, 0.0, 0.0], "transmission_weight_out": [0.0]}},
+      {"inputs": {"base": "0.216", "base_color": "0.65, 0.701, 0.437", "diffuse_roughness": "0.102", "metalness": "0.166", "specular": "0.16", "specular_color": "0.709, 0.561, 0.508", "specular_roughness": "0.355", "specular_IOR": "0.366", "specular_anisotropy": "0.434", "transmission": "0.96", "transmission_color": "0.827, 0.926, 0.812", "transmission_depth": "0.7", "transmission_scatter": "0.261, 0.894, 0.464", "transmission_scatter_anisotropy": "0.188", "transmission_dispersion": "0.912", "subsurface": "0.369", "subsurface_color": "0.754, 0.363, 0.245", "subsurface_radius": "0.156, 0.345, 0.734", "subsurface_scale": "0.587", "subsurface_anisotropy": "0.522", "sheen": "0.897", "sheen_color": "0.203, 0.836, 0.319", "sheen_roughness": "0.328", "coat": "0.191", "coat_color": "0.842, 0.666, 0.187", "coat_roughness": "0.632", "coat_anisotropy": "0.966", "coat_IOR": "0.415", "coat_affect_roughness": "0.519", "thin_film_thickness": "0.59", "thin_film_IOR": "0.948", "emission": "0.907", "emission_color": "0.413, 0.579, 0.181", "opacity": "0.655, 0.195, 0.692", "thin_walled": "false"}, "expected": {"base_color_out": [0.6303843, 0.6562804, 0.36914134], "base_diffuse_roughness_out": [0.102], "base_metalness_out": [0.166], "base_weight_out": [0.216], "coat_color_out": [0.842, 0.666, 0.187], "coat_darkening_out": [0.519], "coat_ior_out": [0.415], "coat_roughness_anisotropy_out": [0.966], "coat_roughness_out": [0.632], "coat_weight_out": [0.0], "emission_color_out": [0.413, 0.579, 0.181], "emission_luminance_out": [0.907], "fuzz_color_out": [0.203, 0.836, 0.319], "fuzz_roughness_out": [0.6402508], "fuzz_weight_out": [0.897], "geometry_opacity_out": [0.655], "geometry_thin_walled_out": [0.0], "specular_color_out": [0.709, 0.561, 0.508], "specular_ior_out": [0.366], "specular_roughness_anisotropy_out": [0.434], "specular_roughness_out": [0.355], "specular_weight_out": [1.0], "subsurface_color_out": [0.754, 0.363, 0.245], "subsurface_radius_out": [0.587], "subsurface_radius_scale_out": [0.156, 0.345, 0.734], "subsurface_scatter_anisotropy_out": [0.522], "subsurface_weight_out": [0.369], "thin_film_ior_out": [0.948], "thin_film_thickness_out": [0.00059], "thin_film_weight_out": [1.0], "transmission_color_out": [0.827, 0.926, 0.812], "transmission_depth_out": [0.7], "transmission_dispersion_scale_out": [0.912], "transmission_scatter_anisotropy_out": [0.188], "transmission_scatter_out": [0.261, 0.894, 0.464], "transmission_weight_out": [0.96]}},
+      {"inputs": {"base": "0.33", "base_color": "0.623, 0.403, 0.033", "diffuse_roughness": "0.845", "metalness": "0.297", "specular": "0.151", "specular_color": "0.699, 0.962, 0.437", "specular_roughness": "0.412", "specular_IOR": "0.902", "specular_anisotropy": "0.229", "transmission": "0.483", "transmission_color": "0.624, 0.723, 0.123", "transmission_depth": "0.414", "transmission_scatter": "0.592, 0.039, 0.607", "transmission_scatter_anisotropy": "0.099", "transmission_dispersion": "0.544", "subsurface": "0.169", "subsurface_color": "0.771, 0.321, 0.363", "subsurface_radius": "0.084, 0.079, 0.017", "subsurface_scale": "0.469", "subsurface_anisotropy": "0.267", "sheen": "0.449", "sheen_color": "0.915, 0.742, 0.535", "sheen_roughness": "0.635", "coat": "0.164", "coat_color": "0.5, 0.959, 0.159", "coat_roughness": "0.218", "coat_anisotropy": "0.643", "coat_IOR": "0.67", "coat_affect_roughness": "0.842", "thin_film_thickness": "0.232", "thin_film_IOR": "0.546", "emission": "0.061", "emission_color": "0.122, 0.395, 0.536", "opacity": "0.63, 0.839, 0.122", "thin_walled": "false"}, "expected": {"base_color_out": [0.571914, 0.40029022, 0.028448507], "base_diffuse_roughness_out": [0.845], "base_metalness_out": [0.297], "base_weight_out": [0.33], "coat_color_out": [0.5, 0.959, 0.159], "coat_darkening_out": [0.842], "coat_ior_out": [0.67], "coat_roughness_anisotropy_out": [0.643], "coat_roughness_out": [0.218], "coat_weight_out": [0.0], "emission_color_out": [0.122, 0.395, 0.536], "emission_luminance_out": [0.061], "fuzz_color_out": [0.915, 0.742, 0.535], "fuzz_roughness_out": [0.83388936], "fuzz_weight_out": [0.449], "geometry_opacity_out": [0.63], "geometry_thin_walled_out": [0.0], "specular_color_out": [0.699, 0.962, 0.437], "specular_ior_out": [0.902], "specular_roughness_anisotropy_out": [0.229], "specular_roughness_out": [0.412], "specular_weight_out": [1.0], "subsurface_color_out": [0.771, 0.321, 0.363], "subsurface_radius_out": [0.469], "subsurface_radius_scale_out": [0.084, 0.079, 0.017], "subsurface_scatter_anisotropy_out": [0.267], "subsurface_weight_out": [0.169], "thin_film_ior_out": [0.546], "thin_film_thickness_out": [0.000232], "thin_film_weight_out": [1.0], "transmission_color_out": [0.624, 0.723, 0.123], "transmission_depth_out": [0.414], "transmission_dispersion_scale_out": [0.544], "transmission_scatter_anisotropy_out": [0.099], "transmission_scatter_out": [0.592, 0.039, 0.607], "transmission_weight_out": [0.483]}},
+      {"inputs": {"base": "0.355", "base_color": "0.261, 0.252, 0.042", "diffuse_roughness": "0.208", "metalness": "0.739", "specular": "0.212", "specular_color": "0.753, 0.169, 0.719", "specular_roughness": "0.579", "specular_IOR": "0.206", "specular_anisotropy": "0.401", "transmission": "0.509", "transmission_color": "0.366, 0.108, 0.05", "transmission_depth": "0.891", "transmission_scatter": "0.411, 0.667, 0.045", "transmission_scatter_anisotropy": "0.11", "transmission_dispersion": "0.313", "subsurface": "0.942", "subsurface_color": "0.14, 0.422, 0.942", "subsurface_radius": "0.262, 0.996, 0.046", "subsurface_scale": "0.401", "subsurface_anisotropy": "0.073", "sheen": "0.908", "sheen_color": "0.178, 0.353, 0.638", "sheen_roughness": "0.237", "coat": "0.551", "coat_color": "0.564, 0.201, 0.555", "coat_roughness": "0.455", "coat_anisotropy": "0.224", "coat_IOR": "0.697", "coat_affect_roughness": "0.238", "thin_film_thickness": "0.372", "thin_film_IOR": "0.656", "emission": "0.751", "emission_color": "0.866, 0.783, 0.013", "opacity": "0.236, 0.323, 0.693", "thin_walled": "false"}, "expected": {"base_color_out": [0.19829841, 0.14105727, 0.031701807], "base_diffuse_roughness_out": [0.208], "base_metalness_out": [0.739], "base_weight_out": [0.355], "coat_color_out": [0.564, 0.201, 0.555], "coat_darkening_out": [0.238], "coat_ior_out": [0.697], "coat_roughness_anisotropy_out": [0.224], "coat_roughness_out": [0.455], "coat_weight_out": [0.0], "emission_color_out": [0.866, 0.783, 0.013], "emission_luminance_out": [0.751], "fuzz_color_out": [0.178, 0.353, 0.638], "fuzz_roughness_out": [0.562217], "fuzz_weight_out": [0.908], "geometry_opacity_out": [0.236], "geometry_thin_walled_out": [0.0], "specular_color_out": [0.753, 0.169, 0.719], "specular_ior_out": [0.206], "specular_roughness_anisotropy_out": [0.401], "specular_roughness_out": [0.579], "specular_weight_out": [1.0], "subsurface_color_out": [0.14, 0.422, 0.942], "subsurface_radius_out": [0.401], "subsurface_radius_scale_out": [0.262, 0.996, 0.046], "subsurface_scatter_anisotropy_out": [0.073], "subsurface_weight_out": [0.942], "thin_film_ior_out": [0.656], "thin_film_thickness_out": [0.00037200004], "thin_film_weight_out": [1.0], "transmission_color_out": [0.366, 0.108, 0.05], "transmission_depth_out": [0.891], "transmission_dispersion_scale_out": [0.313], "transmission_scatter_anisotropy_out": [0.11], "transmission_scatter_out": [0.411, 0.667, 0.045], "transmission_weight_out": [0.509]}}
+    ]},
+    {"nodedef": "ND_trianglewave_float", "samples": [
+      {"inputs": {"in": "0"}, "expected": {"out": [0.0]}},
+      {"inputs": {"in": "0.938"}, "expected": {"out": [0.061999977]}},
+      {"inputs": {"in": "1.011"}, "expected": {"out": [0.011000037]}},
+      {"inputs": {"in": "0.274"}, "expected": {"out": [0.274]}}
+    ]},
+    {"nodedef": "ND_unifiednoise2d_float", "samples": [
+      {"inputs": {"texcoord": "-0.464, -1.108", "freq": "1, 1", "offset": "0, 0", "jitter": "1", "outmin": "0", "outmax": "1", "clampoutput": "true", "octaves": "3", "lacunarity": "2", "diminish": "0.5", "type": "0", "style": "0"}, "expected": {"out": [0.44571266]}},
+      {"inputs": {"texcoord": "0.557, 0.11", "freq": "-0.496, 0.134", "offset": "0.985, -0.231", "jitter": "0.758", "outmin": "-0.899", "outmax": "0.151", "clampoutput": "false", "octaves": "4", "lacunarity": "2.835", "diminish": "0.762", "type": "2", "style": "0"}, "expected": {"out": [-0.6490892]}},
+      {"inputs": {"texcoord": "-0.47, 1.164", "freq": "0.533, -0.453", "offset": "-0.384, 1.144", "jitter": "0.955", "outmin": "-0.173", "outmax": "1.155", "clampoutput": "true", "octaves": "2", "lacunarity": "1.794", "diminish": "0.984", "type": "0", "style": "0"}, "expected": {"out": [0.6658376]}},
+      {"inputs": {"texcoord": "1.643, -1.997", "freq": "-0.788, 1.034", "offset": "-0.686, -0.097", "jitter": "0.644", "outmin": "-0.617", "outmax": "0.272", "clampoutput": "true", "octaves": "5", "lacunarity": "1.559", "diminish": "0.651", "type": "2", "style": "0"}, "expected": {"out": [-0.08893645]}}
+    ]},
+    {"nodedef": "ND_unifiednoise3d_float", "samples": [
+      {"inputs": {"position": "-3.739, 0.789, -0.334", "freq": "1, 1, 1", "offset": "0, 0, 0", "jitter": "1", "outmin": "0", "outmax": "1", "clampoutput": "true", "octaves": "3", "lacunarity": "2", "diminish": "0.5", "type": "0", "style": "0"}, "expected": {"out": [0.6014573]}},
+      {"inputs": {"position": "-3.273, -0.283, 1.796", "freq": "1.02, 1.162, 1.371", "offset": "1.899, 1.584, -0.001", "jitter": "0.677", "outmin": "-0.153", "outmax": "1.93", "clampoutput": "false", "octaves": "3", "lacunarity": "1.65", "diminish": "0.163", "type": "2", "style": "1"}, "expected": {"out": [0.8711622]}},
+      {"inputs": {"position": "-0.665, -2.248, -3.202", "freq": "1.88, 0.288, 0.057", "offset": "-0.291, 1.796, -0.271", "jitter": "0.905", "outmin": "0.016", "outmax": "1.425", "clampoutput": "true", "octaves": "1", "lacunarity": "2.979", "diminish": "0.449", "type": "3", "style": "1"}, "expected": {"out": [0.44500893]}},
+      {"inputs": {"position": "-3.362, -2.622, -2.779", "freq": "-0.396, 1.944, -0.964", "offset": "1.693, -0.248, 1.772", "jitter": "0.516", "outmin": "0.434", "outmax": "0.866", "clampoutput": "false", "octaves": "6", "lacunarity": "1.67", "diminish": "0.946", "type": "1", "style": "0"}, "expected": {"out": [0.84541255]}}
+    ]},
+    {"nodedef": "ND_unpremult_color4", "samples": [
+      {"inputs": {"in": "0.0, 0.0, 0.0, 1.0"}, "expected": {"out": [0.0, 0.0, 0.0, 1.0]}},
+      {"inputs": {"in": "0.585, 1.516, 0.324, -0.962"}, "expected": {"out": [-0.6081081, -1.5758836, -0.33679834, -0.962]}},
+      {"inputs": {"in": "1.909, 1.102, 1.875, -0.847"}, "expected": {"out": [-2.253837, -1.3010626, -2.2136953, -0.847]}},
+      {"inputs": {"in": "0.586, 0.377, 0.425, 1.845"}, "expected": {"out": [0.31761518, 0.20433605, 0.23035231, 1.845]}}
+    ]},
+    {"nodedef": "ND_worleynoise2d_float", "samples": [
+      {"inputs": {"texcoord": "-0.054, 0.624", "jitter": "1.0", "style": "0"}, "expected": {"out": [0.4580995]}},
+      {"inputs": {"texcoord": "0.988, 1.892", "jitter": "0.473", "style": "0"}, "expected": {"out": [0.4793657]}},
+      {"inputs": {"texcoord": "1.71, 1.589", "jitter": "0.918", "style": "1"}, "expected": {"out": [0.24146889]}},
+      {"inputs": {"texcoord": "1.964, -0.408", "jitter": "0.094", "style": "0"}, "expected": {"out": [0.46918288]}}
+    ]},
+    {"nodedef": "ND_worleynoise2d_vector2", "samples": [
+      {"inputs": {"texcoord": "0.118, -0.171", "jitter": "1.0", "style": "0"}, "expected": {"out": [0.3719969, 0.608637]}},
+      {"inputs": {"texcoord": "-0.979, -0.529", "jitter": "0.312", "style": "1"}, "expected": {"out": [0.3817128, 0.10122452]}},
+      {"inputs": {"texcoord": "1.534, 0.846", "jitter": "0.682", "style": "0"}, "expected": {"out": [0.43471012, 0.5907187]}},
+      {"inputs": {"texcoord": "1.635, 1.969", "jitter": "0.72", "style": "0"}, "expected": {"out": [0.6239662, 0.72204435]}}
+    ]},
+    {"nodedef": "ND_worleynoise2d_vector3", "samples": [
+      {"inputs": {"texcoord": "0.098, 1.467", "jitter": "1.0", "style": "0"}, "expected": {"out": [0.7350202, 0.7444557, 0.96349823]}},
+      {"inputs": {"texcoord": "0.717, 0.515", "jitter": "0.077", "style": "1"}, "expected": {"out": [0.61106765, 0.18582378, 0.041306067]}},
+      {"inputs": {"texcoord": "0.233, 1.899", "jitter": "0.217", "style": "0"}, "expected": {"out": [0.5041606, 0.7564264, 0.8565706]}},
+      {"inputs": {"texcoord": "0.25, 1.488", "jitter": "0.055", "style": "1"}, "expected": {"out": [0.81939966, 0.6078448, 0.4341765]}}
+    ]},
+    {"nodedef": "ND_worleynoise3d_float", "samples": [
+      {"inputs": {"position": "-1.743, -0.148, -0.646", "jitter": "1.0", "style": "0"}, "expected": {"out": [0.6486873]}},
+      {"inputs": {"position": "-1.443, -3.982, -0.883", "jitter": "0.539", "style": "1"}, "expected": {"out": [0.022591764]}},
+      {"inputs": {"position": "3.473, 3.381, 0.175", "jitter": "0.685", "style": "0"}, "expected": {"out": [0.5426402]}},
+      {"inputs": {"position": "-2.399, -2.231, -1.486", "jitter": "0.594", "style": "1"}, "expected": {"out": [0.21438079]}}
+    ]},
+    {"nodedef": "ND_worleynoise3d_vector2", "samples": [
+      {"inputs": {"position": "0.3, 1.562, 1.593", "jitter": "1.0", "style": "0"}, "expected": {"out": [0.59306467, 0.6800714]}},
+      {"inputs": {"position": "-0.044, -1.29, 0.151", "jitter": "0.207", "style": "0"}, "expected": {"out": [0.70475376, 0.71015066]}},
+      {"inputs": {"position": "3.628, 3.798, 0.739", "jitter": "0.828", "style": "0"}, "expected": {"out": [0.39417142, 0.52607167]}},
+      {"inputs": {"position": "-3.744, -0.801, -3.477", "jitter": "0.857", "style": "0"}, "expected": {"out": [0.35553965, 0.6177177]}}
+    ]},
+    {"nodedef": "ND_worleynoise3d_vector3", "samples": [
+      {"inputs": {"position": "1.081, 2.119, 3.828", "jitter": "1.0", "style": "0"}, "expected": {"out": [0.7838302, 0.8295256, 0.96701527]}},
+      {"inputs": {"position": "-2.148, 1.533, -3.763", "jitter": "0.539", "style": "1"}, "expected": {"out": [0.77523357, 0.93656915, 0.26119325]}},
+      {"inputs": {"position": "3.931, 3.791, 1.546", "jitter": "0.769", "style": "1"}, "expected": {"out": [0.42457694, 0.8530484, 0.26176477]}},
+      {"inputs": {"position": "-1.604, -2.255, -0.491", "jitter": "0.484", "style": "1"}, "expected": {"out": [0.2697791, 0.46533984, 0.0071318904]}}
+    ]}
+  ]
+}

@@ -374,3 +374,47 @@ def test_displacement_through_preview_surface():
 
   surface.GetInput('displacement').DisconnectSource()
   assert material.convert_material(mesh)[2] is None
+
+
+def test_materialx_translation() -> None:
+  """Tests MaterialX emissive surface translation and time-sampled inputs."""
+  stage = Usd.Stage.CreateInMemory()
+  mesh = stage.DefinePrim('/Mesh', 'Mesh')
+  mat = UsdShade.Material.Define(stage, '/Material')
+  surf = UsdShade.Shader.Define(stage, '/Material/Surface')
+  surf.CreateIdAttr('ND_standard_surface_surfaceshader')
+  surf.CreateInput('emission', Sdf.ValueTypeNames.Float).Set(2.0)
+  emission_color = surf.CreateInput(
+      'emission_color', Sdf.ValueTypeNames.Color3f
+  )
+  emission_color.Set((0.1, 0.5, 0.9), 0.0)
+  emission_color.Set((0.8, 0.2, 0.1), 1.0)
+  mat.CreateSurfaceOutput('mtlx').ConnectToSource(
+      surf.CreateOutput('out', Sdf.ValueTypeNames.Token)
+  )
+  UsdShade.MaterialBindingAPI.Apply(mesh).Bind(mat)
+
+  bsdf, emitter, displacement, medium = material.convert_material(
+      mesh, time=Usd.TimeCode(0.0)
+  )
+  assert isinstance(bsdf, mi.BSDF)
+  assert isinstance(emitter, mi.Emitter)
+  assert displacement is None and medium is None
+  assert isinstance(material.convert_material(mat.GetPrim())[1], mi.Emitter)
+  si = dr.zeros(mi.SurfaceInteraction3f)
+  si.n = si.wi = mi.Vector3f(0.0, 0.0, 1.0)
+  si.sh_frame = mi.Frame3f(si.n)
+  np.testing.assert_allclose(
+      emitter.eval(si), mi.Color3f(0.2, 1.0, 1.8), rtol=1e-5
+  )
+
+  # Non-default TimeCode evaluates time-sampled MaterialX inputs.
+  _, emitter_t1, _, _ = material.convert_material(mesh, time=Usd.TimeCode(1.0))
+  mesh_mat_t1 = material.convert_mesh_material(
+      mesh, double_sided=True, time=Usd.TimeCode(1.0)
+  )
+  for em in (emitter_t1, mesh_mat_t1.emitter):
+    assert em is not None
+    np.testing.assert_allclose(
+        em.eval(si), mi.Color3f(1.6, 0.4, 0.2), rtol=1e-5
+    )

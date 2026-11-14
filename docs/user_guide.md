@@ -16,6 +16,19 @@ This document provides an overview of the USD features supported by `hdMitsuba`,
 *   **Displacement Mapping**: Fully supports displacement mapping. The delegate evaluates displacement textures connected to `mitsuba:displacement` or standard USD displacement terminals, either directly or through a `UsdPreviewSurface`'s `inputs:displacement`. Scalar displacement values are used as-is as offsets along the vertex normal (there is no implicit 0.5 mid-level); remap them with `UsdUVTexture` `inputs:scale` and `inputs:bias`.
 
 ### Shading & Materials
+*   **MaterialX Shading Networks**: Support for MaterialX emission and pattern
+    shading networks (via `outputs:mtlx:surface` or standard surface terminals),
+    including:
+    *   Surface emission via `surface_unlit`, `standard_surface`,
+        `open_pbr_surface`, `gltf_pbr`, `mix` (`surfaceshader`), and `surface`
+        EDF closures (`uniform_edf`, `generalized_schlick_edf`, `conical_edf`,
+        and EDF combinators `add`, `multiply`, `mix`).
+    *   Procedural pattern graphs, math/vector/matrix/color/channel/logic
+        nodes, 2D/3D procedural noises (`cellnoise`, `noise`, `worleynoise`,
+        `fractal`, `unifiednoise`), image textures (`image`, `tiledimage`,
+        `triplanarprojection`, `normalmap`), and geometric intrinsics
+        (`geompropvalue` primvars, `geomcolor`, object/world positions and
+        normals, tangents, view direction, UVs).
 *   **UsdPreviewSurface**: Various USD preview surface parameters are mapped to Mitsuba's `principled` BSDF:
     *   `diffuseColor` (Base color)
     *   `roughness` (Specular roughness)
