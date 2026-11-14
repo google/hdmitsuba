@@ -213,8 +213,11 @@ const HdMaterialConnection2* FindTerminalConnection(
 void SetMitsubaPropertyFromValue(mitsuba::Properties& props,
                                  std::string_view name, const VtValue& val,
                                  bool invert_float) {
-  // Color space metadata is consumed when building texture keys.
-  if (absl::StartsWith(name, "colorSpace:")) return;
+  // Color space and type name metadata are not Mitsuba plugin properties.
+  if (absl::StartsWith(name, "colorSpace:") ||
+      absl::StartsWith(name, "typeName:")) {
+    return;
+  }
   if (val.IsHolding<GfVec3f>()) {
     auto c = val.Get<GfVec3f>();
     props.set(name, mitsuba::Color<float, 3>(c[0], c[1], c[2]));
