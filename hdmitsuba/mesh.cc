@@ -176,16 +176,14 @@ void HdMitsubaMesh::Sync(HdSceneDelegate* sceneDelegate,
        (HdChangeTracker::DirtyPrimvar | HdChangeTracker::DirtyPoints |
         HdChangeTracker::DirtyNormals)) != 0;
   const bool scene_update_dirty =
-      (*dirtyBits & (HdChangeTracker::DirtyTransform |
-                     HdChangeTracker::DirtyInstancer |
-                     HdChangeTracker::DirtyInstanceIndex |
-                     HdChangeTracker::DirtyDoubleSided |
-                     HdMitsubaMesh::DirtyLight)) != 0;
+      (*dirtyBits &
+       (HdChangeTracker::DirtyTransform | HdChangeTracker::DirtyInstancer |
+        HdChangeTracker::DirtyInstanceIndex |
+        HdChangeTracker::DirtyDoubleSided | HdMitsubaMesh::DirtyLight)) != 0;
 
   if (topology_dirty) {
     *dirtyBits |= HdChangeTracker::DirtyTopology |
-                  HdChangeTracker::DirtyPoints |
-                  HdChangeTracker::DirtyNormals |
+                  HdChangeTracker::DirtyPoints | HdChangeTracker::DirtyNormals |
                   HdChangeTracker::DirtyPrimvar;
     SyncTopology(sceneDelegate, refine_level);
   }
@@ -200,8 +198,8 @@ void HdMitsubaMesh::Sync(HdSceneDelegate* sceneDelegate,
       SyncPrimvars(sceneDelegate, dirtyBits);
     }
     if (!num_referenced_points_ ||
-        !GeometryProcessor::ValidatePointCount(
-            GetId(), *num_referenced_points_, num_points_)) {
+        !GeometryProcessor::ValidatePointCount(GetId(), *num_referenced_points_,
+                                               num_points_)) {
       RemoveFromScene(scene);
       refine_level_ = -1;  // Fully re-sync the mesh once it is valid.
       *dirtyBits = HdChangeTracker::Clean;
@@ -504,11 +502,11 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
                                                  interpolation};
       } else {
         geometry_.primvars.erase(HdTokens->normals);
-        size_t actual_size =
-            value.IsHolding<VtVec3fArray>()
-                ? value.UncheckedGet<VtVec3fArray>().size()
-                : 0;
-        // Only warn if the user explicitly authored a non-empty array with incorrect length (>1)
+        size_t actual_size = value.IsHolding<VtVec3fArray>()
+                                 ? value.UncheckedGet<VtVec3fArray>().size()
+                                 : 0;
+        // Only warn if the user explicitly authored a non-empty array with
+        // incorrect length (>1)
         if (actual_size > 1) {
           TF_WARN(
               "Ignored invalid normals for %s (size mismatch). "

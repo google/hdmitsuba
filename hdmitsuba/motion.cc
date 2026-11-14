@@ -147,10 +147,10 @@ bool IsUniformlySpaced(const GfVec2f& interval,
 // quat, translation) and slerps along the shortest arc, segments with large
 // (>= 90 deg) rotations or curved/orbiting trajectories are adaptively
 // subdivided.
-void AppendRefinedSamples(
-    const MatrixEvalFn& eval_matrix, const EvaluatedSample& s0,
-    const EvaluatedSample& s1, int max_segments,
-    std::vector<std::pair<float, GfMatrix4d>>& samples) {
+void AppendRefinedSamples(const MatrixEvalFn& eval_matrix,
+                          const EvaluatedSample& s0, const EvaluatedSample& s1,
+                          int max_segments,
+                          std::vector<std::pair<float, GfMatrix4d>>& samples) {
   if (max_segments > 1) {
     const EvaluatedSample s_mid(eval_matrix, GfLerp(0.5, s0.time, s1.time));
     if (NeedsRefinement(eval_matrix, s0, s1, s_mid)) {
@@ -222,11 +222,11 @@ MotionSamples<GfMatrix4d> SampleTransformOverInterval(
     const MatrixEvalFn& eval_matrix, const GfVec2f& interval,
     std::vector<float> times, bool uniform, int max_samples) {
   std::sort(times.begin(), times.end());
-  times.erase(
-      std::remove_if(
-          times.begin(), times.end(),
-          [&](float t) { return t <= interval[0] || t >= interval[1]; }),
-      times.end());
+  times.erase(std::remove_if(times.begin(), times.end(),
+                             [&](float t) {
+                               return t <= interval[0] || t >= interval[1];
+                             }),
+              times.end());
   times.erase(std::unique(times.begin(), times.end()), times.end());
   times.push_back(interval[1]);
 
@@ -247,9 +247,9 @@ MotionSamples<GfMatrix4d> SampleTransformOverInterval(
   } else {
     const bool seed_with_times =
         init_segments < max_samples && IsUniformlySpaced(interval, times);
-    for (auto& s : SampleUniformGrid(eval_matrix, interval,
-                                     seed_with_times ? init_segments : 1,
-                                     max_samples)) {
+    for (auto& s :
+         SampleUniformGrid(eval_matrix, interval,
+                           seed_with_times ? init_segments : 1, max_samples)) {
       result.samples.emplace_back(s.time, std::move(s.matrix));
     }
   }
@@ -263,8 +263,8 @@ int GetUsdMotionSamples(const UsdPrim& prim) {
   if (UsdGeomPrimvar pv = UsdGeomPrimvarsAPI(prim).FindPrimvarWithInheritance(
           HdMitsubaMotionTokens->motion_samples);
       pv && !pv.Get(&samples)) {
-    TF_WARN("Ignoring %s on %s: expected an int.",
-            pv.GetName().GetText(), prim.GetPath().GetText());
+    TF_WARN("Ignoring %s on %s: expected an int.", pv.GetName().GetText(),
+            prim.GetPath().GetText());
   }
   return samples;
 }
@@ -404,7 +404,8 @@ std::vector<MotionSamples<GfMatrix4d>> SamplePointInstancerTransforms(
   std::vector<GfMatrix4d> proto_xforms(proto_paths.size(), GfMatrix4d(1.0));
   for (size_t i = 0; i < proto_paths.size(); ++i) {
     bool resets = false;
-    if (UsdGeomXformable proto{prim.GetStage()->GetPrimAtPath(proto_paths[i])}) {
+    if (UsdGeomXformable proto{
+            prim.GetStage()->GetPrimAtPath(proto_paths[i])}) {
       proto.GetLocalTransformation(&proto_xforms[i], &resets, time);
     }
   }

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 // Scene-index plugins for HdMitsuba.
 //
 // Contents:
@@ -215,7 +214,7 @@ class HdMitsuba_MotionIntervalSceneIndex final
 
     HdSceneIndexObserver::DirtiedPrimEntries dirtied = {
         {SdfPath::AbsoluteRootPath(),
-        HdDataSourceLocator(HdMitsubaMotionTokens->motion_interval)}};
+         HdDataSourceLocator(HdMitsubaMotionTokens->motion_interval)}};
     const HdSceneIndexBaseRefPtr& input = _GetInputSceneIndex();
     for (const SdfPath& path : HdSceneIndexPrimView(input)) {
       const TfToken& type = input->GetPrim(path).primType;
@@ -261,10 +260,10 @@ class HdMitsuba_SceneIndexPlugin : public HdSceneIndexPlugin {
                 tessellate_all ? to_mesh : HdDataSourceBaseHandle(),
                 HdPrimTypeTokens->cube, to_mesh, HdPrimTypeTokens->cone,
                 to_mesh, HdPrimTypeTokens->cylinder,
-                tessellate_all ? to_mesh
-                               : HdRetainedTypedSampledDataSource<TfToken>::New(
-                                     HdsiImplicitSurfaceSceneIndexTokens
-                                         ->axisToTransform),
+                tessellate_all
+                    ? to_mesh
+                    : HdRetainedTypedSampledDataSource<TfToken>::New(
+                          HdsiImplicitSurfaceSceneIndexTokens->axisToTransform),
                 HdPrimTypeTokens->capsule, to_mesh, HdPrimTypeTokens->plane,
                 to_mesh)));
   }

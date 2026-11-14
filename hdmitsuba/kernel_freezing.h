@@ -165,21 +165,13 @@ JITInputs<Float, Spectrum> GatherAllJitInputs(
     }
 
     const char* variant_name = mitsuba::detail::variant<Float, Spectrum>::name;
-    constexpr const char* domains[] = {
-        "Scene",
-        "ReconstructionFilter",
-        "Sensor",
-        "Film",
-        "Emitter",
-        "Sampler",
-        "Shape",
-        "Texture",
-        "Volume",
-        "Medium",
-        "BSDF",
-        "PhaseFunction",
-        "Integrator"
-    };
+    constexpr const char* domains[] = {"Scene",     "ReconstructionFilter",
+                                       "Sensor",    "Film",
+                                       "Emitter",   "Sampler",
+                                       "Shape",     "Texture",
+                                       "Volume",    "Medium",
+                                       "BSDF",      "PhaseFunction",
+                                       "Integrator"};
 
     std::vector<void*> registry_pointers;
     for (const auto& domain : domains) {
@@ -187,12 +179,12 @@ JITInputs<Float, Spectrum> GatherAllJitInputs(
       inputs.Append(registry_bound);
       if (registry_bound == 0) continue;
       registry_pointers.assign(registry_bound, nullptr);
-      ::jit_registry_get_pointers(variant_name, domain, registry_pointers.data());
+      ::jit_registry_get_pointers(variant_name, domain,
+                                  registry_pointers.data());
       for (void* ptr : registry_pointers) {
         child_cb(&payload, static_cast<mitsuba::Object*>(ptr), "");
       }
     }
-
 
     // Force evaluation of all input JIT variables before recording or replay.
     ::jit_eval();
@@ -219,7 +211,8 @@ class FrozenRender {
   bool HasRecording() const { return recording_ != nullptr; }
 
   void Clear() {
-    TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("Clear(): destroying recording %p\n", (void*)recording_);
+    TF_DEBUG(HDMITSUBA_LIFECYCLE)
+        .Msg("Clear(): destroying recording %p\n", (void*)recording_);
     if (recording_) {
       jit_freeze_destroy(recording_);
       recording_ = nullptr;
@@ -227,26 +220,29 @@ class FrozenRender {
     output_indices_.clear();
     output_shape_.clear();
     recorded_layout_.clear();
-    render_count_ = 0;             // Reset the recording warm-up count!
+    render_count_ = 0;  // Reset the recording warm-up count!
     TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("Clear(): done\n");
   }
 
   bool CanReplay(const JITInputs<Float, Spectrum>& new_inputs) {
     if (!recording_) return false;
     if (new_inputs.layout != recorded_layout_) {
-      TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("CanReplay failed: input layout changed\n");
+      TF_DEBUG(HDMITSUBA_LIFECYCLE)
+          .Msg("CanReplay failed: input layout changed\n");
       return false;
     }
     return jit_freeze_dry_run(recording_, new_inputs.flat_indices.data()) != 0;
   }
 
   TensorXf Record(const JITInputs<Float, Spectrum>& inputs,
-                      const std::function<TensorXf()>& render_fn) {
+                  const std::function<TensorXf()>& render_fn) {
     if constexpr (dr::is_jit_v<Float>) {
       Clear();
-      TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("Record: flat_indices size = %zu\n", inputs.flat_indices.size());
+      TF_DEBUG(HDMITSUBA_LIFECYCLE)
+          .Msg("Record: flat_indices size = %zu\n", inputs.flat_indices.size());
       recorded_layout_ = inputs.layout;
-      jit_freeze_start(backend_, inputs.flat_indices.data(), inputs.flat_indices.size());
+      jit_freeze_start(backend_, inputs.flat_indices.data(),
+                       inputs.flat_indices.size());
       TensorXf result = render_fn();
       dr::eval(result.array());
       dr::sync_thread();
@@ -262,20 +258,22 @@ class FrozenRender {
 
   TensorXf Replay(const JITInputs<Float, Spectrum>& inputs) {
     if constexpr (dr::is_jit_v<Float>) {
-      TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("Replay: flat_indices size = %zu\n", inputs.flat_indices.size());
+      TF_DEBUG(HDMITSUBA_LIFECYCLE)
+          .Msg("Replay: flat_indices size = %zu\n", inputs.flat_indices.size());
       std::vector<uint32_t> new_outputs(output_indices_.size(), 0);
-      jit_freeze_replay(recording_, inputs.flat_indices.data(), new_outputs.data());
+      jit_freeze_replay(recording_, inputs.flat_indices.data(),
+                        new_outputs.data());
       return TensorXf(std::move(Float::steal(new_outputs[0])), output_shape_);
     } else {
-      throw std::runtime_error("FrozenRender::Replay() called on non-JIT variant");
+      throw std::runtime_error(
+          "FrozenRender::Replay() called on non-JIT variant");
     }
   }
 
   TensorXf Render(mitsuba::Scene<Float, Spectrum>* scene,
-                      mitsuba::Sensor<Float, Spectrum>* sensor,
-                      mitsuba::Integrator<Float, Spectrum>* integrator,
-                      uint32_t sample_index,
-                      uint32_t samples_to_render) {
+                  mitsuba::Sensor<Float, Spectrum>* sensor,
+                  mitsuba::Integrator<Float, Spectrum>* integrator,
+                  uint32_t sample_index, uint32_t samples_to_render) {
     if constexpr (dr::is_jit_v<Float>) {
       if (recorded_samples_to_render_ != 0 &&
           recorded_samples_to_render_ != samples_to_render) {
@@ -289,8 +287,10 @@ class FrozenRender {
       recorded_samples_to_render_ = samples_to_render;
 
       if (render_count_ == 0) {
-        TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("FrozenRender: Warm-up pass (Frame 1)\n");
-        TensorXf result = integrator->render(scene, sensor, sample_index, samples_to_render, true, true);
+        TF_DEBUG(HDMITSUBA_LIFECYCLE)
+            .Msg("FrozenRender: Warm-up pass (Frame 1)\n");
+        TensorXf result = integrator->render(scene, sensor, sample_index,
+                                             samples_to_render, true, true);
         render_count_ = 1;
         return result;
       }
@@ -300,27 +300,32 @@ class FrozenRender {
       auto inputs = GatherAllJitInputs(scene, sensor, integrator);
       inputs.flat_indices.push_back(seed_var.index());
       auto render_fn = [&]() {
-        return integrator->render(scene, sensor, seed_var, samples_to_render, true, true);
+        return integrator->render(scene, sensor, seed_var, samples_to_render,
+                                  true, true);
       };
 
       if (render_count_ == 1) {
-        TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("FrozenRender: Recording kernel (Frame 2)\n");
+        TF_DEBUG(HDMITSUBA_LIFECYCLE)
+            .Msg("FrozenRender: Recording kernel (Frame 2)\n");
         TensorXf result = Record(inputs, render_fn);
         render_count_ = 2;
         return result;
       } else {
         if (CanReplay(inputs)) {
-          TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("FrozenRender: Replaying frozen kernel (Frame 3+)\n");
+          TF_DEBUG(HDMITSUBA_LIFECYCLE)
+              .Msg("FrozenRender: Replaying frozen kernel (Frame 3+)\n");
           return Replay(inputs);
         } else {
-          TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("FrozenRender: Replay dry-run failed, re-recording...\n");
+          TF_DEBUG(HDMITSUBA_LIFECYCLE)
+              .Msg("FrozenRender: Replay dry-run failed, re-recording...\n");
           TensorXf result = Record(inputs, render_fn);
           render_count_ = 2;
           return result;
         }
       }
     } else {
-      return integrator->render(scene, sensor, sample_index, samples_to_render, true, true);
+      return integrator->render(scene, sensor, sample_index, samples_to_render,
+                                true, true);
     }
   }
 
@@ -336,7 +341,7 @@ class FrozenRender {
 
 PXR_NAMESPACE_CLOSE_SCOPE
 
-#else // MI_ENABLE_JIT
+#else  // MI_ENABLE_JIT
 
 #include <drjit/tensor.h>
 #include <mitsuba/render/fwd.h>
@@ -355,14 +360,14 @@ class FrozenRender {
   void Clear() {}
 
   TensorXf Render(mitsuba::Scene<Float, Spectrum>* scene,
-                      mitsuba::Sensor<Float, Spectrum>* sensor,
-                      mitsuba::Integrator<Float, Spectrum>* integrator,
-                      uint32_t sample_index,
-                      uint32_t samples_to_render) {
-    return integrator->render(scene, sensor, sample_index, samples_to_render, true, true);
+                  mitsuba::Sensor<Float, Spectrum>* sensor,
+                  mitsuba::Integrator<Float, Spectrum>* integrator,
+                  uint32_t sample_index, uint32_t samples_to_render) {
+    return integrator->render(scene, sensor, sample_index, samples_to_render,
+                              true, true);
   }
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE
 
-#endif // MI_ENABLE_JIT
+#endif  // MI_ENABLE_JIT

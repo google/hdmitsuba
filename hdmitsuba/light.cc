@@ -81,9 +81,8 @@ LightParams ReadLightParams(const HdContainerDataSourceHandle& container) {
   p.normalize = GetParam<bool>(container, HdLightTokens->normalize, false);
   // `treatAsPoint` always has a value (its schema fallback is false), so
   // zero-radius spheres must be checked explicitly.
-  p.treat_as_point =
-      GetParam<bool>(container, treat_as_point_token, false) ||
-      p.radius == 0.0f;
+  p.treat_as_point = GetParam<bool>(container, treat_as_point_token, false) ||
+                     p.radius == 0.0f;
   // Mitsuba's `directional` emitter requires angles below 180 deg.
   p.angle = std::clamp(GetParam<float>(container, HdLightTokens->angle, 0.0f),
                        0.0f, 179.99f);
@@ -109,10 +108,10 @@ double SphereArea(const GfMatrix4d& transform, float radius) {
   const double c = transform.TransformDir(GfVec3d(0, 0, radius)).GetLength();
   constexpr double kP = 1.6;
   return 4.0 * drjit::Pi<double> *
-         std::pow((std::pow(a * b, kP) + std::pow(a * c, kP) +
-                   std::pow(b * c, kP)) /
-                      3.0,
-                  1.0 / kP);
+         std::pow(
+             (std::pow(a * b, kP) + std::pow(a * c, kP) + std::pow(b * c, kP)) /
+                 3.0,
+             1.0 / kP);
 }
 
 // World-space perimeter of a light-space circle of radius `radius` in the YZ
@@ -196,9 +195,9 @@ GfVec3f ComputeLightEmission(const TfToken& type_id,
     // normal incidence.
     if (params.angle > 0.0f) {
       const double cos_theta = std::cos(drjit::deg_to_rad(0.5 * params.angle));
-      emission *= static_cast<float>(
-          params.normalize ? 2.0 / (1.0 + cos_theta)
-                           : drjit::TwoPi<double> * (1.0 - cos_theta));
+      emission *= static_cast<float>(params.normalize ? 2.0 / (1.0 + cos_theta)
+                                                      : drjit::TwoPi<double> *
+                                                            (1.0 - cos_theta));
     }
     return emission;
   }
@@ -245,13 +244,14 @@ GfVec3f GetLightBaseEmission(
       GetParam<GfVec3f>(light_container, HdLightTokens->color, GfVec3f(1.0f));
   if (GetParam<bool>(light_container, HdLightTokens->enableColorTemperature,
                      false)) {
-    color = GfCompMult(color, UsdLuxBlackbodyTemperatureAsRgb(GetParam<float>(
-                                  light_container,
-                                  HdLightTokens->colorTemperature, 6500.0f)));
+    color = GfCompMult(
+        color, UsdLuxBlackbodyTemperatureAsRgb(GetParam<float>(
+                   light_container, HdLightTokens->colorTemperature, 6500.0f)));
   }
   // Like hdEmbree, `diffuse` scales all emission: Mitsuba cannot restrict it
   // to diffuse reflection.
-  return color * GetParam<float>(light_container, HdLightTokens->diffuse, 1.0f) *
+  return color *
+         GetParam<float>(light_container, HdLightTokens->diffuse, 1.0f) *
          GetParam<float>(light_container, HdLightTokens->intensity, 1.0f) *
          std::exp2(
              GetParam<float>(light_container, HdLightTokens->exposure, 0.0f));

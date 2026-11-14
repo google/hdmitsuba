@@ -87,17 +87,16 @@ class RenderEngine {
   explicit RenderEngine(pxr::UsdStagePtr stage);
   ~RenderEngine();
 
-  void Configure(const pxr::TfToken& hydra_delegate_id,
-                 const std::optional<pxr::SdfPath>& render_settings_prim_path,
-                 std::optional<int> width,
-                 const std::optional<pxr::SdfPath>& camera_path,
-                 std::optional<int> refine_level_fallback,
-                 const pxr::HdRenderSettingsMap& overrides = {},
-                 // USD purposes to render (subset of "default", "render",
-                 // "proxy" and "guide"). Defaults to {"default", "render"},
-                 // matching usdrecord.
-                 const std::optional<pxr::TfTokenVector>& purposes =
-                     std::nullopt);
+  void Configure(
+      const pxr::TfToken& hydra_delegate_id,
+      const std::optional<pxr::SdfPath>& render_settings_prim_path,
+      std::optional<int> width, const std::optional<pxr::SdfPath>& camera_path,
+      std::optional<int> refine_level_fallback,
+      const pxr::HdRenderSettingsMap& overrides = {},
+      // USD purposes to render (subset of "default", "render",
+      // "proxy" and "guide"). Defaults to {"default", "render"},
+      // matching usdrecord.
+      const std::optional<pxr::TfTokenVector>& purposes = std::nullopt);
 
   // Renders the current frame. When enableInteractive is false (the default),
   // loops until the frame has converged. When enableInteractive is true, runs

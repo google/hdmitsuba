@@ -43,7 +43,7 @@ class SceneManager;
 
 class HdMitsubaMesh final : public HdMesh {
  public:
-  // Custom dirty bit for mesh lights (may be removed in the future once 
+  // Custom dirty bit for mesh lights (may be removed in the future once
   // Hydra tracks these correctly automatically)
   static constexpr HdDirtyBits DirtyLight = HdChangeTracker::CustomBitsBegin;
 

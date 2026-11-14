@@ -50,15 +50,13 @@ namespace {
 
 // Evaluates subdivision stencils for a primvar array.
 template <typename T>
-VtArray<T> EvalSubdivisionStencil(
-    const VtArray<T>& coarsePrimvar,
-    const OpenSubdiv::Far::StencilTable* stencil,
-    bool include_coarse = true) {
+VtArray<T> EvalSubdivisionStencil(const VtArray<T>& coarsePrimvar,
+                                  const OpenSubdiv::Far::StencilTable* stencil,
+                                  bool include_coarse = true) {
   if (!TF_VERIFY(stencil, "OSD stencil must not be null")) {
     return {};
   }
-  const int num_coarse =
-      include_coarse ? stencil->GetNumControlVertices() : 0;
+  const int num_coarse = include_coarse ? stencil->GetNumControlVertices() : 0;
   const int num_refined = stencil->GetNumStencils();
   VtArray<T> refined_primvar(num_coarse + num_refined);
   T* dst_ptr = refined_primvar.data();
@@ -125,7 +123,8 @@ void SubdivisionEvaluator::Initialize(
     const VtIntArray& channel_indices = indices.empty() ? identity : indices;
     auto it = std::find(fvar_topologies.begin(), fvar_topologies.end(),
                         channel_indices);
-    fvar_primvar_to_channel_[token] = std::distance(fvar_topologies.begin(), it);
+    fvar_primvar_to_channel_[token] =
+        std::distance(fvar_topologies.begin(), it);
     if (it == fvar_topologies.end()) fvar_topologies.push_back(channel_indices);
   }
 

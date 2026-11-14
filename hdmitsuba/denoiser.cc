@@ -14,6 +14,17 @@
 
 #include "hdmitsuba/denoiser.h"
 
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <memory>
+#include <optional>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
 #include <drjit-core/jit.h>
 #include <drjit/array.h>
 #include <drjit/tensor.h>
@@ -25,17 +36,6 @@
 #include <mitsuba/render/sensor.h>
 #include <pxr/base/tf/diagnostic.h>
 #include <pxr/pxr.h>
-
-#include <array>
-#include <cstddef>
-#include <cstdint>
-#include <exception>
-#include <memory>
-#include <optional>
-#include <tuple>
-#include <type_traits>
-#include <utility>
-#include <vector>
 
 #if defined(HDMITSUBA_ENABLE_OIDN)
 #include <OpenImageDenoise/oidn.hpp>
@@ -71,9 +71,8 @@ struct OidnDenoiserBackend {
       }
       const char* error_message = nullptr;
       if (!device || device.getError(error_message) != oidn::Error::None) {
-        TF_RUNTIME_ERROR(
-            "Failed to initialize OpenImageDenoise CPU device: %s",
-            error_message ? error_message : "unknown error");
+        TF_RUNTIME_ERROR("Failed to initialize OpenImageDenoise CPU device: %s",
+                         error_message ? error_message : "unknown error");
         device.release();
         return;
       }
@@ -212,8 +211,7 @@ struct OptixDenoiserBackend {
   }
 
   void Denoise(TensorXf& display_result, const Sensor* sensor,
-               size_t base_channels,
-               const std::optional<size_t>& albedo_offset,
+               size_t base_channels, const std::optional<size_t>& albedo_offset,
                const std::optional<size_t>& normal_offset) {
     const size_t height = display_result.shape()[0];
     const size_t width = display_result.shape()[1];
@@ -221,8 +219,8 @@ struct OptixDenoiserBackend {
     const bool has_albedo = albedo_offset.has_value();
     const bool has_normals = normal_offset.has_value();
     const OptixDenoiserType& denoiser = GetOrCreateDenoiser(
-        static_cast<uint32_t>(width), static_cast<uint32_t>(height),
-        has_albedo, has_normals);
+        static_cast<uint32_t>(width), static_cast<uint32_t>(height), has_albedo,
+        has_normals);
 
     if (total_channels == base_channels &&
         (base_channels == 3 || base_channels == 4)) {

@@ -28,7 +28,8 @@ class HdMitsubaConfig {
   /// The Mitsuba variant to use.
   std::string variant;
 
-  /// Global override for kernel freezing: -1 = use USD settings, 0 = force off, 1 = force on
+  /// Global override for kernel freezing: -1 = use USD settings, 0 = force off,
+  /// 1 = force on
   int use_kernel_freezing = -1;
 
   /// Whether to tessellate all implicit surfaces, instead of rendering spheres

@@ -14,13 +14,14 @@
 
 #include "hdmitsuba/render_pass.h"
 
+#include <optional>
+
 #include <pxr/base/tf/diagnostic.h>
 #include <pxr/base/tf/token.h>
+#include <pxr/imaging/cameraUtil/framing.h>
 #include <pxr/imaging/hd/aov.h>
 #include <pxr/imaging/hd/renderIndex.h>
 #include <pxr/imaging/hd/renderPass.h>
-#include <optional>
-#include <pxr/imaging/cameraUtil/framing.h>
 #include <pxr/imaging/hd/renderPassState.h>
 #include <pxr/imaging/hd/rprimCollection.h>
 #include <pxr/pxr.h>
