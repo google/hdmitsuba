@@ -192,17 +192,18 @@ def _open_asset_stream(filename: str) -> mi.MemoryStream | None:
 
 def _extract_usd_transform2d(
     shader: UsdShade.Shader,
+    time: Usd.TimeCode = Usd.TimeCode.Default(),
 ) -> mi.scalar_rgb.ScalarAffineTransform3f | None:
   """Extracts a Mitsuba UV transform from upstream UsdTransform2d nodes."""
   identity = mi.scalar_rgb.ScalarAffineTransform3f()
   xf = identity
   curr = find_shader(shader.GetInput('st'))
-  while curr is not None and curr.GetIdAttr().Get() == 'UsdTransform2d':
-    if (t := curr.GetInput('translation').Get()) is not None:
+  while curr is not None and curr.GetIdAttr().Get(time) == 'UsdTransform2d':
+    if (t := curr.GetInput('translation').Get(time)) is not None:
       xf = xf.translate(tuple(t))
-    if r := curr.GetInput('rotation').Get():
+    if r := curr.GetInput('rotation').Get(time):
       xf = xf.rotate(r)
-    if (s := curr.GetInput('scale').Get()) is not None:
+    if (s := curr.GetInput('scale').Get(time)) is not None:
       xf = xf.scale(tuple(s))
     curr = find_shader(curr.GetInput('in'))
   if xf == identity:
@@ -252,6 +253,7 @@ def _convert_uv_texture(
     shader: UsdShade.Shader,
     input_name: str | None,
     output_name: str | None,
+    time: Usd.TimeCode = Usd.TimeCode.Default(),
 ) -> dict[str, Any] | None:
   """Extracts texture information from a UsdUVTexture shader."""
   is_normal = input_name in ('normal', 'normalmap')
@@ -264,14 +266,16 @@ def _convert_uv_texture(
 
   # 1. Use the texture image if it is valid.
   file_input = shader.GetInput('file')
-  asset_path = None if is_normal and ch_idx >= 0 else file_input.Get()
+  asset_path = None if is_normal and ch_idx >= 0 else file_input.Get(time)
   filename = asset_path.resolvedPath if asset_path else None
   if filename and (texture := _load_uv_texture_image(filename, ch_idx)):
     if texture['type'] != 'bitmap':
-      return _apply_uv_texture_scale_bias(shader, input_name, ch_idx, texture)
+      return _apply_uv_texture_scale_bias(
+          shader, input_name, ch_idx, texture, time
+      )
     # Like UsdImaging, only consider the `colorSpace` metadata of the file
     # attribute itself if `sourceColorSpace` is unset or 'auto'.
-    cs = shader.GetInput('sourceColorSpace').Get()
+    cs = shader.GetInput('sourceColorSpace').Get(time)
     if not cs or cs == 'auto':
       cs = file_input.GetAttr().GetColorSpace()
     if _use_raw_bitmap(cs, input_name, ch_idx):
@@ -280,7 +284,7 @@ def _convert_uv_texture(
     # Mitsuba's bitmap only has a single wrap_mode: use wrapS, falling back to
     # wrapT if wrapS is unauthored, 'useMetadata' or unsupported.
     for param in ('wrapS', 'wrapT'):
-      w = shader.GetInput(param).Get()
+      w = shader.GetInput(param).Get(time)
       if w in ('repeat', 'clamp', 'mirror'):
         texture['wrap_mode'] = w
         break
@@ -290,9 +294,11 @@ def _convert_uv_texture(
             f" '{filename}'; ignoring."
         )
 
-    if to_uv := _extract_usd_transform2d(shader):
+    if to_uv := _extract_usd_transform2d(shader, time):
       texture['to_uv'] = to_uv
-    return _apply_uv_texture_scale_bias(shader, input_name, ch_idx, texture)
+    return _apply_uv_texture_scale_bias(
+        shader, input_name, ch_idx, texture, time
+    )
 
   if input_name in ('normal', 'bump'):
     return None
@@ -303,7 +309,7 @@ def _convert_uv_texture(
     return {'type': 'rgb', 'value': (0.5, 0.5, 1.0)}
   if input_name == 'bumpmap':
     return {'type': 'uniform', 'value': 0.0}
-  fb = shader.GetInput('fallback').Get()
+  fb = shader.GetInput('fallback').Get(time)
   fb = tuple(fb) if fb is not None else (0.0, 0.0, 0.0, 1.0)
   if ch_idx >= 0:
     fallback = {
@@ -317,13 +323,16 @@ def _convert_uv_texture(
         'unbounded': True,
     }
   # A UsdUVTexture applies its `scale` and `bias` to the fallback, too.
-  return _apply_uv_texture_scale_bias(shader, input_name, ch_idx, fallback)
+  return _apply_uv_texture_scale_bias(
+      shader, input_name, ch_idx, fallback, time
+  )
 
 
 def _convert_primvar_reader(
     shader: UsdShade.Shader,
     input_name: str | None,
     mesh_attributes: set[tuple[str, int]] | None,
+    time: Usd.TimeCode = Usd.TimeCode.Default(),
 ) -> dict[str, Any] | None:
   """Converts a UsdPrimvarReader shader to a Mitsuba mesh_attribute texture.
 
@@ -335,6 +344,7 @@ def _convert_primvar_reader(
     mesh_attributes: The `(primvar name, channel count)` pairs read by the
       material, to which the primvar is added. None if the shader is not
       evaluated on a mesh surface, which rejects the primvar reader.
+    time: The time code to evaluate the shader inputs at.
 
   Returns:
     The Mitsuba texture dictionary, or None if the shader is rejected.
@@ -344,7 +354,7 @@ def _convert_primvar_reader(
       shader_id.removeprefix(_PRIMVAR_READER_PREFIX)
   )
   varname_attrs = shader.GetInput('varname').GetValueProducingAttributes()
-  varname = varname_attrs[0].Get() if varname_attrs else None
+  varname = varname_attrs[0].Get(time) if varname_attrs else None
   if channels is None or not varname:
     Tf.Warn(f'Ignoring unsupported primvar reader {shader.GetPath()}.')
     return None
@@ -372,6 +382,7 @@ def usd_mitsuba_material_to_dict(
     input_name: str | None = None,
     output_name: str | None = None,
     mesh_attributes: set[tuple[str, int]] | None = None,
+    time: Usd.TimeCode = Usd.TimeCode.Default(),
 ) -> dict[str, Any]:
   """Converts a USD shader to a Mitsuba BSDF dictionary.
 
@@ -381,6 +392,7 @@ def usd_mitsuba_material_to_dict(
     output_name: Optional output channel name on `shader` (e.g. 'r', 'rgb').
     mesh_attributes: The `(primvar name, channel count)` pairs read by primvar
       readers are added to this set. If None, primvar readers are rejected.
+    time: The time code to evaluate the shader inputs at.
 
   Returns:
     The Mitsuba dictionary representation of the shader, or an empty dictionary
@@ -392,11 +404,11 @@ def usd_mitsuba_material_to_dict(
       input_name: str | None = None,
       output_name: str | None = None,
   ) -> dict[str, Any] | None:
-    shader_id = shader.GetIdAttr().Get()
+    shader_id = shader.GetIdAttr().Get(time)
     if shader_id == 'UsdUVTexture':
-      return _convert_uv_texture(shader, input_name, output_name)
+      return _convert_uv_texture(shader, input_name, output_name, time)
     if shader_id.startswith(_PRIMVAR_READER_PREFIX):
-      return _convert_primvar_reader(shader, input_name, mesh_attributes)
+      return _convert_primvar_reader(shader, input_name, mesh_attributes, time)
 
     if not shader_id.startswith(_MI_PREFIX):
       raise ValueError(f'The shader {shader_id} is not a Mitsuba shader.')
@@ -420,7 +432,7 @@ def usd_mitsuba_material_to_dict(
           result[name] = child
       else:
         attr = usd_input.GetAttr()
-        value = attr.Get()
+        value = attr.Get(time)
         if value is not None:
           type_name = attr.GetTypeName()
           if type_name == Sdf.ValueTypeNames.Color3f:
@@ -459,6 +471,7 @@ def usd_mitsuba_material_to_dict(
 def usd_preview_surface_to_mitsuba(
     shader: UsdShade.Shader,
     mesh_attributes: set[tuple[str, int]] | None = None,
+    time: Usd.TimeCode = Usd.TimeCode.Default(),
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
   """Converts a USD preview surface to a Mitsuba principled BSDF.
 
@@ -466,6 +479,7 @@ def usd_preview_surface_to_mitsuba(
     shader: The UsdPreviewSurface shader to convert.
     mesh_attributes: The `(primvar name, channel count)` pairs read by primvar
       readers are added to this set. If None, primvar readers are rejected.
+    time: The time code to evaluate the shader inputs at.
 
   Returns:
     A tuple containing:
@@ -505,9 +519,9 @@ def usd_preview_surface_to_mitsuba(
     if conn:
       conn_id = conn[0].GetShaderId()
       if conn_id == 'UsdUVTexture':
-        val = _convert_uv_texture(conn[0], name, conn[1])
+        val = _convert_uv_texture(conn[0], name, conn[1], time)
       elif conn_id.startswith(_PRIMVAR_READER_PREFIX):
-        val = _convert_primvar_reader(conn[0], name, mesh_attributes)
+        val = _convert_primvar_reader(conn[0], name, mesh_attributes, time)
       if val is not None and name == 'opacity':
         # E.g., the alpha of an image without an alpha channel is constant.
         opacity = val['value'] if val['type'] == 'uniform' else val
@@ -519,7 +533,7 @@ def usd_preview_surface_to_mitsuba(
         else:
           val = {'type': 'math', 'expr': '1 - in[0]', 'in0': val}
     elif name not in ('normal', 'bump'):  # Like hdMitsuba.
-      raw_val = usd_input.GetAttr().Get()
+      raw_val = usd_input.GetAttr().Get(time)
       if raw_val is not None:
         if name == 'emissiveColor' and (raw_val == Gf.Vec3f(0) or raw_val == 0):
           continue
@@ -550,7 +564,7 @@ def usd_preview_surface_to_mitsuba(
   # mode, which keeps the specular response.
   def get_input(name: str, default: Any) -> Any:
     usd_input = shader.GetInput(name)
-    value = usd_input.Get() if usd_input else None
+    value = usd_input.Get(time) if usd_input else None
     return default if value is None else value
 
   def opacity_math(expr: str) -> dict[str, Any]:
@@ -631,9 +645,11 @@ class MeshMaterial:
 
 
 def convert_mesh_material(
-    prim: Usd.Prim, double_sided: bool = False
+    prim: Usd.Prim,
+    double_sided: bool = False,
+    time: Usd.TimeCode = Usd.TimeCode.Default(),
 ) -> MeshMaterial:
-  """Parses a USD geometry prim and returns Mitsuba material properties.
+  """Parses a USD geometry or material prim and returns Mitsuba material properties.
 
   This function will use the Mitsuba material variant if available, and
   otherwise fall back to using the USD preview surface shader, or even just
@@ -644,6 +660,7 @@ def convert_mesh_material(
   Args:
     prim: The USD prim to extract the material from.
     double_sided: Whether the emitter of an emissive material is two-sided.
+    time: The time code to evaluate the material at.
 
   Returns:
     The converted material.
@@ -652,14 +669,17 @@ def convert_mesh_material(
   bsdf, emitter, displacement, interior_medium = None, None, None, None
   mesh_attributes = set()
   # Like hdMitsuba, resolve the "full" purpose (falling back to allPurpose).
-  material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial(
-      UsdShade.Tokens.full
-  )
+  if prim.IsA(UsdShade.Material):
+    material = UsdShade.Material(prim)
+  else:
+    material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial(
+        UsdShade.Tokens.full
+    )
   if material:
     if shader := find_shader(_get_surface_output(material)):
       if shader.GetShaderId() == 'UsdPreviewSurface':
         bsdf_dict, emitter_dict = usd_preview_surface_to_mitsuba(
-            shader, mesh_attributes
+            shader, mesh_attributes, time
         )
         bsdf = mi.load_dict(bsdf_dict)
         if emitter_dict:
@@ -667,12 +687,12 @@ def convert_mesh_material(
           emitter = mi.load_dict(emitter_dict | {'twosided': double_sided})
       elif shader.GetShaderId().startswith(_MI_PREFIX):
         if bsdf_dict := usd_mitsuba_material_to_dict(
-            shader, mesh_attributes=mesh_attributes
+            shader, mesh_attributes=mesh_attributes, time=time
         ):
           bsdf = mi.load_dict(bsdf_dict)
 
     if shader := _get_volume_shader(material):
-      medium_dict = usd_mitsuba_material_to_dict(shader, 'volume')
+      medium_dict = usd_mitsuba_material_to_dict(shader, 'volume', time=time)
       medium = mi.load_dict(medium_dict)
       if not isinstance(medium, mi.Medium):
         raise ValueError(
@@ -685,7 +705,7 @@ def convert_mesh_material(
 
     if conn := _find_displacement_connection(material):
       if disp_dict := usd_mitsuba_material_to_dict(
-          conn[0], 'displacement', conn[1]
+          conn[0], 'displacement', conn[1], time=time
       ):
         displacement = mi.load_dict(disp_dict)
         if not isinstance(displacement, mi.Texture):
@@ -695,7 +715,7 @@ def convert_mesh_material(
           )
 
   elif display_color_attr := prim.GetAttribute('primvars:displayColor'):
-    if colors := display_color_attr.Get():
+    if colors := display_color_attr.Get(time):
       bsdf = mi.load_dict({
           'type': 'diffuse',
           'reflectance': {
@@ -716,6 +736,7 @@ def convert_mesh_material(
 def convert_material(
     prim: Usd.Prim,
     double_sided: bool = False,
+    time: Usd.TimeCode = Usd.TimeCode.Default(),
 ) -> tuple[
     mi.BSDF | None, mi.Emitter | None, mi.Texture | None, mi.Medium | None
 ]:
@@ -726,12 +747,13 @@ def convert_material(
   Args:
     prim: The USD prim to extract the material from.
     double_sided: Whether the emitter of an emissive material is two-sided.
+    time: The time code to evaluate the material at.
 
   Returns:
     A tuple of the Mitsuba BSDF, emitter, displacement texture, and interior
     medium (each may be None if not found).
   """
-  mat = convert_mesh_material(prim, double_sided)
+  mat = convert_mesh_material(prim, double_sided, time)
   return mat.bsdf, mat.emitter, mat.displacement, mat.interior_medium
 
 
@@ -760,10 +782,11 @@ def _apply_uv_texture_scale_bias(
     input_name: str | None,
     ch_idx: int,
     texture: dict[str, Any],
+    time: Usd.TimeCode = Usd.TimeCode.Default(),
 ) -> dict[str, Any]:
   """Applies the UsdUVTexture `scale` and `bias` inputs to a texture dict."""
-  raw_scale = shader.GetInput('scale').Get()
-  raw_bias = shader.GetInput('bias').Get()
+  raw_scale = shader.GetInput('scale').Get(time)
+  raw_bias = shader.GetInput('bias').Get(time)
   channels = [ch_idx] * 3 if ch_idx >= 0 else [0, 1, 2]
   scale = [raw_scale[c] if raw_scale is not None else 1.0 for c in channels]
   bias = [raw_bias[c] if raw_bias is not None else 0.0 for c in channels]
