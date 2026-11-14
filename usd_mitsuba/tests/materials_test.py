@@ -384,3 +384,34 @@ def test_displacement_through_preview_surface():
 
   surface.GetInput('displacement').DisconnectSource()
   assert material.convert_material(mesh)[2] is None
+
+
+def test_time_sampled_and_material_prim_conversion() -> None:
+  stage = Usd.Stage.CreateInMemory()
+  mesh = stage.DefinePrim('/Mesh', 'Mesh')
+  mat = UsdShade.Material.Define(stage, '/Material')
+  surf = UsdShade.Shader.Define(stage, '/Material/Surface')
+  surf.CreateIdAttr('UsdPreviewSurface')
+  emissive = surf.CreateInput('emissiveColor', Sdf.ValueTypeNames.Color3f)
+  emissive.Set((0.2, 0.4, 0.8), 0.0)
+  emissive.Set((0.9, 0.3, 0.1), 1.0)
+  mat.CreateSurfaceOutput().ConnectToSource(
+      surf.CreateOutput('surface', Sdf.ValueTypeNames.Token)
+  )
+  UsdShade.MaterialBindingAPI.Apply(mesh).Bind(mat)
+
+  si = dr.zeros(mi.SurfaceInteraction3f)
+  si.n = si.wi = mi.Vector3f(0.0, 0.0, 1.0)
+  si.sh_frame = mi.Frame3f(si.n)
+
+  _, emitter_t0, _, _ = material.convert_material(mesh, time=Usd.TimeCode(0.0))
+  _, emitter_mat_t1, _, _ = material.convert_material(
+      mat.GetPrim(), time=Usd.TimeCode(1.0)
+  )
+  assert emitter_t0 is not None and emitter_mat_t1 is not None
+  np.testing.assert_allclose(
+      emitter_t0.eval(si), mi.Color3f(0.2, 0.4, 0.8), rtol=1e-5
+  )
+  np.testing.assert_allclose(
+      emitter_mat_t1.eval(si), mi.Color3f(0.9, 0.3, 0.1), rtol=1e-5
+  )

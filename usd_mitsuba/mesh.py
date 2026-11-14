@@ -121,9 +121,9 @@ def convert_mesh(
       for material_id in mesh_data.material_ids
   ]
   # GeomSubsets share the sidedness of their mesh.
-  double_sided = UsdGeom.Mesh(prim).GetDoubleSidedAttr().Get()
+  double_sided = UsdGeom.Mesh(prim).GetDoubleSidedAttr().Get(time)
   materials = [
-      material.convert_mesh_material(subprim, double_sided)
+      material.convert_mesh_material(subprim, double_sided, time)
       for subprim in subprims
   ]
 

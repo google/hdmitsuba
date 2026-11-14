@@ -85,7 +85,7 @@ def convert_points(
       'data': mi.TensorXf(data),
   }
 
-  bsdf, _, displacement, _ = material.convert_material(prim)
+  bsdf, _, displacement, _ = material.convert_material(prim, time=time)
   if displacement is not None:
     Tf.Warn(f'Displacement on {prim.GetPath()} is not supported.')
   # Like the constant displayColor, per-point colors are a fallback for
