@@ -1,0 +1,90 @@
+#usda 1.0
+(
+    endTimeCode = 30
+    startTimeCode = 1
+    subLayers = [
+        @./skinned_mesh.usda@
+    ]
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+over "Root"
+{
+    over "Mesh"
+    {
+        uniform token[] skel:blendShapes = ["Bulge"]
+        rel skel:blendShapeTargets = </Root/Mesh/Bulge>
+
+        def BlendShape "Bulge"
+        {
+            uniform vector3f[] offsets = [(0, 0, 0.4), (0, 0, 0.4)]
+            uniform int[] pointIndices = [6, 7]
+        }
+    }
+
+    over "Skeleton"
+    {
+        over "Animation"
+        {
+            uniform token[] blendShapes = ["Flare", "Bulge"]
+            float[] blendShapeWeights.timeSamples = {
+                1: [0, 0],
+                20: [1, 1],
+            }
+        }
+    }
+
+    # Cubic B-spline curve rigidly bound to a single joint (constant joint
+    # influence).
+    def BasisCurves "RigidCurve" (
+        prepend apiSchemas = ["SkelBindingAPI", "MaterialBindingAPI"]
+    )
+    {
+        uniform token basis = "bspline"
+        int[] curveVertexCounts = [4]
+        point3f[] points = [(-0.3, -0.5, 1.5), (-0.3, 0, 1.5), (-0.3, 0.5, 1.5), (-0.3, 1, 1.5)]
+        uniform token type = "cubic"
+        float[] widths = [0.25]
+        rel material:binding = </Root/_materials/RedMaterial>
+        matrix4d primvars:skel:geomBindTransform = ( (0, 0, 1, 0), (1, 0, 0, 0), (0, 1, 0, 0), (1, 0, 0, 1) )
+        int[] primvars:skel:jointIndices = [0] (
+            elementSize = 1
+            interpolation = "constant"
+        )
+        float[] primvars:skel:jointWeights = [1] (
+            elementSize = 1
+            interpolation = "constant"
+        )
+        uniform token[] skel:joints = ["joint1/joint2"]
+    }
+
+    # Linear curve with per-CV joint weights and a blend shape on its tip.
+    def BasisCurves "VaryingCurve" (
+        prepend apiSchemas = ["SkelBindingAPI", "MaterialBindingAPI"]
+    )
+    {
+        int[] curveVertexCounts = [4]
+        point3f[] points = [(0.9, -0.8, 0), (0.9, -0.2, 0), (0.9, 0.4, 0), (0.9, 1, 0)]
+        uniform token type = "linear"
+        float[] widths = [0.25]
+        rel material:binding = </Root/_materials/RedMaterial>
+        matrix4d primvars:skel:geomBindTransform = ( (0, 0, 1, 0), (1, 0, 0, 0), (0, 1, 0, 0), (1, 0, 0, 1) )
+        int[] primvars:skel:jointIndices = [0, 1, 0, 1, 0, 1, 1, 0] (
+            elementSize = 2
+            interpolation = "vertex"
+        )
+        float[] primvars:skel:jointWeights = [1, 0, 0.5, 0.5, 0.2, 0.8, 1, 0] (
+            elementSize = 2
+            interpolation = "vertex"
+        )
+        uniform token[] skel:blendShapes = ["Flare"]
+        rel skel:blendShapeTargets = </Root/VaryingCurve/Flare>
+
+        def BlendShape "Flare"
+        {
+            uniform vector3f[] offsets = [(0.35, 0, 0)]
+            uniform int[] pointIndices = [3]
+        }
+    }
+}

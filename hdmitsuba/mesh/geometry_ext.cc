@@ -44,10 +44,14 @@
 #include <pxr/usd/usd/prim.h>
 #include <pxr/usd/usd/primFlags.h>
 #include <pxr/usd/usd/stage.h>
+#include <pxr/usd/usdGeom/curves.h>
 #include <pxr/usd/usdGeom/mesh.h>
 #include <pxr/usd/usdGeom/primvarsAPI.h>
 #include <pxr/usd/usdGeom/subset.h>
 #include <pxr/usd/usdGeom/xformCache.h>
+#include <pxr/usd/usdSkel/animQuery.h>
+#include <pxr/usd/usdSkel/bindingAPI.h>
+#include <pxr/usd/usdSkel/blendShapeQuery.h>
 #include <pxr/usd/usdSkel/cache.h>
 #include <pxr/usd/usdSkel/root.h>
 #include <pxr/usd/usdSkel/skeletonQuery.h>
@@ -112,22 +116,16 @@ HdInterpolation UsdInterpolationToHdInterpolation(const TfToken& interp) {
 
 namespace {
 
-// Fetches the mesh's vertex positions at a given time.
-std::pair<VtVec3fArray, VtVec3fArray> GetMeshPointsAndNormals(
-    const UsdPrim& prim, const UsdGeomMesh& mesh, UsdTimeCode time) {
-  VtVec3fArray points;
-  VtVec3fArray normals;
-  if (!mesh.GetPointsAttr().Get(&points, time)) {
-    return {points, normals};
-  }
-  bool has_normals = mesh.GetNormalsAttr().Get(&normals, time);
-
+// Applies the UsdSkel blend shapes and skinning bound to `prim` to its
+// `points` and (possibly empty) `normals`, in the local space of `prim`.
+void ApplySkelDeformation(const UsdPrim& prim, UsdTimeCode time,
+                          VtVec3fArray& points, VtVec3fArray& normals) {
   UsdSkelRoot skel_root = UsdSkelRoot::Find(prim);
-  if (!skel_root) return {points, normals};
+  if (!skel_root) return;
   UsdSkelCache skel_cache;
   skel_cache.Populate(skel_root, UsdPrimDefaultPredicate);
   UsdSkelSkinningQuery skinning_query = skel_cache.GetSkinningQuery(prim);
-  if (!skinning_query) return {points, normals};
+  if (!skinning_query) return;
 
   std::vector<UsdSkelBinding> bindings;
   skel_cache.ComputeSkelBindings(skel_root, &bindings, UsdPrimDefaultPredicate);
@@ -141,11 +139,29 @@ std::pair<VtVec3fArray, VtVec3fArray> GetMeshPointsAndNormals(
     }
     if (skel_query) break;
   }
-  if (!skel_query) return {points, normals};
+  if (!skel_query) return;
+
+  // Blend shapes are applied before skinning. Like UsdSkelImaging, this
+  // ignores the normal offsets.
+  const UsdSkelAnimQuery& anim_query = skel_query.GetAnimQuery();
+  VtFloatArray anim_weights, weights, sub_shape_weights;
+  VtUIntArray blend_shape_indices, sub_shape_indices;
+  UsdSkelBlendShapeQuery blend_shape_query{UsdSkelBindingAPI(prim)};
+  if (skinning_query.HasBlendShapes() && anim_query &&
+      anim_query.ComputeBlendShapeWeights(&anim_weights, time) &&
+      skinning_query.GetBlendShapeMapper()->Remap(anim_weights, &weights) &&
+      blend_shape_query.ComputeSubShapeWeights(weights, &sub_shape_weights,
+                                               &blend_shape_indices,
+                                               &sub_shape_indices)) {
+    blend_shape_query.ComputeDeformedPoints(
+        sub_shape_weights, blend_shape_indices, sub_shape_indices,
+        blend_shape_query.ComputeBlendShapePointIndices(),
+        blend_shape_query.ComputeSubShapePointOffsets(), points);
+  }
 
   VtMatrix4dArray skinning_xforms;
   if (!skel_query.ComputeSkinningTransforms(&skinning_xforms, time)) {
-    return {points, normals};
+    return;
   }
 
   bool skinned_points = false;
@@ -155,7 +171,7 @@ std::pair<VtVec3fArray, VtVec3fArray> GetMeshPointsAndNormals(
   }
 
   bool skinned_normals = false;
-  if (has_normals && !normals.empty()) {
+  if (!normals.empty()) {
     skinned_normals =
         skinning_query.ComputeSkinnedNormals(skinning_xforms, &normals, time);
   }
@@ -187,7 +203,27 @@ std::pair<VtVec3fArray, VtVec3fArray> GetMeshPointsAndNormals(
       }
     }
   }
+}
+
+// Fetches the mesh's vertex positions at a given time.
+std::pair<VtVec3fArray, VtVec3fArray> GetMeshPointsAndNormals(
+    const UsdPrim& prim, const UsdGeomMesh& mesh, UsdTimeCode time) {
+  VtVec3fArray points;
+  VtVec3fArray normals;
+  if (!mesh.GetPointsAttr().Get(&points, time)) {
+    return {points, normals};
+  }
+  mesh.GetNormalsAttr().Get(&normals, time);
+  ApplySkelDeformation(prim, time, points, normals);
   return {std::move(points), std::move(normals)};
+}
+
+// Fetches the control points of a curves prim at a given time.
+VtVec3fArray ExtractCurvePoints(const UsdPrim& prim, UsdTimeCode time) {
+  VtVec3fArray points, normals;
+  UsdGeomCurves(prim).GetPointsAttr().Get(&points, time);
+  ApplySkelDeformation(prim, time, points, normals);
+  return points;
 }
 
 }  // namespace
@@ -392,6 +428,10 @@ NB_MODULE(geometry_ext, m) {
         nb::arg("path"), nb::arg("time"),
         "Extracts the topology, primvars and GeomSubset material assignment "
         "of the UsdGeomMesh at `path`.");
+  m.def("extract_curve_points", &ExtractCurvePoints, nb::arg("prim"),
+        nb::arg("time"),
+        "Extracts the control points of the UsdGeomCurves `prim` at `time`, "
+        "applying the UsdSkel blend shapes and skinning bound to it.");
   m.def("process_mesh", &ProcessMesh, nb::arg("mesh_data"),
         nb::arg("refine_level"), nb::arg("transform"), nb::arg("displacements"),
         nb::arg("requested_attributes"),
