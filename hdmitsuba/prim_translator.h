@@ -78,6 +78,12 @@ struct TranslatedMaterial {
   MeshAttributeRequests mesh_attributes;
 };
 
+// Instantiates a shape emitter from `props`
+// (`TranslatedMaterial::shape_emitter_props`).
+mitsuba::ref<mitsuba::Object> CreateMaterialEmitter(mitsuba::Properties props,
+                                                    bool double_sided,
+                                                    std::string_view variant);
+
 MI_VARIANT
 class PrimTranslator {
  public:

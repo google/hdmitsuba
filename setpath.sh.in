@@ -11,7 +11,10 @@ export PYTHONPATH="@CMAKE_CURRENT_SOURCE_DIR@:${HDMITSUBA_BUILD_DIR}:${HDMITSUBA
 
 # On Windows, PATH is used to find DLLs at runtime (including Release subdirectories)
 if [ -n "$COMSPEC" ] || [ -n "$SYSTEMROOT" ]; then
-  export PATH="${MITSUBA_BUILD_DIR_CONF}:${MITSUBA_BUILD_DIR_CONF}/Release:${HDMITSUBA_BUILD_DIR}/hdmitsuba:${HDMITSUBA_BUILD_DIR}/hdmitsuba/Release:${PATH}"
+  export PATH="${MITSUBA_BUILD_DIR_CONF}:${MITSUBA_BUILD_DIR_CONF}/Release:${HDMITSUBA_BUILD_DIR}/hdmitsuba:${HDMITSUBA_BUILD_DIR}/hdmitsuba/Release:${USD_DIR}/lib:${USD_DIR}/bin:${PATH}"
+  if [ -n "@MATERIALX_BASE_DIR@" ]; then
+    export PATH="@MATERIALX_BASE_DIR@/bin:${PATH}"
+  fi
 fi
 
 # Add Embree path if configured

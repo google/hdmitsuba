@@ -49,9 +49,14 @@ def _set_mitsuba_variant():
         'uv_texture',
         'uv_texture_scale_bias',
         'volumes',
+        'materialx',
     ],
 )
-def test_render(scene_name: str):
+def test_render(scene_name: str, monkeypatch: pytest.MonkeyPatch):
+  # TODO(vicini): Remove `HDMITSUBA_ENABLE_MATERIALX` once MaterialX support is
+  # complete.
+  if scene_name == 'materialx':
+    monkeypatch.setenv('HDMITSUBA_ENABLE_MATERIALX', '1')
   stage = Usd.Stage.Open(
       f'{test_helpers.TEST_ASSETS_PATH}/materials/{scene_name}.usda'
   )

@@ -32,7 +32,6 @@
 #include <pxr/imaging/hd/bprim.h>
 #include <pxr/imaging/hd/extComputation.h>
 #include <pxr/imaging/hd/instancer.h>
-#include <pxr/imaging/hd/materialSchema.h>
 #include <pxr/imaging/hd/perfLog.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/resourceRegistry.h>
@@ -346,8 +345,7 @@ VtDictionary HdMitsubaRenderDelegate::GetRenderStats() const {
 }
 
 TfTokenVector HdMitsubaRenderDelegate::GetMaterialRenderContexts() const {
-  return {TfToken("mitsuba"), HdMaterialSchemaTokens->universalRenderContext,
-          TfToken("glslfx")};
+  return PXR_NS::GetMaterialRenderContexts();
 }
 
 TfToken HdMitsubaRenderDelegate::GetMaterialBindingPurpose() const {

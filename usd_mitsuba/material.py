@@ -21,6 +21,7 @@ of USD assets for Mitsuba rendering.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import dataclasses
 import os
 from typing import Any
@@ -109,13 +110,9 @@ _PRIMVAR_READER_CHANNELS = {
 }
 
 
-def _get_surface_shader(material: UsdShade.Material) -> UsdShade.Shader | None:
-  """Gets the Mitsuba, universal, or glslfx surface shader of `material`."""
-  return (
-      find_shader(material.GetSurfaceOutput('mitsuba'))
-      or find_shader(material.GetSurfaceOutput())
-      or find_shader(material.GetSurfaceOutput('glslfx'))
-  )
+def _shader_id(shader: UsdShade.Shader) -> str:
+  """Returns `shader`'s info:id, or '' if unset."""
+  return shader.GetShaderId() or ''
 
 
 def _find_shader_output(
@@ -126,6 +123,23 @@ def _find_shader_output(
       attrs := prop.GetValueProducingAttributes(shaderOutputsOnly=True)
   ):
     return UsdShade.Shader(attrs[0].GetPrim()), attrs[0].GetBaseName()
+  return None
+
+
+def _find_terminal_connection(
+    get_output: Callable[[str], UsdShade.Output],
+) -> tuple[UsdShade.Shader, str] | None:
+  """Returns the `(shader, output)` on the highest-priority render context."""
+  # Like hdMitsuba, the `mtlx` render context takes precedence over the
+  # universal one when MaterialX translation is enabled.
+  contexts = (
+      ('mitsuba', 'mtlx', '', 'glslfx')
+      if geom_lib.is_materialx_enabled()
+      else ('mitsuba', '', 'glslfx')
+  )
+  for ctx in contexts:
+    if conn := _find_shader_output(get_output(ctx)):
+      return conn
   return None
 
 
@@ -147,13 +161,9 @@ def _get_volume_shader(
     material: UsdShade.Material,
 ) -> UsdShade.Shader | None:
   """Gets the Mitsuba-specific volume shader or falls back to default."""
-  shader = (
-      find_shader(material.GetVolumeOutput('mitsuba'))
-      or find_shader(material.GetVolumeOutput())
-      or find_shader(material.GetVolumeOutput('glslfx'))
-  )
-  if shader is not None and shader.GetShaderId().startswith(_MI_PREFIX):
-    return shader
+  conn = _find_terminal_connection(material.GetVolumeOutput)
+  if conn is not None and _shader_id(conn[0]).startswith(_MI_PREFIX):
+    return conn[0]
   return None
 
 
@@ -355,7 +365,7 @@ def _convert_primvar_reader(
   Returns:
     The Mitsuba texture dictionary, or None if the shader is rejected.
   """
-  shader_id = shader.GetShaderId()
+  shader_id = _shader_id(shader)
   channels = _PRIMVAR_READER_CHANNELS.get(
       shader_id.removeprefix(_PRIMVAR_READER_PREFIX)
   )
@@ -410,7 +420,7 @@ def usd_mitsuba_material_to_dict(
       input_name: str | None = None,
       output_name: str | None = None,
   ) -> dict[str, Any] | None:
-    shader_id = shader.GetIdAttr().Get(time)
+    shader_id = _shader_id(shader)
     if shader_id == 'UsdUVTexture':
       return _convert_uv_texture(shader, input_name, output_name, time)
     if shader_id.startswith(_PRIMVAR_READER_PREFIX):
@@ -419,7 +429,7 @@ def usd_mitsuba_material_to_dict(
     if not shader_id.startswith(_MI_PREFIX):
       raise ValueError(f'The shader {shader_id} is not a Mitsuba shader.')
 
-    result = {'type': shader_id.removeprefix(_MI_PREFIX)}
+    result: dict[str, Any] = {'type': shader_id.removeprefix(_MI_PREFIX)}
     for usd_input in shader.GetInputs():
       name = usd_input.GetBaseName()
       conn = _find_shader_output(usd_input)
@@ -507,10 +517,11 @@ def usd_preview_surface_to_mitsuba(
   if (diffuse := shader.GetInput('diffuseColor')) and (
       diffuse.HasConnectedSource()
   ):
-    conn = _find_shader_output(diffuse)
-    if conn is None or (
-        conn[0].GetShaderId() != 'UsdUVTexture'
-        and not conn[0].GetShaderId().startswith(_PRIMVAR_READER_PREFIX)
+    conn_id = (
+        _shader_id(conn[0]) if (conn := _find_shader_output(diffuse)) else ''
+    )
+    if conn_id != 'UsdUVTexture' and not conn_id.startswith(
+        _PRIMVAR_READER_PREFIX
     ):
       return {}, None
 
@@ -535,7 +546,7 @@ def usd_preview_surface_to_mitsuba(
       )
       conn = None
     if conn:
-      conn_id = conn[0].GetShaderId()
+      conn_id = _shader_id(conn[0])
       if conn_id == 'UsdUVTexture':
         val = _convert_uv_texture(conn[0], name, conn[1], time)
       elif conn_id.startswith(_PRIMVAR_READER_PREFIX):
@@ -670,9 +681,9 @@ def convert_mesh_material(
 ) -> MeshMaterial:
   """Parses a USD geometry or material prim and returns Mitsuba material properties.
 
-  This function will use the Mitsuba material variant if available, and
-  otherwise fall back to using the USD preview surface shader, or even just
-  the display color attribute.
+  Resolves the highest-priority surface shader across the `mitsuba`, `mtlx`
+  (when MaterialX is enabled), universal, and `glslfx` render contexts, falling
+  back to `displayColor` when no supported BSDF is bound.
 
   If the material is emissive, a Mitsuba `area` emitter will also be returned.
 
@@ -696,25 +707,34 @@ def convert_mesh_material(
     material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial(
         UsdShade.Tokens.full
     )
-  if material:
-    if shader := _get_surface_shader(material):
-      if shader.GetShaderId() == 'UsdPreviewSurface':
-        bsdf_dict, emitter_dict = usd_preview_surface_to_mitsuba(
-            shader, mesh_attributes, time
-        )
-        if bsdf_dict:
-          bsdf = mi.load_dict(bsdf_dict)
-        if emitter_dict:
-          # Like hdMitsuba, double-sided geometry emits from both sides.
-          emitter = mi.load_dict(emitter_dict | {'twosided': double_sided})
-      elif shader.GetShaderId().startswith(_MI_PREFIX):
-        if bsdf_dict := usd_mitsuba_material_to_dict(
-            shader, mesh_attributes=mesh_attributes, time=time
-        ):
-          loaded = mi.load_dict(bsdf_dict)
-          if isinstance(loaded, mi.BSDF):
-            bsdf = loaded
+  if material and (
+      conn := _find_terminal_connection(material.GetSurfaceOutput)
+  ):
+    shader_id = _shader_id(conn[0])
+    if shader_id == 'UsdPreviewSurface':
+      bsdf_dict, emitter_dict = usd_preview_surface_to_mitsuba(
+          conn[0], mesh_attributes, time
+      )
+      if bsdf_dict:
+        bsdf = mi.load_dict(bsdf_dict)
+      if emitter_dict:
+        # Like hdMitsuba, double-sided geometry emits from both sides.
+        emitter = mi.load_dict(emitter_dict | {'twosided': double_sided})
+    elif shader_id.startswith(_MI_PREFIX):
+      if bsdf_dict := usd_mitsuba_material_to_dict(
+          conn[0], mesh_attributes=mesh_attributes, time=time
+      ):
+        loaded = mi.load_dict(bsdf_dict)
+        if isinstance(loaded, mi.BSDF):
+          bsdf = loaded
+    elif mtlx := geom_lib.translate_materialx(
+        material.GetPrim(), time, double_sided
+    ):
+      # Like hdMitsuba, a MaterialX surface that fails to translate does not
+      # fall back to the surface shader of another render context.
+      bsdf, emitter, mesh_attributes = mtlx
 
+  if material:
     if shader := _get_volume_shader(material):
       medium_dict = usd_mitsuba_material_to_dict(shader, 'volume', time=time)
       medium = mi.load_dict(medium_dict)
@@ -793,17 +813,13 @@ def _find_displacement_connection(
     material: UsdShade.Material,
 ) -> tuple[UsdShade.Shader, str] | None:
   """Returns the `(shader, output)` driving `material`'s displacement."""
-  conn = (
-      _find_shader_output(material.GetDisplacementOutput('mitsuba'))
-      or _find_shader_output(material.GetDisplacementOutput())
-      or _find_shader_output(material.GetDisplacementOutput('glslfx'))
-  )
-  if conn is not None and conn[0].GetShaderId() == 'UsdPreviewSurface':
+  conn = _find_terminal_connection(material.GetDisplacementOutput)
+  if conn is not None and _shader_id(conn[0]) == 'UsdPreviewSurface':
     conn = _find_shader_output(conn[0].GetInput('displacement'))
   # Like hdMitsuba, ignore displacement from unsupported shaders.
   if conn is None:
     return None
-  shader_id = conn[0].GetShaderId()
+  shader_id = _shader_id(conn[0])
   if shader_id == 'UsdUVTexture' or shader_id.startswith(
       (_MI_PREFIX, _PRIMVAR_READER_PREFIX)
   ):

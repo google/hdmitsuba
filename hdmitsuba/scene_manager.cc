@@ -93,6 +93,7 @@
 #include "hdmitsuba/framebuffer.h"
 #include "hdmitsuba/ies_emitter.h"
 #include "hdmitsuba/kernel_freezing.h"
+#include "hdmitsuba/materialx/evaluator.h"
 #include "hdmitsuba/mesh/displacement.h"
 #include "hdmitsuba/mesh/geometry_processor.h"
 #include "hdmitsuba/prim_translator.h"
@@ -1100,13 +1101,9 @@ class SceneModel final : public SceneManager {
     if (pair.emitter_ptr == nullptr) {
       auto emitter_it = material_emitters_.find(material_id);
       if (emitter_it != material_emitters_.end()) {
-        mitsuba::Properties emitter_props = emitter_it->second;
-        if (double_sided) {
-          emitter_props.set("twosided", true, false);
-        }
-        pair.mesh_emitter = mitsuba::PluginManager::instance()->create_object(
-            emitter_props, mitsuba::Emitter<Float, Spectrum>::Variant,
-            mitsuba::Emitter<Float, Spectrum>::Type);
+        pair.mesh_emitter =
+            CreateMaterialEmitter(emitter_it->second, double_sided,
+                                  mitsuba::Emitter<Float, Spectrum>::Variant);
         pair.emitter_ptr = pair.mesh_emitter.get();
       }
     }
@@ -1880,6 +1877,7 @@ SceneManager* SceneManager::CreateSceneManager(const std::string& variant) {
 
 SceneManager::SceneManager() {
   RegisterIesEmitter();
+  mitsuba::mtlx::RegisterMaterialXExprTexture();
   absl::MutexLock lock(lifecycle_mutex_);
 
   // Try to determine if static initialization is already done or not.

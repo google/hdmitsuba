@@ -59,11 +59,12 @@ jobs:
         # sync with HDMITSUBA_MIN_PXR_VERSION in CMakeLists.txt.
         OPENUSD_SPEC: "openusd>=26.05,<27"
       run: |
-        if [ "$RUNNER_OS" = "macOS" ] || [ "$RUNNER_OS" = "Windows" ]; then
-          mamba install -y -c conda-forge "$OPENUSD_SPEC" openimagedenoise ninja "llvm>=18"
-        else
-          mamba install -y -c conda-forge "$OPENUSD_SPEC" openimagedenoise ninja
-        fi
+        # Note: conda-forge publishes `libmaterialx` for linux-64 and win-64,
+        # but not yet for osx-arm64 (built and cached below on macOS).
+        EXTRA_PKGS=()
+        [ "$RUNNER_OS" != "macOS" ] && EXTRA_PKGS+=(libmaterialx)
+        [ "$RUNNER_OS" != "Linux" ] && EXTRA_PKGS+=("llvm>=18")
+        mamba install -y -c conda-forge "$OPENUSD_SPEC" openimagedenoise ninja "${EXTRA_PKGS[@]}"
         python -c "from pxr import Usd; print('OpenUSD version:', Usd.GetVersion())"
 
     - name: Resolve LLVM Path for DrJit
@@ -103,7 +104,7 @@ jobs:
       with:
         path: |
           third_party/mitsuba3
-        key: ${{ runner.os }}-mitsuba3-aa01500f57770a4ef0b067693cae08b3e8a2ac73
+        key: ${{ runner.os }}-mitsuba3-aa01500f57770a4ef0b067693cae08b3e8a2ac73-spectral
 
     - name: Clone and Build Mitsuba 3
       if: steps.cache-mitsuba.outputs.cache-hit != 'true'
@@ -116,7 +117,7 @@ jobs:
         git checkout aa01500f57770a4ef0b067693cae08b3e8a2ac73
         git submodule update --init --recursive
         # Configure with minimal variants to speed up build
-        CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Release -DMI_ENABLE_CUDA=OFF -DMI_DEFAULT_VARIANTS=scalar_rgb,llvm_ad_rgb,metal_ad_rgb -DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+        CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Release -DMI_ENABLE_CUDA=OFF -DMI_DEFAULT_VARIANTS=scalar_rgb,llvm_ad_rgb,llvm_ad_spectral,metal_ad_rgb -DCMAKE_POLICY_VERSION_MINIMUM=3.5"
         if [ "$RUNNER_OS" = "Windows" ]; then
           # Use default MSBuild generator on Windows (no CC/CXX overrides, no Ninja)
           cmake -B build $CMAKE_FLAGS
@@ -130,12 +131,50 @@ jobs:
         fi
         cmake --build build --config Release
 
+    - name: Cache MaterialX (macOS)
+      if: runner.os == 'macOS'
+      id: cache-materialx
+      uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+      with:
+        path: third_party/materialx-install
+        key: ${{ runner.os }}-materialx-1.39.5-stdlib
+
+    - name: Build MaterialX (macOS)
+      if: runner.os == 'macOS' && steps.cache-materialx.outputs.cache-hit != 'true'
+      env:
+        COMPILER_CC: ${{ inputs.compiler_cc }}
+        COMPILER_CXX: ${{ inputs.compiler_cxx }}
+      run: |
+        curl -fsSL https://github.com/AcademySoftwareFoundation/MaterialX/archive/refs/tags/v1.39.5.tar.gz | tar xz
+        CC="$COMPILER_CC" CXX="$COMPILER_CXX" cmake -S MaterialX-1.39.5 -B MaterialX-1.39.5/build -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX="$PWD/third_party/materialx-install" \
+          -DMATERIALX_BUILD_SHARED_LIBS=ON \
+          -DMATERIALX_BUILD_GEN_MSL=OFF \
+          -DMATERIALX_BUILD_GEN_GLSL=OFF \
+          -DMATERIALX_BUILD_GEN_OSL=OFF \
+          -DMATERIALX_BUILD_GEN_MDL=OFF \
+          -DMATERIALX_BUILD_GEN_SLANG=OFF \
+          -DMATERIALX_BUILD_RENDER=OFF \
+          -DMATERIALX_BUILD_RENDER_PLATFORMS=OFF \
+          -DMATERIALX_INSTALL_RESOURCES=OFF
+        cmake --build MaterialX-1.39.5/build --target install
+        # Disabling all shader generators skips `add_subdirectory(libraries)` in
+        # MaterialX's CMakeLists.txt, which `MaterialXConfig.cmake` requires.
+        cp -R MaterialX-1.39.5/libraries "$PWD/third_party/materialx-install/libraries"
+        rm -rf MaterialX-1.39.5
+
     - name: Configure hdmitsuba
       env:
         COMPILER_CC: ${{ inputs.compiler_cc }}
         COMPILER_CXX: ${{ inputs.compiler_cxx }}
       run: |
-        CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DMITSUBA_DIR=$PWD/third_party/mitsuba3 -DMITSUBA_BUILD_DIR=$PWD/third_party/mitsuba3/build"
+        PREFIX_PATH="$CONDA_PREFIX"
+        if [ "$RUNNER_OS" = "macOS" ]; then
+          # Append after $CONDA_PREFIX so OpenUSD's own MaterialX wins if present.
+          PREFIX_PATH="$PREFIX_PATH;$PWD/third_party/materialx-install"
+        fi
+        CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$PREFIX_PATH -DMITSUBA_DIR=$PWD/third_party/mitsuba3 -DMITSUBA_BUILD_DIR=$PWD/third_party/mitsuba3/build"
         if [ "$RUNNER_OS" = "Windows" ]; then
           # Use default MSBuild generator on Windows
           cmake -B build $CMAKE_FLAGS
@@ -163,6 +202,7 @@ jobs:
 
     - name: Run C++ Tests
       run: |
+        source build/setpath.sh
         ctest --test-dir build -C Release --output-on-failure
 
     - name: Run Pyrefly Type Checker

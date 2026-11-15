@@ -26,6 +26,9 @@ add_library(hdMitsuba SHARED
   ies_emitter.cc
   light.cc
   instancer.cc
+  materialx/compiler.cc
+  materialx/evaluator.cc
+  materialx/translator.cc
   mesh.cc
   mesh/geometry_processor.cc
   mesh/subdivision.cc
@@ -70,6 +73,7 @@ target_link_libraries(hdMitsuba
     pxOsd
     sdf
     tf
+    usd
     usdGeom
     usdImaging
     usdLux
@@ -126,6 +130,12 @@ if(OpenImageDenoise_FOUND AND TARGET OpenImageDenoise)
 else()
   message(STATUS "hdmitsuba: OpenImageDenoise not found, CPU/LLVM/Metal OIDN denoiser disabled.")
 endif()
+
+file(TO_CMAKE_PATH "${MATERIALX_STDLIB_DIR}" HDMITSUBA_MTLX_STDLIB_PATH)
+target_compile_definitions(hdMitsuba PRIVATE
+  HDMITSUBA_MATERIALX_STDLIB_DIR="${HDMITSUBA_MTLX_STDLIB_PATH}"
+)
+target_link_libraries(hdMitsuba PRIVATE MaterialXCore MaterialXFormat)
 
 # Enable CUDA if needed
 option(HDMITSUBA_ENABLE_CUDA "Enable CUDA support for Mitsuba" OFF)

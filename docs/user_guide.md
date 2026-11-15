@@ -16,6 +16,36 @@ This document provides an overview of the USD features supported by `hdMitsuba`,
 *   **Displacement Mapping**: Fully supports displacement mapping. The delegate evaluates displacement textures connected to `mitsuba:displacement` or standard USD displacement terminals, either directly or through a `UsdPreviewSurface`'s `inputs:displacement`. Scalar displacement values are used as-is as offsets along the vertex normal (there is no implicit 0.5 mid-level); remap them with `UsdUVTexture` `inputs:scale` and `inputs:bias`.
 
 ### Shading & Materials
+*   **MaterialX Shading Networks (Experimental)**: Opt-in support for MaterialX
+    emissive and pattern shading networks (via `outputs:mtlx:surface` or
+    standard surface terminals; `outputs:mitsuba:surface` still takes
+    precedence). Set the environment variable `HDMITSUBA_ENABLE_MATERIALX=1` to
+    enable it (disabled by default while BSDF closure support is in progress;
+    when enabled, non-emissive BSDF lobes on MaterialX shaders currently render
+    black):
+    *   Surface emission and cutout opacity (`mask`) via `surface_unlit`,
+        `standard_surface`, `open_pbr_surface`, `gltf_pbr`, `mix`
+        (`surfaceshader`), and `surface` EDF closures (`uniform_edf`,
+        `generalized_schlick_edf`, `conical_edf`, `measured_edf`, and EDF
+        combinators `add`, `multiply`, `mix`; directional EDFs are approximated
+        as diffuse `area` emission, and IES profiles on `measured_edf` are not
+        supported). Custom MaterialX `.mtlx` node definitions
+        (`info:implementationSource = "sourceAsset"`) are also supported if
+        OpenUSD is built with MaterialX support.
+    *   Core pattern nodes: `constant`, `dot`, `convert`, channel ops
+        (`extract`, `combine2`/`3`/`4`, `swizzle`), basic arithmetic (`add`,
+        `subtract`, `multiply`, `divide`, `clamp`, `invert`, `mix`),
+        conditionals (`ifgreater`, `ifgreatereq`, `ifequal`, `not`, `switch`),
+        `luminance`, primary texture coordinates (`texcoord`, `index = 0`), and
+        2D ramps (`ramplr`, `ramptb`, `ramp4`), with USD/MaterialX color-space
+        conversions on value inputs. MaterialX image textures and
+        geometric/primvar property nodes are not supported yet.
+    *   Unsupported pattern nodes emit a warning and evaluate to their `in`
+        input (or `0` if none). When `HDMITSUBA_ENABLE_MATERIALX=1`, `mtlx`
+        material outputs (`mtlx:surface`, `mtlx:displacement`, `mtlx:volume`)
+        take precedence over universal outputs even if the MaterialX shader
+        cannot be translated (displacement and volume shaders are not supported
+        yet and are ignored).
 *   **UsdPreviewSurface**: Various USD preview surface parameters are mapped to Mitsuba's `principled` BSDF:
     *   `diffuseColor` (Base color)
     *   `roughness` (Specular roughness)

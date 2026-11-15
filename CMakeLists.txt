@@ -114,6 +114,15 @@ if(PXR_VERSION LESS HDMITSUBA_MIN_PXR_VERSION)
 endif()
 message(STATUS "hdmitsuba: Using OpenUSD ${PXR_MAJOR_VERSION}.${PXR_MINOR_VERSION}.${PXR_PATCH_VERSION} (PXR_VERSION=${PXR_VERSION})")
 
+# Standalone MaterialX, unless OpenUSD or Houdini already provides its targets.
+if(NOT TARGET MaterialXCore)
+  find_package(MaterialX 1.39 REQUIRED)
+elseif(DEFINED MaterialX_VERSION AND MaterialX_VERSION VERSION_LESS 1.39)
+  message(FATAL_ERROR
+    "hdmitsuba requires MaterialX 1.39 or newer, but found "
+    "MaterialX ${MaterialX_VERSION}.")
+endif()
+
 if(NOT Houdini_FOUND)
   find_package(OpenSubdiv REQUIRED)
   find_package(OpenImageDenoise 2.1 QUIET)

@@ -58,7 +58,10 @@
 #include <pxr/usd/usdSkel/skinningQuery.h>
 #include <pxr/usd/usdSkel/utils.h>
 
+#include "hdmitsuba/config.h"
 #include "hdmitsuba/ies_emitter.h"
+#include "hdmitsuba/materialx/evaluator.h"
+#include "hdmitsuba/materialx/translator.h"
 #include "hdmitsuba/mesh/displacement.h"
 #include "hdmitsuba/mesh/geometry_processor.h"
 #include "hdmitsuba/mesh/subdivision.h"
@@ -403,8 +406,41 @@ void AddMeshAttributes(const nb::object& mesh, const SubMeshOutput& sub,
       sub.primvars, mesh_attributes);
 }
 
+namespace {
+
+// Returns the Python object of `obj`, with the type of the active variant
+// (e.g. `mi.BSDF`). This module cannot cast Mitsuba objects itself, as it does
+// not share the nanobind domain of the Mitsuba bindings, so it calls the
+// function that they export for this purpose.
+nb::object CastMitsubaObject(mitsuba::Object* obj) {
+  if (!obj) return nb::none();
+  using Caster = nb::object (*)(mitsuba::Object*);
+  return reinterpret_cast<Caster>(
+      nb::borrow<nb::capsule>(
+          nb::module_::import_("mitsuba.mitsuba_ext").attr("cast_object"))
+          .data())(obj);
+}
+
+nb::object TranslateMaterialX(const UsdPrim& prim, UsdTimeCode time,
+                              bool double_sided) {
+  std::string variant = ActiveVariant();
+  auto trans = TranslateUsdMaterialX(prim, time, variant);
+  if (!trans) return nb::none();
+  mitsuba::ref<mitsuba::Object> emitter;
+  if (trans->shape_emitter_props) {
+    emitter = CreateMaterialEmitter(std::move(*trans->shape_emitter_props),
+                                    double_sided, variant);
+  }
+  return nb::make_tuple(CastMitsubaObject(trans->bsdf.get()),
+                        CastMitsubaObject(emitter.get()),
+                        std::move(trans->mesh_attributes));
+}
+
+}  // namespace
+
 NB_MODULE(geometry_ext, m) {
   PXR_NS::RegisterIesEmitter();
+  mitsuba::mtlx::RegisterMaterialXExprTexture();
   m.doc() = "Python bindings for hdmitsuba geometry processing utilities.";
 
   nb::class_<SubMeshOutput>(m, "SubMeshOutput")
@@ -464,4 +500,12 @@ NB_MODULE(geometry_ext, m) {
           }
           return out;
         });
+  m.def("is_materialx_enabled", &IsMaterialXEnabled,
+        "Returns True if MaterialX translation is enabled at runtime.");
+  m.def("translate_materialx", &TranslateMaterialX, nb::arg("prim"),
+        nb::arg("time"), nb::arg("double_sided") = false,
+        "Translates a MaterialX UsdShadeMaterial prim into a "
+        "`(bsdf, emitter, mesh_attributes)` tuple, or None if MaterialX "
+        "support is disabled or the material has no active MaterialX surface "
+        "shader.");
 }

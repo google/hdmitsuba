@@ -43,7 +43,8 @@ This repository provies the following components:
     *   **macOS**: Clang is required (Xcode toolchain).
     *   **Linux**: Either GCC or Clang work. If you install OpenUSD using `conda`, you need to use GCC for ABI compatibility.
 2.  **Dependencies**:
-    *   **OpenUSD**: For example [built locally](https://github.com/PixarAnimationStudios/OpenUSD/blob/dev/BUILDING.md) or installed via `conda`. Due to the size and complexity of this dependency, we currently do not include it as a git submodule.
+    *   **OpenUSD**: Version 26.05 or newer. For example [built locally](https://github.com/PixarAnimationStudios/OpenUSD/blob/dev/BUILDING.md) or installed via `conda` (`conda-forge`'s `openusd`). Due to the size and complexity of this dependency, we currently do not include it as a git submodule.
+    *   **MaterialX**: Version 1.39 or newer. Either installed separately (`libmaterialx` on `conda-forge` for Linux/Windows, or built from [MaterialX](https://github.com/AcademySoftwareFoundation/MaterialX) and added to `CMAKE_PREFIX_PATH`) or bundled with a local OpenUSD build (`build_usd.py --materialx`).
     *   **Mitsuba 3**: Locally built from source. Similarly to USD, it is not included as a submodule. For compatibility, it is recommended to use commit [`aa01500f`](https://github.com/mitsuba-renderer/mitsuba3/commit/aa01500f57770a4ef0b067693cae08b3e8a2ac73) (which is the version validated in our CI configuration). The `pip`-installed version of Mitsuba currently is not supported.
     *   **Additional dependencies**: Additional C++ dependencies are included as git submoduls. When cloning this repository, use `git clone --recursive` to initialize submodules. Otherwise, they can also be initialized using `git submodule update --init --recursive`.
     *   **Python dependencies**: `numpy`, `pytest`.
@@ -61,7 +62,7 @@ cmake -G Ninja \
 cmake --build build
 ```
 
-To build against a local **Houdini** installation (Houdini 22.0 or newer, which bundles OpenUSD >= 26.05 and Python), pass the Houdini installation path as `CMAKE_PREFIX_PATH` (e.g. `/Applications/Houdini/Current` on macOS, or `/opt/hfs22.0` on Linux):
+To build against a local **Houdini** installation (Houdini 22.0 or newer, which bundles OpenUSD >= 26.05, MaterialX >= 1.39, and Python), pass the Houdini installation path as `CMAKE_PREFIX_PATH` (e.g. `/Applications/Houdini/Current` on macOS, or `/opt/hfs22.0` on Linux):
 
 ```bash
 cmake -G Ninja \
