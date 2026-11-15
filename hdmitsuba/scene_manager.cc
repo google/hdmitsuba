@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -996,16 +997,30 @@ class SceneModel final : public SceneManager {
 
   void CommitMaterials() {
     auto pending_specs = GetPendingSpecs(material_specs_);
+    if (pending_specs.empty()) return;
 
-    // Pre-load all textures in parallel to support re-use.
-    if (!pending_specs.empty()) {
-      PreloadTextures(pending_specs);
+    // Discover and pre-load all textures in parallel for reuse, keeping any
+    // flattened MaterialX networks for the build pass below.
+    absl::flat_hash_map<SdfPath, std::shared_ptr<const PreparedMaterialX>,
+                        SdfPath::Hash>
+        prepared_mtlx;
+    absl::flat_hash_set<TextureKey> keys;
+    for (const MaterialSpec* spec : pending_specs) {
+      if (auto prepared = DiscoverTextures(
+              spec->id, spec->network2,
+              [&](const TextureKey& key) { keys.insert(key); })) {
+        prepared_mtlx.emplace(spec->id, std::move(prepared));
+      }
     }
+    texture_cache_.Preload(keys);
 
     ParallelCommit<decltype(material_specs_), TranslatedMaterial>(
         material_specs_,
         [&](MaterialSpec* spec, TranslatedMaterial& res) {
-          res = PrimTranslator::BuildMaterial(*spec, texture_cache_);
+          auto it = prepared_mtlx.find(spec->id);
+          res = PrimTranslator::BuildMaterial(
+              *spec, texture_cache_,
+              it != prepared_mtlx.end() ? it->second.get() : nullptr);
         },
         [&](MaterialSpec* spec, TranslatedMaterial& trans) {
           if (auto* bsdf = dynamic_cast<BSDF*>(trans.bsdf.get())) {
@@ -1785,15 +1800,6 @@ class SceneModel final : public SceneManager {
       }
     }
     has_pending_commits_ = true;
-  }
-
-  void PreloadTextures(const std::vector<MaterialSpec*>& pending_specs) {
-    absl::flat_hash_set<TextureKey> keys;
-    for (const auto* spec : pending_specs) {
-      DiscoverTextures(spec->network2,
-                       [&](const TextureKey& key) { keys.insert(key); });
-    }
-    texture_cache_.Preload(keys);
   }
 
   // Mitsuba's Scene only scans for filtered (trilinear/anisotropic) textures

@@ -14,20 +14,27 @@
 
 #pragma once
 
+#include <functional>
 #include <string_view>
 
 #include <MaterialXCore/Node.h>
 #include <mitsuba/core/object.h>
 #include <pxr/pxr.h>
 
+#include "hdmitsuba/texture_cache.h"
+#include "hdmitsuba/utils.h"
+
 PXR_NAMESPACE_OPEN_SCOPE
 
-// The `materialx_expr` textures of a compiled surface shader.
+// The `materialx_expr` textures and mesh attributes of a compiled surface
+// shader.
 struct CompiledSurfaceShader {
   // Emitted radiance, or null if there is no emission.
   mitsuba::ref<mitsuba::Object> radiance_texture;
   // Cutout opacity, or null if it is identically 1.
   mitsuba::ref<mitsuba::Object> opacity_texture;
+  // Primvars read as mesh attributes by the compiled shader.
+  MeshAttributeRequests mesh_attributes;
 };
 
 // Compiles the emission (`edf`, weighted by `opacity`) and cutout `opacity` of
@@ -35,6 +42,14 @@ struct CompiledSurfaceShader {
 // `surfacematerial`, or raw EDF closures). This reads the node definitions of
 // the data library of the document, which must not be modified concurrently.
 CompiledSurfaceShader CompileSurfaceShader(
-    const MaterialX::NodePtr& shader_node, std::string_view variant);
+    const MaterialX::NodePtr& shader_node, std::string_view variant,
+    const std::function<const CachedTexture*(const TextureKey&)>&
+        lookup_texture);
+
+// Dry-run compiles the active branches of `shader_node` and invokes `callback`
+// with the `TextureKey` of every bitmap texture it consumes.
+void DiscoverSurfaceShaderTextures(
+    const MaterialX::NodePtr& shader_node,
+    const std::function<void(const TextureKey&)>& callback);
 
 PXR_NAMESPACE_CLOSE_SCOPE

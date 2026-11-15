@@ -15,6 +15,7 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -45,10 +46,14 @@ void SetMitsubaPropertyFromValue(mitsuba::Properties& props,
                                  std::string_view name, const pxr::VtValue& val,
                                  bool invert_float = false);
 
+struct PreparedMaterialX;
+
 // Invokes `callback` with the key of every texture the material parsers will
-// look up for `network`, so the TextureCache can be preloaded beforehand.
-void DiscoverTextures(
-    const HdMaterialNetwork2& network,
+// look up for `network`, so the TextureCache can be preloaded beforehand. If
+// `network` has an active MaterialX surface shader, returns its prepared
+// network, which must be passed to `BuildMaterial`.
+std::shared_ptr<const PreparedMaterialX> DiscoverTextures(
+    const SdfPath& id, const HdMaterialNetwork2& network,
     const std::function<void(const TextureKey& tex_key)>& callback);
 
 // Displacement texture of a material.
@@ -107,7 +112,8 @@ class PrimTranslator {
 
   static TranslatedMaterial BuildMaterial(
       const MaterialSpec& spec,
-      const TextureCache<Float, Spectrum>& texture_cache);
+      const TextureCache<Float, Spectrum>& texture_cache,
+      const PreparedMaterialX* prepared_mtlx);
 
   struct TranslatedLight {
     mitsuba::ref<mitsuba::Shape<Float, Spectrum>> shape = nullptr;

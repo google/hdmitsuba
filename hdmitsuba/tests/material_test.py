@@ -73,9 +73,17 @@ def test_render(scene_name: str, monkeypatch: pytest.MonkeyPatch):
     [
         ('materials', ['albedo.png']),
         ('uv_texture', ['uv_quadrants.png', 'albedo.png']),
+        ('materialx', ['albedo.png', 'normalmap.png']),
     ],
 )
-def test_render_usdz(tmp_path, scene_name: str, textures: list[str]):
+def test_render_usdz(
+    tmp_path,
+    scene_name: str,
+    textures: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+):
+  if scene_name == 'materialx':
+    monkeypatch.setenv('HDMITSUBA_ENABLE_MATERIALX', '1')
   stage = Usd.Stage.Open(
       f'{test_helpers.TEST_ASSETS_PATH}/materials/{scene_name}.usda'
   )

@@ -17,6 +17,7 @@
 #include <cstring>
 #include <exception>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -38,6 +39,7 @@
 #include <mitsuba/core/string.h>
 #include <mitsuba/render/texture.h>
 #include <nanothread/nanothread.h>
+#include <pxr/base/gf/colorSpace.h>
 #include <pxr/base/gf/matrix3d.h>
 #include <pxr/base/gf/matrix3f.h>
 #include <pxr/base/gf/matrix4d.h>
@@ -45,6 +47,7 @@
 #include <pxr/base/gf/vec2f.h>
 #include <pxr/base/gf/vec4f.h>
 #include <pxr/base/tf/diagnostic.h>
+#include <pxr/base/tf/span.h>
 #include <pxr/imaging/hd/material.h>
 #include <pxr/usd/ar/asset.h>
 #include <pxr/usd/ar/resolvedPath.h>
@@ -182,19 +185,25 @@ mitsuba::ref<mitsuba::Object> ApplyScaleBias(
   return CreateExpandedObject(props, variant, mitsuba::ObjectType::Texture);
 }
 
+// A single-channel OpenEXR image with an "A" channel is loaded as a
+// multi-channel bitmap without alpha, whose only channel is the alpha.
+bool IsSingleAlphaBitmap(const mitsuba::Bitmap& bitmap) {
+  return bitmap.pixel_format() == mitsuba::Bitmap::PixelFormat::MultiChannel &&
+         bitmap.channel_count() == 1 && bitmap.channel_names()[0] == "A";
+}
+
+mitsuba::ref<mitsuba::Object> CreateUniformTexture(float value,
+                                                   std::string_view variant) {
+  mitsuba::Properties props("uniform");
+  props.set("value", value);
+  return CreateExpandedObject(props, variant, mitsuba::ObjectType::Texture);
+}
+
 mitsuba::ref<mitsuba::Object> CreateBitmapTexture(const TextureKey& key,
                                                   const mitsuba::Bitmap& bitmap,
                                                   std::string_view variant) {
-  // A single-channel OpenEXR image with an "A" channel is loaded as a
-  // multi-channel bitmap without alpha, whose only channel is the alpha.
-  const bool single_alpha =
-      bitmap.pixel_format() == mitsuba::Bitmap::PixelFormat::MultiChannel &&
-      bitmap.channel_count() == 1 && bitmap.channel_names()[0] == "A";
-  if (key.channel == 3 && !bitmap.has_alpha() && !single_alpha) {
-    mitsuba::Properties uniform_props("uniform");
-    uniform_props.set("value", key.scale[0] + key.bias[0]);
-    return CreateExpandedObject(uniform_props, variant,
-                                mitsuba::ObjectType::Texture);
+  if (key.channel == 3 && !bitmap.has_alpha() && !IsSingleAlphaBitmap(bitmap)) {
+    return CreateUniformTexture(key.scale[0] + key.bias[0], variant);
   }
   mitsuba::ref<mitsuba::Bitmap> view;
   if (key.channel >= 0 && bitmap.channel_count() > 1) {
@@ -238,6 +247,19 @@ mitsuba::ref<mitsuba::Object> CreateBitmapTexture(const TextureKey& key,
                                const_cast<uint8_t*>(bitmap.uint8_data()));
     view->set_srgb_gamma(bitmap.srgb_gamma());
     view->set_premultiplied_alpha(bitmap.premultiplied_alpha());
+    if (key.channel < 0 && !key.color_space.empty()) {
+      // Convert raw encoded pixel values to linear Rec.709 Float32 RGB before
+      // Mitsuba builds its bitmap texture so bilinear filtering happens in
+      // linear space and evaluation pays zero per-sample color-space cost.
+      view->set_srgb_gamma(false);
+      view = view->convert(mitsuba::Bitmap::PixelFormat::RGB,
+                           struct_jit::Type::Float32,
+                           /*srgb_gamma=*/false);
+      GfColorSpace(TfToken(key.color_space))
+          .ConvertRGBSpan(GfColorSpace(GfColorSpaceNames->LinearRec709),
+                          TfSpan<float>(static_cast<float*>(view->data()),
+                                        view->pixel_count() * 3));
+    }
   }
 
   mitsuba::Properties props("bitmap");
@@ -421,22 +443,48 @@ MI_VARIANT const CachedTexture* TextureCache<Float, Spectrum>::Find(
 MI_VARIANT void TextureCache<Float, Spectrum>::Preload(
     const absl::flat_hash_set<TextureKey>& keys) {
   std::vector<TextureKey> texture_list;
+  std::vector<const TextureKey*> uniform_alpha_keys;
   std::vector<std::string> file_list;
   std::vector<std::vector<size_t>> file_to_textures;
   absl::flat_hash_map<std::string, size_t> file_indices;
+  std::optional<absl::flat_hash_set<std::string_view>> no_alpha_files;
 
   for (const TextureKey& key : keys) {
-    if (!textures_.contains(key)) {
-      const size_t tex_idx = texture_list.size();
-      texture_list.push_back(key);
-      auto [it, inserted] =
-          file_indices.try_emplace(key.filename, file_list.size());
-      if (inserted) {
-        file_list.push_back(key.filename);
-        file_to_textures.emplace_back();
+    if (textures_.contains(key)) continue;
+    // Skip re-decoding images already known to lack an alpha channel (e.g.
+    // MaterialX `color4` alpha discovery on subsequent interactive commits).
+    if (key.channel == 3 && !textures_.empty()) {
+      if (!no_alpha_files) {
+        no_alpha_files.emplace();
+        for (const auto& [cached_key, cached_tex] : textures_) {
+          if (cached_tex.texture && !cached_tex.has_alpha) {
+            no_alpha_files->insert(cached_key.filename);
+          }
+        }
       }
-      file_to_textures[it->second].push_back(tex_idx);
+      if (no_alpha_files->contains(key.filename)) {
+        uniform_alpha_keys.push_back(&key);
+        continue;
+      }
     }
+    const size_t tex_idx = texture_list.size();
+    texture_list.push_back(key);
+    auto [it, inserted] =
+        file_indices.try_emplace(key.filename, file_list.size());
+    if (inserted) {
+      file_list.push_back(key.filename);
+      file_to_textures.emplace_back();
+    }
+    file_to_textures[it->second].push_back(tex_idx);
+  }
+
+  for (const TextureKey* key : uniform_alpha_keys) {
+    textures_.emplace(
+        *key, CachedTexture{CreateUniformTexture(
+                                key->scale[0] + key->bias[0],
+                                mitsuba::Texture<Float, Spectrum>::Variant),
+                            /*channel_count=*/1, /*has_alpha=*/false});
+    dirty_ = true;
   }
   if (texture_list.empty()) return;
 
@@ -492,7 +540,11 @@ MI_VARIANT CachedTexture TextureCache<Float, Spectrum>::LoadTexture(
     return CachedTexture{
         CreateBitmapTexture(key, bitmap,
                             mitsuba::Texture<Float, Spectrum>::Variant),
-        key.channel >= 0 ? 1 : bitmap.channel_count()};
+        key.channel >= 0 ? 1
+        : !key.color_space.empty()
+            ? 3
+            : bitmap.channel_count() - bitmap.has_alpha(),
+        bitmap.has_alpha() || IsSingleAlphaBitmap(bitmap)};
   } catch (const std::exception& e) {
     TF_WARN("Failed to load texture '%s': %s.", key.filename.c_str(), e.what());
     return CachedTexture{};

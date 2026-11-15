@@ -253,8 +253,8 @@ void SetMitsubaPropertyFromValue(mitsuba::Properties& props,
   }
 }
 
-void DiscoverTextures(
-    const HdMaterialNetwork2& network,
+std::shared_ptr<const PreparedMaterialX> DiscoverTextures(
+    const SdfPath& id, const HdMaterialNetwork2& network,
     const std::function<void(const TextureKey& tex_key)>& callback) {
   absl::flat_hash_set<SdfPath, SdfPath::Hash> visited_nodes;
   std::function<void(const HdMaterialConnection2&, const TfToken&)> visit =
@@ -293,17 +293,20 @@ void DiscoverTextures(
         }
       };
 
-  for (const TfToken& terminal :
-       {HdMaterialTerminalTokens->displacement,
-        HdMaterialTerminalTokens->volume, HdMaterialTerminalTokens->surface}) {
-    if (terminal == HdMaterialTerminalTokens->surface &&
-        IsMaterialXNetwork(network)) {
-      continue;
-    }
+  for (const TfToken& terminal : {HdMaterialTerminalTokens->displacement,
+                                  HdMaterialTerminalTokens->volume}) {
     if (const auto* conn = FindTerminalConnection(network, terminal)) {
       visit(*conn, terminal);
     }
   }
+  if (auto prepared = PrepareMaterialXNetwork(id, network, callback)) {
+    return prepared;
+  }
+  if (const auto* conn =
+          FindTerminalConnection(network, HdMaterialTerminalTokens->surface)) {
+    visit(*conn, HdMaterialTerminalTokens->surface);
+  }
+  return nullptr;
 }
 
 namespace {
@@ -757,16 +760,19 @@ mitsuba::ref<mitsuba::Object> CreateMaterialEmitter(mitsuba::Properties props,
 
 MI_VARIANT TranslatedMaterial PrimTranslator<Float, Spectrum>::BuildMaterial(
     const MaterialSpec& spec,
-    const TextureCache<Float, Spectrum>& texture_cache) {
+    const TextureCache<Float, Spectrum>& texture_cache,
+    const PreparedMaterialX* prepared_mtlx) {
   TranslatedMaterial res;
   const HdMaterialNetwork2& network2 = spec.network2;
   const std::string id_str = spec.id.GetAsString();
   absl::flat_hash_map<SdfPath, mitsuba::ref<mitsuba::Object>, SdfPath::Hash>
       cache;
 
-  if (IsMaterialXNetwork(network2)) {
-    res = TranslateMaterialXNetwork(spec.id, network2,
-                                    mitsuba::BSDF<Float, Spectrum>::Variant);
+  if (prepared_mtlx) {
+    res = TranslateMaterialXNetwork(
+        spec.id, *prepared_mtlx,
+        [&](const TextureKey& key) { return texture_cache.Find(key); },
+        mitsuba::BSDF<Float, Spectrum>::Variant);
     if (res.bsdf) res.bsdf->set_id(id_str);
   } else if (const auto* surf_conn = FindTerminalConnection(
                  network2, HdMaterialTerminalTokens->surface)) {

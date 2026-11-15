@@ -38,6 +38,8 @@
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/tf/diagnostic.h>
 #include <pxr/base/tf/token.h>
+#include <pxr/usd/ar/resolvedPath.h>
+#include <pxr/usd/ar/resolver.h>
 
 #include "hdmitsuba/debug_codes.h"
 #include "hdmitsuba/materialx/evaluator.h"
@@ -73,7 +75,7 @@ Expr call(Op op, const Expr& arg0, const Exprs&... rest);
 // Arithmetic, `mix()` and `select()` simplify constant 0 and 1 operands. This
 // is not an optimization (Dr.Jit simplifies the traced program itself), but
 // determines what is known before rendering: whether a surface emits or is
-// cut out at all.
+// cut out at all, and which textures and primvars its shader reads.
 struct Expr {
   std::vector<Inst> code;
   uint8_t channels = 3;
@@ -84,7 +86,10 @@ struct Expr {
 
   static Expr zero() { return Expr({Op::Const, 0, 0}, 1); }
   static Expr one() { return Expr({Op::Const, 0, 1}, 1); }
-  static Expr uv() { return Expr({Op::GeomUV, 0, 0}, 2); }
+  static Expr p_world() { return Expr({Op::GeomPosWorld, 0, 0}); }
+  static Expr n_world() { return Expr({Op::GeomNormalWorld, 0, 0}); }
+  static Expr t_world() { return Expr({Op::GeomTangentWorld, 0, 0}); }
+  static Expr b_world() { return Expr({Op::GeomBitangentWorld, 0, 0}); }
 
   bool uniform() const { return channels == 1; }
   bool is_zero() const { return *this == zero(); }
@@ -146,7 +151,8 @@ Expr call(Op op, uint16_t imm, const Exprs&... args) {
     e.max_depth = std::max(e.max_depth, depth + args.max_depth), ++depth),
    ...);
   bool ew = elementwise_arity(op) != 0;
-  e.channels = ew ? std::max<uint8_t>({args.channels...}) : result_channels(op);
+  e.channels =
+      ew ? std::max<uint8_t>({args.channels...}) : result_channels(op, imm);
   e.code.push_back({op, static_cast<uint8_t>(ew ? e.channels : 0), imm});
   return e;
 }
@@ -182,59 +188,18 @@ Expr CompileMix(const Expr& m, FgFn&& fg_fn, BgFn&& bg_fn) {
   return mix(fg, bg, m);
 }
 
-// Maps MaterialX `cmlib` and USD `GfColorSpace` names to a `GfColorSpace` when
-// conversion to linear Rec.709 is needed, or `std::nullopt` if `color_space`
-// is empty, data/raw, or already linear Rec.709.
-std::optional<GfColorSpace> ResolveSourceColorSpace(
-    std::string_view color_space) {
-  if (color_space.empty()) return std::nullopt;
-  std::string cs = absl::AsciiStrToLower(color_space);
-  static const absl::NoDestructor<
-      absl::flat_hash_map<std::string_view, TfToken>>
-      kMtlxAliases({
-          {"acescg", GfColorSpaceNames->LinearAP1},
-          {"g22_ap1", GfColorSpaceNames->G22AP1},
-          {"g22_rec709", GfColorSpaceNames->G22Rec709},
-          {"g18_rec709", GfColorSpaceNames->G18Rec709},
-          {"rec709_display", GfColorSpaceNames->G24Rec709},
-          {"srgb", GfColorSpaceNames->SRGBRec709},
-          {"srgb_texture", GfColorSpaceNames->SRGBRec709},
-          {"lin_adobergb", GfColorSpaceNames->LinearAdobeRGB},
-          {"adobergb", GfColorSpaceNames->G22AdobeRGB},
-          {"srgb_displayp3", GfColorSpaceNames->SRGBP3D65},
-          {"lin_displayp3", GfColorSpaceNames->LinearP3D65},
-      });
-  auto it = kMtlxAliases->find(cs);
-  TfToken token = it != kMtlxAliases->end() ? it->second : TfToken(cs);
-  if (token == GfColorSpaceNames->LinearRec709 ||
-      token == GfColorSpaceNames->Raw || token == GfColorSpaceNames->Data ||
-      token == GfColorSpaceNames->Identity ||
-      token == GfColorSpaceNames->Unknown || !GfColorSpace::IsValid(token)) {
-    return std::nullopt;
-  }
-  return GfColorSpace(token);
-}
-
-GfVec3f ToLinearRec709(GfVec3f rgb_val, std::string_view color_space) {
-  if (rgb_val != GfVec3f(0.0f) && rgb_val != GfVec3f(1.0f)) {
-    if (auto src_cs = ResolveSourceColorSpace(color_space)) {
-      rgb_val = GfColorSpace(GfColorSpaceNames->LinearRec709)
-                    .Convert(*src_cs, rgb_val)
-                    .GetRGB();
-    }
-  }
-  return rgb_val;
-}
-
-// Expression of the default `texcoord` node (UV0), undoing Mitsuba's mesh UV
-// v-flip.
+// Expression of the default `texcoord` node (UV0).
 Expr DefaultTexcoord(uint8_t channels = 2) {
-  Expr uv = vec2(Expr::uv().x(), Expr::one() - Expr::uv().y());
-  uv.channels = channels;
-  return uv;
+  return Expr({Op::GeomUV, 0, 0}, channels);
 }
 
-mx::InputPtr GetValueInput(const mx::NodePtr& node, const std::string& name) {
+mx::InputPtr GetValueInput(mx::NodePtr node, std::string name) {
+  while (mx::NodePtr up = node->getConnectedNode(name)) {
+    const std::string& cat = up->getCategory();
+    if (cat != "dot" && cat != "constant") return nullptr;
+    node = std::move(up);
+    name = cat == "constant" ? "value" : "in";
+  }
   if (mx::InputPtr in = node->getInput(name); in && in->hasValueString()) {
     return in;
   }
@@ -245,6 +210,12 @@ mx::InputPtr GetValueInput(const mx::NodePtr& node, const std::string& name) {
     }
   }
   return nullptr;
+}
+
+std::string GetNodeInputString(const mx::NodePtr& node, const std::string& name,
+                               std::string_view def = {}) {
+  mx::InputPtr in = GetValueInput(node, name);
+  return in ? in->getValueString() : std::string(def);
 }
 
 // Returns the type of the input `name` of `node`, which may only be declared
@@ -261,6 +232,12 @@ bool IsFourChannelType(std::string_view type) {
   return type == "color4" || type == "vector4";
 }
 
+uint8_t TypeChannels(std::string_view type) {
+  if (type == "float" || type == "integer" || type == "boolean") return 1;
+  if (type == "vector2") return 2;
+  return IsFourChannelType(type) ? 4 : 3;
+}
+
 mx::NodePtr UnwrapShaderNode(mx::NodePtr node) {
   while (node) {
     const std::string& cat = node->getCategory();
@@ -271,12 +248,19 @@ mx::NodePtr UnwrapShaderNode(mx::NodePtr node) {
   return node;
 }
 
-// Compiles a flattened MaterialX DAG into a `mitsuba::mtlx::MtlxProgram`.
+// Compiles a flattened MaterialX DAG into a `mitsuba::mtlx::MtlxProgram` and
+// a list of Mitsuba Texture child inputs (`in0`, `in1`, ...).
 class MtlxExprCompiler {
  public:
-  MtlxExprCompiler(std::string_view variant,
+  using LookupTextureFn =
+      std::function<const CachedTexture*(const TextureKey&)>;
+  using DiscoverTextureFn = std::function<void(const TextureKey&)>;
+
+  MtlxExprCompiler(const LookupTextureFn& lookup_texture,
                    absl::flat_hash_set<std::string>& warned)
-      : variant_(variant), warned_(warned) {}
+      : lookup_texture_(&lookup_texture), warned_(&warned) {}
+  explicit MtlxExprCompiler(const DiscoverTextureFn& discover_texture)
+      : discover_texture_(&discover_texture) {}
 
   // Compiles a MaterialX EDF or surface emission DAG (`surface`,
   // `surface_unlit`, `uniform_edf`, `generalized_schlick_edf`, `multiply`,
@@ -287,7 +271,9 @@ class MtlxExprCompiler {
   // `surface_unlit`, and `mix` (`surfaceshader`) nodes, or `Expr::one()`.
   Expr CompileOpacity(const mx::NodePtr& shader_node);
 
-  ref<Object> CreateExprTexture(const Expr& expr, bool unbounded);
+  ref<Object> CreateExprTexture(const Expr& expr, bool unbounded,
+                                std::string_view variant,
+                                MeshAttributeRequests& mesh_attributes);
 
  private:
   Expr Const(double value);
@@ -299,20 +285,30 @@ class MtlxExprCompiler {
   Expr EmitTuple(std::initializer_list<float> vals);
   Expr EmitTmpExpr(const Expr& expr);
 
+  TfToken ResolveSourceColorSpace(std::string_view color_space);
+  GfVec3f ToLinearRec709(GfVec3f rgb_val, std::string_view color_space);
   Expr CompileInputExpr(const mx::NodePtr& node, const std::string& input_name,
                         const Expr& default_expr = Expr::zero());
   Expr CompileNodeOutputExpr(const mx::NodePtr& node);
   std::optional<int> ConstIntInput(const mx::NodePtr& node,
                                    const std::string& name);
+  Expr MeshAttr(std::string_view name, int dim, const Expr& def);
+  Expr SampleImage(const mx::NodePtr& node);
   Expr CompileValueElement(const mx::ValueElementPtr& elem,
                            const Expr& default_expr);
 
+  // Warns once per message about an unsupported feature of the compiled shader
+  // (not during texture discovery, which compiles it a second time).
   void WarnUnsupported(const std::string& msg) {
-    if (warned_.insert(msg).second) TF_WARN("%s", msg.c_str());
+    if (warned_ && warned_->insert(msg).second) {
+      TF_WARN("%s", msg.c_str());
+    }
   }
 
-  std::string_view variant_;
+  const LookupTextureFn* lookup_texture_ = nullptr;
+  const DiscoverTextureFn* discover_texture_ = nullptr;
   MtlxProgram prog_;
+  std::vector<std::pair<std::string, int>> attr_requests_;
   std::vector<uint8_t> tmp_channels_;
   absl::flat_hash_map<const mx::Node*, Expr> node_output_expr_;
   absl::flat_hash_map<const mx::Node*, Expr> edf_expr_;
@@ -320,7 +316,9 @@ class MtlxExprCompiler {
   absl::flat_hash_map<std::pair<const mx::Node*, std::string>, Expr>
       value_input_expr_;
   absl::flat_hash_map<Expr, int> expr_to_slot_;
-  absl::flat_hash_set<std::string>& warned_;
+  std::vector<ref<Object>> inputs_;
+  uint16_t discover_input_idx_ = 0;
+  absl::flat_hash_set<std::string>* warned_ = nullptr;
 };
 
 Expr MtlxExprCompiler::Const(double value) {
@@ -348,6 +346,83 @@ Expr MtlxExprCompiler::Opaque(double value) {
   prog_.opaques.push_back(value);
   return Expr({Op::Opaque, 0, static_cast<uint16_t>(prog_.opaques.size() - 1)},
               1);
+}
+
+// Maps MaterialX `cmlib` and USD `GfColorSpace` names to a canonical
+// `GfColorSpace` token when conversion to linear Rec.709 is needed, or an empty
+// token if `color_space` is empty, data/raw, or already linear Rec.709.
+TfToken MtlxExprCompiler::ResolveSourceColorSpace(
+    std::string_view color_space) {
+  if (color_space.empty()) return {};
+  std::string cs = absl::AsciiStrToLower(color_space);
+  static const absl::NoDestructor<
+      absl::flat_hash_map<std::string_view, TfToken>>
+      kMtlxAliases({
+          {"lin_rec709", GfColorSpaceNames->LinearRec709},
+          {"lin_srgb", GfColorSpaceNames->LinearRec709},
+          {"none", GfColorSpaceNames->Raw},
+          {"acescg", GfColorSpaceNames->LinearAP1},
+          {"g22_ap1", GfColorSpaceNames->G22AP1},
+          {"g22_rec709", GfColorSpaceNames->G22Rec709},
+          {"g18_rec709", GfColorSpaceNames->G18Rec709},
+          {"rec709_display", GfColorSpaceNames->G24Rec709},
+          {"srgb", GfColorSpaceNames->SRGBRec709},
+          {"srgb_texture", GfColorSpaceNames->SRGBRec709},
+          {"lin_adobergb", GfColorSpaceNames->LinearAdobeRGB},
+          {"adobergb", GfColorSpaceNames->G22AdobeRGB},
+          {"srgb_displayp3", GfColorSpaceNames->SRGBP3D65},
+          {"lin_displayp3", GfColorSpaceNames->LinearP3D65},
+      });
+  auto it = kMtlxAliases->find(cs);
+  TfToken token = it != kMtlxAliases->end() ? it->second : TfToken(cs);
+  if (token == GfColorSpaceNames->LinearRec709 ||
+      token == GfColorSpaceNames->Raw || token == GfColorSpaceNames->Data ||
+      token == GfColorSpaceNames->Identity ||
+      token == GfColorSpaceNames->Unknown) {
+    return {};
+  }
+  if (!GfColorSpace::IsValid(token)) {
+    WarnUnsupported("Unsupported MaterialX color space '" +
+                    std::string(color_space) +
+                    "'; treating as linear Rec.709.");
+    return {};
+  }
+  return token;
+}
+
+GfVec3f MtlxExprCompiler::ToLinearRec709(GfVec3f rgb_val,
+                                         std::string_view color_space) {
+  if (rgb_val == GfVec3f(0.0f)) return rgb_val;
+  TfToken src_cs = ResolveSourceColorSpace(color_space);
+  if (src_cs.IsEmpty()) return rgb_val;
+  rgb_val = GfColorSpace(GfColorSpaceNames->LinearRec709)
+                .Convert(GfColorSpace(src_cs), rgb_val)
+                .GetRGB();
+  // Snap 1-ULP float32 transfer/matrix rounding at `(1, 1, 1)` (e.g. sRGB
+  // `opacity = (1, 1, 1)` under `UsdColorSpaceAPI`) so `EmitTuple` folds
+  // opaque white to `Expr::one()`, while preserving spaces where `(1, 1, 1)`
+  // does not map to Rec.709 white.
+  if (GfIsClose(rgb_val, GfVec3f(1.0f), 1e-5f)) rgb_val = GfVec3f(1.0f);
+  return rgb_val;
+}
+
+Expr MtlxExprCompiler::MeshAttr(std::string_view name, int dim,
+                                const Expr& def) {
+  std::pair<std::string, int> req{std::string(name), dim};
+  auto it = std::find(attr_requests_.begin(), attr_requests_.end(), req);
+  if (it == attr_requests_.end()) {
+    if (attr_requests_.size() >= kMaxImm) {
+      throw std::runtime_error("materialx_expr: too many attributes");
+    }
+    prog_.attr_names.push_back(MeshAttributeName(name, dim));
+    it = attr_requests_.insert(attr_requests_.end(), std::move(req));
+  }
+  Expr e = def;
+  uint8_t read_ch = static_cast<uint8_t>(dim);
+  e.code.push_back(
+      {Op::Attr, read_ch, static_cast<uint16_t>(it - attr_requests_.begin())});
+  e.channels = std::max<uint8_t>(def.channels, read_ch);
+  return e;
 }
 
 Expr MtlxExprCompiler::EmitTuple(std::initializer_list<float> vals) {
@@ -456,6 +531,144 @@ std::optional<int> MtlxExprCompiler::ConstIntInput(const mx::NodePtr& node,
              : std::nullopt;
 }
 
+Expr MtlxExprCompiler::SampleImage(const mx::NodePtr& node) {
+  auto default_val = [&] { return CompileInputExpr(node, "default"); };
+  mx::InputPtr file_in = GetValueInput(node, "file");
+  if (!file_in || file_in->getValueString().empty()) return default_val();
+
+  const std::string& type = node->getType();
+  bool has_alpha = IsFourChannelType(type);
+  std::string u_mode = GetNodeInputString(node, "uaddressmode", "periodic");
+  std::string v_mode = GetNodeInputString(node, "vaddressmode", "periodic");
+  auto is_oob_mode = [](std::string_view m) {
+    return m == "constant" || m == "black";
+  };
+  bool has_oob = is_oob_mode(u_mode) || is_oob_mode(v_mode);
+  bool mixed_wrap = u_mode != v_mode || has_oob;
+  if (!GetNodeInputString(node, "layer").empty()) {
+    WarnUnsupported(
+        "Unsupported MaterialX image 'layer'; reading default layer.");
+  }
+  if (!GetNodeInputString(node, "framerange").empty()) {
+    WarnUnsupported(
+        "Unsupported MaterialX image 'framerange'; reading static file.");
+  }
+
+  TextureKey key;
+  key.filename =
+      ArGetResolver().Resolve(file_in->getValueString()).GetPathString();
+  // Keep raw filename when unresolved so `TextureCache::Preload` logs missing
+  // files (`TF_WARN`) and `<UDIM>` tiles (`TF_DEBUG(HDMITSUBA_MATERIAL)`).
+  if (key.filename.empty()) key.filename = file_in->getValueString();
+  // Images load raw: like MaterialX, an image without a color space is in the
+  // working color space, while `key.color_space` converts all others at load
+  // time in `TextureCache`.
+  key.raw = true;
+  if (type == "color3" || type == "color4") {
+    key.color_space =
+        ResolveSourceColorSpace(file_in->getActiveColorSpace()).GetString();
+  }
+  if (type == "float") key.channel = 0;
+  // Mitsuba's `bitmap` supports a single `wrap_mode`; mixed or out-of-bounds
+  // (`"constant"` / `"black"`) address modes clamp at the border and remap UVs
+  // below.
+  key.wrap_mode = (mixed_wrap || u_mode == "clamp") ? "clamp"
+                  : u_mode == "mirror"              ? "mirror"
+                                                    : "repeat";
+  key.filter_type =
+      GetNodeInputString(node, "filtertype", "linear") == "closest"
+          ? "nearest"
+          : "bilinear";
+
+  if (discover_texture_) {
+    (*discover_texture_)(key);
+    if (has_alpha) {
+      key.channel = 3;
+      key.color_space.clear();
+      (*discover_texture_)(key);
+    }
+    CompileInputExpr(node, "texcoord", DefaultTexcoord());
+    default_val();
+    return Expr({Op::SampleInput, 0, discover_input_idx_++},
+                TypeChannels(type));
+  }
+
+  const CachedTexture* cached_color = (*lookup_texture_)(key);
+  if (!cached_color || !cached_color->texture) return default_val();
+  const CachedTexture* cached_alpha = nullptr;
+  if (has_alpha && cached_color->has_alpha) {
+    key.channel = 3;
+    key.color_space.clear();
+    cached_alpha = (*lookup_texture_)(key);
+    if (!cached_alpha || !cached_alpha->texture) return default_val();
+  }
+
+  Expr tc = CompileInputExpr(node, "texcoord", DefaultTexcoord());
+  bool default_uv = !mixed_wrap && tc == DefaultTexcoord();
+  Expr u, v;
+  if (!default_uv) {
+    tc = EmitTmpExpr(tc);
+    auto wrap_axis = [&](Expr c, const std::string& mode) {
+      if (!mixed_wrap || mode == "clamp" || is_oob_mode(mode)) return c;
+      if (mode == "mirror") {
+        return Expr::one() -
+               call(Op::Abs,
+                    call(Op::Fract, c * Const(0.5)) * Const(2.0) - Expr::one());
+      }
+      return call(Op::Fract, c);
+    };
+    u = wrap_axis(tc.x(), u_mode);
+    v = Expr::one() - wrap_axis(tc.y(), v_mode);
+    if (cached_alpha) {
+      u = EmitTmpExpr(u);
+      v = EmitTmpExpr(v);
+    }
+  }
+
+  auto sample_tex = [&](const CachedTexture& cached) -> Expr {
+    auto it = std::find(inputs_.begin(), inputs_.end(), cached.texture);
+    if (it == inputs_.end()) {
+      if (inputs_.size() >= kMaxImm) {
+        throw std::runtime_error("materialx_expr: too many texture inputs");
+      }
+      it = inputs_.insert(inputs_.end(), cached.texture);
+    }
+    uint16_t idx = static_cast<uint16_t>(it - inputs_.begin());
+    uint8_t ch = cached.channel_count == 1 ? 1 : 3;
+    if (default_uv) return Expr({Op::SampleInput, ch, idx}, ch);
+    Expr e = call(Op::SampleInputUV, idx, u, v);
+    e.channels = e.code.back().channels = ch;
+    return e;
+  };
+
+  Expr result = sample_tex(*cached_color);
+  if (has_alpha) {
+    result =
+        vec4(result, cached_alpha ? sample_tex(*cached_alpha) : Expr::one());
+  }
+  if (type == "vector2") result.channels = 2;
+  if (has_oob) {
+    auto oob_axis = [](const Expr& c) {
+      return (c < Expr::zero()) + (c > Expr::one());
+    };
+    auto oob_val = [&](const std::string& mode) {
+      return mode == "black" ? Expr::zero() : default_val();
+    };
+    if (u_mode == v_mode) {
+      result =
+          select(oob_axis(tc.x()) + oob_axis(tc.y()), oob_val(u_mode), result);
+    } else {
+      if (is_oob_mode(u_mode)) {
+        result = select(oob_axis(tc.x()), oob_val(u_mode), result);
+      }
+      if (is_oob_mode(v_mode)) {
+        result = select(oob_axis(tc.y()), oob_val(v_mode), result);
+      }
+    }
+  }
+  return result;
+}
+
 Expr MtlxExprCompiler::CompileNodeOutputExpr(const mx::NodePtr& node) {
   const std::string& cat = node->getCategory();
   const std::string& type = node->getType();
@@ -470,9 +683,8 @@ Expr MtlxExprCompiler::CompileNodeOutputExpr(const mx::NodePtr& node) {
   if (cat == "dot" || cat == "convert") return in("in");
   if (cat == "extract") {
     int idx = ConstIntInput(node, "index").value_or(0);
-    std::string_view in_type = InputType(node, "in");
-    int n = in_type == "vector2" ? 2 : IsFourChannelType(in_type) ? 4 : 3;
-    return in("in").chan(std::clamp(idx, 0, n - 1));
+    return in("in").chan(
+        std::clamp(idx, 0, TypeChannels(InputType(node, "in")) - 1));
   }
   if (cat == "combine2") {
     if (IsFourChannelType(type)) {
@@ -498,12 +710,12 @@ Expr MtlxExprCompiler::CompileNodeOutputExpr(const mx::NodePtr& node) {
   // Arithmetic and interpolation, simplifying constant operands without
   // compiling unused inputs.
   if (cat == "multiply") {
-    if (!node->getConnectedNode("in1")) {
-      Expr i1 = in("in1");
-      return i1.is_zero() ? Expr::zero() : i1 * in("in2", Expr::one());
+    if (GetValueInput(node, "in2") && !GetValueInput(node, "in1")) {
+      Expr i2 = in("in2", Expr::one());
+      return i2.is_zero() ? Expr::zero() : in("in1") * i2;
     }
-    Expr i2 = in("in2", Expr::one());
-    return i2.is_zero() ? Expr::zero() : in("in1") * i2;
+    Expr i1 = in("in1");
+    return i1.is_zero() ? Expr::zero() : i1 * in("in2", Expr::one());
   }
   if (cat == "add") return in("in1") + in("in2");
   if (cat == "subtract") return in("in1") - in("in2");
@@ -519,15 +731,30 @@ Expr MtlxExprCompiler::CompileNodeOutputExpr(const mx::NodePtr& node) {
     Expr x = in("in"), lo = in("low"), hi = in("high", Expr::one());
     return call(Op::Clip, x, lo, hi);
   }
+  if (cat == "power") {
+    Expr i1 = in("in1"), i2 = in("in2", Expr::one());
+    return call(Op::Pow, i1, i2);
+  }
   if (cat == "invert") return in("amount", Expr::one()) - in("in");
+  if (cat == "absval") return call(Op::Abs, in("in"));
+  if (cat == "fract") return call(Op::Fract, in("in"));
 
-  // Texture coordinates
-  if (cat == "texcoord") {
+  auto check_zero_index = [&] {
     if (ConstIntInput(node, "index").value_or(0) != 0) {
-      WarnUnsupported(
-          "Unsupported MaterialX 'texcoord' index; using the primary UV set.");
+      WarnUnsupported("Unsupported MaterialX '" + cat +
+                      "' index; using index 0.");
     }
+  };
+
+  // Images and texture coordinates
+  if (cat == "image") return SampleImage(node);
+  if (cat == "texcoord") {
+    check_zero_index();
     return DefaultTexcoord(type == "vector3" ? 3 : 2);
+  }
+  if (cat == "rotate2d") {
+    Expr i1 = in("in"), amt = in("amount");
+    return call(Op::Rotate2D, i1, amt);
   }
 
   // Conditionals & boolean negation
@@ -557,6 +784,96 @@ Expr MtlxExprCompiler::CompileNodeOutputExpr(const mx::NodePtr& node) {
     return select(cond, i1, i2);
   }
 
+  // Vector ops & normal map
+  if (cat == "normalize" || cat == "dotproduct") {
+    std::string_view in_type =
+        InputType(node, cat == "dotproduct" ? "in1" : "in");
+    uint16_t vec_imm = in_type == "vector2" ? 2 : in_type == "vector4" ? 4 : 0;
+    if (cat == "normalize") return call(Op::Normalize, vec_imm, in("in"));
+    Expr i1 = in("in1"), i2 = in("in2");
+    return call(Op::Dot, vec_imm, i1, i2);
+  }
+  if (cat == "normalmap") {
+    std::string space = GetNodeInputString(node, "space", "tangent");
+    if (space != "tangent") {
+      WarnUnsupported("Unsupported MaterialX normalmap space '" + space +
+                      "'; evaluating in tangent space.");
+    }
+    Expr in_e = in("in"), scale = in("scale", Expr::one());
+    Expr n = in("normal", Expr::n_world()), t = in("tangent", Expr::t_world()),
+         b = in("bitangent", Expr::b_world());
+    return call(Op::NormalMap, in_e, scale, n, t, b);
+  }
+
+  // Geometric intrinsics & space transforms
+  auto warn_world_space = [&](const std::string& space) {
+    if (space != "world") {
+      WarnUnsupported("Unsupported MaterialX " + cat + " space '" + space +
+                      "'; evaluating in world space.");
+    }
+  };
+  if (cat == "position") {
+    std::string space = GetNodeInputString(node, "space", "object");
+    if (space == "object" || space == "model") {
+      return MeshAttr("__p_object", 3, Expr::p_world());
+    }
+    warn_world_space(space);
+    return Expr::p_world();
+  }
+  if (cat == "normal") {
+    std::string space = GetNodeInputString(node, "space", "object");
+    if (space == "object" || space == "model") {
+      return call(Op::Normalize, MeshAttr("__n_object", 3, Expr::n_world()));
+    }
+    if (space == "tangent") return ConstRgb(0.0, 0.0, 1.0);
+    warn_world_space(space);
+    return Expr::n_world();
+  }
+  if (cat == "tangent" || cat == "bitangent") {
+    check_zero_index();
+    std::string space = GetNodeInputString(node, "space", "object");
+    bool bitangent = cat == "bitangent";
+    if (space == "tangent") {
+      return bitangent ? ConstRgb(0.0, 1.0, 0.0) : ConstRgb(1.0, 0.0, 0.0);
+    }
+    warn_world_space(space);
+    return bitangent ? Expr::b_world() : Expr::t_world();
+  }
+  if (cat == "viewdirection") {
+    warn_world_space(GetNodeInputString(node, "space", "world"));
+    return Expr({Op::GeomIncidentDir, 0, 0});
+  }
+  if (cat == "geomcolor") {
+    check_zero_index();
+    Expr color =
+        MeshAttr("displayColor", type == "float" ? 1 : 3, Expr::zero());
+    // The alpha channel of `geomcolor` is the display opacity.
+    return type == "color4"
+               ? vec4(color, MeshAttr("displayOpacity", 1, Expr::one()))
+               : color;
+  }
+  if (cat == "geompropvalue") {
+    std::string p = GetNodeInputString(node, "geomprop");
+    if (p.empty()) return in("default");
+    uint8_t ch = TypeChannels(type);
+    Expr attr = MeshAttr(p, ch == 1 ? 1 : 3, in("default"));
+    attr.channels = ch;
+    return attr;
+  }
+  if (cat == "transformpoint" || cat == "transformvector" ||
+      cat == "transformnormal") {
+    std::string from = GetNodeInputString(node, "fromspace");
+    std::string to = GetNodeInputString(node, "tospace");
+    auto canon_space = [](std::string_view s) {
+      return (s.empty() || s == "model") ? std::string_view("object") : s;
+    };
+    if (canon_space(from) != canon_space(to)) {
+      WarnUnsupported("Unsupported MaterialX space transform '" + cat + "(" +
+                      from + "->" + to + ")'; passing input through.");
+    }
+    return in("in");
+  }
+
   // 2D ramps & luminance
   if (cat == "ramplr" || cat == "ramptb") {
     bool lr = cat == "ramplr";
@@ -577,6 +894,12 @@ Expr MtlxExprCompiler::CompileNodeOutputExpr(const mx::NodePtr& node) {
     return type == "color4" ? vec4(lum, in_e.w()) : lum;
   }
 
+  if (cat == "bump") {
+    WarnUnsupported(
+        "Unsupported MaterialX node category 'bump'; passing through "
+        "'normal'.");
+    return in("normal", Expr::n_world());
+  }
   WarnUnsupported("Unsupported MaterialX node category '" + cat +
                   "'; passing through its 'in' input.");
   return in("in");
@@ -614,7 +937,7 @@ Expr MtlxExprCompiler::CompileEdf(const mx::NodePtr& edf_node) {
       WarnUnsupported(
           "Unsupported MaterialX 'measured_edf' IES profile; approximating as "
           "uniform_edf.");
-    } else if (cat != "uniform_edf") {
+    } else if (cat != "uniform_edf" && !discover_texture_) {
       TF_DEBUG(HDMITSUBA_MATERIAL)
           .Msg("Approximating MaterialX '%s' as uniform_edf.\n", cat.c_str());
     }
@@ -678,42 +1001,57 @@ Expr MtlxExprCompiler::CompileOpacity(const mx::NodePtr& shader_node) {
   return res;
 }
 
-ref<Object> MtlxExprCompiler::CreateExprTexture(const Expr& expr,
-                                                bool unbounded) {
+ref<Object> MtlxExprCompiler::CreateExprTexture(
+    const Expr& expr, bool unbounded, std::string_view variant,
+    MeshAttributeRequests& mesh_attributes) {
   RegisterMaterialXExprTexture();
+  Properties props("materialx_expr");
+  for (size_t i = 0; i < inputs_.size(); ++i) {
+    props.set("in" + std::to_string(i), std::move(inputs_[i]));
+  }
   prog_.code.insert(prog_.code.end(), expr.code.begin(), expr.code.end());
+  mesh_attributes.insert(attr_requests_.begin(), attr_requests_.end());
   prog_.stack_size = std::max(prog_.stack_size, expr.max_depth);
   prog_.result_uniform = expr.uniform();
   prog_.unbounded = unbounded;
-  Properties props("materialx_expr");
   props.set_any("program", std::move(prog_));
-  return PluginManager::instance()->create_object(props, variant_,
+  return PluginManager::instance()->create_object(props, variant,
                                                   ObjectType::Texture);
 }
 
 }  // namespace
 
-CompiledSurfaceShader CompileSurfaceShader(const mx::NodePtr& shader_node,
-                                           std::string_view variant) {
+CompiledSurfaceShader CompileSurfaceShader(
+    const mx::NodePtr& shader_node, std::string_view variant,
+    const std::function<const CachedTexture*(const TextureKey&)>&
+        lookup_texture) {
   absl::flat_hash_set<std::string> warned;
   CompiledSurfaceShader out;
   {
-    MtlxExprCompiler compiler(variant, warned);
+    MtlxExprCompiler compiler(lookup_texture, warned);
     Expr radiance = compiler.CompileEdf(shader_node);
     if (!radiance.is_zero()) {
-      out.radiance_texture =
-          compiler.CreateExprTexture(radiance, /*unbounded=*/true);
+      out.radiance_texture = compiler.CreateExprTexture(
+          radiance, /*unbounded=*/true, variant, out.mesh_attributes);
     }
   }
   {
-    MtlxExprCompiler compiler(variant, warned);
+    MtlxExprCompiler compiler(lookup_texture, warned);
     Expr opacity = compiler.CompileOpacity(shader_node);
     if (!opacity.is_one()) {
-      out.opacity_texture =
-          compiler.CreateExprTexture(opacity, /*unbounded=*/false);
+      out.opacity_texture = compiler.CreateExprTexture(
+          opacity, /*unbounded=*/false, variant, out.mesh_attributes);
     }
   }
   return out;
+}
+
+void DiscoverSurfaceShaderTextures(
+    const mx::NodePtr& shader_node,
+    const std::function<void(const TextureKey&)>& callback) {
+  MtlxExprCompiler compiler(callback);
+  compiler.CompileEdf(shader_node);
+  compiler.CompileOpacity(shader_node);
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

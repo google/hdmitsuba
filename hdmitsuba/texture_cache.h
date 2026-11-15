@@ -60,12 +60,15 @@ struct TextureKey {
   // UsdUVTextureScaleBias()).
   Rgb scale = {1, 1, 1};
   Rgb bias = {0, 0, 0};
+  // Optional source GfColorSpace name to convert to linear Rec.709 at load time
+  // (used with `raw = true` for MaterialX images).
+  std::string color_space;
 
  private:
   // Single source of truth for equality and hashing. Add new fields here.
   auto Fields() const {
     return std::tie(filename, raw, wrap_mode, filter_type, max_anisotropy,
-                    format, accel, to_uv, channel, scale, bias);
+                    format, accel, to_uv, channel, scale, bias, color_space);
   }
 
  public:
@@ -80,9 +83,11 @@ struct TextureKey {
 };
 
 // A loaded texture. `texture` is null if the image failed to load.
+// `channel_count` is the number of color channels (excluding alpha).
 struct CachedTexture {
   mitsuba::ref<mitsuba::Object> texture = nullptr;
   size_t channel_count = 0;
+  bool has_alpha = false;
 };
 
 // Returns the channel index (0=R, 1=G, 2=B, 3=A) for a UsdUVTexture

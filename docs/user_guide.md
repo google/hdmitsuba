@@ -32,14 +32,22 @@ This document provides an overview of the USD features supported by `hdMitsuba`,
         supported). Custom MaterialX `.mtlx` node definitions
         (`info:implementationSource = "sourceAsset"`) are also supported if
         OpenUSD is built with MaterialX support.
-    *   Core pattern nodes: `constant`, `dot`, `convert`, channel ops
-        (`extract`, `combine2`/`3`/`4`, `swizzle`), basic arithmetic (`add`,
-        `subtract`, `multiply`, `divide`, `clamp`, `invert`, `mix`),
-        conditionals (`ifgreater`, `ifgreatereq`, `ifequal`, `not`, `switch`),
-        `luminance`, primary texture coordinates (`texcoord`, `index = 0`), and
-        2D ramps (`ramplr`, `ramptb`, `ramp4`), with USD/MaterialX color-space
-        conversions on value inputs. MaterialX image textures and
-        geometric/primvar property nodes are not supported yet.
+    *   Core pattern nodes (`constant`, `dot`, `convert`, `extract`,
+        `combine2`/`3`/`4`, `swizzle`, `add`, `subtract`, `multiply`, `divide`,
+        `power`, `absval`, `fract`, `clamp`, `invert`, `mix`, `ifgreater`,
+        `ifgreatereq`, `ifequal`, `not`, `switch`, `luminance`, `place2d`,
+        `rotate2d`, `normalize`, `dotproduct`, `normalmap`, `facingratio`,
+        `ramplr`, `ramptb`, `ramp4`), image textures (`image`, `tiledimage`,
+        `triplanarprojection`), and geometric intrinsics (`geompropvalue`
+        primvars, `geomcolor`, object/world positions, object/world/tangent
+        normals, world/tangent tangents and bitangents, world view direction,
+        and primary UVs; `color4`/`vector4` primvars read 3 channels from the
+        mesh and take their 4th channel from `default`, and object-space
+        positions/normals and primvars fall back to world space / default values
+        on non-mesh shapes). Color value inputs and
+        `color3`/`color4` images with a USD/MaterialX color space are converted
+        to linear Rec.709 (images without an authored color space are treated
+        as linear).
     *   Unsupported pattern nodes emit a warning and evaluate to their `in`
         input (or `0` if none). When `HDMITSUBA_ENABLE_MATERIALX=1`, `mtlx`
         material outputs (`mtlx:surface`, `mtlx:displacement`, `mtlx:volume`)
