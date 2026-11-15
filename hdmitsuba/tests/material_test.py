@@ -42,6 +42,7 @@ def _set_mitsuba_variant():
         'normalmap',
         'nodegraphs',
         'display_color',
+        'display_color_fallback',
         'mitsuba_bitmap',
         'opacity',
         'texture_fallback_unauthored',
@@ -203,14 +204,30 @@ def test_unsupported_diffuse_falls_back_to_display_color(render_context: str):
       hydra_delegate_id='HdMitsubaRendererPlugin',
       camera_path='/root/Camera/Camera',
   )
-  r, g, b = engine.render()['color'][32, 32, :3]
+  img_blue, _ = test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      '/root/Camera/Camera',
+      'test_ptex_fallback_before',
+      engine=engine,
+      spp=16,
+      atol=0.05,
+  )
+  r, g, b = img_blue[32, 32, :3]
   assert b > 2.0 * max(r, g)
 
   # Connecting an unsupported (Ptex) texture reveals the green displayColor.
   ptex = UsdShade.Shader.Define(stage, '/root/_materials/PtexMat/Ptex')
   ptex.CreateIdAttr('HwPtexTexture_1')
   diffuse.ConnectToSource(ptex.ConnectableAPI(), 'rgb')
-  r, g, b = engine.render()['color'][32, 32, :3]
+  img_green, _ = test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      '/root/Camera/Camera',
+      'test_ptex_fallback_after',
+      engine=engine,
+      spp=16,
+      atol=0.05,
+  )
+  r, g, b = img_green[32, 32, :3]
   assert g > 2.0 * max(r, b)
 
 

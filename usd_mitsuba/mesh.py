@@ -123,7 +123,9 @@ def convert_mesh(
   # GeomSubsets share the sidedness of their mesh.
   double_sided = UsdGeom.Mesh(prim).GetDoubleSidedAttr().Get(time)
   materials = [
-      material.convert_mesh_material(subprim, double_sided, time)
+      material.convert_mesh_material(
+          subprim, double_sided, time, fallback_prim=prim
+      )
       for subprim in subprims
   ]
 
@@ -190,6 +192,8 @@ def convert_mesh(
       mesh_light_emitter = light.convert_mesh_light(prim, time, world_transform)
       if mesh_light_emitter is not None:
         props['emitter'] = mesh_light_emitter
+        if mat.bsdf is None:
+          props['bsdf'] = mi.load_dict({'type': 'diffuse', 'reflectance': 0.0})
       elif mat.emitter is not None:
         props['emitter'] = mat.emitter
 
