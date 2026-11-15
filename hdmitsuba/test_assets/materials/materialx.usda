@@ -125,10 +125,18 @@ def Xform "root"
             }
         }
 
-        # Vertex primvar + displayColor via surface_unlit.
+        # 3D fractal noise + vertex primvar + displayColor via surface_unlit.
         def Material "mtlx_primvar"
         {
             token outputs:mtlx:surface.connect = </root/_materials/mtlx_primvar/Surface.outputs:out>
+
+            def Shader "Fractal"
+            {
+                uniform token info:id = "ND_fractal3d_color3"
+                float3 inputs:amplitude = (0.35, 0.35, 0.35)
+                int inputs:octaves = 3
+                color3f outputs:out
+            }
 
             def Shader "Tint"
             {
@@ -152,11 +160,19 @@ def Xform "root"
                 color3f outputs:out
             }
 
+            def Shader "Sum2"
+            {
+                uniform token info:id = "ND_add_color3"
+                color3f inputs:in1.connect = </root/_materials/mtlx_primvar/Sum.outputs:out>
+                color3f inputs:in2.connect = </root/_materials/mtlx_primvar/Fractal.outputs:out>
+                color3f outputs:out
+            }
+
             def Shader "Surface"
             {
                 uniform token info:id = "ND_surface_unlit"
                 float inputs:emission = 1.0
-                color3f inputs:emission_color.connect = </root/_materials/mtlx_primvar/Sum.outputs:out>
+                color3f inputs:emission_color.connect = </root/_materials/mtlx_primvar/Sum2.outputs:out>
                 token outputs:out
             }
         }

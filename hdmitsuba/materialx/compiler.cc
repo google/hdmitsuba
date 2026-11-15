@@ -31,6 +31,7 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/strings/ascii.h>
+#include <absl/strings/strip.h>
 #include <mitsuba/core/plugin.h>
 #include <mitsuba/core/properties.h>
 #include <pxr/base/gf/color.h>
@@ -56,8 +57,13 @@ using mitsuba::Properties;
 using mitsuba::ref;
 using mitsuba::mtlx::elementwise_arity;
 using mitsuba::mtlx::Inst;
+using mitsuba::mtlx::kFractalDynamicOctaves;
+using mitsuba::mtlx::kFractalOctavesShift;
+using mitsuba::mtlx::kMaxFractalOctaves;
 using mitsuba::mtlx::kMaxImm;
 using mitsuba::mtlx::kMtlxFloatEps;
+using mitsuba::mtlx::kNoise3D;
+using mitsuba::mtlx::kNoiseVec3;
 using mitsuba::mtlx::MtlxProgram;
 using mitsuba::mtlx::Op;
 using mitsuba::mtlx::RegisterMaterialXExprTexture;
@@ -272,9 +278,9 @@ mx::NodePtr UnwrapShaderNode(mx::NodePtr node) {
   return node;
 }
 
-// Compiles a flattened MaterialX DAG of pattern/math/image nodes into a
-// `mitsuba::mtlx::MtlxProgram` and a list of Mitsuba Texture child inputs
-// (`in0`, `in1`, ...).
+// Compiles a flattened MaterialX DAG of pattern/math/procedural/image nodes
+// into a `mitsuba::mtlx::MtlxProgram` and a list of Mitsuba Texture child
+// inputs (`in0`, `in1`, ...).
 class MtlxExprCompiler {
  public:
   using LookupTextureFn =
@@ -1273,6 +1279,75 @@ Expr MtlxExprCompiler::CompileNodeOutputExpr(const mx::NodePtr& node,
     Expr np1 = EmitTmpExpr(eta + Expr::one()),
          nm1 = EmitTmpExpr(eta - Expr::one());
     return call(Op::Sqrt, (np1 * np1 * r - nm1 * nm1) / (Expr::one() - r));
+  }
+
+  // Procedural noise nodes
+  std::string_view noise = cat;
+  bool is_3d = absl::ConsumeSuffix(&noise, "3d");
+  if ((is_3d || absl::ConsumeSuffix(&noise, "2d")) &&
+      (noise == "cellnoise" || noise == "worleynoise" || noise == "noise" ||
+       noise == "fractal")) {
+    uint16_t dim_bit = is_3d ? kNoise3D : 0;
+    uint16_t imm = dim_bit | (type != "float" ? kNoiseVec3 : 0);
+    Expr coord =
+        is_3d ? in("position", MeshAttr("__p_object", 3, Expr::p_world()))
+              : in("texcoord", DefaultTexcoord());
+    if (noise == "cellnoise") {
+      return call(Op::CellNoise, imm, coord);
+    }
+    if (noise == "worleynoise") {
+      Expr jitter = in("jitter", Expr::one()), style = in("style");
+      Expr w = call(Op::Worley, imm, coord, jitter, style);
+      if (type == "vector2") w.channels = 2;
+      return w;
+    }
+    bool is_noise = noise == "noise";
+    std::optional<int> oct =
+        is_noise ? std::nullopt : ConstIntInput(node, "octaves");
+    bool four_ch = IsFourChannelType(type);
+    bool split_vec2 = !is_noise && type == "vector2";
+    // Operands of two noise calls are stored in temporaries.
+    auto shared = [&](const Expr& e) {
+      return four_ch || split_vec2 ? EmitTmpExpr(e) : e;
+    };
+    coord = shared(coord);
+    Expr lac, dim, dyn_oct;
+    if (!is_noise) {
+      lac = shared(in("lacunarity", Const(2.0)));
+      dim = shared(in("diminish", Const(0.5)));
+      if (!oct) dyn_oct = shared(in("octaves"));
+    }
+    auto eval_one = [&](bool vec3, const Expr& p) {
+      uint16_t bits = dim_bit | (vec3 ? kNoiseVec3 : 0);
+      if (is_noise) return call(Op::Noise, bits, p);
+      if (oct) {
+        bits |= std::clamp(*oct, 0, kMaxFractalOctaves) << kFractalOctavesShift;
+        return call(Op::Fractal, bits, p, lac, dim);
+      }
+      return call(Op::Fractal,
+                  bits | (kFractalDynamicOctaves << kFractalOctavesShift), p,
+                  lac, dim, dyn_oct);
+    };
+    auto offset_coord = [&]() {
+      constexpr double kNoiseOffset[3] = {19.0, 73.0, 29.0};
+      constexpr double kFractalOffset[3] = {19.0, 193.0, 17.0};
+      const double* off = is_noise ? kNoiseOffset : kFractalOffset;
+      if (is_3d) return coord + ConstRgb(off[0], off[1], off[2]);
+      return coord + vec2(Const(off[0]), Const(off[1]));
+    };
+    Expr res;
+    if (four_ch) {
+      // Like MaterialX, a fourth channel is scalar noise at an offset.
+      res = vec4(eval_one(true, coord), eval_one(false, offset_coord()));
+    } else if (split_vec2) {
+      // Like MaterialX, `vector2` fractals are two scalar fractals.
+      res = vec2(eval_one(false, coord), eval_one(false, offset_coord()));
+    } else {
+      res = eval_one(type != "float", coord);
+      if (type == "vector2") res.channels = 2;
+    }
+    res = res * in("amplitude", Expr::one());
+    return is_noise ? res + in("pivot") : res;
   }
 
   if (cat == "bump") {

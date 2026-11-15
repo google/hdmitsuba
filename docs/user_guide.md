@@ -32,9 +32,13 @@ This document provides an overview of the USD features supported by `hdMitsuba`,
         supported). Custom MaterialX `.mtlx` node definitions
         (`info:implementationSource = "sourceAsset"`) are also supported if
         OpenUSD is built with MaterialX support.
-    *   Procedural pattern graphs (excluding noise),
-        math/vector/matrix/color/channel/compositing/logic nodes, image textures
-        (`image`, `tiledimage`, `triplanarprojection`), and geometric intrinsics
+    *   Procedural pattern graphs,
+        math/vector/matrix/color/channel/compositing/logic nodes, 2D/3D
+        procedural noises (`cellnoise2d`/`3d`, `noise2d`/`3d`,
+        `worleynoise2d`/`3d`, `fractal2d`/`3d`, `unifiednoise2d`/`3d`; fractal
+        noises evaluate at most 16 octaves), `randomfloat`, `randomcolor`,
+        image textures (`image`, `tiledimage`, `triplanarprojection`), and
+        geometric intrinsics
         (`geompropvalue` primvars, `geomcolor`, object/world positions,
         object/world/tangent normals, world/tangent tangents and bitangents,
         world view direction, and primary UVs; `color4`/`vector4` primvars read
