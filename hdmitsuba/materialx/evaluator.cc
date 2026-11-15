@@ -19,6 +19,7 @@
 #include <cstring>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -29,21 +30,42 @@
 #include <absl/synchronization/mutex.h>
 #include <mitsuba/core/config.h>
 #include <mitsuba/core/filesystem.h>
+#include <mitsuba/core/frame.h>
 #include <mitsuba/core/fresolver.h>
 #include <mitsuba/core/object.h>
 #include <mitsuba/core/plugin.h>
 #include <mitsuba/core/properties.h>
 #include <mitsuba/core/spectrum.h>
+#include <mitsuba/core/string.h>
 #include <mitsuba/core/vector.h>
 #include <mitsuba/render/interaction.h>
+#include <mitsuba/render/shape.h>
 #include <mitsuba/render/srgb.h>
 #include <mitsuba/render/texture.h>
 
 NAMESPACE_BEGIN(mitsuba)
 namespace mtlx {
+namespace {
+
+template <typename Vec>
+MI_INLINE Vec safe_normalize(const Vec& v, const Vec& fallback = Vec(0.0f)) {
+  auto len2 = dr::squared_norm(v);
+  auto valid = len2 > 0.f;
+  return dr::select(valid, v * dr::rsqrt(dr::select(valid, len2, 1.0f)),
+                    fallback);
+}
+
+}  // namespace
 
 template <typename Float, typename Spectrum>
 void MtlxEvaluator<Float, Spectrum>::compile(const Properties& props) {
+  m_inputs.clear();
+  for (size_t i = 0;; ++i) {
+    std::string name = "in" + std::to_string(i);
+    if (!props.has_property(name)) break;
+    m_inputs.push_back(props.get_texture<Texture>(name));
+  }
+
   m_prog = props.get_any<MtlxProgram>("program");
   m_opaques.clear();
   m_opaques.reserve(m_prog.opaques.size());
@@ -54,6 +76,9 @@ void MtlxEvaluator<Float, Spectrum>::compile(const Properties& props) {
 
 template <typename Float, typename Spectrum>
 void MtlxEvaluator<Float, Spectrum>::traverse(TraversalCallback* cb) {
+  for (size_t i = 0; i < m_inputs.size(); ++i) {
+    cb->put("in" + std::to_string(i), m_inputs[i], ParamFlags::Differentiable);
+  }
   for (size_t i = 0; i < m_opaques.size(); ++i) {
     cb->put("param" + std::to_string(i), m_opaques[i],
             ParamFlags::Differentiable);
@@ -78,14 +103,21 @@ void MtlxEvaluator<Float, Spectrum>::parameters_changed() {
 template <typename Float, typename Spectrum>
 std::string MtlxEvaluator<Float, Spectrum>::to_string() const {
   std::ostringstream oss;
-  oss << "  code_size = " << m_prog.code.size() << "\n";
+  oss << "  code_size = " << m_prog.code.size() << ",\n";
+  for (size_t i = 0; i < m_inputs.size(); ++i) {
+    oss << "  in" << i << " = " << string::indent(m_inputs[i]) << ",\n";
+  }
   return oss.str();
 }
 
 template <typename Float, typename Spectrum>
 bool MtlxEvaluator<Float, Spectrum>::is_spatially_varying() const {
   for (Inst inst : m_prog.code) {
-    if (inst.op == Op::GeomUV) return true;
+    if (inst.op == Op::SampleInput) {
+      if (m_inputs[inst.imm]->is_spatially_varying()) return true;
+    } else if (inst.op >= Op::SampleInputUV && inst.op <= Op::GeomIncidentDir) {
+      return true;
+    }
   }
   return false;
 }
@@ -96,6 +128,10 @@ Float MtlxEvaluator<Float, Spectrum>::elementwise(Op op, const Val* sp, int c) {
   switch (op) {
     case Op::Neg:
       return -a0;
+    case Op::Abs:
+      return dr::abs(a0);
+    case Op::Fract:
+      return a0 - dr::floor(a0);
     case Op::Add:
       return a0 + sp[0][c];
     case Op::Sub:
@@ -115,6 +151,18 @@ Float MtlxEvaluator<Float, Spectrum>::elementwise(Op op, const Val* sp, int c) {
       return dr::select(a0 == sp[0][c], 1.f, 0.f);
     case Op::Max:
       return dr::maximum(a0, sp[0][c]);
+    case Op::Pow: {
+      // Like OSL's `safe_pow()`, raises negative bases to integer powers only,
+      // and returns 0 for other negative bases.
+      const Float& y = sp[0][c];
+      Float mag = dr::pow(dr::select(a0 != 0.f, dr::abs(a0), 1.f), y);
+      Float neg = dr::select(
+          dr::floor(y) == y,
+          dr::select(dr::floor(0.5f * y) * 2.f != y, -mag, mag), 0.f);
+      return dr::select(
+          y == 0.f, 1.f,
+          dr::select(a0 == 0.f, 0.f, dr::select(a0 > 0.f, mag, neg)));
+    }
     case Op::Select:
       return dr::select(a0 != 0.f, sp[0][c], sp[1][c]);
     case Op::Mix:
@@ -129,10 +177,23 @@ Float MtlxEvaluator<Float, Spectrum>::elementwise(Op op, const Val* sp, int c) {
 template <typename Float, typename Spectrum>
 typename MtlxEvaluator<Float, Spectrum>::Val
 MtlxEvaluator<Float, Spectrum>::eval(const SurfaceInteraction3f& si,
-                                     Mask /*active*/) const {
+                                     Mask active) const {
   absl::InlinedVector<Val, 64> mem(m_prog.num_tmps + m_prog.stack_size);
   Val* tmps = mem.data();
   Val* sp = tmps + m_prog.num_tmps;
+  std::optional<SurfaceInteraction3f> si_uv;
+
+  auto xy = [](const Val& v) -> Vector2f { return dr::head<2>(v); };
+  auto xyz = [](const Val& v) -> Vector3f { return dr::head<3>(v); };
+  auto val3 = [](const auto& v, const Float& w = 0.f) {
+    return Val(v.x(), v.y(), v.z(), w);
+  };
+
+  auto eval_input = [&](uint16_t k, bool mono,
+                        const SurfaceInteraction3f& si_q) -> Val {
+    return mono ? Val(m_inputs[k]->eval_1(si_q, active))
+                : val3(m_inputs[k]->eval_3(si_q, active));
+  };
 
   for (Inst inst : m_prog.code) {
     uint16_t imm = inst.imm;
@@ -158,9 +219,62 @@ MtlxEvaluator<Float, Spectrum>::eval(const SurfaceInteraction3f& si,
       case Op::StoreTmp:
         tmps[imm] = *--sp;
         break;
-      case Op::GeomUV:
-        *sp++ = Val(si.uv.x(), si.uv.y(), 0.f, 0.f);
+      case Op::SampleInput:
+        *sp++ = eval_input(imm, inst.channels == 1, si);
         break;
+      case Op::SampleInputUV: {
+        --sp;
+        if (!si_uv) si_uv.emplace(dr::zeros<SurfaceInteraction3f>());
+        si_uv->uv = Point2f(sp[-1].x(), sp[0].x());
+        sp[-1] = eval_input(imm, inst.channels == 1, *si_uv);
+        break;
+      }
+      case Op::Attr: {
+        if constexpr (!dr::is_jit_v<Float>) {
+          if (!active || !si.shape) break;
+        }
+        const std::string& attr = m_prog.attr_names[imm];
+        Mask has = si.shape->has_attribute(attr, active) & active;
+        if (dr::none_or<false>(has)) break;
+        // A fourth channel is that of the default.
+        sp[-1] = dr::select(
+            has,
+            inst.channels == 1
+                ? Val(si.shape->eval_attribute_1(attr, si, has))
+                : val3(si.shape->eval_attribute_3(attr, si, has), sp[-1].w()),
+            sp[-1]);
+        break;
+      }
+
+      case Op::GeomUV:
+        *sp++ = Val(si.uv.x(), 1.f - si.uv.y(), 0.f, 0.f);
+        break;
+      case Op::GeomPosWorld:
+        *sp++ = val3(si.p);
+        break;
+      case Op::GeomNormalWorld:
+        *sp++ = val3(si.sh_frame.n);
+        break;
+      case Op::GeomTangentWorld:
+      case Op::GeomBitangentWorld: {
+        Vector3f t = safe_normalize(
+            Vector3f(si.dp_du -
+                     si.sh_frame.n * dr::dot(si.sh_frame.n, si.dp_du)),
+            si.sh_frame.s);
+        if (inst.op == Op::GeomTangentWorld) {
+          *sp++ = val3(t);
+        } else {
+          Vector3f b = dr::cross(si.sh_frame.n, t);
+          // Mitsuba's V is flipped relative to MaterialX, so dp/dv_mtlx =
+          // -dp_dv.
+          *sp++ = val3(dr::select(dr::dot(b, si.dp_dv) > 0.f, -b, b));
+        }
+        break;
+      }
+      case Op::GeomIncidentDir:
+        *sp++ = val3(-si.to_world(si.wi));
+        break;
+
       case Op::Rgb:
       case Op::Vec2:
         sp -= inst.op == Op::Rgb ? 2 : 1;
@@ -176,8 +290,39 @@ MtlxEvaluator<Float, Spectrum>::eval(const SurfaceInteraction3f& si,
         break;
       case Op::Dot:
         --sp;
-        sp[-1] = Val(dr::dot(dr::head<3>(sp[-1]), dr::head<3>(sp[0])));
+        sp[-1] = Val(imm == 2   ? dr::dot(xy(sp[-1]), xy(sp[0]))
+                     : imm == 4 ? dr::dot(sp[-1], sp[0])
+                                : dr::dot(xyz(sp[-1]), xyz(sp[0])));
         break;
+      case Op::Normalize:
+        sp[-1] =
+            imm == 2
+                ? Val(dr::concat(safe_normalize(xy(sp[-1])), Vector2f(0.f)))
+            : imm == 4 ? safe_normalize(sp[-1])
+                       : val3(safe_normalize(xyz(sp[-1])));
+        break;
+      case Op::Rotate2D: {
+        --sp;
+        Val v = sp[-1];
+        auto [s, c] = dr::sincos(dr::deg_to_rad(sp[0].x()));
+        sp[-1] = Val(v.x() * c + v.y() * s, v.y() * c - v.x() * s, 0.f, 0.f);
+        break;
+      }
+      case Op::NormalMap: {
+        sp -= 4;
+        Vector3f val = xyz(sp[-1]), tangent = xyz(sp[2]),
+                 N = safe_normalize(xyz(sp[1]), Vector3f(si.sh_frame.n)),
+                 T = safe_normalize(tangent - N * dr::dot(N, tangent),
+                                    coordinate_system(N).first),
+                 B = dr::cross(N, T);
+        B = dr::select(dr::dot(xyz(sp[3]), B) < 0.f, -B, B);
+        val = dr::select(dr::squared_norm(val) == 0.f, Vector3f(0.f, 0.f, 1.f),
+                         val * 2.f - 1.f);
+        sp[-1] = val3(safe_normalize(
+            T * (val.x() * sp[0].x()) + B * (val.y() * sp[0].y()) + N * val.z(),
+            N));
+        break;
+      }
       default:  // Element-wise ops are handled above.
         break;
     }
@@ -205,6 +350,7 @@ MtlxEvaluator<Float, Spectrum>::eval_3(const SurfaceInteraction3f& si,
 template <typename Float, typename Spectrum>
 void MtlxEvaluator<Float, Spectrum>::traverse_cb(
     void* payload, const drjit::TraverseVisitor& cb) {
+  DR_TRAVERSE_MEMBER(m_inputs)
   DR_TRAVERSE_MEMBER(m_opaques)
   if (!cb.state) return;
   auto put_span = [&](const auto& vec, const char* name) {
@@ -217,6 +363,11 @@ void MtlxEvaluator<Float, Spectrum>::traverse_cb(
   };
   put_span(m_prog.code, "code");
   put_span(m_prog.consts, "consts");
+  size_t n_attrs = m_prog.attr_names.size();
+  DR_TRAVERSE_STATE(n_attrs)
+  for (const std::string& s : m_prog.attr_names) {
+    put_span(s, "attr_names");
+  }
   DR_TRAVERSE_STATE(m_prog.result_uniform)
   DR_TRAVERSE_STATE(m_prog.unbounded)
 }
@@ -377,12 +528,19 @@ MaterialX Expression (:monosp:`materialx_expr`)
    - Compiled ``mitsuba::mtlx::MtlxProgram`` bytecode and constant/opaque
      tables.
 
+ * - in0, in1, ...
+   - |texture|
+   - Nested input textures referenced by ``Op::SampleInput`` and
+     ``Op::SampleInputUV``.
+   - |exposed|, |differentiable|
+
  * - param0, param1, ...
    - |float|
    - Differentiable opaque scalar parameters exposed through traversal.
    - |exposed|, |differentiable|
 
-Evaluates a compiled MaterialX expression DAG over surface interactions.
+Evaluates a compiled MaterialX expression DAG over surface interactions,
+supporting 2D texture lookups, geometric intrinsics, and mesh attributes.
 
 */
 template <typename Float, typename Spectrum>

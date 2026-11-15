@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<materialx version="1.39" fileprefix="textures/">
+  <nodedef name="ND_hdmitsuba_fp_test" node="hdmitsuba_fp_test">
+    <input name="override_tex" type="filename" value="" />
+    <input name="unset_tex" type="filename" value="" />
+    <output name="out" type="color3" />
+  </nodedef>
+  <nodegraph name="NG_hdmitsuba_fp_test" nodedef="ND_hdmitsuba_fp_test">
+    <image name="emb" type="color3">
+      <input name="file" type="filename" value="uv_quadrants.png" />
+      <input name="texcoord" type="vector2" value="0.25, 0.25" />
+      <input name="filtertype" type="string" value="closest" />
+    </image>
+    <image name="ovr" type="color3">
+      <input name="file" type="filename" interfacename="override_tex" />
+    </image>
+    <image name="emp" type="color3">
+      <input name="file" type="filename" interfacename="unset_tex" />
+      <input name="default" type="color3" value="0.1, 0.1, 0.1" />
+    </image>
+    <add name="s1" type="color3">
+      <input name="in1" type="color3" nodename="emb" />
+      <input name="in2" type="color3" nodename="ovr" />
+    </add>
+    <add name="s2" type="color3">
+      <input name="in1" type="color3" nodename="s1" />
+      <input name="in2" type="color3" nodename="emp" />
+    </add>
+    <output name="out" type="color3" nodename="s2" />
+  </nodegraph>
+</materialx>

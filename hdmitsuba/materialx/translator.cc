@@ -16,7 +16,9 @@
 
 #include <cstddef>
 #include <exception>
+#include <functional>
 #include <locale>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -29,6 +31,7 @@
 #include <MaterialXCore/Node.h>
 #include <MaterialXFormat/File.h>
 #include <MaterialXFormat/Util.h>
+#include <MaterialXFormat/XmlIo.h>
 #include <absl/base/const_init.h>
 #include <absl/base/no_destructor.h>
 #include <absl/container/flat_hash_map.h>
@@ -37,8 +40,11 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/strip.h>
 #include <absl/synchronization/mutex.h>
+#include <mitsuba/core/config.h>
+#include <mitsuba/core/logger.h>
 #include <mitsuba/core/plugin.h>
 #include <mitsuba/core/properties.h>
+#include <mitsuba/core/spectrum.h>
 #include <pxr/base/gf/matrix3d.h>
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/vec2d.h>
@@ -68,6 +74,7 @@
 #include "hdmitsuba/material.h"
 #include "hdmitsuba/materialx/compiler.h"
 #include "hdmitsuba/prim_translator.h"
+#include "hdmitsuba/texture_cache.h"
 #include "hdmitsuba/utils.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -81,6 +88,27 @@ namespace mx = MaterialX;
 // synthesize 1.38 `swizzle` definitions), and a shared reader lock is held
 // while flattening and compiling against `std_libs`.
 ABSL_CONST_INIT absl::Mutex mtlx_mu(absl::kConstInit);
+
+// `importLibrary` and `flattenSubgraphs` drop enclosing `<materialx>` /
+// `<nodegraph>` `fileprefix` attributes, so resolve non-empty relative
+// filenames in library documents before flattening.
+void ResolveLibraryFilenames(const mx::DocumentPtr& doc) {
+  std::vector<mx::ElementPtr> with_prefix;
+  for (const mx::ElementPtr& elem : doc->traverseTree()) {
+    if (elem->hasFilePrefix()) with_prefix.push_back(elem);
+    auto ve = elem->asA<mx::ValueElement>();
+    if (!ve || ve->getType() != mx::FILENAME_TYPE_STRING) continue;
+    const std::string& raw = ve->getValueString();
+    if (raw.empty() || mx::FilePath(raw).isAbsolute()) continue;
+    mx::FilePath p(ve->getActiveFilePrefix() + raw);
+    mx::FilePath dir = mx::FilePath(ve->getActiveSourceUri()).getParentPath();
+    if (!p.isAbsolute() && !dir.isEmpty()) p = dir / p;
+    ve->setValueString(p.asString(mx::FilePath::FormatPosix));
+  }
+  for (const mx::ElementPtr& elem : with_prefix) {
+    elem->removeAttribute(mx::Element::FILE_PREFIX_ATTRIBUTE);
+  }
+}
 
 // Returns the MaterialX standard libraries, which are protected by `mtlx_mu`.
 const mx::DocumentPtr& GetMaterialXStdLibraries() {
@@ -101,6 +129,7 @@ const mx::DocumentPtr& GetMaterialXStdLibraries() {
     }
     mx::DocumentPtr doc = mx::createDocument();
     mx::loadLibraries({}, search_path, doc);
+    ResolveLibraryFilenames(doc);
     return doc;
   }());
   return *std_libs;
@@ -211,7 +240,10 @@ mx::NodeDefPtr ResolveNodeDef(const TfToken& hd_node_type,
   const std::string& uri = sdr_node->GetResolvedImplementationURI();
   static absl::NoDestructor<absl::flat_hash_set<std::string>> loaded_uris;
   if (uri.empty() || !loaded_uris->insert(uri).second) return nullptr;
-  mx::loadLibrary(uri, std_libs);
+  mx::DocumentPtr lib_doc = mx::createDocument();
+  mx::readFromXmlFile(lib_doc, uri);
+  ResolveLibraryFilenames(lib_doc);
+  std_libs->importLibrary(lib_doc);
   return std_libs->getNodeDef(sdr_node->GetImplementationName());
 }
 
@@ -256,8 +288,7 @@ const std::string* GetMtlxVersion(const HdMaterialNetwork2& net2) {
 }
 
 // Populates a standalone `mx::Document` with the subgraph rooted at
-// `term_conn`, warning about cycles and nodes without a `NodeDef`. Caller must
-// hold `mtlx_mu`.
+// `term_conn`. Caller must hold `mtlx_mu`.
 class DocumentBuilder {
  public:
   using BuiltNode = std::pair<mx::NodePtr, mx::NodeDefPtr>;
@@ -388,51 +419,79 @@ void UpgradeMaterialXDocument(const mx::DocumentPtr& doc,
   }
 }
 
-// Builds, flattens, and compiles the MaterialX surface network of `net2`
-// without running full-stdlib `mx::Document::validate`.
-std::optional<CompiledSurfaceShader> CompileMaterialXSurfaceNetwork(
-    const HdMaterialNetwork2& net2, std::string_view variant) {
-  const auto* term_conn = FindMaterialXSurfaceTerminal(net2);
-  if (!term_conn) return std::nullopt;
-
-  const std::string* version = GetMtlxVersion(net2);
-  mx::DocumentPtr doc;
-  {
-    absl::MutexLock lock(mtlx_mu);
-    doc = DocumentBuilder(net2, GetMaterialXStdLibraries(), version)
-              .Build(*term_conn);
-    if (!doc) return std::nullopt;
-  }
-
-  // Upgrade the small standalone user graph BEFORE attaching `std_libs`, then
-  // attach `std_libs`, flatten subgraphs, and compile under one reader lock.
-  UpgradeMaterialXDocument(doc, version != nullptr);
-
-  absl::ReaderMutexLock rlock(mtlx_mu);
-  doc->setDataLibrary(GetMaterialXStdLibraries());
-  doc->flattenSubgraphs();
-  mx::OutputPtr out = doc->getOutput("out");
-  mx::NodePtr shader_node = out ? out->getConnectedNode() : nullptr;
-  if (!shader_node) return std::nullopt;
-  return CompileSurfaceShader(shader_node, variant);
+template <typename Float, typename Spectrum>
+TranslatedMaterial TranslateWithTextureCache(
+    const SdfPath& id, const PreparedMaterialX& prepared,
+    const absl::flat_hash_set<TextureKey>& keys, std::string_view variant) {
+  TextureCache<Float, Spectrum> texture_cache;
+  texture_cache.Preload(keys);
+  return TranslateMaterialXNetwork(
+      id, prepared, [&](const TextureKey& k) { return texture_cache.Find(k); },
+      variant);
 }
 
 }  // namespace
 
-bool IsMaterialXNetwork(const HdMaterialNetwork2& network) {
-  return IsMaterialXEnabled() &&
-         FindMaterialXSurfaceTerminal(network) != nullptr;
+struct PreparedMaterialX {
+  mx::DocumentPtr doc;
+  mx::NodePtr shader_node;
+};
+
+std::shared_ptr<const PreparedMaterialX> PrepareMaterialXNetwork(
+    const SdfPath& id, const HdMaterialNetwork2& network,
+    const std::function<void(const TextureKey&)>& callback) {
+  if (!IsMaterialXEnabled()) return nullptr;
+  const auto* term_conn = FindMaterialXSurfaceTerminal(network);
+  if (!term_conn) return nullptr;
+  auto prepared = std::make_shared<PreparedMaterialX>();
+  try {
+    const std::string* version = GetMtlxVersion(network);
+    mx::DocumentPtr doc;
+    {
+      absl::MutexLock lock(mtlx_mu);
+      doc = DocumentBuilder(network, GetMaterialXStdLibraries(), version)
+                .Build(*term_conn);
+      if (!doc) return prepared;
+    }
+
+    // Upgrade the small standalone user graph BEFORE attaching `std_libs`.
+    UpgradeMaterialXDocument(doc, version != nullptr);
+
+    absl::ReaderMutexLock rlock(mtlx_mu);
+    doc->setDataLibrary(GetMaterialXStdLibraries());
+    doc->flattenSubgraphs();
+    mx::OutputPtr out = doc->getOutput("out");
+    mx::NodePtr shader_node = out ? out->getConnectedNode() : nullptr;
+    if (!shader_node) return prepared;
+    if (!doc->getNodes("image").empty()) {
+      DiscoverSurfaceShaderTextures(shader_node, callback);
+    }
+    prepared->doc = std::move(doc);
+    prepared->shader_node = std::move(shader_node);
+  } catch (const std::exception& e) {
+    TF_WARN("Failed to translate MaterialX network '%s': %s", id.GetText(),
+            e.what());
+  }
+  return prepared;
 }
 
-TranslatedMaterial TranslateMaterialXNetwork(const SdfPath& id,
-                                             const HdMaterialNetwork2& network,
-                                             std::string_view variant) {
+TranslatedMaterial TranslateMaterialXNetwork(
+    const SdfPath& id, const PreparedMaterialX& prepared,
+    const std::function<const CachedTexture*(const TextureKey&)>&
+        lookup_texture,
+    std::string_view variant) {
+  if (!prepared.shader_node) return {};
   try {
     TranslatedMaterial res;
-    auto compiled = CompileMaterialXSurfaceNetwork(network, variant);
-    if (!compiled) return res;
-    if (compiled->radiance_texture) {
-      mitsuba::ref<mitsuba::Object> radiance = compiled->radiance_texture;
+    CompiledSurfaceShader compiled;
+    {
+      absl::ReaderMutexLock rlock(mtlx_mu);
+      compiled =
+          CompileSurfaceShader(prepared.shader_node, variant, lookup_texture);
+    }
+    res.mesh_attributes = std::move(compiled.mesh_attributes);
+    if (compiled.radiance_texture) {
+      mitsuba::ref<mitsuba::Object> radiance = compiled.radiance_texture;
       if (absl::StrContains(variant, "spectral")) {
         // Linear sRGB colors are relative to the D65 white point. As for
         // Mitsuba's own RGB emitter colors, multiply the upsampled color by
@@ -451,9 +510,9 @@ TranslatedMaterial TranslateMaterialXNetwork(const SdfPath& id,
     bsdf_props.set("reflectance", 0.0f);
     res.bsdf = mitsuba::PluginManager::instance()->create_object(
         bsdf_props, variant, mitsuba::ObjectType::BSDF);
-    if (compiled->opacity_texture) {
+    if (compiled.opacity_texture) {
       mitsuba::Properties mask_props("mask");
-      mask_props.set("opacity", compiled->opacity_texture);
+      mask_props.set("opacity", compiled.opacity_texture);
       mask_props.set("nested_bsdf", res.bsdf);
       res.bsdf = mitsuba::PluginManager::instance()->create_object(
           mask_props, variant, mitsuba::ObjectType::BSDF);
@@ -483,11 +542,17 @@ std::optional<TranslatedMaterial> TranslateUsdMaterialX(
 
   HdMaterialNetwork2 net = ConvertMaterialSchema(
       HdMaterialSchema(UsdImagingDataSourceMaterial::New(prim, globals)));
-  if (!IsMaterialXNetwork(net)) return std::nullopt;
-
-  TranslatedMaterial trans =
-      TranslateMaterialXNetwork(prim.GetPath(), net, variant);
-  if (trans.bsdf) trans.bsdf->set_id(prim.GetPath().GetAsString());
+  absl::flat_hash_set<TextureKey> keys;
+  auto prepared = PrepareMaterialXNetwork(
+      prim.GetPath(), net, [&](const TextureKey& k) { keys.insert(k); });
+  if (!prepared) return std::nullopt;
+  TranslatedMaterial trans;
+  if (prepared->shader_node) {
+    using namespace mitsuba;
+    trans = MI_INVOKE_VARIANT(variant, TranslateWithTextureCache,
+                              prim.GetPath(), *prepared, keys, variant);
+    if (trans.bsdf) trans.bsdf->set_id(prim.GetPath().GetAsString());
+  }
   return trans;
 }
 

@@ -52,6 +52,115 @@ def Xform "root"
             }
         }
 
+        # Tiled image + triplanar projection + normalmap on standard_surface emission.
+        def Material "mtlx_textured"
+        {
+            token outputs:mtlx:surface.connect = </root/_materials/mtlx_textured/Surface.outputs:out>
+
+            def Shader "Tiled"
+            {
+                uniform token info:id = "ND_tiledimage_color3"
+                asset inputs:file = @textures/albedo.png@ (
+                    colorSpace = "srgb_texture"
+                )
+                float2 inputs:uvtiling = (2, 2)
+                color3f outputs:out
+            }
+
+            def Shader "Triplanar"
+            {
+                uniform token info:id = "ND_triplanarprojection_color3"
+                asset inputs:filex = @textures/albedo.png@
+                asset inputs:filey = @textures/albedo.png@
+                asset inputs:filez = @textures/albedo.png@
+                color3f outputs:out
+            }
+
+            def Shader "TexBlend"
+            {
+                uniform token info:id = "ND_mix_color3"
+                color3f inputs:fg.connect = </root/_materials/mtlx_textured/Tiled.outputs:out>
+                color3f inputs:bg.connect = </root/_materials/mtlx_textured/Triplanar.outputs:out>
+                float inputs:mix = 0.5
+                color3f outputs:out
+            }
+
+            def Shader "NormalImg"
+            {
+                uniform token info:id = "ND_image_vector3"
+                asset inputs:file = @textures/normalmap.png@
+                float3 outputs:out
+            }
+
+            def Shader "NormalMap"
+            {
+                uniform token info:id = "ND_normalmap_float"
+                float3 inputs:in.connect = </root/_materials/mtlx_textured/NormalImg.outputs:out>
+                float inputs:scale = 0.6
+                float3 outputs:out
+            }
+
+            def Shader "NormalColor"
+            {
+                uniform token info:id = "ND_convert_vector3_color3"
+                float3 inputs:in.connect = </root/_materials/mtlx_textured/NormalMap.outputs:out>
+                color3f outputs:out
+            }
+
+            def Shader "FinalColor"
+            {
+                uniform token info:id = "ND_mix_color3"
+                color3f inputs:fg.connect = </root/_materials/mtlx_textured/TexBlend.outputs:out>
+                color3f inputs:bg.connect = </root/_materials/mtlx_textured/NormalColor.outputs:out>
+                float inputs:mix = 0.7
+                color3f outputs:out
+            }
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_standard_surface_surfaceshader"
+                float inputs:emission = 1.2
+                color3f inputs:emission_color.connect = </root/_materials/mtlx_textured/FinalColor.outputs:out>
+                token outputs:out
+            }
+        }
+
+        # Vertex primvar + displayColor via surface_unlit.
+        def Material "mtlx_primvar"
+        {
+            token outputs:mtlx:surface.connect = </root/_materials/mtlx_primvar/Surface.outputs:out>
+
+            def Shader "Tint"
+            {
+                uniform token info:id = "ND_geompropvalue_color3"
+                string inputs:geomprop = "tint"
+                color3f inputs:default = (0.8, 0.1, 0.1)
+                color3f outputs:out
+            }
+
+            def Shader "GeomColor"
+            {
+                uniform token info:id = "ND_geomcolor_color3"
+                color3f outputs:out
+            }
+
+            def Shader "Sum"
+            {
+                uniform token info:id = "ND_add_color3"
+                color3f inputs:in1.connect = </root/_materials/mtlx_primvar/Tint.outputs:out>
+                color3f inputs:in2.connect = </root/_materials/mtlx_primvar/GeomColor.outputs:out>
+                color3f outputs:out
+            }
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_surface_unlit"
+                float inputs:emission = 1.0
+                color3f inputs:emission_color.connect = </root/_materials/mtlx_primvar/Sum.outputs:out>
+                token outputs:out
+            }
+        }
+
         # Horizontal ramp on a transformed quad. The unsupported
         # mtlx:displacement takes precedence over the universal one.
         def Material "mtlx_ramp_lr" (prepend apiSchemas = ["ColorSpaceAPI"])
@@ -169,6 +278,31 @@ def Xform "root"
             int[] faceVertexCounts = [4]
             int[] faceVertexIndices = [0, 1, 2, 3]
             point3f[] points = [(-1.5, -1.5, -0.2), (1.5, -1.5, -0.2), (1.5, 1.5, -0.2), (-1.5, 1.5, -0.2)]
+        }
+
+        def Mesh "TexturedQuad" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            rel material:binding = </root/_materials/mtlx_textured>
+            double3 xformOp:translate = (-0.6, 0.6, 0.05)
+            float3 xformOp:rotateXYZ = (-20, 25, 15)
+            float3 xformOp:scale = (0.5, 0.45, 1)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (interpolation = "vertex")
+            point3f[] points = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)]
+            texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "faceVarying")
+        }
+
+        def Mesh "PrimvarQuad" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            rel material:binding = </root/_materials/mtlx_primvar>
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (interpolation = "vertex")
+            point3f[] points = [(0.1, 0.1, 0), (1.1, 0.1, 0), (1.1, 1.1, 0), (0.1, 1.1, 0)]
+            color3f[] primvars:displayColor = [(0.05, 0.1, 0.05), (0.05, 0.1, 0.05), (0.1, 0.05, 0.15), (0.1, 0.05, 0.15)] (interpolation = "vertex")
+            color3f[] primvars:tint = [(0.1, 0.6, 0.2), (0.2, 0.5, 0.3), (0.2, 0.7, 0.2), (0.1, 0.5, 0.4)] (interpolation = "vertex")
         }
 
         def Mesh "RampQuad" (prepend apiSchemas = ["MaterialBindingAPI"])

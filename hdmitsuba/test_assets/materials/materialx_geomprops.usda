@@ -1,0 +1,162 @@
+#usda 1.0
+(
+    metersPerUnit = 1
+)
+
+def Camera "camera"
+{
+    double3 xformOp:translate = (0, 0, 2.8)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+}
+
+def Mesh "mesh" (
+    prepend apiSchemas = ["MaterialBindingAPI"]
+)
+{
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    rel material:binding = </mesh/Material>
+    normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+        interpolation = "vertex"
+    )
+    point3f[] points = [(-0.8, -0.8, 0), (0.8, -0.8, 0), (0.8, 0.8, 0), (-0.8, 0.8, 0)]
+    # Omit `primvars:st` so `geompropvalue(geomprop="st")` falls back to `default`.
+    color3f[] primvars:displayColor = [(0.2, 0.4, 0.6)] (
+        interpolation = "constant"
+    )
+    float[] primvars:displayOpacity = [0.75] (
+        interpolation = "constant"
+    )
+    float[] primvars:present_w = [0.5] (
+        interpolation = "constant"
+    )
+
+    def Material "Material"
+    {
+        token outputs:mtlx:surface.connect = </mesh/Material/Surface.outputs:out>
+
+        def Shader "PresentW"
+        {
+            uniform token info:id = "ND_geompropvalue_float"
+            float inputs:default = 0.1
+            string inputs:geomprop = "present_w"
+            float outputs:out
+        }
+
+        def Shader "MissingW"
+        {
+            uniform token info:id = "ND_geompropvalue_float"
+            float inputs:default = 1.0
+            string inputs:geomprop = "missing_w"
+            float outputs:out
+        }
+
+        def Shader "DisplayC4"
+        {
+            uniform token info:id = "ND_geompropvalue_color4"
+            color4f inputs:default = (0, 0, 0, 0.2)
+            string inputs:geomprop = "displayColor"
+            color4f outputs:out
+        }
+
+        def Shader "DisplayC4A"
+        {
+            uniform token info:id = "ND_extract_color4"
+            color4f inputs:in.connect = </mesh/Material/DisplayC4.outputs:out>
+            int inputs:index = 3
+            float outputs:out
+        }
+
+        def Shader "AddW2"
+        {
+            uniform token info:id = "ND_add_float"
+            float inputs:in1.connect = </mesh/Material/MissingW.outputs:out>
+            float inputs:in2.connect = </mesh/Material/DisplayC4A.outputs:out>
+            float outputs:out
+        }
+
+        def Shader "Emission"
+        {
+            uniform token info:id = "ND_multiply_float"
+            float inputs:in1.connect = </mesh/Material/PresentW.outputs:out>
+            float inputs:in2.connect = </mesh/Material/AddW2.outputs:out>
+            float outputs:out
+        }
+
+        def Shader "GC4"
+        {
+            uniform token info:id = "ND_geomcolor_color4"
+            color4f outputs:out
+        }
+
+        def Shader "GC4Rgb"
+        {
+            uniform token info:id = "ND_convert_color4_color3"
+            color4f inputs:in.connect = </mesh/Material/GC4.outputs:out>
+            color3f outputs:out
+        }
+
+        def Shader "GC4A"
+        {
+            uniform token info:id = "ND_extract_color4"
+            color4f inputs:in.connect = </mesh/Material/GC4.outputs:out>
+            int inputs:index = 3
+            float outputs:out
+        }
+
+        def Shader "GC4Scaled"
+        {
+            uniform token info:id = "ND_multiply_color3FA"
+            color3f inputs:in1.connect = </mesh/Material/GC4Rgb.outputs:out>
+            float inputs:in2.connect = </mesh/Material/GC4A.outputs:out>
+            color3f outputs:out
+        }
+
+        def Shader "MissingC"
+        {
+            uniform token info:id = "ND_geompropvalue_color3"
+            color3f inputs:default = (0.1, 0.2, 0.3)
+            string inputs:geomprop = "missing_c"
+            color3f outputs:out
+        }
+
+        def Shader "MissingSt"
+        {
+            uniform token info:id = "ND_geompropvalue_vector2"
+            float2 inputs:default = (0.3, 0.25)
+            string inputs:geomprop = "st"
+            float2 outputs:out
+        }
+
+        def Shader "StRgb"
+        {
+            uniform token info:id = "ND_convert_vector2_color3"
+            float2 inputs:in.connect = </mesh/Material/MissingSt.outputs:out>
+            color3f outputs:out
+        }
+
+        def Shader "AddC2"
+        {
+            uniform token info:id = "ND_add_color3"
+            color3f inputs:in1.connect = </mesh/Material/MissingC.outputs:out>
+            color3f inputs:in2.connect = </mesh/Material/StRgb.outputs:out>
+            color3f outputs:out
+        }
+
+        def Shader "EmissionColor"
+        {
+            uniform token info:id = "ND_add_color3"
+            color3f inputs:in1.connect = </mesh/Material/GC4Scaled.outputs:out>
+            color3f inputs:in2.connect = </mesh/Material/AddC2.outputs:out>
+            color3f outputs:out
+        }
+
+        def Shader "Surface"
+        {
+            uniform token info:id = "ND_surface_unlit"
+            float inputs:emission.connect = </mesh/Material/Emission.outputs:out>
+            color3f inputs:emission_color.connect = </mesh/Material/EmissionColor.outputs:out>
+            token outputs:out
+        }
+    }
+}

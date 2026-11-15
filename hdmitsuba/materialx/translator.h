@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include <functional>
+#include <memory>
 #include <optional>
 #include <string_view>
 
@@ -24,17 +26,28 @@
 #include <pxr/usd/usd/timeCode.h>
 
 #include "hdmitsuba/prim_translator.h"
+#include "hdmitsuba/texture_cache.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-// Returns true if experimental MaterialX support is enabled and the active
-// surface terminal of `network` is a MaterialX shader node.
-bool IsMaterialXNetwork(const HdMaterialNetwork2& network);
+// Opaque flattened MaterialX surface network shared between texture discovery
+// and material translation within a single Hydra commit.
+struct PreparedMaterialX;
 
-// Translates a Hydra MaterialX network for a specific Mitsuba variant string.
-TranslatedMaterial TranslateMaterialXNetwork(const SdfPath& id,
-                                             const HdMaterialNetwork2& network,
-                                             std::string_view variant);
+// Flattens a Hydra MaterialX shading network and invokes `callback` with the
+// `TextureKey` of every bitmap texture it consumes for parallel preloading.
+// Returns nullptr if MaterialX is disabled or `network` has no MaterialX
+// surface terminal.
+std::shared_ptr<const PreparedMaterialX> PrepareMaterialXNetwork(
+    const SdfPath& id, const HdMaterialNetwork2& network,
+    const std::function<void(const TextureKey&)>& callback);
+
+// Translates a prepared MaterialX network for a specific Mitsuba variant.
+TranslatedMaterial TranslateMaterialXNetwork(
+    const SdfPath& id, const PreparedMaterialX& prepared,
+    const std::function<const CachedTexture*(const TextureKey&)>&
+        lookup_texture,
+    std::string_view variant);
 
 // --- Offline translation (usd_mitsuba, via geometry_ext) ---
 
