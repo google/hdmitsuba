@@ -31,6 +31,7 @@ from pxr import UsdLux
 from pxr import UsdRender
 from pxr import UsdVol
 
+from hdmitsuba import geometry_ext as geom_lib
 from usd_mitsuba import camera
 from usd_mitsuba import gaussian_splatting
 from usd_mitsuba import instancing
@@ -305,7 +306,7 @@ def _convert_curves(
     )
 
   curve_points = np.array(
-      curve_prim.GetPointsAttr().Get(time), dtype=np.float32
+      geom_lib.extract_curve_points(prim, time), dtype=np.float32
   )
   world_mat = np.array(
       curve_prim.ComputeLocalToWorldTransform(time), dtype=np.float32

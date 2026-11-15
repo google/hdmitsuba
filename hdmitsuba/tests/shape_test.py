@@ -22,6 +22,7 @@ from pxr import Gf
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
+from pxr import UsdSkel
 from pxr import UsdVol
 from pxr import Vt
 import pytest
@@ -50,6 +51,7 @@ def _set_mitsuba_variant():
         ('empty_mesh', Usd.TimeCode.Default(), False),
         ('invalid_topology', Usd.TimeCode.Default(), True),
         ('skinned_mesh', Usd.TimeCode(20), True),
+        ('skel_deformation', Usd.TimeCode(20), True),
         ('gaussian_splats', Usd.TimeCode.Default(), True),
         ('implicit_surfaces', Usd.TimeCode.Default(), True),
         ('visibility', Usd.TimeCode.Default(), True),
@@ -424,3 +426,41 @@ def test_modify_gaussian_splat_positions():
     positions = field.GetPositionsAttr()
     positions.Set([p + Gf.Vec3f(0, 0, -3) for p in positions.Get()])
   assert not np.allclose(image, engine.render()['color'], atol=1e-2)
+
+
+def test_skel_deformation_time_change():
+  stage = Usd.Stage.Open(
+      f'{test_helpers.TEST_ASSETS_PATH}/shapes/skel_deformation.usda'
+  )
+  test_helpers.create_render_settings(stage, resolution=(128, 128))
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin')
+  image_t1, _ = test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      output_prefix='test_skel_deformation_t1',
+      engine=engine,
+      time=Usd.TimeCode(1),
+  )
+  # Changing the time on the same engine re-syncs the skinned points.
+  image_t20, _ = test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      output_prefix='test_skel_deformation_t20',
+      engine=engine,
+      time=Usd.TimeCode(20),
+  )
+  assert np.mean(np.abs(image_t20[..., :3] - image_t1[..., :3])) > 0.01
+
+  # Compare against the points baked by OpenUSD's reference implementation
+  # (into the session layer, to not modify the shared test asset layer).
+  stage.SetEditTarget(stage.GetSessionLayer())
+  # The USD type stubs do not declare `BakeSkinning`.
+  # pyrefly: ignore[missing-attribute]
+  assert UsdSkel.BakeSkinning(stage.Traverse(), Gf.Interval(20, 20))
+  image_baked, _ = test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      output_prefix='test_skel_deformation_baked_t20',
+      time=Usd.TimeCode(20),
+  )
+  test_helpers.robust_assert_close(
+      image_t20[..., :3], image_baked[..., :3], atol=0.05
+  )

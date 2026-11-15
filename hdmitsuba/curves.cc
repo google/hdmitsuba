@@ -29,6 +29,7 @@
 #include <pxr/imaging/hd/basisCurvesTopology.h>
 #include <pxr/imaging/hd/basisCurvesTopologySchema.h>
 #include <pxr/imaging/hd/changeTracker.h>
+#include <pxr/imaging/hd/extComputationUtils.h>
 #include <pxr/imaging/hd/materialBindingSchema.h>
 #include <pxr/imaging/hd/materialBindingsSchema.h>
 #include <pxr/imaging/hd/primvarsSchema.h>
@@ -178,7 +179,16 @@ void HdMitsubaCurves::Sync(HdSceneDelegate* sceneDelegate,
   if (points_.empty() || widths_.empty() ||
       HdChangeTracker::IsPrimvarDirty(*dirtyBits, id, HdTokens->points) ||
       HdChangeTracker::IsPrimvarDirty(*dirtyBits, id, HdTokens->widths)) {
-    points_ = GetParam<VtVec3fArray>(data_source, points_locator);
+    // UsdSkelImaging provides the deformed points as a computed primvar.
+    HdExtComputationUtils::ValueStore computed =
+        HdExtComputationUtils::GetComputedPrimvarValues(
+            sceneDelegate->GetExtComputationPrimvarDescriptors(
+                id, HdInterpolationVertex),
+            sceneDelegate);
+    auto it = computed.find(HdTokens->points);
+    points_ = it != computed.end()
+                  ? it->second.Get<VtVec3fArray>()
+                  : GetParam<VtVec3fArray>(data_source, points_locator);
     if (points_.empty()) {
       TF_WARN("Curves %s: missing or invalid points primvar.", id.GetText());
     }
