@@ -45,4 +45,8 @@ class HdMitsubaConfig {
   friend class TfSingleton<HdMitsubaConfig>;
 };
 
+// Returns whether experimental MaterialX translation is enabled at runtime via
+// the `HDMITSUBA_ENABLE_MATERIALX` environment variable (off by default).
+bool IsMaterialXEnabled();
+
 PXR_NAMESPACE_CLOSE_SCOPE

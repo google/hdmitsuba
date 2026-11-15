@@ -15,12 +15,16 @@
 #pragma once
 
 #include <pxr/imaging/hd/material.h>
+#include <pxr/imaging/hd/materialSchema.h>
 #include <pxr/imaging/hd/sprim.h>
 #include <pxr/imaging/hd/types.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
+
+TfTokenVector GetMaterialRenderContexts();
+HdMaterialNetwork2 ConvertMaterialSchema(const HdMaterialSchema& schema);
 
 class HdMitsubaMaterial final : public HdMaterial {
  public:

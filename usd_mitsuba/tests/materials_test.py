@@ -386,6 +386,13 @@ def test_displacement_through_preview_surface():
   assert material.convert_material(mesh)[2] is None
 
 
+def _make_z_up_si():
+  si = dr.zeros(mi.SurfaceInteraction3f)
+  si.n = si.wi = mi.Vector3f(0.0, 0.0, 1.0)
+  si.sh_frame = mi.Frame3f(si.n)
+  return si
+
+
 def test_time_sampled_and_material_prim_conversion() -> None:
   stage = Usd.Stage.CreateInMemory()
   mesh = stage.DefinePrim('/Mesh', 'Mesh')
@@ -400,10 +407,7 @@ def test_time_sampled_and_material_prim_conversion() -> None:
   )
   UsdShade.MaterialBindingAPI.Apply(mesh).Bind(mat)
 
-  si = dr.zeros(mi.SurfaceInteraction3f)
-  si.n = si.wi = mi.Vector3f(0.0, 0.0, 1.0)
-  si.sh_frame = mi.Frame3f(si.n)
-
+  si = _make_z_up_si()
   _, emitter_t0, _, _ = material.convert_material(mesh, time=Usd.TimeCode(0.0))
   _, emitter_mat_t1, _, _ = material.convert_material(
       mat.GetPrim(), time=Usd.TimeCode(1.0)
@@ -415,3 +419,70 @@ def test_time_sampled_and_material_prim_conversion() -> None:
   np.testing.assert_allclose(
       emitter_mat_t1.eval(si), mi.Color3f(0.9, 0.3, 0.1), rtol=1e-5
   )
+
+
+def test_materialx_translation(monkeypatch: pytest.MonkeyPatch) -> None:
+  """Tests MaterialX feature-flag gating, emissive translation, and time-sampled inputs.
+
+  Args:
+    monkeypatch: Pytest monkeypatch fixture.
+  """
+  stage = Usd.Stage.CreateInMemory()
+  mesh = stage.DefinePrim('/Mesh', 'Mesh')
+  mat = UsdShade.Material.Define(stage, '/Material')
+  surf = UsdShade.Shader.Define(stage, '/Material/Surface')
+  surf.CreateIdAttr('ND_standard_surface_surfaceshader')
+  surf.CreateInput('emission', Sdf.ValueTypeNames.Float).Set(2.0)
+  em_color = surf.CreateInput('emission_color', Sdf.ValueTypeNames.Color3f)
+  em_color.Set((0.1, 0.5, 0.9), 0.0)
+  em_color.Set((0.8, 0.2, 0.1), 1.0)
+  mat.CreateSurfaceOutput('mtlx').ConnectToSource(
+      surf.CreateOutput('out', Sdf.ValueTypeNames.Token)
+  )
+  UsdShade.MaterialBindingAPI.Apply(mesh).Bind(mat)
+
+  # TODO(vicini): Remove `HDMITSUBA_ENABLE_MATERIALX` once MaterialX support is
+  # complete.
+  monkeypatch.delenv('HDMITSUBA_ENABLE_MATERIALX', raising=False)
+  assert material.convert_material(mesh) == (None, None, None, None)
+
+  monkeypatch.setenv('HDMITSUBA_ENABLE_MATERIALX', '1')
+  bsdf, emitter, displacement, medium = material.convert_material(
+      mesh, time=Usd.TimeCode(0.0)
+  )
+  assert isinstance(bsdf, mi.BSDF) and bsdf.class_name() == 'SmoothDiffuse'
+  assert isinstance(emitter, mi.Emitter)
+  assert displacement is None and medium is None
+  assert isinstance(
+      material.convert_material(mat.GetPrim(), time=Usd.TimeCode(0.0))[1],
+      mi.Emitter,
+  )
+  si = _make_z_up_si()
+  np.testing.assert_allclose(
+      emitter.eval(si), mi.Color3f(0.2, 1.0, 1.8), rtol=1e-5
+  )
+
+  # Time-sampled inputs and `double_sided=True` back-face emission (`wi.z < 0`).
+  _, emitter_t1, _, _ = material.convert_material(mesh, time=Usd.TimeCode(1.0))
+  em_ds = material.convert_mesh_material(
+      mesh, double_sided=True, time=Usd.TimeCode(1.0)
+  ).emitter
+  assert emitter_t1 is not None and em_ds is not None
+  c_t1 = mi.Color3f(1.6, 0.4, 0.2)
+  np.testing.assert_allclose(emitter_t1.eval(si), c_t1, rtol=1e-5)
+  np.testing.assert_allclose(em_ds.eval(si), c_t1, rtol=1e-5)
+  si.wi = mi.Vector3f(0.0, 0.0, -1.0)
+  np.testing.assert_allclose(emitter_t1.eval(si), mi.Color3f(0.0), atol=1e-6)
+  np.testing.assert_allclose(em_ds.eval(si), c_t1, rtol=1e-5)
+
+  # Unrecognized `outputs:mtlx:surface` does not fall back to `outputs:surface`.
+  preview = UsdShade.Shader.Define(stage, '/Material/Preview')
+  preview.CreateIdAttr('UsdPreviewSurface')
+  preview.CreateInput('emissiveColor', Sdf.ValueTypeNames.Color3f).Set(
+      (0.0, 1.0, 0.0)
+  )
+  mat.CreateSurfaceOutput().ConnectToSource(
+      preview.CreateOutput('surface', Sdf.ValueTypeNames.Token)
+  )
+  surf.GetIdAttr().Set('UnknownCustomShader')
+  assert material.convert_material(mesh) == (None, None, None, None)

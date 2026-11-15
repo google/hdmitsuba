@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Configures Python, OpenUSD, OpenSubdiv, and OpenImageDenoise targets when
-# CMAKE_PREFIX_PATH points to a SideFX Houdini installation (Houdini 22.0+).
+# Configures Python, OpenUSD, MaterialX, OpenSubdiv, and OpenImageDenoise
+# targets when CMAKE_PREFIX_PATH points to a SideFX Houdini installation
+# (Houdini 22.0+).
 
 foreach(_prefix ${CMAKE_PREFIX_PATH})
   find_package(Houdini QUIET NO_DEFAULT_PATH PATHS
@@ -76,6 +77,30 @@ macro(hdmitsuba_setup_houdini)
   set_target_properties(OpenSubdiv::osdCPU PROPERTIES
     IMPORTED_LOCATION "${_osd_lib}"
     INTERFACE_INCLUDE_DIRECTORIES "${_houdini_include_dir}")
+
+  if(EXISTS "${_houdini_include_dir}/MaterialXCore/Generated.h")
+    file(READ "${_houdini_include_dir}/MaterialXCore/Generated.h" _mtlx_h)
+    foreach(_v MATERIALX_MAJOR_VERSION MATERIALX_MINOR_VERSION MATERIALX_BUILD_VERSION)
+      if(_mtlx_h MATCHES "#define[ \t]+${_v}[ \t]+([0-9]+)")
+        set(_${_v} "${CMAKE_MATCH_1}")
+      endif()
+    endforeach()
+    set(MaterialX_VERSION
+      "${_MATERIALX_MAJOR_VERSION}.${_MATERIALX_MINOR_VERSION}.${_MATERIALX_BUILD_VERSION}")
+  endif()
+  foreach(_mtlx_lib MaterialXCore MaterialXFormat)
+    find_library(_mtlx_${_mtlx_lib} NAMES "${_mtlx_lib}" PATHS "${HOUDINI_LIB_DIR}" NO_DEFAULT_PATH REQUIRED)
+    add_library(${_mtlx_lib} SHARED IMPORTED)
+    set_target_properties(${_mtlx_lib} PROPERTIES
+      IMPORTED_LOCATION "${_mtlx_${_mtlx_lib}}"
+      INTERFACE_INCLUDE_DIRECTORIES "${_houdini_include_dir}")
+  endforeach()
+  set_property(TARGET MaterialXFormat APPEND PROPERTY INTERFACE_LINK_LIBRARIES MaterialXCore)
+  if(EXISTS "${_houdini_hfs_root}/houdini/materialx/libraries")
+    set(MATERIALX_STDLIB_DIR "${_houdini_hfs_root}/houdini/materialx/libraries")
+  else()
+    set(MATERIALX_STDLIB_DIR "${_houdini_hfs_root}/houdini/materialx")
+  endif()
 
   find_library(_oidn_lib NAMES OpenImageDenoise PATHS "${HOUDINI_LIB_DIR}" NO_DEFAULT_PATH)
   if(_oidn_lib AND EXISTS "${_houdini_include_dir}/OpenImageDenoise/oidn.hpp")

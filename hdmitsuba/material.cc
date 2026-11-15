@@ -25,13 +25,13 @@
 #include <pxr/imaging/hd/materialNodeParameterSchema.h>
 #include <pxr/imaging/hd/materialNodeSchema.h>
 #include <pxr/imaging/hd/materialSchema.h>
-#include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/imaging/hd/sceneIndex.h>
 #include <pxr/imaging/hd/types.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
 
+#include "hdmitsuba/config.h"
 #include "hdmitsuba/debug_codes.h"
 #include "hdmitsuba/render_param.h"
 #include "hdmitsuba/scene_manager.h"
@@ -46,6 +46,14 @@ namespace {
 // using the schema.
 void ConvertMaterialNetwork(const HdMaterialNetworkSchema& network_schema,
                             HdMaterialNetwork2& network) {
+  if (auto config_schema = network_schema.GetConfig()) {
+    for (const TfToken& key : config_schema.GetNames()) {
+      if (auto ds = config_schema.Get(key)) {
+        network.config[key] = ds->GetValue(0.0f);
+      }
+    }
+  }
+
   HdMaterialNodeContainerSchema nodes_schema = network_schema.GetNodes();
   if (!nodes_schema.IsDefined()) {
     return;
@@ -130,6 +138,28 @@ void ConvertMaterialNetwork(const HdMaterialNetworkSchema& network_schema,
 
 }  // namespace
 
+TfTokenVector GetMaterialRenderContexts() {
+  if (IsMaterialXEnabled()) {
+    return {TfToken("mitsuba"), TfToken("mtlx"),
+            HdMaterialSchemaTokens->universalRenderContext, TfToken("glslfx")};
+  }
+  return {TfToken("mitsuba"), HdMaterialSchemaTokens->universalRenderContext,
+          TfToken("glslfx")};
+}
+
+HdMaterialNetwork2 ConvertMaterialSchema(const HdMaterialSchema& schema) {
+  HdMaterialNetwork2 network2;
+  if (schema.IsDefined()) {
+    // Merge the universal network with renderer-specific contexts in reverse
+    // priority order so partial context overrides retain base terminals.
+    const TfTokenVector contexts = GetMaterialRenderContexts();
+    for (auto it = contexts.rbegin(); it != contexts.rend(); ++it) {
+      ConvertMaterialNetwork(schema.GetMaterialNetwork(*it), network2);
+    }
+  }
+  return network2;
+}
+
 HdMitsubaMaterial::HdMitsubaMaterial(const SdfPath& id) : HdMaterial(id) {}
 
 void HdMitsubaMaterial::Sync(HdSceneDelegate* scene_delegate,
@@ -152,19 +182,8 @@ void HdMitsubaMaterial::Sync(HdSceneDelegate* scene_delegate,
   ScopedResolverCache resolver_cache(
       static_cast<HdMitsubaRenderParam*>(render_param)->ResolverCacheData());
 
-  HdMaterialSchema materialSchema =
-      HdMaterialSchema::GetFromParent(scene_index->GetPrim(id).dataSource);
-  HdMaterialNetwork2 network2;
-  if (materialSchema.IsDefined()) {
-    // Merge the universal network with renderer-specific contexts in reverse
-    // priority order so partial context overrides retain base terminals.
-    const TfTokenVector contexts = scene_delegate->GetRenderIndex()
-                                       .GetRenderDelegate()
-                                       ->GetMaterialRenderContexts();
-    for (auto it = contexts.rbegin(); it != contexts.rend(); ++it) {
-      ConvertMaterialNetwork(materialSchema.GetMaterialNetwork(*it), network2);
-    }
-  }
+  HdMaterialNetwork2 network2 = ConvertMaterialSchema(
+      HdMaterialSchema::GetFromParent(scene_index->GetPrim(id).dataSource));
 
   SceneManager* scene_manager =
       static_cast<HdMitsubaRenderParam*>(render_param)->GetScene();

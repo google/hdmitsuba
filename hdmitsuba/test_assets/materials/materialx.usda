@@ -1,0 +1,207 @@
+#usda 1.0
+(
+    defaultPrim = "root"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "root"
+{
+    def Xform "Camera"
+    {
+        float3 xformOp:rotateXYZ = (45, 0, 0)
+        double3 xformOp:translate = (0, -3.2, 3.2)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+
+        def Camera "Camera"
+        {
+            float2 clippingRange = (0.1, 100)
+            float focalLength = 0.035
+            float horizontalAperture = 0.036
+            token projection = "perspective"
+            float verticalAperture = 0.024
+        }
+    }
+
+    def DomeLight "Sky"
+    {
+        float inputs:intensity = 0.35
+    }
+
+    def Scope "_materials"
+    {
+        # Backdrop with both mitsuba:surface and mtlx:surface (mitsuba wins).
+        def Material "backdrop"
+        {
+            token outputs:mitsuba:surface.connect = </root/_materials/backdrop/MitsubaDiffuse.outputs:surface>
+            token outputs:mtlx:surface.connect = </root/_materials/backdrop/MtlxFallback.outputs:out>
+
+            def Shader "MitsubaDiffuse"
+            {
+                uniform token info:id = "mitsuba_diffuse"
+                color3f inputs:reflectance = (0.25, 0.35, 0.55)
+                token outputs:surface
+            }
+
+            def Shader "MtlxFallback"
+            {
+                uniform token info:id = "ND_surface_unlit"
+                float inputs:emission = 2.0
+                color3f inputs:emission_color = (1, 0, 0)
+                token outputs:out
+            }
+        }
+
+        # Horizontal ramp on a transformed quad. The unsupported
+        # mtlx:displacement takes precedence over the universal one.
+        def Material "mtlx_ramp_lr" (prepend apiSchemas = ["ColorSpaceAPI"])
+        {
+            uniform token colorSpace:name = "srgb_rec709_scene"
+            token outputs:mtlx:surface.connect = </root/_materials/mtlx_ramp_lr/Surface.outputs:out>
+            token outputs:mtlx:displacement.connect = </root/_materials/mtlx_ramp_lr/MtlxDisplacement.outputs:out>
+            token outputs:displacement.connect = </root/_materials/mtlx_ramp_lr/HeightTexture.outputs:r>
+
+            def Shader "MtlxDisplacement"
+            {
+                uniform token info:id = "ND_displacement_float"
+                float inputs:displacement = 0.5
+                token outputs:out
+            }
+
+            def Shader "HeightTexture"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @textures/albedo.png@
+                float4 inputs:bias = (0.5, 0.5, 0.5, 0)
+                float outputs:r
+            }
+
+            def Shader "RampLR"
+            {
+                uniform token info:id = "ND_ramplr_color3"
+                color3f inputs:valuel = (0.1, 0.2, 0.9)
+                color3f inputs:valuer = (0.9, 0.6, 0.1)
+                color3f outputs:out
+            }
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_standard_surface_surfaceshader"
+                float inputs:emission = 1.0
+                color3f inputs:emission_color.connect = </root/_materials/mtlx_ramp_lr/RampLR.outputs:out>
+                token outputs:out
+            }
+        }
+
+        # Vertical ramp + cutout opacity gradient over the lit backdrop.
+        def Material "mtlx_cutout_tb"
+        {
+            token outputs:mtlx:surface.connect = </root/_materials/mtlx_cutout_tb/Surface.outputs:out>
+
+            def Shader "RampTB"
+            {
+                uniform token info:id = "ND_ramptb_color3"
+                color3f inputs:valuet = (0.9, 0.15, 0.35)
+                color3f inputs:valueb = (0.15, 0.85, 0.45)
+                color3f outputs:out
+            }
+
+            def Shader "OpacityRamp"
+            {
+                uniform token info:id = "ND_ramptb_float"
+                float inputs:valuet = 0.2
+                float inputs:valueb = 0.9
+                float outputs:out
+            }
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_surface_unlit"
+                float inputs:emission = 1.2
+                color3f inputs:emission_color.connect = </root/_materials/mtlx_cutout_tb/RampTB.outputs:out>
+                float inputs:opacity.connect = </root/_materials/mtlx_cutout_tb/OpacityRamp.outputs:out>
+                token outputs:out
+            }
+        }
+
+        # Unresolvable mtlx:surface and mtlx:volume: renders with the default
+        # material rather than the universal UsdPreviewSurface and medium.
+        def Material "mtlx_unresolved"
+        {
+            token outputs:mtlx:surface.connect = </root/_materials/mtlx_unresolved/Surface.outputs:out>
+            token outputs:surface.connect = </root/_materials/mtlx_unresolved/Preview.outputs:surface>
+            token outputs:mtlx:volume.connect = </root/_materials/mtlx_unresolved/Volume.outputs:out>
+            token outputs:volume.connect = </root/_materials/mtlx_unresolved/Medium.outputs:volume>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_hdmitsuba_test_unknown_surfaceshader"
+                token outputs:out
+            }
+
+            def Shader "Volume"
+            {
+                uniform token info:id = "ND_hdmitsuba_test_unknown_volumeshader"
+                token outputs:out
+            }
+
+            def Shader "Medium"
+            {
+                uniform token info:id = "mitsuba_homogeneous"
+                float inputs:sigma_t = 3
+                token outputs:volume
+            }
+
+            def Shader "Preview"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.9, 0.05, 0.05)
+                token outputs:surface
+            }
+        }
+    }
+
+    def Xform "Meshes"
+    {
+        def Mesh "Backdrop" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            rel material:binding = </root/_materials/backdrop>
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(-1.5, -1.5, -0.2), (1.5, -1.5, -0.2), (1.5, 1.5, -0.2), (-1.5, 1.5, -0.2)]
+        }
+
+        def Mesh "RampQuad" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            rel material:binding = </root/_materials/mtlx_ramp_lr>
+            double3 xformOp:translate = (-0.6, -0.6, 0)
+            float xformOp:rotateZ = 35
+            float3 xformOp:scale = (0.45, 0.45, 1)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ", "xformOp:scale"]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (interpolation = "vertex")
+            point3f[] points = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)]
+            texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "faceVarying")
+        }
+
+        def Mesh "CutoutQuad" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            rel material:binding = </root/_materials/mtlx_cutout_tb>
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (interpolation = "vertex")
+            point3f[] points = [(0.1, -1.1, 0.05), (1.1, -1.1, 0.05), (1.1, -0.1, 0.05), (0.1, -0.1, 0.05)]
+            texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "faceVarying")
+        }
+
+        def Mesh "UnresolvedQuad" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            rel material:binding = </root/_materials/mtlx_unresolved>
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            normal3f[] normals = [(0, -1, 0), (0, -1, 0), (0, -1, 0), (0, -1, 0)] (interpolation = "vertex")
+            point3f[] points = [(-1, 1.5, -0.2), (1, 1.5, -0.2), (1, 1.5, 0.5), (-1, 1.5, 0.5)]
+        }
+    }
+}

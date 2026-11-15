@@ -86,6 +86,7 @@
 
 #include "hdmitsuba/debug_codes.h"
 #include "hdmitsuba/ies_emitter.h"
+#include "hdmitsuba/materialx/translator.h"
 #include "hdmitsuba/motion.h"
 #include "hdmitsuba/spec_types.h"
 #include "hdmitsuba/traversal.h"
@@ -295,6 +296,10 @@ void DiscoverTextures(
   for (const TfToken& terminal :
        {HdMaterialTerminalTokens->displacement,
         HdMaterialTerminalTokens->volume, HdMaterialTerminalTokens->surface}) {
+    if (terminal == HdMaterialTerminalTokens->surface &&
+        IsMaterialXNetwork(network)) {
+      continue;
+    }
     if (const auto* conn = FindTerminalConnection(network, terminal)) {
       visit(*conn, terminal);
     }
@@ -742,6 +747,14 @@ PrimTranslator<Float, Spectrum>::ParsePreviewSurface(
   return res;
 }
 
+mitsuba::ref<mitsuba::Object> CreateMaterialEmitter(mitsuba::Properties props,
+                                                    bool double_sided,
+                                                    std::string_view variant) {
+  if (double_sided) props.set("twosided", true, false);
+  return mitsuba::PluginManager::instance()->create_object(
+      props, variant, mitsuba::ObjectType::Emitter);
+}
+
 MI_VARIANT TranslatedMaterial PrimTranslator<Float, Spectrum>::BuildMaterial(
     const MaterialSpec& spec,
     const TextureCache<Float, Spectrum>& texture_cache) {
@@ -751,8 +764,29 @@ MI_VARIANT TranslatedMaterial PrimTranslator<Float, Spectrum>::BuildMaterial(
   absl::flat_hash_map<SdfPath, mitsuba::ref<mitsuba::Object>, SdfPath::Hash>
       cache;
 
+  if (IsMaterialXNetwork(network2)) {
+    res = TranslateMaterialXNetwork(spec.id, network2,
+                                    mitsuba::BSDF<Float, Spectrum>::Variant);
+    if (res.bsdf) res.bsdf->set_id(id_str);
+  } else if (const auto* surf_conn = FindTerminalConnection(
+                 network2, HdMaterialTerminalTokens->surface)) {
+    if (auto node_it = network2.nodes.find(surf_conn->upstreamNode);
+        node_it != network2.nodes.end()) {
+      const HdMaterialNode2& surface_node = node_it->second;
+      if (surface_node.nodeTypeId == TfToken("UsdPreviewSurface")) {
+        res = ParsePreviewSurface(network2, surface_node, texture_cache);
+      } else {
+        res.bsdf = ParseNodeRecursive<Float, Spectrum>(
+            *surf_conn, network2, cache, HdMaterialTerminalTokens->surface,
+            texture_cache, &res.mesh_attributes);
+      }
+      if (res.bsdf) res.bsdf->set_id(id_str);
+    }
+  }
+
   if (const auto* disp_conn = FindTerminalConnection(
           network2, HdMaterialTerminalTokens->displacement)) {
+    cache.clear();
     res.displacement.texture = ParseNodeRecursive<Float, Spectrum>(
         *disp_conn, network2, cache, HdMaterialTerminalTokens->displacement,
         texture_cache, /*mesh_attributes=*/nullptr);
@@ -776,29 +810,6 @@ MI_VARIANT TranslatedMaterial PrimTranslator<Float, Spectrum>::BuildMaterial(
         res.interior_medium = nullptr;
       } else {
         res.interior_medium->set_id(id_str);
-      }
-    }
-  }
-
-  if (const auto* surf_conn =
-          FindTerminalConnection(network2, HdMaterialTerminalTokens->surface)) {
-    if (auto node_it = network2.nodes.find(surf_conn->upstreamNode);
-        node_it != network2.nodes.end()) {
-      const HdMaterialNode2& surface_node = node_it->second;
-      if (surface_node.nodeTypeId == TfToken("UsdPreviewSurface")) {
-        TranslatedMaterial preview_res =
-            ParsePreviewSurface(network2, surface_node, texture_cache);
-        res.bsdf = std::move(preview_res.bsdf);
-        res.shape_emitter_props = std::move(preview_res.shape_emitter_props);
-        res.mesh_attributes = std::move(preview_res.mesh_attributes);
-      } else {
-        cache.clear();
-        res.bsdf = ParseNodeRecursive<Float, Spectrum>(
-            *surf_conn, network2, cache, HdMaterialTerminalTokens->surface,
-            texture_cache, &res.mesh_attributes);
-      }
-      if (res.bsdf) {
-        res.bsdf->set_id(id_str);
       }
     }
   }
