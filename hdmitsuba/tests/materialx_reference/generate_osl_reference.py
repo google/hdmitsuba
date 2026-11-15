@@ -62,7 +62,35 @@ _OUTPUT_COMPONENTS = {
 # Non-standard, procedural, or MaterialX-specific NodeDefs where OSL parity
 # testing complements the unit tests in materialx_arithmetic_test.py.
 _TARGETED_NODEDEFS = frozenset({
-    # 2D procedural shapes & ramps (stdlib procedural graphs).
+    # Procedural noises & 2D shapes (evaluator.cc, stdlib procedural graphs).
+    'ND_cellnoise2d_float',
+    'ND_cellnoise3d_float',
+    'ND_noise2d_float',
+    'ND_noise2d_vector2',
+    'ND_noise2d_color3',
+    'ND_noise2d_color4',
+    'ND_noise3d_float',
+    'ND_noise3d_vector2',
+    'ND_noise3d_color3',
+    'ND_noise3d_color4',
+    'ND_fractal2d_float',
+    'ND_fractal2d_vector2',
+    'ND_fractal2d_vector3',
+    'ND_fractal2d_vector4',
+    'ND_fractal3d_float',
+    'ND_fractal3d_vector2',
+    'ND_fractal3d_vector3',
+    'ND_fractal3d_vector4',
+    'ND_worleynoise2d_float',
+    'ND_worleynoise2d_vector2',
+    'ND_worleynoise2d_vector3',
+    'ND_worleynoise3d_float',
+    'ND_worleynoise3d_vector2',
+    'ND_worleynoise3d_vector3',
+    'ND_unifiednoise2d_float',
+    'ND_unifiednoise3d_float',
+    'ND_randomfloat_float',
+    'ND_randomcolor_float',
     'ND_ramplr_color3',
     'ND_ramptb_color3',
     'ND_splitlr_color3',
@@ -126,9 +154,14 @@ _DEFAULT_RANGE = (-1.0, 2.0)
 _INPUT_RANGES = {
     'amount': (-1.0, 1.0),
     'anisotropy': (0.0, 1.0),
+    'diminish': (0.3, 0.8),
     'edge_color': (0.05, 0.95),
     'gamma': (0.3, 3.0),
+    'jitter': (0.0, 1.0),
+    'lacunarity': (1.5, 3.0),
     'mix': (0.0, 1.0),
+    'octaves': (1.0, 6.0),
+    'position': (-4.0, 4.0),
     'radius': (0.05, 1.0),
     'reflectivity': (0.05, 0.95),
     'roughness': (0.0, 1.0),
@@ -181,8 +214,16 @@ _CATEGORY_INPUT_RANGES = {
 # Groups of inputs sorted per channel after sampling so ordering preconditions
 # hold across MaterialX backends.
 _SORTED_INPUTS = {
+    'randomcolor': [
+        ('huelow', 'huehigh'),
+        ('saturationlow', 'saturationhigh'),
+        ('brightnesslow', 'brightnesshigh'),
+    ],
+    'randomfloat': [('min', 'max')],
     'range': [('outlow', 'outhigh')],
     'ramp': [tuple(f'interval{i}' for i in range(1, 11))],
+    'unifiednoise2d': [('outmin', 'outmax')],
+    'unifiednoise3d': [('outmin', 'outmax')],
 }
 
 # Inputs normalized after sampling (directions and normals).
@@ -213,14 +254,21 @@ def _input_range(
   return lo_val, max(_val(hi, default_hi), lo_val + 1.0)
 
 
-def _sample_input(rng: random.Random, category: str, inp: mx.Input) -> str:
+def _sample_input(
+    rng: random.Random, category: str, inp: mx.Input, sample_idx: int
+) -> str:
   """Returns a random MaterialX value string for the input `inp`."""
   name, typ = inp.getName(), inp.getType()
   if typ == 'boolean':
     return rng.choice(['true', 'false'])
   if typ == 'integer':
     if inp.hasAttribute('enumvalues'):
-      return rng.choice(inp.getAttribute('enumvalues').split(',')).strip()
+      # Cycles through the enum values after the default, so that the samples
+      # cover all of them.
+      vals = [v.strip() for v in inp.getAttribute('enumvalues').split(',')]
+      default = inp.getValueString().strip()
+      start = vals.index(default) if default in vals else 0
+      return vals[(start + sample_idx) % len(vals)]
     lo, hi = _input_range(category, inp, 0, default=(0.0, 3.0))
     return str(rng.randint(int(lo), int(hi)))
   size = len(_OUTPUT_COMPONENTS[typ])
@@ -267,14 +315,14 @@ def _make_samples(nd: mx.NodeDef) -> list[dict[str, str]]:
       inp.getName(): (
           inp.getValueString()
           if not inp.hasDefaultGeomPropString() and inp.hasValueString()
-          else _sample_input(rng, category, inp)
+          else _sample_input(rng, category, inp, 0)
       )
       for inp in inputs
   }
   samples = [defaults]
-  for _ in range(_NUM_RANDOM_SAMPLES):
+  for i in range(1, _NUM_RANDOM_SAMPLES + 1):
     sample = {
-        inp.getName(): _sample_input(rng, category, inp) for inp in inputs
+        inp.getName(): _sample_input(rng, category, inp, i) for inp in inputs
     }
     _sort_inputs(category, sample)
     samples.append(sample)

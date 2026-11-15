@@ -36,6 +36,15 @@ inline constexpr size_t kMaxImm = std::numeric_limits<uint16_t>::max();
 // Matches MaterialX's `M_FLOAT_EPS`.
 inline constexpr double kMtlxFloatEps = 1e-8;
 
+// Bit flags in `Inst::imm` for `CellNoise`, `Noise`, `Worley` and `Fractal`.
+// For `Fractal`, the bits from `kFractalOctavesShift` hold the constant octave
+// count, or `kFractalDynamicOctaves` when octaves are passed as the last
+// operand.
+inline constexpr uint16_t kNoise3D = 1, kNoiseVec3 = 2;
+inline constexpr int kMaxFractalOctaves = 16;
+inline constexpr int kFractalOctavesShift = 2;
+inline constexpr uint16_t kFractalDynamicOctaves = kMaxFractalOctaves + 1;
+
 // Note: `elementwise_arity()`, `result_channels()`, and
 // `MtlxEvaluator::is_spatially_varying()` rely on the contiguous enum ranges
 // below.
@@ -110,6 +119,12 @@ enum class Op : uint8_t {
   Blackbody,
   Vec4,
 
+  // Procedural noise ops (see `kNoise3D`).
+  CellNoise,
+  Noise,
+  Worley,
+  Fractal,
+
   // Matrix ops on 3x3 or 4x4 matrices (`channels` is the size), which are
   // passed as rows. `MatTranspose`, `MatInverse` and `MatMul` store the rows of
   // their result in consecutive temporaries, starting at `imm`.
@@ -154,6 +169,9 @@ constexpr uint8_t result_channels(Op op, uint16_t imm = 0) {
     return 1;
   }
   if (op == Op::Vec4 || (op == Op::Normalize && imm == 4)) return 4;
+  if (op >= Op::CellNoise && op <= Op::Fractal) {
+    return (imm & kNoiseVec3) ? 3 : 1;
+  }
   if (op == Op::GeomUV || op == Op::Vec2 || op == Op::Rotate2D ||
       (op == Op::Normalize && imm == 2)) {
     return 2;
