@@ -85,43 +85,48 @@ def convert_points(
       'data': mi.TensorXf(data),
   }
 
-  bsdf, _, displacement, _ = material.convert_material(prim, time=time)
+  bound_mat, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial(
+      UsdShade.Tokens.full
+  )
+  bsdf, _, displacement, _ = (
+      material.convert_material(bound_mat.GetPrim(), time=time)
+      if bound_mat
+      else (None, None, None, None)
+  )
   if displacement is not None:
     Tf.Warn(f'Displacement on {prim.GetPath()} is not supported.')
   # Like the constant displayColor, per-point colors are a fallback for
-  # geometry without a material.
+  # geometry without a resolved BSDF.
   display_color = points.GetDisplayColorPrimvar()
   colors = display_color.Get(time)
-  if (
-      UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial(
-          UsdShade.Tokens.full
-      )[0]
-      or display_color.GetInterpolation()
-      not in (UsdGeom.Tokens.vertex, UsdGeom.Tokens.varying)
-      or len(colors) != count
-  ):
-    if bsdf is not None:
-      shape['bsdf'] = bsdf
-  elif count == 1:
-    # The `lut` texture below requires at least two entries.
-    shape['bsdf'] = {
-        'type': 'diffuse',
-        'reflectance': {'type': 'rgb', 'value': tuple(colors[0])},
-    }
-  else:
-    # The `ellipsoids` shape does not expose per-ellipsoid colors to
-    # `mesh_attribute` textures, so look them up by the point index instead.
-    shape['vertex_point_index'] = mi.TensorXf(
-        np.arange(count, dtype=np.float32).reshape(-1, 1)
-    )
-    shape['bsdf'] = {
-        'type': 'diffuse',
-        'reflectance': {
-            'type': 'lut',
-            'input': {'type': 'mesh_attribute', 'name': 'vertex_point_index'},
-            'filter_type': 'nearest',
-            'input_max': count - 1.0,
-            'data': mi.TensorXf(np.array(colors, dtype=np.float32)),
-        },
-    }
+  if bsdf is not None:
+    shape['bsdf'] = bsdf
+  elif colors:
+    if (
+        display_color.GetInterpolation()
+        not in (UsdGeom.Tokens.vertex, UsdGeom.Tokens.varying)
+        or len(colors) != count
+        or count == 1
+    ):
+      # The `lut` texture below requires at least two entries.
+      shape['bsdf'] = {
+          'type': 'diffuse',
+          'reflectance': {'type': 'rgb', 'value': tuple(colors[0])},
+      }
+    else:
+      # The `ellipsoids` shape does not expose per-ellipsoid colors to
+      # `mesh_attribute` textures, so look them up by the point index instead.
+      shape['vertex_point_index'] = mi.TensorXf(
+          np.arange(count, dtype=np.float32).reshape(-1, 1)
+      )
+      shape['bsdf'] = {
+          'type': 'diffuse',
+          'reflectance': {
+              'type': 'lut',
+              'input': {'type': 'mesh_attribute', 'name': 'vertex_point_index'},
+              'filter_type': 'nearest',
+              'input_max': count - 1.0,
+              'data': mi.TensorXf(np.array(colors, dtype=np.float32)),
+          },
+      }
   return shape

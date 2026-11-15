@@ -1009,8 +1009,8 @@ class SceneModel final : public SceneManager {
           res = PrimTranslator::BuildMaterial(*spec, texture_cache_);
         },
         [&](MaterialSpec* spec, TranslatedMaterial& trans) {
-          if (trans.bsdf) {
-            bsdfs_[spec->id] = dynamic_cast<BSDF*>(trans.bsdf.get());
+          if (auto* bsdf = dynamic_cast<BSDF*>(trans.bsdf.get())) {
+            bsdfs_[spec->id] = bsdf;
           } else {
             bsdfs_.erase(spec->id);
           }

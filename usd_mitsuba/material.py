@@ -109,9 +109,13 @@ _PRIMVAR_READER_CHANNELS = {
 }
 
 
-def _get_surface_output(material: UsdShade.Material) -> UsdShade.Output | None:
-  """Gets the Mitsuba-specific surface output or falls back to default."""
-  return material.GetSurfaceOutput('mitsuba') or material.GetSurfaceOutput()
+def _get_surface_shader(material: UsdShade.Material) -> UsdShade.Shader | None:
+  """Gets the Mitsuba, universal, or glslfx surface shader of `material`."""
+  return (
+      find_shader(material.GetSurfaceOutput('mitsuba'))
+      or find_shader(material.GetSurfaceOutput())
+      or find_shader(material.GetSurfaceOutput('glslfx'))
+  )
 
 
 def _find_shader_output(
@@ -143,8 +147,10 @@ def _get_volume_shader(
     material: UsdShade.Material,
 ) -> UsdShade.Shader | None:
   """Gets the Mitsuba-specific volume shader or falls back to default."""
-  shader = find_shader(material.GetVolumeOutput('mitsuba')) or find_shader(
-      material.GetVolumeOutput()
+  shader = (
+      find_shader(material.GetVolumeOutput('mitsuba'))
+      or find_shader(material.GetVolumeOutput())
+      or find_shader(material.GetVolumeOutput('glslfx'))
   )
   if shader is not None and shader.GetShaderId().startswith(_MI_PREFIX):
     return shader
@@ -496,6 +502,18 @@ def usd_preview_surface_to_mitsuba(
       return {'type': 'rgb', 'value': tuple(value)}
     return value
 
+  # Like hdMitsuba, leave the BSDF empty for unsupported diffuse inputs (e.g.
+  # Ptex) so that the geometry falls back to its displayColor.
+  if (diffuse := shader.GetInput('diffuseColor')) and (
+      diffuse.HasConnectedSource()
+  ):
+    conn = _find_shader_output(diffuse)
+    if conn is None or (
+        conn[0].GetShaderId() != 'UsdUVTexture'
+        and not conn[0].GetShaderId().startswith(_PRIMVAR_READER_PREFIX)
+    ):
+      return {}, None
+
   bsdf_dict: dict[str, Any] = {'type': 'principled'}
   parent_bsdf_dict = {}
   renaming = USD_TO_MI_PRINCIPLED_RENAMING
@@ -648,6 +666,7 @@ def convert_mesh_material(
     prim: Usd.Prim,
     double_sided: bool = False,
     time: Usd.TimeCode = Usd.TimeCode.Default(),
+    fallback_prim: Usd.Prim | None = None,
 ) -> MeshMaterial:
   """Parses a USD geometry or material prim and returns Mitsuba material properties.
 
@@ -661,6 +680,8 @@ def convert_mesh_material(
     prim: The USD prim to extract the material from.
     double_sided: Whether the emitter of an emissive material is two-sided.
     time: The time code to evaluate the material at.
+    fallback_prim: Optional geometry prim providing fallback `displayColor`
+      (e.g. the parent `Mesh` when `prim` is a `GeomSubset`).
 
   Returns:
     The converted material.
@@ -676,12 +697,13 @@ def convert_mesh_material(
         UsdShade.Tokens.full
     )
   if material:
-    if shader := find_shader(_get_surface_output(material)):
+    if shader := _get_surface_shader(material):
       if shader.GetShaderId() == 'UsdPreviewSurface':
         bsdf_dict, emitter_dict = usd_preview_surface_to_mitsuba(
             shader, mesh_attributes, time
         )
-        bsdf = mi.load_dict(bsdf_dict)
+        if bsdf_dict:
+          bsdf = mi.load_dict(bsdf_dict)
         if emitter_dict:
           # Like hdMitsuba, double-sided geometry emits from both sides.
           emitter = mi.load_dict(emitter_dict | {'twosided': double_sided})
@@ -689,7 +711,9 @@ def convert_mesh_material(
         if bsdf_dict := usd_mitsuba_material_to_dict(
             shader, mesh_attributes=mesh_attributes, time=time
         ):
-          bsdf = mi.load_dict(bsdf_dict)
+          loaded = mi.load_dict(bsdf_dict)
+          if isinstance(loaded, mi.BSDF):
+            bsdf = loaded
 
     if shader := _get_volume_shader(material):
       medium_dict = usd_mitsuba_material_to_dict(shader, 'volume', time=time)
@@ -714,7 +738,15 @@ def convert_mesh_material(
               ' Mitsuba texture.'
           )
 
-  elif display_color_attr := prim.GetAttribute('primvars:displayColor'):
+  if (
+      bsdf is None
+      and emitter is None
+      and (
+          display_color_attr := (fallback_prim or prim).GetAttribute(
+              'primvars:displayColor'
+          )
+      )
+  ):
     if colors := display_color_attr.Get(time):
       bsdf = mi.load_dict({
           'type': 'diffuse',
@@ -761,9 +793,11 @@ def _find_displacement_connection(
     material: UsdShade.Material,
 ) -> tuple[UsdShade.Shader, str] | None:
   """Returns the `(shader, output)` driving `material`'s displacement."""
-  conn = _find_shader_output(
-      material.GetDisplacementOutput('mitsuba')
-  ) or _find_shader_output(material.GetDisplacementOutput())
+  conn = (
+      _find_shader_output(material.GetDisplacementOutput('mitsuba'))
+      or _find_shader_output(material.GetDisplacementOutput())
+      or _find_shader_output(material.GetDisplacementOutput('glslfx'))
+  )
   if conn is not None and conn[0].GetShaderId() == 'UsdPreviewSurface':
     conn = _find_shader_output(conn[0].GetInput('displacement'))
   # Like hdMitsuba, ignore displacement from unsupported shaders.
