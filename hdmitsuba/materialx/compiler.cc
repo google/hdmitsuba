@@ -57,6 +57,7 @@ using mitsuba::ref;
 using mitsuba::mtlx::elementwise_arity;
 using mitsuba::mtlx::Inst;
 using mitsuba::mtlx::kMaxImm;
+using mitsuba::mtlx::kMtlxFloatEps;
 using mitsuba::mtlx::MtlxProgram;
 using mitsuba::mtlx::Op;
 using mitsuba::mtlx::RegisterMaterialXExprTexture;
@@ -104,7 +105,14 @@ struct Expr {
   }
   Expr x() const { return chan(0); }
   Expr y() const { return chan(1); }
+  Expr z() const { return chan(2); }
   Expr w() const { return chan(3); }
+  // Returns the first three channels of a 4-channel expression.
+  Expr xyz() const {
+    Expr e = *this;
+    e.channels = std::min<uint8_t>(channels, 3);
+    return e;
+  }
 
   Expr operator-() const { return is_zero() ? zero() : call(Op::Neg, *this); }
   Expr operator!() const {
@@ -218,6 +226,22 @@ std::string GetNodeInputString(const mx::NodePtr& node, const std::string& name,
   return in ? in->getValueString() : std::string(def);
 }
 
+std::string ConnectedOutputName(const mx::InputPtr& input) {
+  if (!input->hasNodeGraphString()) return input->getOutputString();
+  mx::OutputPtr out = input->getConnectedOutput();
+  return out ? out->getOutputString() : std::string();
+}
+
+// Returns the category of `node`, which is determined by its explicit node
+// definition, if any. For example, `NG_ramp_gradient` has an `ifgreater` node
+// with the node definition `ND_ifgreatereq_color4I`.
+std::string NodeCategory(const mx::NodePtr& node) {
+  if (node->hasNodeDefString()) {
+    if (mx::NodeDefPtr nd = node->getNodeDef()) return nd->getNodeString();
+  }
+  return node->getCategory();
+}
+
 // Returns the type of the input `name` of `node`, which may only be declared
 // by its node definition, or an empty view if there is no such input.
 std::string_view InputType(const mx::NodePtr& node, const std::string& name) {
@@ -240,7 +264,7 @@ uint8_t TypeChannels(std::string_view type) {
 
 mx::NodePtr UnwrapShaderNode(mx::NodePtr node) {
   while (node) {
-    const std::string& cat = node->getCategory();
+    std::string cat = NodeCategory(node);
     if (cat != "dot" && cat != "surfacematerial") break;
     node = node->getConnectedNode(cat == "surfacematerial" ? "surfaceshader"
                                                            : "in");
@@ -248,8 +272,9 @@ mx::NodePtr UnwrapShaderNode(mx::NodePtr node) {
   return node;
 }
 
-// Compiles a flattened MaterialX DAG into a `mitsuba::mtlx::MtlxProgram` and
-// a list of Mitsuba Texture child inputs (`in0`, `in1`, ...).
+// Compiles a flattened MaterialX DAG of pattern/math/image nodes into a
+// `mitsuba::mtlx::MtlxProgram` and a list of Mitsuba Texture child inputs
+// (`in0`, `in1`, ...).
 class MtlxExprCompiler {
  public:
   using LookupTextureFn =
@@ -276,6 +301,25 @@ class MtlxExprCompiler {
                                 MeshAttributeRequests& mesh_attributes);
 
  private:
+  // A 3x3 or 4x4 matrix as the expressions of its `n` rows.
+  struct MatExpr {
+    Expr rows[4];
+    int n = 3;
+
+    static MatExpr Identity(int n) {
+      MatExpr m;
+      m.n = n;
+      for (int i = 0; i < 3; ++i) {
+        Expr row = rgb(i == 0 ? Expr::one() : Expr::zero(),
+                       i == 1 ? Expr::one() : Expr::zero(),
+                       i == 2 ? Expr::one() : Expr::zero());
+        m.rows[i] = n == 4 ? vec4(row, Expr::zero()) : row;
+      }
+      m.rows[3] = vec4(Expr::zero(), Expr::one());
+      return m;
+    }
+  };
+
   Expr Const(double value);
   Expr ConstRgb(double r, double g, double b);
   Expr Opaque(double value);
@@ -284,14 +328,25 @@ class MtlxExprCompiler {
   // other values become opaque scalars exposed via traversal.
   Expr EmitTuple(std::initializer_list<float> vals);
   Expr EmitTmpExpr(const Expr& expr);
+  Expr LoadTmp(int slot) const {
+    return Expr({Op::LoadTmp, 0, static_cast<uint16_t>(slot)},
+                tmp_channels_[slot]);
+  }
 
   TfToken ResolveSourceColorSpace(std::string_view color_space);
   GfVec3f ToLinearRec709(GfVec3f rgb_val, std::string_view color_space);
   Expr CompileInputExpr(const mx::NodePtr& node, const std::string& input_name,
                         const Expr& default_expr = Expr::zero());
-  Expr CompileNodeOutputExpr(const mx::NodePtr& node);
+  Expr CompileNodeOutputExpr(const mx::NodePtr& node,
+                             const std::string& output_name);
   std::optional<int> ConstIntInput(const mx::NodePtr& node,
                                    const std::string& name);
+  Expr CompileIfCondition(const mx::NodePtr& node, std::string_view cat);
+  MatExpr CompileMatrixInput(const mx::NodePtr& node,
+                             const std::string& input_name);
+  MatExpr CompileMatrixNode(const mx::NodePtr& node);
+  // Emits `MatTranspose`, `MatInverse` or `MatMul` (of `a` and `b`).
+  MatExpr MatrixOp(Op op, const MatExpr& a, const MatExpr* b = nullptr);
   Expr MeshAttr(std::string_view name, int dim, const Expr& def);
   Expr SampleImage(const mx::NodePtr& node);
   Expr CompileValueElement(const mx::ValueElementPtr& elem,
@@ -310,11 +365,13 @@ class MtlxExprCompiler {
   MtlxProgram prog_;
   std::vector<std::pair<std::string, int>> attr_requests_;
   std::vector<uint8_t> tmp_channels_;
-  absl::flat_hash_map<const mx::Node*, Expr> node_output_expr_;
+  absl::flat_hash_map<std::pair<const mx::Node*, std::string>, Expr>
+      node_output_expr_;
   absl::flat_hash_map<const mx::Node*, Expr> edf_expr_;
   absl::flat_hash_map<const mx::Node*, Expr> opacity_expr_;
   absl::flat_hash_map<std::pair<const mx::Node*, std::string>, Expr>
       value_input_expr_;
+  absl::flat_hash_map<const mx::Node*, MatExpr> node_matrix_expr_;
   absl::flat_hash_map<Expr, int> expr_to_slot_;
   std::vector<ref<Object>> inputs_;
   uint16_t discover_input_idx_ = 0;
@@ -444,7 +501,7 @@ Expr MtlxExprCompiler::EmitTuple(std::initializer_list<float> vals) {
 }
 
 Expr MtlxExprCompiler::EmitTmpExpr(const Expr& expr) {
-  if (expr.code.size() == 1 && expr.code[0].op == Op::LoadTmp) return expr;
+  if (expr.code.size() == 1 && expr.code[0].op <= Op::LoadTmp) return expr;
   auto [it, inserted] =
       expr_to_slot_.try_emplace(expr, static_cast<int>(prog_.num_tmps));
   if (inserted) {
@@ -458,9 +515,7 @@ Expr MtlxExprCompiler::EmitTmpExpr(const Expr& expr) {
     tmp_channels_.push_back(expr.channels);
     ++prog_.num_tmps;
   }
-  int slot = it->second;
-  return Expr({Op::LoadTmp, 0, static_cast<uint16_t>(slot)},
-              tmp_channels_[slot]);
+  return LoadTmp(it->second);
 }
 
 Expr MtlxExprCompiler::CompileValueElement(const mx::ValueElementPtr& elem,
@@ -507,11 +562,13 @@ Expr MtlxExprCompiler::CompileInputExpr(const mx::NodePtr& node,
                                         const Expr& default_expr) {
   if (mx::InputPtr input = node->getInput(input_name)) {
     if (mx::NodePtr upstream = input->getConnectedNode()) {
-      auto it = node_output_expr_.find(upstream.get());
+      std::string out_name = ConnectedOutputName(input);
+      std::pair<const mx::Node*, std::string> key(upstream.get(), out_name);
+      auto it = node_output_expr_.find(key);
       if (it == node_output_expr_.end()) {
-        Expr se = CompileNodeOutputExpr(upstream);
+        Expr se = CompileNodeOutputExpr(upstream, out_name);
         if (se.code.size() > 1) se = EmitTmpExpr(se);
-        it = node_output_expr_.emplace(upstream.get(), std::move(se)).first;
+        it = node_output_expr_.emplace(std::move(key), std::move(se)).first;
       }
       return it->second;
     }
@@ -529,6 +586,149 @@ std::optional<int> MtlxExprCompiler::ConstIntInput(const mx::NodePtr& node,
   return (e.code.size() == 1 && e.code[0].op == Op::Const)
              ? std::optional<int>(static_cast<int>(prog_.consts[e.code[0].imm]))
              : std::nullopt;
+}
+
+Expr MtlxExprCompiler::CompileIfCondition(const mx::NodePtr& node,
+                                          std::string_view cat) {
+  Expr v1 = CompileInputExpr(node, "value1");
+  Expr v2 = CompileInputExpr(node, "value2");
+  if (v1 == v2) return cat != "ifgreater" ? Expr::one() : Expr::zero();
+  if (v1.code.size() == 1 && v1.code[0].op == Op::Const &&
+      v2.code.size() == 1 && v2.code[0].op == Op::Const) {
+    double c1 = prog_.consts[v1.code[0].imm];
+    double c2 = prog_.consts[v2.code[0].imm];
+    bool b = cat == "ifgreater"     ? (c1 > c2)
+             : cat == "ifgreatereq" ? (c1 >= c2)
+                                    : (c1 == c2);
+    return b ? Expr::one() : Expr::zero();
+  }
+  return cat == "ifgreater"     ? (v1 > v2)
+         : cat == "ifgreatereq" ? (v1 >= v2)
+                                : call(Op::Eq, v1, v2);
+}
+
+MtlxExprCompiler::MatExpr MtlxExprCompiler::MatrixOp(Op op, const MatExpr& a,
+                                                     const MatExpr* b) {
+  if (prog_.num_tmps + a.n > kMaxImm) {
+    throw std::runtime_error("materialx_expr: too many temporaries");
+  }
+  uint32_t depth = 0;
+  auto emit_rows = [&](const MatExpr& m) {
+    for (int i = 0; i < a.n; ++i) {
+      prog_.code.insert(prog_.code.end(), m.rows[i].code.begin(),
+                        m.rows[i].code.end());
+      prog_.stack_size =
+          std::max(prog_.stack_size, depth + m.rows[i].max_depth);
+      ++depth;
+    }
+  };
+  emit_rows(a);
+  if (b) emit_rows(*b);
+  uint16_t first = static_cast<uint16_t>(prog_.num_tmps);
+  prog_.code.push_back({op, static_cast<uint8_t>(a.n), first});
+  tmp_channels_.insert(tmp_channels_.end(), a.n, static_cast<uint8_t>(a.n));
+  prog_.num_tmps += a.n;
+  MatExpr out;
+  out.n = a.n;
+  for (int i = 0; i < a.n; ++i) out.rows[i] = LoadTmp(first + i);
+  return out;
+}
+
+MtlxExprCompiler::MatExpr MtlxExprCompiler::CompileMatrixInput(
+    const mx::NodePtr& node, const std::string& input_name) {
+  if (mx::NodePtr upstream = node->getConnectedNode(input_name)) {
+    return CompileMatrixNode(upstream);
+  }
+  int n = InputType(node, input_name) == "matrix44" ? 4 : 3;
+  mx::InputPtr val_in = GetValueInput(node, input_name);
+  if (!val_in || !val_in->getValue()) return MatExpr::Identity(n);
+  const std::string& t = val_in->getType();
+  if (t != "matrix33" && t != "matrix44") return MatExpr::Identity(n);
+  MatExpr out;
+  if (t == "matrix44") {
+    out.n = 4;
+    mx::Matrix44 m = val_in->getValue()->asA<mx::Matrix44>();
+    for (int i = 0; i < 4; ++i) {
+      out.rows[i] = EmitTuple({m[i][0], m[i][1], m[i][2], m[i][3]});
+    }
+  } else {
+    mx::Matrix33 m = val_in->getValue()->asA<mx::Matrix33>();
+    for (int i = 0; i < 3; ++i) {
+      out.rows[i] = EmitTuple({m[i][0], m[i][1], m[i][2]});
+    }
+  }
+  return out;
+}
+
+MtlxExprCompiler::MatExpr MtlxExprCompiler::CompileMatrixNode(
+    const mx::NodePtr& node) {
+  if (auto it = node_matrix_expr_.find(node.get());
+      it != node_matrix_expr_.end()) {
+    return it->second;
+  }
+  int n = node->getType() == "matrix44" ? 4 : 3;
+  std::string cat = NodeCategory(node);
+
+  MatExpr res = MatExpr::Identity(n);
+  if (cat == "constant") {
+    res = CompileMatrixInput(node, "value");
+  } else if (cat == "dot") {
+    res = CompileMatrixInput(node, "in");
+  } else if (cat == "creatematrix") {
+    // The rows of a 4x4 matrix are either `vector4` or `vector3` values, which
+    // are extended by the fourth column of the identity.
+    bool extend = n == 4 && InputType(node, "in1") != "vector4";
+    for (int i = 0; i < n; ++i) {
+      Expr row = CompileInputExpr(node, "in" + std::to_string(i + 1));
+      res.rows[i] =
+          extend ? vec4(row, i == 3 ? Expr::one() : Expr::zero()) : row;
+    }
+  } else if (cat == "transpose") {
+    res = MatrixOp(Op::MatTranspose, CompileMatrixInput(node, "in"));
+  } else if (cat == "invertmatrix") {
+    res = MatrixOp(Op::MatInverse, CompileMatrixInput(node, "in"));
+  } else if (cat == "add" || cat == "subtract") {
+    MatExpr m1 = CompileMatrixInput(node, "in1");
+    bool is_add = cat == "add";
+    if (InputType(node, "in2") == "float") {
+      Expr s = EmitTmpExpr(CompileInputExpr(node, "in2"));
+      for (int i = 0; i < n; ++i) {
+        res.rows[i] = is_add ? m1.rows[i] + s : m1.rows[i] - s;
+      }
+    } else {
+      MatExpr m2 = CompileMatrixInput(node, "in2");
+      for (int i = 0; i < n; ++i) {
+        res.rows[i] =
+            is_add ? m1.rows[i] + m2.rows[i] : m1.rows[i] - m2.rows[i];
+      }
+    }
+  } else if (cat == "multiply" || cat == "divide") {
+    MatExpr m1 = CompileMatrixInput(node, "in1");
+    MatExpr m2 = CompileMatrixInput(node, "in2");
+    if (cat == "divide") m2 = MatrixOp(Op::MatInverse, m2);
+    res = MatrixOp(Op::MatMul, m1, &m2);
+  } else if (cat == "ifgreater" || cat == "ifgreatereq" || cat == "ifequal") {
+    Expr cond = CompileIfCondition(node, cat);
+    if (cond.is_one() || cond.is_zero()) {
+      res = CompileMatrixInput(node, cond.is_one() ? "in1" : "in2");
+    } else {
+      Expr cmp = EmitTmpExpr(cond);
+      MatExpr m1 = CompileMatrixInput(node, "in1"),
+              m2 = CompileMatrixInput(node, "in2");
+      for (int i = 0; i < n; ++i) {
+        res.rows[i] = select(cmp, m1.rows[i], m2.rows[i]);
+      }
+    }
+  } else {
+    WarnUnsupported("Unsupported MaterialX matrix node category '" + cat +
+                    "'; using identity.");
+  }
+
+  for (int i = 0; i < n; ++i) {
+    if (res.rows[i].code.size() > 1) res.rows[i] = EmitTmpExpr(res.rows[i]);
+  }
+  node_matrix_expr_[node.get()] = res;
+  return res;
 }
 
 Expr MtlxExprCompiler::SampleImage(const mx::NodePtr& node) {
@@ -669,25 +869,34 @@ Expr MtlxExprCompiler::SampleImage(const mx::NodePtr& node) {
   return result;
 }
 
-Expr MtlxExprCompiler::CompileNodeOutputExpr(const mx::NodePtr& node) {
-  const std::string& cat = node->getCategory();
+Expr MtlxExprCompiler::CompileNodeOutputExpr(const mx::NodePtr& node,
+                                             const std::string& output_name) {
+  std::string cat = NodeCategory(node);
   const std::string& type = node->getType();
   auto in = [&](const std::string& name, const Expr& def = Expr::zero()) {
     return CompileInputExpr(node, name, def);
   };
+  auto in_slot = [&](const std::string& name, const Expr& def = Expr::zero()) {
+    return EmitTmpExpr(CompileInputExpr(node, name, def));
+  };
 
-  // Constants, routing, and channel ops (`stdlib_ng` flattens compound
-  // `convert` nodes, leaving scalar bool/int/float conversions as
-  // pass-through).
+  // Categories are ordered by how common they are in material networks.
+
+  // Constants, routing, and channel ops
   if (cat == "constant") return in("value");
   if (cat == "dot" || cat == "convert") return in("in");
   if (cat == "extract") {
     int idx = ConstIntInput(node, "index").value_or(0);
-    return in("in").chan(
-        std::clamp(idx, 0, TypeChannels(InputType(node, "in")) - 1));
+    std::string_view in_type = InputType(node, "in");
+    if (in_type == "matrix33" || in_type == "matrix44") {
+      MatExpr mat = CompileMatrixInput(node, "in");
+      return mat.rows[std::clamp(idx, 0, mat.n - 1)];
+    }
+    return in("in").chan(std::clamp(idx, 0, TypeChannels(in_type) - 1));
   }
   if (cat == "combine2") {
     if (IsFourChannelType(type)) {
+      // A 3-channel value and a float, or two `vector2` values.
       if (InputType(node, "in1") != "vector2") {
         Expr i1 = in("in1"), i2 = in("in2");
         return vec4(i1, i2);
@@ -736,8 +945,28 @@ Expr MtlxExprCompiler::CompileNodeOutputExpr(const mx::NodePtr& node) {
     return call(Op::Pow, i1, i2);
   }
   if (cat == "invert") return in("amount", Expr::one()) - in("in");
-  if (cat == "absval") return call(Op::Abs, in("in"));
-  if (cat == "fract") return call(Op::Fract, in("in"));
+  if (cat == "sign") {
+    Expr x = in_slot("in");
+    return (x > Expr::zero()) - (x < Expr::zero());
+  }
+  if (cat == "modulo") {
+    Expr x = in_slot("in1"), y = in_slot("in2", Expr::one());
+    return x - y * call(Op::Floor, x / y);
+  }
+  if (cat == "smoothstep") {
+    // Like OSL, a step function at `low` if `low >= high`.
+    Expr lo = in_slot("low"), hi = in_slot("high", Expr::one()),
+         x = in_slot("in");
+    Expr t = EmitTmpExpr((x - lo) / (hi - lo));
+    return select(
+        x < lo, Expr::zero(),
+        select(x >= hi, Expr::one(), t * t * (Const(3.0) - Const(2.0) * t)));
+  }
+  if (cat == "remap") {
+    Expr ilo = in_slot("inlow"), olo = in_slot("outlow");
+    return olo + (in("in") - ilo) / (in("inhigh", Expr::one()) - ilo) *
+                     (in("outhigh", Expr::one()) - olo);
+  }
 
   auto check_zero_index = [&] {
     if (ConstIntInput(node, "index").value_or(0) != 0) {
@@ -752,46 +981,81 @@ Expr MtlxExprCompiler::CompileNodeOutputExpr(const mx::NodePtr& node) {
     check_zero_index();
     return DefaultTexcoord(type == "vector3" ? 3 : 2);
   }
-  if (cat == "rotate2d") {
-    Expr i1 = in("in"), amt = in("amount");
-    return call(Op::Rotate2D, i1, amt);
+  // Unary and binary ops that map to a single instruction
+  static constexpr struct {
+    std::string_view name;
+    Op op;
+  } kUnaryOps[] = {
+      {"absval", Op::Abs},  {"floor", Op::Floor}, {"ceil", Op::Ceil},
+      {"round", Op::Round}, {"fract", Op::Fract}, {"sin", Op::Sin},
+      {"cos", Op::Cos},     {"tan", Op::Tan},     {"asin", Op::Asin},
+      {"acos", Op::Acos},   {"sqrt", Op::Sqrt},   {"ln", Op::Log},
+      {"exp", Op::Exp},
+  };
+  for (const auto& [name, op] : kUnaryOps) {
+    if (cat == name) {
+      return call(op, in("in", op == Op::Log ? Expr::one() : Expr::zero()));
+    }
+  }
+  static constexpr struct {
+    std::string_view name;
+    const char *in1, *in2;
+    Op op;
+    bool def2_one;
+  } kBinaryOps[] = {
+      {"min", "in1", "in2", Op::Min, false},
+      {"max", "in1", "in2", Op::Max, false},
+      {"atan2", "iny", "inx", Op::Atan2, true},
+      {"crossproduct", "in1", "in2", Op::Cross, false},
+      {"rotate2d", "in", "amount", Op::Rotate2D, false},
+  };
+  for (const auto& [name, in1, in2, op, def2_one] : kBinaryOps) {
+    if (cat == name) {
+      Expr e1 = in(in1), e2 = in(in2, def2_one ? Expr::one() : Expr::zero());
+      return call(op, e1, e2);
+    }
   }
 
-  // Conditionals & boolean negation
-  if (cat == "not") return !in("in");
+  // Conditionals & logical ops
   if (cat == "ifgreater" || cat == "ifgreatereq" || cat == "ifequal") {
-    Expr v1 = in("value1"), v2 = in("value2");
-    Expr cond;
-    if (v1 == v2) {
-      cond = cat != "ifgreater" ? Expr::one() : Expr::zero();
-    } else if (v1.code.size() == 1 && v1.code[0].op == Op::Const &&
-               v2.code.size() == 1 && v2.code[0].op == Op::Const) {
-      double c1 = prog_.consts[v1.code[0].imm];
-      double c2 = prog_.consts[v2.code[0].imm];
-      bool b = cat == "ifgreater"     ? (c1 > c2)
-               : cat == "ifgreatereq" ? (c1 >= c2)
-                                      : (c1 == c2);
-      cond = b ? Expr::one() : Expr::zero();
-    } else {
-      cond = cat == "ifgreater"     ? (v1 > v2)
-             : cat == "ifgreatereq" ? (v1 >= v2)
-                                    : call(Op::Eq, v1, v2);
-    }
+    Expr cond = CompileIfCondition(node, cat);
     if (type == "boolean") return cond;
     if (cond.is_one()) return in("in1");
     if (cond.is_zero()) return in("in2");
     Expr i1 = in("in1"), i2 = in("in2");
     return select(cond, i1, i2);
   }
+  if (cat == "and" || cat == "or") {
+    auto to_bool = [](const Expr& e) {
+      return (e.is_zero() || e.is_one()) ? e
+                                         : select(e, Expr::one(), Expr::zero());
+    };
+    Expr b1 = to_bool(in("in1")), b2 = to_bool(in("in2"));
+    if (cat == "and") return b1 * b2;
+    return (b1.is_one() || b2.is_one()) ? Expr::one()
+           : b1.is_zero()               ? b2
+           : b2.is_zero()               ? b1
+                                        : call(Op::Max, b1, b2);
+  }
+  if (cat == "not") return !in("in");
 
   // Vector ops & normal map
-  if (cat == "normalize" || cat == "dotproduct") {
+  if (cat == "normalize" || cat == "magnitude" || cat == "dotproduct") {
     std::string_view in_type =
         InputType(node, cat == "dotproduct" ? "in1" : "in");
     uint16_t vec_imm = in_type == "vector2" ? 2 : in_type == "vector4" ? 4 : 0;
     if (cat == "normalize") return call(Op::Normalize, vec_imm, in("in"));
+    if (cat == "magnitude") {
+      Expr v = in_slot("in");
+      return call(Op::Sqrt, call(Op::Dot, vec_imm, v, v));
+    }
     Expr i1 = in("in1"), i2 = in("in2");
     return call(Op::Dot, vec_imm, i1, i2);
+  }
+  if (cat == "rotate3d") {
+    Expr x = in("in"), amt = in("amount"),
+         axis = in("axis", ConstRgb(0.0, 1.0, 0.0));
+    return call(Op::Rotate3D, x, amt, axis);
   }
   if (cat == "normalmap") {
     std::string space = GetNodeInputString(node, "space", "tangent");
@@ -874,12 +1138,98 @@ Expr MtlxExprCompiler::CompileNodeOutputExpr(const mx::NodePtr& node) {
     return in("in");
   }
 
-  // 2D ramps & luminance
-  if (cat == "ramplr" || cat == "ramptb") {
-    bool lr = cat == "ramplr";
-    Expr fg = in(lr ? "valuer" : "valuet"), bg = in(lr ? "valuel" : "valueb");
+  // Matrix ops
+  if (cat == "transformmatrix") {
+    // Row vectors are transformed as `v * M`. The last coordinate of a vector
+    // with fewer coordinates than the matrix is 1.
+    Expr v = in_slot("in");
+    MatExpr mat = CompileMatrixInput(node, "mat");
+    Expr last = type == (mat.n == 4 ? "vector3" : "vector2")
+                    ? Expr::one()
+                    : v.chan(mat.n - 1);
+    Expr res = mat.rows[0] * v.x() + mat.rows[1] * v.y();
+    res = mat.n == 4 ? res + mat.rows[2] * v.z() + mat.rows[3] * last
+                     : res + mat.rows[2] * last;
+    if (type == "vector2") {
+      res = EmitTmpExpr(res);
+      return vec2(res.x(), res.y());
+    }
+    return type == "vector3" ? res.xyz() : res;
+  }
+  if (cat == "determinant") {
+    MatExpr m = CompileMatrixInput(node, "in");
+    Expr det =
+        m.n == 4 ? call(Op::MatDet, m.rows[0], m.rows[1], m.rows[2], m.rows[3])
+                 : call(Op::MatDet, m.rows[0], m.rows[1], m.rows[2]);
+    det.code.back().channels = static_cast<uint8_t>(m.n);
+    return det;
+  }
+
+  // Compositing & 2D patterns
+  if (cat == "plus" || cat == "minus" || cat == "difference" ||
+      cat == "screen" || cat == "burn" || cat == "dodge") {
+    Expr fg = in_slot("fg"), bg = in_slot("bg"), m = in("mix", Expr::one());
+    // Like MaterialX, burn and dodge are 0 where they divide by 0.
+    if (cat == "burn" || cat == "dodge") {
+      Expr denom = cat == "burn" ? fg : EmitTmpExpr(Expr::one() - fg);
+      Expr blend =
+          cat == "burn" ? Expr::one() - (Expr::one() - bg) / denom : bg / denom;
+      return select(call(Op::Abs, denom) < Const(kMtlxFloatEps), Expr::zero(),
+                    mix(blend, bg, m));
+    }
+    Expr blend = cat == "plus"         ? (bg + fg)
+                 : cat == "minus"      ? (bg - fg)
+                 : cat == "difference" ? call(Op::Abs, bg - fg)
+                                       : (bg + fg - bg * fg);
+    return mix(blend, bg, m);
+  }
+  if (cat == "inside") return in("in") * in("mask", Expr::one());
+  if (cat == "outside") return in("in") * (Expr::one() - in("mask"));
+  if (cat == "premult" || cat == "unpremult") {
+    Expr in_e = in_slot("in");
+    Expr color = in_e.xyz(), a = in_e.w();
+    return vec4(cat == "premult" ? color * a : color / a, a);
+  }
+  if (cat == "over" || cat == "in" || cat == "out" || cat == "mask" ||
+      cat == "matte" || cat == "disjointover") {
+    Expr fg = in_slot("fg"), bg = in_slot("bg");
+    Expr fa = fg.w(), ba = bg.w();
+    Expr composite =
+        cat == "over"   ? fg + bg * (Expr::one() - fa)
+        : cat == "in"   ? fg * ba
+        : cat == "out"  ? fg * (Expr::one() - ba)
+        : cat == "mask" ? bg * fa
+        : cat == "matte"
+            ? fg * fa + bg * (Expr::one() - fa)
+            : select(fa + ba <= Expr::one(), fg + bg,
+                     select(call(Op::Abs, ba) < Const(kMtlxFloatEps),
+                            Expr::zero(), fg + bg * ((Expr::one() - fa) / ba)));
+    // The alpha channels of `matte` and `disjointover` are not composited like
+    // their colors.
+    if (cat == "matte") {
+      composite = vec4(composite.xyz(), fa + ba * (Expr::one() - fa));
+    } else if (cat == "disjointover") {
+      composite = vec4(composite.xyz(), call(Op::Min, fa + ba, Expr::one()));
+    }
+    return mix(composite, bg, in("mix", Expr::one()));
+  }
+  if (cat == "ramplr" || cat == "ramptb" || cat == "splitlr" ||
+      cat == "splittb") {
+    bool lr = (cat == "ramplr" || cat == "splitlr");
+    Expr v0 = in(lr ? "valuer" : "valuet"), v1 = in(lr ? "valuel" : "valueb");
     Expr tc = in("texcoord", DefaultTexcoord());
-    return mix(fg, bg, saturate(lr ? tc.x() : tc.y()));
+    Expr tc_comp = lr ? tc.x() : tc.y();
+    if (cat == "ramplr" || cat == "ramptb") {
+      return mix(v0, v1, saturate(tc_comp));
+    }
+    return select(tc_comp >= in("center", Const(0.5)), v0, v1);
+  }
+
+  // Color science & PBR helper nodes
+  if (cat == "rgbtohsv" || cat == "hsvtorgb") {
+    Expr e = call(cat == "rgbtohsv" ? Op::RgbToHsv : Op::HsvToRgb, in("in"));
+    if (type == "color4") e.channels = 4;
+    return e;
   }
   if (cat == "luminance") {
     // The luminance of a gray value is the value itself, which keeps e.g. the
@@ -892,6 +1242,37 @@ Expr MtlxExprCompiler::CompileNodeOutputExpr(const mx::NodePtr& node) {
                     has_coeffs ? in("lumacoeffs")
                                : ConstRgb(0.2722287, 0.6740818, 0.0536895));
     return type == "color4" ? vec4(lum, in_e.w()) : lum;
+  }
+  if (cat == "blackbody") {
+    return call(Op::Blackbody, in("temperature", Const(5000.0)));
+  }
+  if (cat == "roughness_anisotropy") {
+    Expr r = in_slot("roughness");
+    Expr r2 =
+        EmitTmpExpr(call(Op::Clip, r * r, Const(kMtlxFloatEps), Expr::one()));
+    Expr aspect = EmitTmpExpr(
+        call(Op::Sqrt, Expr::one() - call(Op::Clip, in("anisotropy"),
+                                          Expr::zero(), Const(0.98))));
+    return vec2(call(Op::Min, r2 / aspect, Expr::one()), r2 * aspect);
+  }
+  if (cat == "roughness_dual") {
+    Expr r = in_slot("roughness"), rx = EmitTmpExpr(r.x());
+    Expr ry = EmitTmpExpr(select(r.y() < Expr::zero(), rx, r.y()));
+    return vec2(call(Op::Clip, rx * rx, Const(kMtlxFloatEps), Expr::one()),
+                call(Op::Clip, ry * ry, Const(kMtlxFloatEps), Expr::one()));
+  }
+  if (cat == "artistic_ior") {
+    Expr r = EmitTmpExpr(
+        call(Op::Clip, in("reflectivity"), Expr::zero(), Const(0.99)));
+    Expr r_sqrt = EmitTmpExpr(call(Op::Sqrt, r));
+    Expr eta =
+        mix((Expr::one() - r) / (Expr::one() + r),
+            (Expr::one() + r_sqrt) / (Expr::one() - r_sqrt), in("edge_color"));
+    if (output_name != "extinction") return eta;
+    eta = EmitTmpExpr(eta);
+    Expr np1 = EmitTmpExpr(eta + Expr::one()),
+         nm1 = EmitTmpExpr(eta - Expr::one());
+    return call(Op::Sqrt, (np1 * np1 * r - nm1 * nm1) / (Expr::one() - r));
   }
 
   if (cat == "bump") {
@@ -911,7 +1292,7 @@ Expr MtlxExprCompiler::CompileEdf(const mx::NodePtr& edf_node) {
   if (auto it = edf_expr_.find(node.get()); it != edf_expr_.end()) {
     return it->second;
   }
-  const std::string& cat = node->getCategory();
+  std::string cat = NodeCategory(node);
   Expr res = Expr::zero();
   if (cat == "surface" || cat == "surface_unlit") {
     if (cat == "surface") {
@@ -985,7 +1366,7 @@ Expr MtlxExprCompiler::CompileOpacity(const mx::NodePtr& shader_node) {
   if (auto it = opacity_expr_.find(node.get()); it != opacity_expr_.end()) {
     return it->second;
   }
-  const std::string& cat = node->getCategory();
+  std::string cat = NodeCategory(node);
   Expr res = Expr::one();
   if (cat == "surface" || cat == "surface_unlit") {
     res = saturate(CompileInputExpr(node, "opacity", Expr::one()));

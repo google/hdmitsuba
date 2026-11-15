@@ -33,6 +33,8 @@ NAMESPACE_BEGIN(mitsuba)
 namespace mtlx {
 
 inline constexpr size_t kMaxImm = std::numeric_limits<uint16_t>::max();
+// Matches MaterialX's `M_FLOAT_EPS`.
+inline constexpr double kMtlxFloatEps = 1e-8;
 
 // Note: `elementwise_arity()`, `result_channels()`, and
 // `MtlxEvaluator::is_spatially_varying()` rely on the contiguous enum ranges
@@ -61,9 +63,20 @@ enum class Op : uint8_t {
   // 1-ary element-wise ops (`Neg..Fract`).
   Neg,
   Abs,
+  Sin,
+  Cos,
+  Tan,
+  Exp,
+  Round,
+  Floor,
+  Ceil,
+  Sqrt,
+  Log,
+  Asin,
+  Acos,
   Fract,
 
-  // 2-ary element-wise ops (`Add..Pow`).
+  // 2-ary element-wise ops (`Add..Atan2`).
   Add,
   Sub,
   Mul,
@@ -71,8 +84,10 @@ enum class Op : uint8_t {
   Lt,
   Le,
   Eq,
+  Min,
   Max,
   Pow,
+  Atan2,
 
   // 3-ary element-wise ops (`Select..Clip`).
   Select,
@@ -87,15 +102,28 @@ enum class Op : uint8_t {
   Rotate2D,
   Normalize,
   Rgb,
+  Cross,
+  Rotate3D,
   NormalMap,
-  Vec4
+  RgbToHsv,
+  HsvToRgb,
+  Blackbody,
+  Vec4,
+
+  // Matrix ops on 3x3 or 4x4 matrices (`channels` is the size), which are
+  // passed as rows. `MatTranspose`, `MatInverse` and `MatMul` store the rows of
+  // their result in consecutive temporaries, starting at `imm`.
+  MatDet,
+  MatTranspose,
+  MatInverse,
+  MatMul
 };
 
 struct Inst {
   Op op;
   // For element-wise ops: active channel count (1 to 4). For `SampleInput`,
-  // `SampleInputUV`, and `Attr`: 1 for single-channel reads, 3 otherwise.
-  // 0 for all other ops.
+  // `SampleInputUV`, and `Attr`: 1 for single-channel reads, 3 otherwise. For
+  // matrix ops: the matrix size. 0 for all other ops.
   uint8_t channels = 0;
   uint16_t imm = 0;
 
@@ -115,14 +143,16 @@ static_assert(std::has_unique_object_representations_v<Inst>);
 // 0 for all other ops.
 constexpr int elementwise_arity(Op op) {
   if (op >= Op::Neg && op <= Op::Fract) return 1;
-  if (op >= Op::Add && op <= Op::Pow) return 2;
+  if (op >= Op::Add && op <= Op::Atan2) return 2;
   if (op >= Op::Select && op <= Op::Clip) return 3;
   return 0;
 }
 
 // Returns the active channel count (1 to 4) of non-elementwise ops.
 constexpr uint8_t result_channels(Op op, uint16_t imm = 0) {
-  if (op <= Op::Opaque || op == Op::Chan || op == Op::Dot) return 1;
+  if (op <= Op::Opaque || op == Op::Chan || op == Op::Dot || op == Op::MatDet) {
+    return 1;
+  }
   if (op == Op::Vec4 || (op == Op::Normalize && imm == 4)) return 4;
   if (op == Op::GeomUV || op == Op::Vec2 || op == Op::Rotate2D ||
       (op == Op::Normalize && imm == 2)) {

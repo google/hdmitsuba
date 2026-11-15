@@ -40,6 +40,8 @@ _SDF_TYPES = {
     str: Sdf.ValueTypeNames.String,
     Gf.Vec2f: Sdf.ValueTypeNames.Float2,
     Gf.Vec3f: Sdf.ValueTypeNames.Vector3f,
+    Gf.Matrix3d: Sdf.ValueTypeNames.Matrix3d,
+    Gf.Matrix4d: Sdf.ValueTypeNames.Matrix4d,
 }
 _TUPLE_SDF_TYPES = {
     2: Sdf.ValueTypeNames.Float2,
@@ -297,7 +299,7 @@ def eval_emission_expr(
   if si is None:
     si = make_test_si(wi=(0.0, 0.0, 1.0))
 
-  n_lanes = max(dr.width(si), 1)
+  n_lanes = max(dr.width(si.p), dr.width(si.uv), dr.width(si.wi), 1)
 
   def _eval(color: Any) -> np.ndarray:
     _, emitter = compile_mtlx_material(
@@ -319,7 +321,7 @@ def eval_emission_expr(
     out = np.column_stack([rgb, _eval(alpha)[:, 0]])
   else:
     out = rgb[:, :channels]
-  if dr.width(si) <= 1:
+  if n_lanes == 1:
     return out[0]
   return out[:, 0] if channels == 1 else out
 

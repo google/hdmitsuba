@@ -28,6 +28,8 @@
 #include <absl/base/no_destructor.h>
 #include <absl/container/inlined_vector.h>
 #include <absl/synchronization/mutex.h>
+#include <drjit/color.h>
+#include <drjit/matrix.h>
 #include <mitsuba/core/config.h>
 #include <mitsuba/core/filesystem.h>
 #include <mitsuba/core/frame.h>
@@ -53,6 +55,44 @@ MI_INLINE Vec safe_normalize(const Vec& v, const Vec& fallback = Vec(0.0f)) {
   auto valid = len2 > 0.f;
   return dr::select(valid, v * dr::rsqrt(dr::select(valid, len2, 1.0f)),
                     fallback);
+}
+
+template <size_t N, typename Float>
+void eval_matrix_op(Op op, uint16_t imm, Vector<Float, 4>*& sp,
+                    Vector<Float, 4>* tmps) {
+  using Matrix = dr::Matrix<Float, N>;
+  using Row = dr::Array<Float, N>;
+  auto pop = [&]() {
+    sp -= N;
+    Matrix m;
+    for (size_t i = 0; i < N; ++i) m.entry(i) = Row(dr::head<N>(sp[i]));
+    return m;
+  };
+  Matrix result;
+  if (op == Op::MatMul) {
+    Matrix b = pop();
+    result = pop() * b;
+  } else {
+    Matrix m = pop();
+    if (op == Op::MatDet) {
+      *sp++ = Vector<Float, 4>(dr::det(m));
+      return;
+    }
+    if (op == Op::MatTranspose) {
+      result = dr::transpose(m);
+    } else {
+      // Like division, the inverse of a singular matrix is zero.
+      auto valid = dr::det(m) != 0.f;
+      result = dr::select(
+          valid, dr::inverse(dr::select(valid, m, dr::identity<Matrix>())),
+          dr::zeros<Matrix>());
+    }
+  }
+  for (size_t i = 0; i < N; ++i) {
+    Vector<Float, 4> row(0.f);
+    for (size_t j = 0; j < N; ++j) row.entry(j) = result(i, j);
+    tmps[imm + i] = row;
+  }
 }
 
 }  // namespace
@@ -130,6 +170,33 @@ Float MtlxEvaluator<Float, Spectrum>::elementwise(Op op, const Val* sp, int c) {
       return -a0;
     case Op::Abs:
       return dr::abs(a0);
+    case Op::Sin:
+      return dr::sin(a0);
+    case Op::Cos:
+      return dr::cos(a0);
+    case Op::Tan:
+      return dr::tan(a0);
+    case Op::Exp:
+      return dr::exp(a0);
+    case Op::Round: {
+      // Like OSL, rounds halfway cases away from zero.
+      Float t = dr::trunc(a0);
+      return dr::select(dr::abs(a0 - t) >= 0.5f, t + dr::copysign(1.f, a0), t);
+    }
+    case Op::Floor:
+      return dr::floor(a0);
+    case Op::Ceil:
+      return dr::ceil(a0);
+    case Op::Sqrt:
+      return dr::safe_sqrt(a0);
+    case Op::Log: {
+      Mask pos = a0 > 0.f;
+      return dr::select(pos, dr::log(dr::select(pos, a0, 1.f)), 0.f);
+    }
+    case Op::Asin:
+      return dr::safe_asin(a0);
+    case Op::Acos:
+      return dr::safe_acos(a0);
     case Op::Fract:
       return a0 - dr::floor(a0);
     case Op::Add:
@@ -149,6 +216,8 @@ Float MtlxEvaluator<Float, Spectrum>::elementwise(Op op, const Val* sp, int c) {
       return dr::select(a0 <= sp[0][c], 1.f, 0.f);
     case Op::Eq:
       return dr::select(a0 == sp[0][c], 1.f, 0.f);
+    case Op::Min:
+      return dr::minimum(a0, sp[0][c]);
     case Op::Max:
       return dr::maximum(a0, sp[0][c]);
     case Op::Pow: {
@@ -162,6 +231,10 @@ Float MtlxEvaluator<Float, Spectrum>::elementwise(Op op, const Val* sp, int c) {
       return dr::select(
           y == 0.f, 1.f,
           dr::select(a0 == 0.f, 0.f, dr::select(a0 > 0.f, mag, neg)));
+    }
+    case Op::Atan2: {
+      Mask nz = (a0 != 0.f) || (sp[0][c] != 0.f);
+      return dr::select(nz, dr::atan2(a0, dr::select(nz, sp[0][c], 1.f)), 0.f);
     }
     case Op::Select:
       return dr::select(a0 != 0.f, sp[0][c], sp[1][c]);
@@ -294,6 +367,10 @@ MtlxEvaluator<Float, Spectrum>::eval(const SurfaceInteraction3f& si,
                      : imm == 4 ? dr::dot(sp[-1], sp[0])
                                 : dr::dot(xyz(sp[-1]), xyz(sp[0])));
         break;
+      case Op::Cross:
+        --sp;
+        sp[-1] = val3(dr::cross(xyz(sp[-1]), xyz(sp[0])));
+        break;
       case Op::Normalize:
         sp[-1] =
             imm == 2
@@ -306,6 +383,14 @@ MtlxEvaluator<Float, Spectrum>::eval(const SurfaceInteraction3f& si,
         Val v = sp[-1];
         auto [s, c] = dr::sincos(dr::deg_to_rad(sp[0].x()));
         sp[-1] = Val(v.x() * c + v.y() * s, v.y() * c - v.x() * s, 0.f, 0.f);
+        break;
+      }
+      case Op::Rotate3D: {
+        sp -= 2;
+        Vector3f v = xyz(sp[-1]), axis = safe_normalize(xyz(sp[1]));
+        auto [s, c] = dr::sincos(-dr::deg_to_rad(sp[0].x()));
+        sp[-1] = val3(v * c + dr::cross(axis, v) * s +
+                      axis * dr::dot(axis, v) * (1.f - c));
         break;
       }
       case Op::NormalMap: {
@@ -323,6 +408,45 @@ MtlxEvaluator<Float, Spectrum>::eval(const SurfaceInteraction3f& si,
             N));
         break;
       }
+      // The color conversions keep a fourth (alpha) channel.
+      case Op::RgbToHsv:
+        sp[-1] = val3(dr::rgb_to_hsv(xyz(sp[-1])), sp[-1].w());
+        break;
+      case Op::HsvToRgb:
+        sp[-1] = val3(dr::hsv_to_rgb(xyz(sp[-1])), sp[-1].w());
+        break;
+      case Op::Blackbody: {
+        // Port of MaterialX `mx_blackbody.glsl` (Apache-2.0, Contributors
+        // to the MaterialX Project).
+        Float temp = dr::clip(sp[-1].x(), 800.f, 25000.f);
+        Float t = 1000.f / temp;
+        Float xc = dr::select(
+            temp < 4000.f,
+            dr::horner(t, 0.179910f, 0.8776956f, -0.2343580f, -0.2661239f),
+            dr::horner(t, 0.240390f, 0.2226347f, 2.1070379f, -3.0258469f));
+        Float yc =
+            dr::select(temp < 2222.f,
+                       dr::horner(xc, -0.20219683f, 2.18555832f, -1.34811020f,
+                                  -1.1063814f),
+                       dr::select(temp < 4000.f,
+                                  dr::horner(xc, -0.16748867f, 2.09137015f,
+                                             -1.37418593f, -0.9549476f),
+                                  dr::horner(xc, -0.37001483f, 3.75112997f,
+                                             -5.87338670f, 3.0817580f)));
+        Color3f rgb = xyz_to_srgb(Color3f(xc / yc, 1.f, (1.f - xc - yc) / yc));
+        sp[-1] = val3(dr::maximum(rgb, 0.f));
+        break;
+      }
+      case Op::MatDet:
+      case Op::MatTranspose:
+      case Op::MatInverse:
+      case Op::MatMul:
+        if (inst.channels == 3) {
+          eval_matrix_op<3>(inst.op, imm, sp, tmps);
+        } else {
+          eval_matrix_op<4>(inst.op, imm, sp, tmps);
+        }
+        break;
       default:  // Element-wise ops are handled above.
         break;
     }
