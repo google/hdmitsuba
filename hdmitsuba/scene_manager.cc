@@ -816,18 +816,17 @@ class SceneModel final : public SceneManager {
       const VtDictionary& namespaced_settings) override {
     absl::MutexLock state_lock(state_mutex_);
     absl::MutexLock aov_lock(aov_states_mutex_);
-    auto samples_per_pass = GetSetting<int>(
-        namespaced_settings, "mitsuba:interactive_samples_per_pass");
-    if (samples_per_pass.has_value()) {
-      int new_samples_per_pass = std::max(1, *samples_per_pass);
-      if (new_samples_per_pass != interactive_samples_per_pass_) {
-        interactive_samples_per_pass_ = new_samples_per_pass;
-        reset_progressive_ = true;
-      }
+    const int new_samples_per_pass =
+        std::max(1, GetSetting<int>(namespaced_settings,
+                                    "mitsuba:interactive_samples_per_pass")
+                        .value_or(1));
+    if (new_samples_per_pass != interactive_samples_per_pass_) {
+      interactive_samples_per_pass_ = new_samples_per_pass;
+      reset_progressive_ = true;
     }
     std::string integrator_type =
         GetSetting<std::string>(namespaced_settings, "mitsuba:integrator:type")
-            .value_or(integrator_type_);
+            .value_or("path");
     VtDictionary integrator_settings;
     for (const auto& [key, val] : namespaced_settings) {
       std::string_view param = key;
@@ -847,21 +846,18 @@ class SceneModel final : public SceneManager {
       if (frozen_render_) frozen_render_->Clear();
       reset_progressive_ = true;
     }
-    auto sample_count =
-        GetSetting<int>(namespaced_settings, "mitsuba:sample_count");
-    if (sample_count.has_value()) {
-      if (static_cast<size_t>(*sample_count) != sample_count_) {
-        sample_count_ = *sample_count;
-        reset_progressive_ = true;
-      }
+    const size_t clamped_samples = static_cast<size_t>(
+        std::max(0, GetSetting<int>(namespaced_settings, "mitsuba:sample_count")
+                        .value_or(static_cast<int>(kDefaultSampleCount))));
+    if (clamped_samples != sample_count_) {
+      sample_count_ = clamped_samples;
+      reset_progressive_ = true;
     }
-    auto seed = GetSetting<int>(namespaced_settings, "mitsuba:seed");
-    if (seed.has_value()) {
-      uint32_t new_seed = static_cast<uint32_t>(*seed);
-      if (new_seed != seed_) {
-        seed_ = new_seed;
-        reset_progressive_ = true;
-      }
+    const uint32_t new_seed = static_cast<uint32_t>(
+        GetSetting<int>(namespaced_settings, "mitsuba:seed").value_or(0));
+    if (new_seed != seed_) {
+      seed_ = new_seed;
+      reset_progressive_ = true;
     }
     auto progressive =
         GetSetting<bool>(namespaced_settings, "enableInteractive");
@@ -891,9 +887,11 @@ class SceneModel final : public SceneManager {
         }
       }
     }
-    auto denoise = GetSetting<bool>(namespaced_settings, "mitsuba:denoise");
-    if (denoise.has_value() && *denoise != denoise_) {
-      denoise_ = *denoise;
+    const bool new_denoise =
+        GetSetting<bool>(namespaced_settings, "mitsuba:denoise")
+            .value_or(false);
+    if (new_denoise != denoise_) {
+      denoise_ = new_denoise;
       denoise_dirty_ = true;
       // Batch sensors switch to the box filter while denoising.
       if (!progressive_rendering_) {
@@ -1628,6 +1626,10 @@ class SceneModel final : public SceneManager {
   }
 
   void CommitResources() override {
+    if (!python_variant_synced_) {
+      SyncMitsubaPythonVariant(Scene::Variant);
+      python_variant_synced_ = true;
+    }
     absl::MutexLock lock(state_mutex_);
     if (!scene_dirty_ && !has_pending_commits_) {
       return;
@@ -1723,14 +1725,15 @@ class SceneModel final : public SceneManager {
   };
 
   bool scene_dirty_ = true;
+  bool python_variant_synced_ = false;
   ref<Scene> scene_;
   ref<Integrator> integrator_ = nullptr;
-  std::string integrator_type_ = "path";
+  std::string integrator_type_;
   VtDictionary integrator_settings_;
   absl::flat_hash_map<const HdRenderPass*, RenderPassState> pass_aov_states_;
-  size_t sample_count_ = kDefaultSampleCount;
+  size_t sample_count_ = 0;
   uint32_t seed_ = 0;
-  int interactive_samples_per_pass_ = 1;
+  int interactive_samples_per_pass_ = 0;
 
   // Progressive rendering state
   bool progressive_rendering_ = false;
@@ -1871,7 +1874,6 @@ SceneManager* CreateSceneManagerImpl() {
 }
 
 SceneManager* SceneManager::CreateSceneManager(const std::string& variant) {
-  SyncMitsubaPythonVariant(variant);
   return MI_INVOKE_VARIANT(variant, CreateSceneManagerImpl);
 }
 

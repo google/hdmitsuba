@@ -141,10 +141,12 @@ void HdMitsubaRenderDelegate::Initialize() {
 
   current_variant_ =
       GetRenderSetting(HdMitsubaRenderSettingsTokens->variant)
+          .Cast<std::string>()
           .GetWithDefault<std::string>(HdMitsubaConfig::GetInstance().variant);
   scene_impl_ = std::unique_ptr<SceneManager>(
       SceneManager::CreateSceneManager(current_variant_));
   render_param_ = std::make_unique<HdMitsubaRenderParam>(scene_impl_.get());
+  settings_dirty_ = true;
 }
 
 HdRprim* HdMitsubaRenderDelegate::CreateRprim(const TfToken& typeId,
@@ -256,6 +258,7 @@ void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* /*tracker*/) {
 
   std::string target_variant =
       ResolveSetting(HdMitsubaRenderSettingsTokens->variant)
+          .Cast<std::string>()
           .GetWithDefault<std::string>(HdMitsubaConfig::GetInstance().variant);
   if (!target_variant.empty() && current_variant_ != target_variant) {
     TF_DEBUG(HDMITSUBA_LIFECYCLE)
@@ -286,7 +289,7 @@ void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* /*tracker*/) {
     add_setting(desc.key);
   }
   for (const auto& [key, _] : _settingsMap) {
-    if (absl::StartsWith(key.GetString(), "mitsuba:integrator:")) {
+    if (absl::StartsWith(key.GetString(), "mitsuba:")) {
       add_setting(key);
     }
   }
@@ -350,6 +353,10 @@ TfTokenVector HdMitsubaRenderDelegate::GetMaterialRenderContexts() const {
 
 TfToken HdMitsubaRenderDelegate::GetMaterialBindingPurpose() const {
   return HdTokens->full;
+}
+
+TfTokenVector HdMitsubaRenderDelegate::GetRenderSettingsNamespaces() const {
+  return {TfToken("mitsuba")};
 }
 
 bool HdMitsubaRenderDelegate::IsParallelSyncEnabled(

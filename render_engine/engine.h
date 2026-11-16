@@ -123,8 +123,6 @@ class RenderEngine {
 
   pxr::UsdRenderSettings GetUsdRenderSettings(
       const std::optional<pxr::SdfPath>& path) const;
-  std::pair<pxr::HdRenderSettingsMap, pxr::UsdRenderSettings>
-  ReadRenderSettings(const std::optional<pxr::SdfPath>& path) const;
 
   pxr::UsdStageRefPtr stage_;
   pxr::UsdImagingStageSceneIndexRefPtr stage_scene_index_;
@@ -144,8 +142,9 @@ class RenderEngine {
 
   std::string hydra_delegate_id_;
   std::optional<pxr::SdfPath> render_settings_prim_path_;
+  std::optional<int> configured_width_;
+  std::optional<pxr::SdfPath> configured_camera_path_;
   pxr::SdfPath camera_path_;
-  int width_;
   pxr::HdRenderSettingsMap settings_map_;
   pxr::GfRange2f data_window_ndc_;
   pxr::TfTokenVector render_tags_;
