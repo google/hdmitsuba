@@ -1,0 +1,14 @@
+{
+    "HdMitsubaRendererPlugin": {
+        "valid": true,
+        "menulabel": "Mitsuba",
+        "menupriority": 45,
+        "depthstyle": "linear",
+        "needsdepth": false,
+        "needsselection": true,
+        "defaultpurposes": ["render"],
+        "drawmodesupport": false,
+        "aovsupport": true,
+        "husk.default_output": "mitsuba.exr"
+    }
+}

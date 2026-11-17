@@ -24,6 +24,18 @@
                         ],
                         "displayName": "Fills UsdImaging invalidation gaps for HdMitsuba",
                         "apiSchemaName": ""
+                    },
+                    "SdrMitsubaDiscoveryPlugin": {
+                        "bases": [
+                            "SdrDiscoveryPlugin"
+                        ],
+                        "displayName": "Mitsuba Shader Discovery Plugin"
+                    },
+                    "SdrMitsubaParserPlugin": {
+                        "bases": [
+                            "SdrParserPlugin"
+                        ],
+                        "displayName": "Mitsuba Shader Parser Plugin"
                     }
                 }
             },

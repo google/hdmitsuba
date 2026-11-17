@@ -61,6 +61,16 @@ cmake -G Ninja \
 cmake --build build
 ```
 
+To build against a local **Houdini** installation (Houdini 22.0 or newer, which bundles OpenUSD >= 26.05 and Python), pass the Houdini installation path as `CMAKE_PREFIX_PATH` (e.g. `/Applications/Houdini/Current` on macOS, or `/opt/hfs22.0` on Linux):
+
+```bash
+cmake -G Ninja \
+  -DCMAKE_PREFIX_PATH="/Applications/Houdini/Current" \
+  -DMITSUBA_DIR="/path/to/mitsuba3/source" \
+  -B build
+cmake --build build
+```
+
 ## Running Tests
 
 The built binaries locate the USD and Mitsuba libraries through their RPATH (which refers to the USD installation and the Mitsuba build directory), so `LD_LIBRARY_PATH` does not need to be set. Only two things need to be configured:
@@ -129,6 +139,18 @@ python render_engine/render_scene_cli.py --scene /path/to/scene.usd --frame 1030
 *   **Time Code Selection**: Pass `--frame <time code>` to render an animated stage at a specific time code, or `--frame default` to render at `UsdTimeCode::Default()`. If `--frame` is omitted, the CLI renders at the stage's start time code if the stage has an authored time code range (`startTimeCode`/`endTimeCode`), and at the default time code otherwise.
 *   **Performance Profiling**: Pass the `--profile` flag to collect a detailed Chrome tracing JSON profile (saved as `<output_path>.trace.json`). You can load this file into [Perfetto UI](https://ui.perfetto.dev/) or `chrome://tracing` to inspect and profile execution times (JIT tracing, scene sync, rendering).
 *   **Dr.Jit Logging**: Pass `--drjit_log info` to print Dr.Jit's own log statements.
+
+#### 5. Running with Houdini (Solaris & Husk)
+When built against Houdini, CMake generates a Houdini package file at `build/hdmitsuba.json`. Copy it into your Houdini user preferences `packages` directory (for example `~/Library/Preferences/houdini/22.0/packages/` on macOS, or `~/houdini22.0/packages/` on Linux):
+
+```bash
+mkdir -p ~/Library/Preferences/houdini/22.0/packages
+cp build/hdmitsuba.json ~/Library/Preferences/houdini/22.0/packages/
+```
+
+Once installed:
+*   **Solaris Viewport**: Launch Houdini, switch to the Solaris (**Stage**) context, and select **Mitsuba** from the viewport renderer menu. Interactive settings are exposed in Display Options (**D** $\rightarrow$ **Mitsuba**), or can be authored as `mitsuba:*` attributes on a `RenderSettings` prim.
+*   **Husk CLI**: Render USD stages from the command line via `husk --renderer HdMitsubaRendererPlugin scene.usd -o output.exr`.
 
 ## Static Type Checking (Pyrefly)
 

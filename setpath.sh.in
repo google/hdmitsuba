@@ -21,5 +21,6 @@ fi
 
 export DRJIT_NO_RTLD_DEEPBIND=1
 export PXR_PLUGINPATH_NAME="${HDMITSUBA_BUILD_DIR}/hdmitsuba"
+export HOUDINI_USD_DSO_PATH="${HDMITSUBA_BUILD_DIR}/hdmitsuba:${HOUDINI_USD_DSO_PATH:-&}"
 
 echo "hdMitsuba environment set up."

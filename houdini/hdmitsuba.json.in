@@ -1,0 +1,28 @@
+{
+    "hpath": "@CMAKE_CURRENT_SOURCE_DIR@/houdini",
+    "env": [
+        {
+            "var": "HOUDINI_USD_DSO_PATH",
+            "method": "prepend",
+            "value": "@CMAKE_BINARY_DIR@/hdmitsuba"
+        },
+        {
+            "var": "PXR_PLUGINPATH_NAME",
+            "method": "prepend",
+            "value": "@CMAKE_BINARY_DIR@/hdmitsuba"
+        },
+        {
+            "var": "PYTHONPATH",
+            "method": "prepend",
+            "value": "@CMAKE_BINARY_DIR@"
+        },
+        {
+            "var": "PYTHONPATH",
+            "method": "prepend",
+            "value": "@MITSUBA_BUILD_DIR@/python"
+        },
+        {
+            "DRJIT_NO_RTLD_DEEPBIND": "1"
+        }
+    ]
+}

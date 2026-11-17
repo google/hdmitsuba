@@ -16,7 +16,7 @@ search-path = [
     "@CMAKE_BINARY_DIR@/render_engine",
     "@CMAKE_BINARY_DIR@",
     "@MITSUBA_BUILD_DIR@/python",
-    "@pxr_DIR@/lib/python"
+    "@PXR_PYTHON_DIR@"
 ]
 
 ignore-missing-imports = ["usd_render"]
