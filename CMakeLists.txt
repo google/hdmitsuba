@@ -62,10 +62,13 @@ set(CMAKE_CXX_VISIBILITY_PRESET default)
 
 # --- Set up dependencies ---
 
-# Ensure user-installed Python is preferred.
-set(Python_FIND_FRAMEWORK LAST)
-set(Python3_FIND_FRAMEWORK LAST)
-find_package(Python 3.9 COMPONENTS Interpreter Development.Module REQUIRED)
+include(cmake/HoudiniUSD.cmake)
+if(NOT Houdini_FOUND)
+  # Ensure user-installed Python is preferred.
+  set(Python_FIND_FRAMEWORK LAST)
+  set(Python3_FIND_FRAMEWORK LAST)
+  find_package(Python 3.9 COMPONENTS Interpreter Development.Module REQUIRED)
+endif()
 
 # Ensure USD uses the same Python.
 set(Python3_EXECUTABLE "${Python_EXECUTABLE}" CACHE FILEPATH "Path to Python 3 interpreter" FORCE)
@@ -85,7 +88,12 @@ unset(BUILD_SHARED_LIBS)
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
 
 find_package(OpenGL REQUIRED)
-find_package(pxr REQUIRED)
+if(Houdini_FOUND)
+  hdmitsuba_setup_houdini()
+else()
+  find_package(pxr REQUIRED)
+  set(PXR_PYTHON_DIR "${pxr_DIR}/lib/python")
+endif()
 
 # hdmitsuba targets the OpenUSD 26.x scene-index pipeline.
 # Keep this in sync with the PXR_VERSION guard in hdmitsuba/scene_index_plugin.cc
@@ -106,8 +114,10 @@ if(PXR_VERSION LESS HDMITSUBA_MIN_PXR_VERSION)
 endif()
 message(STATUS "hdmitsuba: Using OpenUSD ${PXR_MAJOR_VERSION}.${PXR_MINOR_VERSION}.${PXR_PATCH_VERSION} (PXR_VERSION=${PXR_VERSION})")
 
-find_package(OpenSubdiv REQUIRED)
-find_package(OpenImageDenoise 2.1 QUIET)
+if(NOT Houdini_FOUND)
+  find_package(OpenSubdiv REQUIRED)
+  find_package(OpenImageDenoise 2.1 QUIET)
+endif()
 
 find_library(MITSUBA_LIBRARY
   NAMES mitsuba
@@ -215,6 +225,9 @@ if(NOT EXISTS "${MITSUBA_DIR}/ext/nanobind/CMakeLists.txt")
   message(FATAL_ERROR "Nanobind not found in Mitsuba directory: ${MITSUBA_DIR}/ext/nanobind. Please ensure MITSUBA_DIR is correct.")
 endif()
 add_subdirectory(${MITSUBA_DIR}/ext/nanobind ${CMAKE_CURRENT_BINARY_DIR}/nanobind)
+if(Houdini_FOUND)
+  hdmitsuba_setup_houdini_nanobind()
+endif()
 
 # Optional: GoogleTest (for C++ unit tests)
 option(HDMITSUBA_BUILD_TESTS "Build C++ unit tests" ON)
