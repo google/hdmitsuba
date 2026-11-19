@@ -21,7 +21,6 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -66,6 +65,7 @@
 #include <pxr/usd/usdRender/product.h>
 #include <pxr/usd/usdRender/settings.h>
 #include <pxr/usd/usdRender/spec.h>
+#include <pxr/usd/usdRender/tokens.h>
 #include <pxr/usd/usdRender/var.h>
 #include <pxr/usdImaging/usdImaging/sceneIndices.h>
 
@@ -270,6 +270,104 @@ CameraUtilFraming ComputeFraming(const GfRange2f& ndc,
       display_window, GfRect2i(GfVec2i(min_x, min_y), GfVec2i(max_x, max_y)));
 }
 
+GfRange2f ResolveDataWindowNdc(const UsdRenderSettings& render_settings,
+                               const HdRenderSettingsMap& overrides) {
+  GfRange2f ndc_range(GfVec2f(0.0f, 0.0f), GfVec2f(1.0f, 1.0f));
+  auto ndc_it = overrides.find(UsdRenderTokens->dataWindowNDC);
+  if (ndc_it != overrides.end() && ndc_it->second.IsHolding<GfVec4f>()) {
+    const GfVec4f& ndc = ndc_it->second.UncheckedGet<GfVec4f>();
+    return GfRange2f(GfVec2f(ndc[0], ndc[1]), GfVec2f(ndc[2], ndc[3]));
+  }
+  if (render_settings &&
+      render_settings.GetDataWindowNDCAttr().HasAuthoredValue()) {
+    GfVec4f ndc;
+    if (render_settings.GetDataWindowNDCAttr().Get(&ndc)) {
+      ndc_range = GfRange2f(GfVec2f(ndc[0], ndc[1]), GfVec2f(ndc[2], ndc[3]));
+    }
+  }
+  return ndc_range;
+}
+
+SdfPath ResolveCameraPath(const UsdStageRefPtr& stage,
+                          const UsdRenderSettings& render_settings,
+                          const std::optional<SdfPath>& explicit_camera,
+                          const HdRenderSettingsMap& overrides) {
+  SdfPath resolved;
+  if (explicit_camera.has_value()) {
+    resolved = explicit_camera.value();
+  } else if (auto cam_it = overrides.find(HdTokens->camera);
+             cam_it != overrides.end() &&
+             cam_it->second.IsHolding<std::string>()) {
+    resolved = SdfPath(cam_it->second.UncheckedGet<std::string>());
+  } else if (render_settings) {
+    SdfPathVector targets;
+    render_settings.GetCameraRel().GetForwardedTargets(&targets);
+    if (!targets.empty()) {
+      resolved = targets[0];
+    }
+  }
+  if (resolved.IsEmpty()) {
+    for (const pxr::UsdPrim& prim : stage->Traverse()) {
+      if (UsdGeomCamera(prim)) {
+        resolved = prim.GetPath();
+        break;
+      }
+    }
+    if (resolved.IsEmpty()) {
+      throw std::runtime_error("No camera found!");
+    }
+  }
+  return resolved;
+}
+
+GfVec2i ResolveResolution(const UsdStageRefPtr& stage,
+                          const UsdRenderSettings& render_settings,
+                          const SdfPath& camera_path,
+                          std::optional<int> explicit_width,
+                          const HdRenderSettingsMap& overrides) {
+  if (explicit_width.has_value()) {
+    const int w = explicit_width.value();
+    const size_t h = GetImageHeight(stage, camera_path, w, UsdTimeCode(0));
+    return GfVec2i(w, h);
+  }
+  if (auto res_it = overrides.find(UsdRenderTokens->resolution);
+      res_it != overrides.end() && res_it->second.IsHolding<GfVec2i>()) {
+    return res_it->second.UncheckedGet<GfVec2i>();
+  }
+  GfVec2i resolved;
+  if (render_settings &&
+      render_settings.GetResolutionAttr().HasAuthoredValue() &&
+      render_settings.GetResolutionAttr().Get(&resolved)) {
+    return resolved;
+  }
+  const int default_width = 512;
+  const size_t height =
+      GetImageHeight(stage, camera_path, default_width, UsdTimeCode(0));
+  return GfVec2i(default_width, height);
+}
+
+std::vector<RenderEngine::AovInfo> ResolveAovInfos(
+    HdRenderDelegate* render_delegate,
+    const UsdRenderSettings& render_settings) {
+  std::vector<UsdRenderSpec::RenderVar> aovs;
+  if (render_settings) {
+    aovs = ReadRenderVars(render_settings);
+  }
+  if (aovs.empty()) {
+    aovs.push_back({.renderVarPath = SdfPath{"/Render/Vars/color"},
+                    .dataType = HdRenderEngineDataTypeTokens->color3f,
+                    .sourceName = "color",
+                    .sourceType = TfToken{},
+                    .namespacedSettings = VtDictionary{}});
+  }
+  std::vector<RenderEngine::AovInfo> aov_infos =
+      GetAovInfos(render_delegate, std::move(aovs));
+  if (aov_infos.empty()) {
+    throw std::runtime_error("No aovs found.");
+  }
+  return aov_infos;
+}
+
 }  // namespace
 
 RenderEngine::RenderEngine(UsdStagePtr stage)
@@ -339,33 +437,6 @@ UsdRenderSettings RenderEngine::GetUsdRenderSettings(
   return UsdRenderSettings::GetStageRenderSettings(stage_);
 }
 
-std::pair<HdRenderSettingsMap, UsdRenderSettings>
-RenderEngine::ReadRenderSettings(const std::optional<SdfPath>& path) const {
-  HdRenderSettingsMap settings_map;
-  UsdRenderSettings settings = GetUsdRenderSettings(path);
-  if (!settings) {
-    return std::make_pair(settings_map, settings);
-  }
-
-  // Convert attributes to Render Settings Map.
-  std::vector<UsdAttribute> attributes =
-      settings.GetPrim().GetAuthoredAttributes();
-  for (const auto& a : attributes) {
-    VtValue value;
-    a.Get(&value);
-    settings_map[a.GetName()] = std::move(value);
-  }
-  UsdRelationship camera_rel = settings.GetCameraRel();
-  if (camera_rel) {
-    SdfPathVector targets;
-    camera_rel.GetTargets(&targets);
-    if (!targets.empty()) {
-      settings_map[HdTokens->camera] = targets[0].GetString();
-    }
-  }
-  return std::make_pair(std::move(settings_map), settings);
-}
-
 void RenderEngine::Configure(
     const TfToken& hydra_delegate_id,
     const std::optional<SdfPath>& render_settings_prim_path,
@@ -374,26 +445,8 @@ void RenderEngine::Configure(
     const HdRenderSettingsMap& overrides,
     const std::optional<TfTokenVector>& purposes) {
   ArResolverScopedCache resolver_cache;
-  // Unconditionally read settings to support robust fallbacks
-  HdRenderSettingsMap settings_map;
-  UsdRenderSettings render_settings;
-  std::tie(settings_map, render_settings) =
-      ReadRenderSettings(render_settings_prim_path);
-
-  // Merge overrides
-  for (const auto& [key, value] : overrides) {
-    settings_map[key] = value;
-  }
-
-  GfRange2f new_data_window_ndc(GfVec2f(0.0f, 0.0f), GfVec2f(1.0f, 1.0f));
-  TfToken ndc_token("dataWindowNDC");
-  auto ndc_it = settings_map.find(ndc_token);
-  if (ndc_it != settings_map.end() && ndc_it->second.IsHolding<GfVec4f>()) {
-    GfVec4f ndc = ndc_it->second.Get<GfVec4f>();
-    new_data_window_ndc =
-        GfRange2f(GfVec2f(ndc[0], ndc[1]), GfVec2f(ndc[2], ndc[3]));
-  }
-  bool ndc_changed = (new_data_window_ndc != data_window_ndc_);
+  UsdRenderSettings render_settings =
+      GetUsdRenderSettings(render_settings_prim_path);
 
   // Map USD purposes to Hydra render tags. Prims with the "default" purpose
   // carry the "geometry" render tag; the other purposes map 1:1.
@@ -405,191 +458,104 @@ void RenderEngine::Configure(
                               : purpose);
   }
 
+  HdRenderSettingsMap delegate_overrides = overrides;
   // Unconditionally disable progressive refinement in the batch render engine
-  settings_map.insert(
+  // unless explicitly overridden by the caller.
+  delegate_overrides.insert(
       {pxr::HdRenderSettingsTokens->enableInteractive, pxr::VtValue(false)});
 
-  bool rebuild_delegate =
+  // Validate camera and resolution before mutating or rebuilding the delegate.
+  const SdfPath resolved_camera_path = ResolveCameraPath(
+      stage_, render_settings, camera_path, delegate_overrides);
+  ResolveResolution(stage_, render_settings, resolved_camera_path, width,
+                    delegate_overrides);
+
+  const bool rebuild_delegate =
       !render_delegate_ || !stage_scene_index_ ||
       (hydra_delegate_id != hydra_delegate_id_) ||
       // Render delegates keep rprims that were synced before a render tag got
       // disabled, so a change of render tags requires a fresh render index.
       (render_tags != render_tags_);
 
-  if (!rebuild_delegate) {
-    for (const auto& [key, _] : settings_map_) {
-      if (settings_map.find(key) == settings_map.end()) {
-        render_delegate_->SetRenderSetting(key, VtValue());
-      }
+  if (rebuild_delegate) {
+    // Clean up any previous state in reverse order.
+    tasks_.clear();
+    render_task_id_ = SdfPath();
+    params_delegate_ = nullptr;
+    render_index_.reset();
+    display_style_scene_index_ = nullptr;
+    scene_globals_scene_index_ = nullptr;
+    stage_scene_index_ = nullptr;
+    render_delegate_ = nullptr;
+    camera_path_ = SdfPath();
+    resolution_ = GfVec2i(0);
+    data_window_ndc_ = GfRange2f();
+    aov_ids_.clear();
+    render_buffer_ids_.clear();
+
+    // Create render delegate, scene index chain, and params delegate.
+    renderer_plugin_ =
+        HdRendererPluginRegistry::GetInstance().GetRendererPlugin(
+            hydra_delegate_id);
+    if (!renderer_plugin_) {
+      throw std::runtime_error(absl::StrCat("Failed to get renderer plugin: ",
+                                            hydra_delegate_id.GetText()));
     }
-    for (const auto& desc : render_delegate_->GetRenderSettingDescriptors()) {
-      auto it = settings_map.find(desc.key);
-      const VtValue& val =
-          (it != settings_map.end()) ? it->second : desc.defaultValue;
-      if (render_delegate_->GetRenderSetting(desc.key) != val) {
-        render_delegate_->SetRenderSetting(desc.key, val);
-      }
+    render_delegate_ = renderer_plugin_->CreateDelegate(delegate_overrides);
+
+    render_index_.reset(
+        HdRenderIndex::New(render_delegate_.Get(), HdDriverVector{}));
+    if (!render_index_) {
+      throw std::runtime_error("Failed to create render index.");
     }
-    for (const auto& [key, value] : settings_map) {
-      // Overrides are always forwarded: a render delegate may give them
-      // precedence over the values it syncs from the render settings prim.
-      if (overrides.count(key) > 0 ||
-          render_delegate_->GetRenderSetting(key) != value) {
-        render_delegate_->SetRenderSetting(key, value);
-      }
-    }
-    settings_map_ = settings_map;
-    render_settings_prim_path_ = render_settings_prim_path;
-  }
-
-  // Resolve target camera path upfront
-  SdfPath resolved_camera_path;
-  if (camera_path.has_value()) {
-    resolved_camera_path = camera_path.value();
-  } else if (settings_map.find(HdTokens->camera) != settings_map.end()) {
-    resolved_camera_path =
-        SdfPath(settings_map[HdTokens->camera].Get<std::string>());
-  } else {
-    for (const pxr::UsdPrim& prim : stage_->Traverse()) {
-      UsdGeomCamera camera(prim);
-      if (camera) {
-        resolved_camera_path = prim.GetPath();
-        break;
-      }
-    }
-    if (resolved_camera_path.IsEmpty()) {
-      throw std::runtime_error("No camera found!");
-    }
-  }
-
-  // Resolve target resolution upfront
-  GfVec2i resolved_resolution;
-  int resolved_width = 0;
-  TfToken resolution_token("resolution");
-  if (width.has_value()) {
-    resolved_width = width.value();
-    size_t height = GetImageHeight(stage_, resolved_camera_path, resolved_width,
-                                   UsdTimeCode(0));
-    resolved_resolution = GfVec2i(resolved_width, height);
-  } else if (settings_map.find(resolution_token) != settings_map.end()) {
-    resolved_resolution = settings_map[resolution_token].Get<GfVec2i>();
-    resolved_width = resolved_resolution[0];
-  } else {
-    const int default_width = 512;
-    size_t height = GetImageHeight(stage_, resolved_camera_path, default_width,
-                                   UsdTimeCode(0));
-    resolved_resolution = GfVec2i(default_width, height);
-    resolved_width = default_width;
-  }
-
-  bool cache_invalid = rebuild_delegate ||
-                       (resolved_resolution != resolution_) ||
-                       (resolved_camera_path != camera_path_);
-
-  if (cache_invalid) {
-    // Commit validated state
-    camera_path_ = resolved_camera_path;
-    resolution_ = resolved_resolution;
-    width_ = resolved_width;
-
-    if (rebuild_delegate) {
-      // Clean up any previous state in reverse order.
-      tasks_.clear();
-      params_delegate_ = nullptr;
-      render_index_.reset();
-      display_style_scene_index_ = nullptr;
-      scene_globals_scene_index_ = nullptr;
-      stage_scene_index_ = nullptr;
-      render_delegate_ = nullptr;
-      aov_ids_.clear();
-      render_buffer_ids_.clear();
-
-      // Create render delegate, scene index chain, and params delegate.
-      renderer_plugin_ =
-          HdRendererPluginRegistry::GetInstance().GetRendererPlugin(
-              hydra_delegate_id);
-      if (!renderer_plugin_) {
-        throw std::runtime_error(absl::StrCat("Failed to get renderer plugin: ",
-                                              hydra_delegate_id.GetText()));
-      }
-      render_delegate_ = renderer_plugin_->CreateDelegate(settings_map);
-
-      render_index_.reset(
-          HdRenderIndex::New(render_delegate_.Get(), HdDriverVector{}));
-      if (!render_index_) {
-        throw std::runtime_error("Failed to create render index.");
-      }
-      UsdImagingCreateSceneIndicesInfo create_info;
-      create_info.stage = stage_;
-      const UsdImagingSceneIndices scene_indices =
-          UsdImagingCreateSceneIndices(create_info);
-      stage_scene_index_ = scene_indices.stageSceneIndex;
-      scene_globals_scene_index_ =
-          HdsiSceneGlobalsSceneIndex::New(scene_indices.finalSceneIndex);
-      display_style_scene_index_ =
-          HdsiLegacyDisplayStyleOverrideSceneIndex::New(
-              scene_globals_scene_index_);
-      render_index_->InsertSceneIndex(display_style_scene_index_,
-                                      SdfPath::AbsoluteRootPath());
-      params_delegate_ = std::make_unique<EngineSceneDelegate>(
-          render_index_.get(), SdfPath{"/task_controller"});
-      hydra_delegate_id_ = hydra_delegate_id;
-      render_settings_prim_path_ = render_settings_prim_path;
-      settings_map_ = settings_map;
-      render_tags_ = render_tags;
-    }
-  }
-
-  display_style_scene_index_->SetRefineLevelFallback(refine_level_fallback);
-  // Tells the render delegate which of the stage's render settings prims
-  // applies.
-  scene_globals_scene_index_->SetActiveRenderSettingsPrimPath(
-      render_settings ? render_settings.GetPath() : SdfPath());
-
-  if (cache_invalid) {
-    if (!rebuild_delegate) {
-      ClearRenderBuffers();
-      if (!render_task_id_.IsEmpty()) {
-        render_index_->RemoveTask(render_task_id_);
-      }
-    }
-    // This update is necessary to correctly update render buffer resolutions.
-    CreateRenderBuffers();
+    UsdImagingCreateSceneIndicesInfo create_info;
+    create_info.stage = stage_;
+    const UsdImagingSceneIndices scene_indices =
+        UsdImagingCreateSceneIndices(create_info);
+    stage_scene_index_ = scene_indices.stageSceneIndex;
+    scene_globals_scene_index_ =
+        HdsiSceneGlobalsSceneIndex::New(scene_indices.finalSceneIndex);
+    display_style_scene_index_ = HdsiLegacyDisplayStyleOverrideSceneIndex::New(
+        scene_globals_scene_index_);
+    render_index_->InsertSceneIndex(display_style_scene_index_,
+                                    SdfPath::AbsoluteRootPath());
+    params_delegate_ = std::make_unique<EngineSceneDelegate>(
+        render_index_.get(), SdfPath{"/task_controller"});
 
     HdRprimCollection collection(HdTokens->geometry,
                                  HdReprSelector(HdReprTokens->hull));
     collection.SetRootPath(SdfPath::AbsoluteRootPath());
-
-    tasks_.clear();
     render_task_id_ = SdfPath{"/task_controller/render_task"};
-    {
-      render_index_->InsertTask<HdxRenderTask>(params_delegate_.get(),
-                                               render_task_id_);
-      HdxRenderTaskParams params{};
-      params.aovBindings = CreateAovBindings();
-      params.viewport = GfVec4d(0, 0, resolution_[0], resolution_[1]);
-      params.framing = ComputeFraming(new_data_window_ndc, resolution_);
-      params_delegate_->SetParameter(render_task_id_, HdTokens->params, params);
-      params_delegate_->SetParameter(render_task_id_, HdTokens->collection,
-                                     collection);
-      params_delegate_->SetParameter(render_task_id_, HdTokens->renderTags,
-                                     render_tags_);
-      tasks_.push_back(render_index_->GetTask(render_task_id_));
+    render_index_->InsertTask<HdxRenderTask>(params_delegate_.get(),
+                                             render_task_id_);
+    params_delegate_->SetParameter(render_task_id_, HdTokens->params,
+                                   HdxRenderTaskParams{});
+    params_delegate_->SetParameter(render_task_id_, HdTokens->collection,
+                                   collection);
+    params_delegate_->SetParameter(render_task_id_, HdTokens->renderTags,
+                                   render_tags);
+    tasks_.push_back(render_index_->GetTask(render_task_id_));
+
+    hydra_delegate_id_ = hydra_delegate_id;
+    settings_map_ = std::move(delegate_overrides);
+    render_tags_ = std::move(render_tags);
+  } else {
+    for (const auto& [key, _] : settings_map_) {
+      if (delegate_overrides.find(key) == delegate_overrides.end()) {
+        render_delegate_->SetRenderSetting(key, VtValue());
+      }
     }
-    if (!rebuild_delegate) {
-      stage_scene_index_->ApplyPendingUpdates();
+    for (const auto& [key, value] : delegate_overrides) {
+      render_delegate_->SetRenderSetting(key, value);
     }
-    SetCamera(camera_path_);
-  } else if (ndc_changed) {
-    auto params = params_delegate_->GetParameter<HdxRenderTaskParams>(
-        render_task_id_, HdTokens->params);
-    params.framing = ComputeFraming(new_data_window_ndc, resolution_);
-    params_delegate_->SetParameter(render_task_id_, HdTokens->params, params);
-    render_index_->GetChangeTracker().MarkTaskDirty(
-        render_task_id_, HdChangeTracker::DirtyParams);
+    settings_map_ = std::move(delegate_overrides);
   }
 
-  data_window_ndc_ = new_data_window_ndc;
+  configured_width_ = width;
+  configured_camera_path_ = camera_path;
+  render_settings_prim_path_ = render_settings_prim_path;
+  display_style_scene_index_->SetRefineLevelFallback(refine_level_fallback);
+  UpdateAovsAndBuffers();
 }
 
 void RenderEngine::SetCamera(const SdfPath& camera) {
@@ -611,37 +577,59 @@ void RenderEngine::SetCamera(const SdfPath& camera) {
 void RenderEngine::UpdateAovsAndBuffers() {
   UsdRenderSettings render_settings =
       GetUsdRenderSettings(render_settings_prim_path_);
-  std::vector<UsdRenderSpec::RenderVar> aovs;
-  if (render_settings) {
-    aovs = ReadRenderVars(render_settings);
-  }
-  if (aovs.empty()) {
-    aovs.push_back({.renderVarPath = SdfPath{"/Render/Vars/color"},
-                    .dataType = HdRenderEngineDataTypeTokens->color3f,
-                    .sourceName = "color",
-                    .sourceType = TfToken{},
-                    .namespacedSettings = VtDictionary{}});
+  if (scene_globals_scene_index_) {
+    scene_globals_scene_index_->SetActiveRenderSettingsPrimPath(
+        render_settings ? render_settings.GetPath() : SdfPath::EmptyPath());
   }
 
+  const SdfPath resolved_camera = ResolveCameraPath(
+      stage_, render_settings, configured_camera_path_, settings_map_);
+  const GfVec2i resolved_resolution =
+      ResolveResolution(stage_, render_settings, resolved_camera,
+                        configured_width_, settings_map_);
+  const GfRange2f resolved_ndc =
+      ResolveDataWindowNdc(render_settings, settings_map_);
   std::vector<AovInfo> new_aov_ids =
-      GetAovInfos(render_delegate_.Get(), std::move(aovs));
-  if (new_aov_ids.empty()) {
-    throw std::runtime_error("No aovs found.");
-  }
-  if (!AovInfosChanged(aov_ids_, new_aov_ids)) {
-    return;
+      ResolveAovInfos(render_delegate_.Get(), render_settings);
+
+  const bool camera_changed = (resolved_camera != camera_path_);
+  const bool resolution_changed = (resolved_resolution != resolution_);
+  const bool ndc_changed = (resolved_ndc != data_window_ndc_);
+  const bool aovs_changed = AovInfosChanged(aov_ids_, new_aov_ids);
+
+  if (camera_changed) {
+    if (scene_globals_scene_index_) {
+      scene_globals_scene_index_->SetPrimaryCameraPrimPath(resolved_camera);
+    }
+    stage_scene_index_->ApplyPendingUpdates();
+    SetCamera(resolved_camera);
+    camera_path_ = resolved_camera;
   }
 
-  ClearRenderBuffers();
-  aov_ids_ = std::move(new_aov_ids);
-  CreateRenderBuffers();
+  if (resolution_changed || aovs_changed) {
+    ClearRenderBuffers();
+    resolution_ = resolved_resolution;
+    aov_ids_ = std::move(new_aov_ids);
+    CreateRenderBuffers();
 
-  auto params = params_delegate_->GetParameter<HdxRenderTaskParams>(
-      render_task_id_, HdTokens->params);
-  params.aovBindings = CreateAovBindings();
-  params_delegate_->SetParameter(render_task_id_, HdTokens->params, params);
-  render_index_->GetChangeTracker().MarkTaskDirty(render_task_id_,
-                                                  HdChangeTracker::DirtyParams);
+    auto params = params_delegate_->GetParameter<HdxRenderTaskParams>(
+        render_task_id_, HdTokens->params);
+    params.aovBindings = CreateAovBindings();
+    params.viewport = GfVec4d(0, 0, resolution_[0], resolution_[1]);
+    params.framing = ComputeFraming(resolved_ndc, resolution_);
+    params_delegate_->SetParameter(render_task_id_, HdTokens->params, params);
+    render_index_->GetChangeTracker().MarkTaskDirty(
+        render_task_id_, HdChangeTracker::DirtyParams);
+  } else if (ndc_changed) {
+    auto params = params_delegate_->GetParameter<HdxRenderTaskParams>(
+        render_task_id_, HdTokens->params);
+    params.framing = ComputeFraming(resolved_ndc, resolution_);
+    params_delegate_->SetParameter(render_task_id_, HdTokens->params, params);
+    render_index_->GetChangeTracker().MarkTaskDirty(
+        render_task_id_, HdChangeTracker::DirtyParams);
+  }
+
+  data_window_ndc_ = resolved_ndc;
 }
 
 absl::flat_hash_map<pxr::TfToken, RenderEngine::OutputBuffer,
@@ -654,6 +642,9 @@ RenderEngine::Render(UsdTimeCode time_code) {
     enable_interactive = it->second.GetWithDefault<bool>(false);
   }
   UpdateAovsAndBuffers();
+  if (scene_globals_scene_index_) {
+    scene_globals_scene_index_->SetCurrentFrame(time_code.GetValue());
+  }
   stage_scene_index_->ApplyPendingUpdates();
   stage_scene_index_->SetTime(time_code);
   do {

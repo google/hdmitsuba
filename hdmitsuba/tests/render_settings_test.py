@@ -261,10 +261,8 @@ def test_crop_rendering():
 
   render_settings.CreateDataWindowNDCAttr().Set((0.25, 0.1, 0.75, 0.4))
 
-  # Re-render with crop
-  engine_crop = usd_render.RenderEngine(stage)
-  engine_crop.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
-  image_crop = engine_crop.render()["color"]
+  # Re-render with crop without reconfiguring the engine
+  image_crop = engine.render()["color"]
 
   test_helpers.write_image(image_full, "test_crop_rendering_full.png")
   test_helpers.write_image(image_crop, "test_crop_rendering_crop.png")
@@ -295,9 +293,8 @@ def test_variant_change_dynamic():
   engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
   results_scalar = engine.render()
 
-  # Change the variant setting dynamically on the same stage and render engine
+  # Change the variant setting dynamically without reconfiguring the engine
   settings_prim.GetAttribute("mitsuba:variant").Set("llvm_ad_rgb")
-  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
   results_llvm = engine.render()
 
   test_helpers.robust_assert_close(
@@ -572,3 +569,46 @@ def test_integrator_parameters():
     )
   finally:
     mi.detail.remove_variant_callback(_register_flat_color)
+
+
+def test_switch_active_render_settings_prim():
+  stage = Usd.Stage.CreateInMemory()
+  stage.GetRootLayer().subLayerPaths.append(
+      f"{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda"
+  )
+  first_settings = UsdRender.Settings.Define(stage, "/Render/FirstSettings")
+  first_settings.CreateResolutionAttr().Set(Gf.Vec2i(8, 8))
+  sample_count_attr = first_settings.GetPrim().CreateAttribute(
+      "mitsuba:sample_count", Sdf.ValueTypeNames.Int
+  )
+  sample_count_attr.Set(4)
+
+  second_settings = UsdRender.Settings.Define(stage, "/Render/SecondSettings")
+  second_settings.CreateResolutionAttr().Set(Gf.Vec2i(16, 12))
+  second_settings.GetPrim().CreateAttribute(
+      "mitsuba:sample_count", Sdf.ValueTypeNames.Int
+  ).Set(12)
+
+  stage.SetMetadata(
+      UsdRender.Tokens.renderSettingsPrimPath, "/Render/FirstSettings"
+  )
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  # Edits between configure() and the first render() are not shadowed.
+  sample_count_attr.Set(6)
+  first = engine.render()["color"]
+  assert first.shape[:2] == (8, 8)
+  assert engine.get_render_stats()["totalSamples"] == 6
+
+  # Switch active UsdRenderSettings via stage metadata without reconfiguring.
+  stage.SetMetadata(
+      UsdRender.Tokens.renderSettingsPrimPath, "/Render/SecondSettings"
+  )
+  second = engine.render()["color"]
+  assert second.shape[:2] == (12, 16)
+  assert engine.get_render_stats()["totalSamples"] == 12
+
+  second_settings.GetPrim().RemoveProperty("mitsuba:sample_count")
+  engine.render()
+  assert engine.get_render_stats()["totalSamples"] == 128

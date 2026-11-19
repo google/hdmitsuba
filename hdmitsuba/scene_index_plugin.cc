@@ -250,22 +250,25 @@ class HdMitsuba_SceneIndexPlugin : public HdSceneIndexPlugin {
     const bool tessellate_all =
         HdMitsubaConfig::GetInstance().tessellate_implicit_surfaces;
     return HdMitsuba_MotionIntervalSceneIndex::New(
-        HdsiImplicitSurfaceSceneIndex::New(
-            // Forwards dirtiness along declared dependencies, e.g., from
-            // USD RenderSettings attributes to the flattened `renderSettings`
-            // prim, so that RenderSettings edits trigger a re-sync.
-            HdDependencyForwardingSceneIndex::New(input_scene),
-            HdRetainedContainerDataSource::New(
-                HdPrimTypeTokens->sphere,
-                tessellate_all ? to_mesh : HdDataSourceBaseHandle(),
-                HdPrimTypeTokens->cube, to_mesh, HdPrimTypeTokens->cone,
-                to_mesh, HdPrimTypeTokens->cylinder,
-                tessellate_all
-                    ? to_mesh
-                    : HdRetainedTypedSampledDataSource<TfToken>::New(
-                          HdsiImplicitSurfaceSceneIndexTokens->axisToTransform),
-                HdPrimTypeTokens->capsule, to_mesh, HdPrimTypeTokens->plane,
-                to_mesh)));
+        // Forwards dirtiness along declared dependencies—both from USD
+        // RenderSettings attributes to the flattened `renderSettings` prim and
+        // from `HdsiImplicitSurfaceSceneIndex` parameters (e.g., cube size,
+        // plane dimensions, cylinder axis) to their generated mesh/xform data.
+        HdDependencyForwardingSceneIndex::New(
+            HdsiImplicitSurfaceSceneIndex::New(
+                input_scene,
+                HdRetainedContainerDataSource::New(
+                    HdPrimTypeTokens->sphere,
+                    tessellate_all ? to_mesh : HdDataSourceBaseHandle(),
+                    HdPrimTypeTokens->cube, to_mesh, HdPrimTypeTokens->cone,
+                    to_mesh, HdPrimTypeTokens->cylinder,
+                    tessellate_all
+                        ? to_mesh
+                        : HdRetainedTypedSampledDataSource<TfToken>::New(
+                              HdsiImplicitSurfaceSceneIndexTokens
+                                  ->axisToTransform),
+                    HdPrimTypeTokens->capsule, to_mesh, HdPrimTypeTokens->plane,
+                    to_mesh))));
   }
 };
 
