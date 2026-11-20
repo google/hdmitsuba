@@ -51,7 +51,7 @@ def test_basic_render_settings():
   settings_prim = render_settings.GetPrim()
 
   settings_prim.CreateAttribute(
-      "mitsuba:sample_count", Sdf.ValueTypeNames.Int
+      "mitsuba:sampler:sample_count", Sdf.ValueTypeNames.Int
   ).Set(4)
   settings_prim.CreateAttribute(
       "mitsuba:integrator:type", Sdf.ValueTypeNames.String
@@ -251,7 +251,7 @@ def test_crop_rendering():
   settings_prim = render_settings.GetPrim()
 
   settings_prim.CreateAttribute(
-      "mitsuba:sample_count", Sdf.ValueTypeNames.Int
+      "mitsuba:sampler:sample_count", Sdf.ValueTypeNames.Int
   ).Set(4)
 
   # Render full image first
@@ -405,7 +405,7 @@ def test_denoise_render_settings(variant: str):
         width=width,
         overrides={
             "mitsuba:variant": variant,
-            "mitsuba:sample_count": 1,
+            "mitsuba:sampler:sample_count": 1,
             "mitsuba:denoise": denoise,
         },
     )
@@ -609,14 +609,14 @@ def test_switch_active_render_settings_prim():
   first_settings = UsdRender.Settings.Define(stage, "/Render/FirstSettings")
   first_settings.CreateResolutionAttr().Set(Gf.Vec2i(8, 8))
   sample_count_attr = first_settings.GetPrim().CreateAttribute(
-      "mitsuba:sample_count", Sdf.ValueTypeNames.Int
+      "mitsuba:sampler:sample_count", Sdf.ValueTypeNames.Int
   )
   sample_count_attr.Set(4)
 
   second_settings = UsdRender.Settings.Define(stage, "/Render/SecondSettings")
   second_settings.CreateResolutionAttr().Set(Gf.Vec2i(16, 12))
   second_settings.GetPrim().CreateAttribute(
-      "mitsuba:sample_count", Sdf.ValueTypeNames.Int
+      "mitsuba:sampler:sample_count", Sdf.ValueTypeNames.Int
   ).Set(12)
 
   stage.SetMetadata(
@@ -639,7 +639,7 @@ def test_switch_active_render_settings_prim():
   assert second.shape[:2] == (12, 16)
   assert engine.get_render_stats()["totalSamples"] == 12
 
-  second_settings.GetPrim().RemoveProperty("mitsuba:sample_count")
+  second_settings.GetPrim().RemoveProperty("mitsuba:sampler:sample_count")
   engine.render()
   assert engine.get_render_stats()["totalSamples"] == 128
 
@@ -704,3 +704,63 @@ def test_nested_integrator_settings():
         f"mitsuba:integrator:{bad_name}:type", Sdf.ValueTypeNames.String
     ).Set(bad_type)
   assert np.mean(engine.render()["color"][16, 16, :3]) > 0.25
+
+
+def test_sampler_render_settings():
+  stage = Usd.Stage.CreateInMemory()
+  stage.GetRootLayer().subLayerPaths.append(
+      f"{test_helpers.TEST_ASSETS_PATH}/render_settings/sampler_stratified.usda"
+  )
+  stage.SetMetadata(UsdRender.Tokens.renderSettingsPrimPath, "/Render/Settings")
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  stratified_hd, _ = test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      output_prefix="test_sampler_stratified",
+      spp=None,
+      atol=0.05,
+      engine=engine,
+  )
+  assert engine.get_render_stats()["totalSamples"] == 16
+
+  # Host overrides take precedence over the prim-authored sample count.
+  override_engine = usd_render.RenderEngine(stage)
+  override_engine.configure(
+      hydra_delegate_id="HdMitsubaRendererPlugin",
+      overrides={"mitsuba:sampler:sample_count": 8},
+  )
+  override_engine.render()
+  assert override_engine.get_render_stats()["totalSamples"] == 8
+  override_engine.configure(
+      hydra_delegate_id="HdMitsubaRendererPlugin",
+      overrides={"mitsuba:sampler:sample_count": 12},
+  )
+  override_engine.render()
+  assert override_engine.get_render_stats()["totalSamples"] == 12
+
+  # Live update of sampler plugin type without calling configure(), and
+  # graceful fallback when an invalid sampler type is specified.
+  settings_prim = stage.GetPrimAtPath("/Render/Settings")
+  sampler_type_attr = settings_prim.GetAttribute("mitsuba:sampler:type")
+  sampler_type_attr.Set("nonexistent_sampler")
+  assert np.max(engine.render()["color"][..., :3]) > 0.1
+  sampler_type_attr.Set("independent")
+  independent_hd = engine.render()["color"]
+  assert not np.allclose(
+      stratified_hd[..., :3], independent_hd[..., :3], atol=1e-4
+  )
+
+  # Interactive progressive rendering uses `independent` so structured samplers
+  # with `jitter = false` do not collapse 1-SPP passes to identical grids.
+  sampler_type_attr.Set("stratified")
+  engine.configure(
+      hydra_delegate_id="HdMitsubaRendererPlugin",
+      overrides={
+          "enableInteractive": True,
+          "mitsuba:sampler:sample_count": 2,
+      },
+  )
+  pass1 = engine.render()["color"]
+  pass2 = engine.render()["color"]
+  assert not np.allclose(pass1[..., :3], pass2[..., :3], atol=1e-4)

@@ -197,7 +197,7 @@ def main() -> None:
 
   overrides = {}
   if args.spp is not None:
-    overrides['mitsuba:sample_count'] = args.spp
+    overrides['mitsuba:sampler:sample_count'] = args.spp
   if args.seed is not None:
     overrides['mitsuba:seed'] = args.seed
 

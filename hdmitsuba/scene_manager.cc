@@ -62,6 +62,7 @@
 #include <mitsuba/render/scene.h>
 #include <mitsuba/render/sensor.h>
 #include <nanothread/nanothread.h>
+#include <pxr/base/gf/half.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/tf/diagnostic.h>
 #include <pxr/base/tf/token.h>
@@ -139,6 +140,14 @@ std::optional<T> GetSetting(const VtDictionary& settings,
   if constexpr (std::is_same_v<T, std::string>) {
     if (it->second.IsHolding<TfToken>()) {
       return it->second.UncheckedGet<TfToken>().GetString();
+    }
+  } else if constexpr (std::is_integral_v<T> && !std::is_same_v<T, bool>) {
+    if (!it->second.IsHolding<bool>() && !it->second.IsHolding<float>() &&
+        !it->second.IsHolding<double>() && !it->second.IsHolding<GfHalf>()) {
+      if (VtValue casted = VtValue::Cast<int64_t>(it->second);
+          casted.IsHolding<int64_t>()) {
+        return static_cast<T>(casted.UncheckedGet<int64_t>());
+      }
     }
   }
   TF_WARN("Type mismatch for render setting '%s': expected %s, got %s",
@@ -850,15 +859,32 @@ class SceneModel final : public SceneManager {
       if (frozen_render_) frozen_render_->Clear();
       reset_progressive_ = true;
     }
-    const size_t clamped_samples = static_cast<size_t>(
-        std::max(0, GetSetting<int>(namespaced_settings, "mitsuba:sample_count")
-                        .value_or(static_cast<int>(kDefaultSampleCount))));
+    PluginSpecNode sampler_spec =
+        ParsePluginSpec(namespaced_settings, "mitsuba:sampler:",
+                        /*default_type=*/"independent");
+    // sample_count is managed via sample_count_ and passed per-render pass,
+    // so omit it from sampler_spec_ to avoid rebuilding sensors when only
+    // the target sample count changes.
+    sampler_spec.params.erase("sample_count");
+    if (sampler_spec != sampler_spec_) {
+      TF_DEBUG(HDMITSUBA_LIFECYCLE)
+          .Msg("Updating sampler spec, type: %s (was: %s)\n",
+               sampler_spec.plugin_type.c_str(),
+               sampler_spec_.plugin_type.c_str());
+      sampler_spec_ = std::move(sampler_spec);
+      MarkSensorsForRebuild();
+      reset_progressive_ = true;
+    }
+    const size_t clamped_samples = static_cast<size_t>(std::max<int64_t>(
+        0,
+        GetSetting<int64_t>(namespaced_settings, "mitsuba:sampler:sample_count")
+            .value_or(static_cast<int64_t>(kDefaultSampleCount))));
     if (clamped_samples != sample_count_) {
       sample_count_ = clamped_samples;
       reset_progressive_ = true;
     }
     const uint32_t new_seed = static_cast<uint32_t>(
-        GetSetting<int>(namespaced_settings, "mitsuba:seed").value_or(0));
+        GetSetting<int64_t>(namespaced_settings, "mitsuba:seed").value_or(0));
     if (new_seed != seed_) {
       seed_ = new_seed;
       reset_progressive_ = true;
@@ -1072,9 +1098,16 @@ class SceneModel final : public SceneManager {
               }
               if (spec->needs_rebuild) {
                 // Denoisers require the uncorrelated pixel noise of the box
-                // filter.
+                // filter, and progressive multi-pass accumulation requires
+                // `independent` so structured samplers (`stratified`,
+                // `multijitter`, `orthogonal`) do not collapse per-pass small
+                // sample counts into biased grids.
                 const bool use_box_filter = progressive_rendering_ || denoise_;
-                res = PrimTranslator::BuildSensor(*spec, use_box_filter);
+                const PluginSpecNode effective_sampler =
+                    progressive_rendering_ ? PluginSpecNode("independent")
+                                           : sampler_spec_;
+                res = PrimTranslator::BuildSensor(*spec, use_box_filter,
+                                                  effective_sampler);
               } else if (spec->dirty_bits != 0) {
                 auto it = sensors_.find(spec->id);
                 if (!TF_VERIFY(it != sensors_.end(),
@@ -1127,9 +1160,12 @@ class SceneModel final : public SceneManager {
     // emitter above, every (re)built mesh gets a fresh one.
     auto sens_it = shape_sensors_.find(shape_id);
     if (sens_it != shape_sensors_.end()) {
-      pair.mesh_sensor =
-          PrimTranslator::BuildSensor(camera_specs_.at(sens_it->second),
-                                      progressive_rendering_ || denoise_);
+      const PluginSpecNode effective_sampler =
+          progressive_rendering_ ? PluginSpecNode("independent")
+                                 : sampler_spec_;
+      pair.mesh_sensor = PrimTranslator::BuildSensor(
+          camera_specs_.at(sens_it->second), progressive_rendering_ || denoise_,
+          effective_sampler);
       pair.sensor_ptr = pair.mesh_sensor.get();
     }
     return pair;
@@ -1762,6 +1798,7 @@ class SceneModel final : public SceneManager {
   ref<Integrator> integrator_ = nullptr;
   PluginSpecNode integrator_spec_;
   bool warned_hide_emitters_ = false;
+  PluginSpecNode sampler_spec_;
   absl::flat_hash_map<const HdRenderPass*, RenderPassState> pass_aov_states_;
   size_t sample_count_ = 0;
   uint32_t seed_ = 0;

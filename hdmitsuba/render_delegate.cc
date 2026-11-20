@@ -118,7 +118,7 @@ void HdMitsubaRenderDelegate::Initialize() {
   setting_descriptors_ = {
       {"Variant", HdMitsubaRenderSettingsTokens->variant,
        VtValue(config.variant)},
-      {"Samples Per Pixel", HdMitsubaRenderSettingsTokens->sample_count,
+      {"Samples Per Pixel", HdMitsubaRenderSettingsTokens->sampler_sample_count,
        VtValue(128)},
       {"Seed", HdMitsubaRenderSettingsTokens->seed, VtValue(0)},
       {"Interactive Samples Per Pass",
@@ -129,6 +129,8 @@ void HdMitsubaRenderDelegate::Initialize() {
        HdMitsubaRenderSettingsTokens->integrator_max_depth, VtValue()},
       {"Integrator Russian Roulette Depth",
        HdMitsubaRenderSettingsTokens->integrator_rr_depth, VtValue()},
+      {"Sampler Type", HdMitsubaRenderSettingsTokens->sampler_type,
+       VtValue(std::string("independent"))},
       {"Enable Interactive Mode", HdRenderSettingsTokens->enableInteractive,
        VtValue(true)},
       {"Enable Kernel Freezing (Experimental)",

@@ -122,11 +122,13 @@ You can configure the render delegate by authoring a `RenderSettings` prim insid
 
 ### Custom Mitsuba Settings
 *   **`mitsuba:variant`**: The Mitsuba variant to use for rendering (e.g., `scalar_rgb`, `cuda_ad_rgb`, `llvm_ad_rgb`).
-*   **`mitsuba:sample_count`** : The target samples per pixel (SPP) for high-quality offline renders.
 *   **`mitsuba:seed`**: The random number generator seed offset (int, default `0`) passed to the Mitsuba integrator. Changing `mitsuba:seed` resets progressive accumulation.
-*   **`mitsuba:interactive_samples_per_pass`**: Number of samples per pixel rendered in each Hydra pass while `enableInteractive` is `true` (default `1`). Larger values reduce per-pass overhead (and, with kernel freezing enabled, are replayed as a single frozen kernel) at the cost of coarser progressive updates. Changing `mitsuba:interactive_samples_per_pass` or `mitsuba:sample_count` resets progressive accumulation.
+*   **`mitsuba:interactive_samples_per_pass`**: Number of samples per pixel rendered in each Hydra pass while `enableInteractive` is `true` (default `1`). Larger values reduce per-pass overhead (and, with kernel freezing enabled, are replayed as a single frozen kernel) at the cost of coarser progressive updates. Changing `mitsuba:interactive_samples_per_pass` or `mitsuba:sampler:sample_count` resets progressive accumulation.
 *   **`mitsuba:integrator:type`**: The Mitsuba integrator to use (e.g., `path`, `volpath`, `aov`, `direct`).
 *   **`mitsuba:integrator:<param>`**: Any flat or nested setting in the `mitsuba:integrator:` namespace is forwarded to the Mitsuba integrator (e.g., `mitsuba:integrator:max_depth`, `mitsuba:integrator:rr_depth`, or nested child integrators). Unset properties use the Mitsuba integrator's defaults, and properties not supported by the integrator are ignored with a warning. Changing these settings recreates the integrator and resets progressive accumulation.
+*   **`mitsuba:sampler:type`**: The Mitsuba sampler to use for offline batch renders (string, default `independent`, e.g., `independent`, `stratified`, `multijitter`, `orthogonal`, `ldsampler`). In interactive progressive mode (`enableInteractive = true`), `hdMitsuba` uses `independent` so multi-pass accumulation remains unbiased.
+*   **`mitsuba:sampler:sample_count`**: The target samples per pixel (SPP, int, default `128`) for both offline batch renders and interactive progressive convergence. Changing this setting resets progressive accumulation without rebuilding sensors.
+*   **`mitsuba:sampler:<param>`**: Any additional flat or nested setting in the `mitsuba:sampler:` namespace is forwarded to the Mitsuba sampler (e.g., `mitsuba:sampler:jitter`, `mitsuba:sampler:seed`). Changing sampler parameters rebuilds sensors and resets progressive accumulation.
 *   **`mitsuba:use_kernel_freezing`**: Enables Dr.Jit's kernel freezing. When enabled, the JIT compilation is frozen after the first frame, drastically reducing JIT tracing overhead for subsequent frames (extremely beneficial for interactive camera navigation in viewports). This is currently disabled by default, as it is still in a somewhat experimental state in its Hydra integration, and also will not work in all Mitsuba 3 scenes.
 *   **`mitsuba:denoise`**: Denoises the rendered `color` image (bool, default
     `false`) using NVIDIA OptiX on CUDA variants (`cuda_*`) or Intel
@@ -142,7 +144,7 @@ Both `hdMitsuba` and the offline `usd_mitsuba` translator share a uniform USD
 namespace convention for configuring native Mitsuba plugins and nested child
 plugins:
 
-*   **Supported Namespaces**: `mitsuba:integrator:*` on `RenderSettings` prims.
+*   **Supported Namespaces**: `mitsuba:integrator:*` and `mitsuba:sampler:*` on `RenderSettings` prims.
 *   **Hierarchy & Plugin Selection**: Colon-separated attribute names map to
     nested Mitsuba plugin properties. `:type` selects a plugin type, `:id`
     assigns a Mitsuba object ID, and nested `:child:type` / `:child:<param>`
@@ -175,10 +177,11 @@ def RenderSettings "/Render/MitsubaSettings"
 
     # Custom Mitsuba settings
     custom string mitsuba:variant = "llvm_ad_rgb"
-    custom int mitsuba:sample_count = 256
     custom int mitsuba:seed = 0
     custom int mitsuba:interactive_samples_per_pass = 4
     custom string mitsuba:integrator:type = "path"
+    custom string mitsuba:sampler:type = "independent"
+    custom int mitsuba:sampler:sample_count = 256
 
     # Enable Dr.Jit kernel freezing for fast interactive viewport updates
     custom bool mitsuba:use_kernel_freezing = true

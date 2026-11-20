@@ -1153,9 +1153,9 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateLightInPlace(
   }
 }
 
-MI_VARIANT mitsuba::ref<mitsuba::Sensor<Float, Spectrum>>
-PrimTranslator<Float, Spectrum>::BuildSensor(const CameraSpec& spec,
-                                             bool is_interactive) {
+MI_VARIANT mitsuba::ref<mitsuba::Sensor<Float, Spectrum>> PrimTranslator<
+    Float, Spectrum>::BuildSensor(const CameraSpec& spec, bool is_interactive,
+                                  const PluginSpecNode& sampler_spec) {
   mitsuba::Properties props;
   if (spec.sensor_type == "irradiancemeter") {
     props = mitsuba::Properties("irradiancemeter");
@@ -1194,6 +1194,13 @@ PrimTranslator<Float, Spectrum>::BuildSensor(const CameraSpec& spec,
             mitsuba::PluginManager::instance()
                 ->create_object<mitsuba::Film<Float, Spectrum>>(film_props)
                 .get()));
+  }
+  if (!sampler_spec.Empty()) {
+    if (mitsuba::ref<mitsuba::Sampler<Float, Spectrum>> sampler =
+            BuildPluginObject<mitsuba::Sampler<Float, Spectrum>>(
+                sampler_spec)) {
+      props.set("sampler", static_cast<mitsuba::Object*>(sampler.get()));
+    }
   }
   mitsuba::ref<mitsuba::Sensor<Float, Spectrum>> sensor =
       mitsuba::PluginManager::instance()

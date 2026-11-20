@@ -115,7 +115,7 @@ def test_kernel_freezing_interactive_rendering():
   # Similar to the test above, but with interactive (progressive) rendering enabled.
   stage_frozen, engine_frozen = _create_engine(
       freeze_enabled=True,
-      overrides={'mitsuba:sample_count': 4, 'enableInteractive': True},
+      overrides={'mitsuba:sampler:sample_count': 4, 'enableInteractive': True},
   )
   img_frozen_1 = engine_frozen.render()['color']
 
@@ -129,7 +129,7 @@ def test_kernel_freezing_interactive_rendering():
 
   stage_ref, engine_ref = _create_engine(
       freeze_enabled=False,
-      overrides={'mitsuba:sample_count': 4, 'enableInteractive': True},
+      overrides={'mitsuba:sampler:sample_count': 4, 'enableInteractive': True},
   )
   img_ref_1 = engine_ref.render()['color']
   translate_op_ref = UsdGeom.Xformable(
