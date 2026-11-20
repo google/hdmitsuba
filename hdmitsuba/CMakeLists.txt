@@ -26,6 +26,7 @@ add_library(hdMitsuba SHARED
   ies_emitter.cc
   light.cc
   instancer.cc
+  materialx/bsdf.cc
   materialx/compiler.cc
   materialx/evaluator.cc
   materialx/translator.cc

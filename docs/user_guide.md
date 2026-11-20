@@ -17,21 +17,32 @@ This document provides an overview of the USD features supported by `hdMitsuba`,
 
 ### Shading & Materials
 *   **MaterialX Shading Networks (Experimental)**: Opt-in support for MaterialX
-    emissive and pattern shading networks (via `outputs:mtlx:surface` or
-    standard surface terminals; `outputs:mitsuba:surface` still takes
+    surface, emissive, and pattern shading networks (via `outputs:mtlx:surface`
+    or standard surface terminals; `outputs:mitsuba:surface` still takes
     precedence). Set the environment variable `HDMITSUBA_ENABLE_MATERIALX=1` to
-    enable it (disabled by default while BSDF closure support is in progress;
-    when enabled, non-emissive BSDF lobes on MaterialX shaders currently render
-    black):
-    *   Surface emission and cutout opacity (`mask`) via `surface_unlit`,
-        `standard_surface`, `open_pbr_surface`, `gltf_pbr`, `mix`
-        (`surfaceshader`), and `surface` EDF closures (`uniform_edf`,
-        `generalized_schlick_edf`, `conical_edf`, `measured_edf`, and EDF
-        combinators `add`, `multiply`, `mix`; directional EDFs are approximated
-        as diffuse `area` emission, and IES profiles on `measured_edf` are not
-        supported). Custom MaterialX `.mtlx` node definitions
-        (`info:implementationSource = "sourceAsset"`) are also supported if
-        OpenUSD is built with MaterialX support.
+    enable it (disabled by default while remaining BSDF closures and
+    displacement support are in progress):
+    *   Surface BSDF closures, emission, and stochastic cutout opacity via
+        `surface`, `surface_unlit`, `standard_surface`, and `mix`
+        (`surfaceshader`):
+        *   BSDF lobes: `oren_nayar_diffuse_bsdf` (standard and energy-
+            compensated), `translucent_bsdf`, `subsurface_bsdf` (diffuse
+            approximation), `dielectric_bsdf` (`R`, `T`, `RT`, solid and
+            `thin_walled`), `conductor_bsdf`, and combinators `layer`, `mix`,
+            `add`, and `multiply` (with per-lobe `normal`/`tangent` shading
+            frames). `burley_diffuse_bsdf`, `generalized_schlick_bsdf`,
+            `sheen_bsdf`, `chiang_hair_bsdf`, thin-film interference,
+            retroreflective specular, VDF volume absorption, and BSDF feature
+            AOVs (`albedo`, `diffuse_albedo`, `specular_reflectance`,
+            `specular_transmittance`, `roughness`) are not supported yet.
+        *   EDF closures: `uniform_edf`, `generalized_schlick_edf`,
+            `conical_edf`, `measured_edf`, and EDF combinators `add`,
+            `multiply`, `mix` (directional EDFs are approximated as diffuse
+            `area` emission, and IES profiles on `measured_edf` are not
+            supported).
+        *   Custom MaterialX `.mtlx` node definitions
+            (`info:implementationSource = "sourceAsset"`) are also supported if
+            OpenUSD is built with MaterialX support.
     *   Procedural pattern graphs,
         math/vector/matrix/color/channel/compositing/logic nodes, 2D/3D
         procedural noises (`cellnoise2d`/`3d`, `noise2d`/`3d`,

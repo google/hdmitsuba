@@ -49,15 +49,18 @@
 
 NAMESPACE_BEGIN(mitsuba)
 namespace mtlx {
-namespace {
 
-template <typename Vec>
-MI_INLINE Vec safe_normalize(const Vec& v, const Vec& fallback = Vec(0.0f)) {
-  auto len2 = dr::squared_norm(v);
-  auto valid = len2 > 0.f;
-  return dr::select(valid, v * dr::rsqrt(dr::select(valid, len2, 1.0f)),
-                    fallback);
-}
+// Device-resident `data/srgb.coeff` lookup tables shared via a weak cache so
+// `MtlxEvaluator::traverse_cb()` can expose `data` and `scale` to
+// `@dr.freeze` and `FrozenRender`.
+template <typename Float32>
+struct SrgbLut {
+  uint32_t res = 0;
+  Float32 data;
+  Float32 scale;
+};
+
+namespace {
 
 template <size_t N, typename Float>
 void eval_matrix_op(Op op, uint16_t imm, Vector<Float, 4>*& sp,
@@ -386,6 +389,109 @@ void eval_noise_op(Op op, uint16_t imm, Vector<Float, 4>*& sp) {
   }
 }
 
+template <typename Float32>
+std::shared_ptr<SrgbLut<Float32>> get_srgb_lut() {
+  static absl::NoDestructor<absl::Mutex> mu;
+  static absl::NoDestructor<std::weak_ptr<SrgbLut<Float32>>> cached;
+  absl::MutexLock lock(*mu);
+  if (auto lut = cached->lock()) return lut;
+
+  fs::path path = file_resolver()->resolve("data/srgb.coeff");
+  std::ifstream f(path, std::ios::binary);
+  char header[4] = {};
+  uint32_t res = 0;
+  if (!f.read(header, 4) || std::memcmp(header, "SPEC", 4) != 0 ||
+      !f.read(reinterpret_cast<char*>(&res), sizeof(res)) || res < 2) {
+    Throw("Could not load sRGB-to-spectrum upsampling model ('%s')",
+          path.string());
+  }
+  std::vector<float> host_scale(res);
+  std::vector<float> host_data(size_t(res) * res * res * 9);
+  if (!f.read(reinterpret_cast<char*>(host_scale.data()),
+              host_scale.size() * sizeof(float)) ||
+      !f.read(reinterpret_cast<char*>(host_data.data()),
+              host_data.size() * sizeof(float))) {
+    Throw("Truncated sRGB-to-spectrum upsampling model ('%s')", path.string());
+  }
+
+  auto lut = std::make_shared<SrgbLut<Float32>>();
+  lut->res = res;
+  lut->scale = dr::load<Float32>(host_scale.data(), host_scale.size());
+  lut->data = dr::load<Float32>(host_data.data(), host_data.size());
+  *cached = lut;
+  return lut;
+}
+
+// Mirrors `mitsuba::SRGBModel::fetch_jit()` (`mitsuba/src/render/srgb.cpp`),
+// reading from the traversable `lut` of `MtlxEvaluator`.
+template <typename Float, typename Spectrum,
+          typename Float32 = dr::float32_array_t<dr::detached_t<Float>>>
+dr::Array<Float, 3> fetch_srgb(const Color<Float, 3>& color,
+                               const SrgbLut<Float32>* lut) {
+  if constexpr (!dr::is_jit_v<Float>) {
+    (void)lut;
+    return SRGBModel<Float, Spectrum>::fetch(color);
+  } else {
+    using Array3f = dr::Array<Float, 3>;
+    using UInt32 = dr::uint32_array_t<Float>;
+    using Mask = dr::mask_t<Float>;
+
+    uint32_t res = lut->res;
+    float res_f = static_cast<float>(res);
+    Color<Float, 3> c = dr::clip(color, 0.f, 1.f);
+
+    Mask g_ge_r = c.g() >= c.r();
+    Float rg = dr::select(g_ge_r, c.g(), c.r());
+    Mask b_largest = c.b() >= rg;
+
+    UInt32 i = dr::select(b_largest, 2u, dr::select(g_ge_r, 1u, 0u));
+    Float z = dr::select(b_largest, c.b(), rg),
+          x = dr::select(b_largest, c.r(), dr::select(g_ge_r, c.b(), c.g())),
+          y = dr::select(b_largest, c.g(), dr::select(g_ge_r, c.r(), c.b()));
+
+    Float scale = (res_f - 1.f) / dr::maximum(z, 1e-9f);
+    x *= scale;
+    y *= scale;
+
+    auto scale_at = [&](const UInt32& idx) {
+      return Float(dr::gather<Float32>(lut->scale, dr::detach<false>(idx)));
+    };
+    UInt32 zi =
+        dr::binary_search<UInt32>(
+            1, res - 1, [&](const UInt32& idx) { return scale_at(idx) <= z; }) -
+        1;
+    Float z0 = scale_at(zi), z1 = scale_at(zi + 1);
+
+    UInt32 xi = dr::minimum(UInt32(x), res - 2),
+           yi = dr::minimum(UInt32(y), res - 2);
+    Float wx = x - Float(xi), wy = y - Float(yi), wz = (z - z0) / (z1 - z0);
+
+    UInt32 index = ((i * res + zi) * res + yi) * res + xi, dy = res,
+           dz = res * res;
+    auto fetch = [&](const UInt32& idx) {
+      return Array3f(
+          dr::gather<dr::Array<Float32, 3>>(lut->data, dr::detach<false>(idx)));
+    };
+    auto lerp_x = [&](const UInt32& idx) {
+      return dr::lerp(fetch(idx), fetch(idx + 1), wx);
+    };
+    Array3f result =
+        dr::lerp(dr::lerp(lerp_x(index), lerp_x(index + dy), wy),
+                 dr::lerp(lerp_x(index + dz), lerp_x(index + dz + dy), wy), wz);
+
+    Float v = c.r();
+    Mask mono = (c.g() == v) && (c.b() == v);
+    Float mono_c2 = dr::select(
+        v <= 0.f, -8192.f,
+        dr::select(v >= 1.f, 8192.f, (v - .5f) * dr::rsqrt(v * (1.f - v))));
+    Array3f mono_coeff(0.f, 0.f, mono_c2);
+    if constexpr (dr::is_diff_v<Float>) {
+      mono_coeff = dr::replace_grad(mono_coeff, result);
+    }
+    return dr::select(mono, mono_coeff, result);
+  }
+}
+
 }  // namespace
 
 template <typename Float, typename Spectrum>
@@ -406,6 +512,13 @@ void MtlxEvaluator<Float, Spectrum>::compile(const Properties& props) {
 }
 
 template <typename Float, typename Spectrum>
+void MtlxEvaluator<Float, Spectrum>::load_srgb_lut() {
+  if constexpr (is_spectral_v<Spectrum> && dr::is_jit_v<Float>) {
+    m_srgb_lut = get_srgb_lut<SrgbFloat32>();
+  }
+}
+
+template <typename Float, typename Spectrum>
 void MtlxEvaluator<Float, Spectrum>::traverse(TraversalCallback* cb) {
   for (size_t i = 0; i < m_inputs.size(); ++i) {
     cb->put("in" + std::to_string(i), m_inputs[i], ParamFlags::Differentiable);
@@ -422,8 +535,7 @@ void MtlxEvaluator<Float, Spectrum>::parameters_changed() {
     bool scheduled = false;
     for (Float& p : m_opaques) {
       if (unlikely(p.size() != 1)) {
-        Throw("MtlxExprTexture: parameter must have size 1 (got %zu)!",
-              p.size());
+        Throw("MtlxEvaluator: parameter must have size 1 (got %zu)!", p.size());
       }
       scheduled |= dr::detail::schedule_force(p);
     }
@@ -541,10 +653,16 @@ Float MtlxEvaluator<Float, Spectrum>::elementwise(Op op, const Val* sp, int c) {
 template <typename Float, typename Spectrum>
 typename MtlxEvaluator<Float, Spectrum>::Val
 MtlxEvaluator<Float, Spectrum>::eval(const SurfaceInteraction3f& si,
-                                     Mask active) const {
-  absl::InlinedVector<Val, 64> mem(m_prog.num_tmps + m_prog.stack_size);
-  Val* tmps = mem.data();
-  Val* sp = tmps + m_prog.num_tmps;
+                                     Mask active, Val* out_tmps,
+                                     int stop_after_tmp) const {
+  size_t local_tmps =
+      out_tmps ? 0
+               : (stop_after_tmp >= 0 ? static_cast<size_t>(stop_after_tmp) + 1
+                                      : m_prog.tmp_channels.size());
+  absl::InlinedVector<Val, 64> mem(local_tmps + m_prog.stack_size);
+  Val* tmps = out_tmps ? out_tmps : mem.data();
+  Val* stack_base = mem.data() + local_tmps;
+  Val* sp = stack_base;
   std::optional<SurfaceInteraction3f> si_uv;
 
   auto xy = [](const Val& v) -> Vector2f { return dr::head<2>(v); };
@@ -582,6 +700,7 @@ MtlxEvaluator<Float, Spectrum>::eval(const SurfaceInteraction3f& si,
         break;
       case Op::StoreTmp:
         tmps[imm] = *--sp;
+        if (static_cast<int>(imm) == stop_after_tmp) return tmps[imm];
         break;
       case Op::SampleInput:
         *sp++ = eval_input(imm, inst.channels == 1, si);
@@ -621,10 +740,7 @@ MtlxEvaluator<Float, Spectrum>::eval(const SurfaceInteraction3f& si,
         break;
       case Op::GeomTangentWorld:
       case Op::GeomBitangentWorld: {
-        Vector3f t = safe_normalize(
-            Vector3f(si.dp_du -
-                     si.sh_frame.n * dr::dot(si.sh_frame.n, si.dp_du)),
-            si.sh_frame.s);
+        Vector3f t = geom_tangent_world(si);
         if (inst.op == Op::GeomTangentWorld) {
           *sp++ = val3(t);
         } else {
@@ -763,7 +879,7 @@ MtlxEvaluator<Float, Spectrum>::eval(const SurfaceInteraction3f& si,
     }
   }
 
-  return sp[-1];
+  return sp > stack_base ? sp[-1] : Val(0.f);
 }
 
 template <typename Float, typename Spectrum>
@@ -782,11 +898,54 @@ MtlxEvaluator<Float, Spectrum>::eval_3(const SurfaceInteraction3f& si,
   return Color3f(v.x(), v.y(), v.z());
 }
 
+// Spectral upsampling of an RGB color computed at render time. `SRGBModel`
+// upsamples colors in [0, 1], so an unbounded color `c` maps to
+// `2 * max(c) * S(c / (2 * max(c)))`, like `D65Spectrum::normalization` for
+// constant colors: the brightest channel sits at 0.5 inside the smooth
+// interior of the model, and the mapping remains homogeneous of degree 1 for
+// unbounded HDR emission and conductor IOR/extinction.
+template <typename Float, typename Spectrum>
+typename MtlxEvaluator<Float, Spectrum>::UnpolarizedSpectrum
+MtlxEvaluator<Float, Spectrum>::upsample_rgb(const Color3f& c,
+                                             const Wavelength& wavelengths,
+                                             bool unbounded) const {
+  if constexpr (!is_spectral_v<Spectrum>) {
+    (void)wavelengths;
+    (void)unbounded;
+    if constexpr (is_monochromatic_v<Spectrum>) {
+      return luminance(c);
+    } else {
+      return c;
+    }
+  } else {
+    if (!unbounded) {
+      return srgb_model_eval<UnpolarizedSpectrum>(
+          fetch_srgb<Float, Spectrum>(c, m_srgb_lut.get()), wavelengths);
+    }
+    Color3f rgb = dr::maximum(c, 0.f);
+    Float z = dr::max(rgb) * 2.f;
+    auto active = z > 0.f;
+    return srgb_model_eval<UnpolarizedSpectrum>(
+               fetch_srgb<Float, Spectrum>(
+                   dr::select(active, rgb / dr::select(active, z, 1.f),
+                              Color3f(0.5f)),
+                   m_srgb_lut.get()),
+               wavelengths) *
+           z;
+  }
+}
+
 template <typename Float, typename Spectrum>
 void MtlxEvaluator<Float, Spectrum>::traverse_cb(
     void* payload, const drjit::TraverseVisitor& cb) {
   DR_TRAVERSE_MEMBER(m_inputs)
   DR_TRAVERSE_MEMBER(m_opaques)
+  if constexpr (is_spectral_v<Spectrum> && dr::is_jit_v<Float>) {
+    if (m_srgb_lut) {
+      DR_TRAVERSE_MEMBER(m_srgb_lut->scale)
+      DR_TRAVERSE_MEMBER(m_srgb_lut->data)
+    }
+  }
   if (!cb.state) return;
   auto put_span = [&](const auto& vec, const char* name) {
     size_t n = vec.size();
@@ -803,151 +962,14 @@ void MtlxEvaluator<Float, Spectrum>::traverse_cb(
   for (const std::string& s : m_prog.attr_names) {
     put_span(s, "attr_names");
   }
+  put_span(m_prog.closures, "closures");
+  put_span(m_prog.tmp_channels, "tmp_channels");
+  DR_TRAVERSE_STATE(m_prog.opacity_slot)
   DR_TRAVERSE_STATE(m_prog.result_uniform)
   DR_TRAVERSE_STATE(m_prog.unbounded)
 }
 
 namespace {
-
-// Device-resident `data/srgb.coeff` lookup tables shared via a weak cache so
-// `MtlxExprTexture::traverse_cb()` can expose `data` and `scale` to
-// `@dr.freeze` and `FrozenRender` (`mitsuba::SRGBModel` keeps its buffers in a
-// translation-unit static).
-template <typename Float32>
-struct SrgbLut {
-  uint32_t res = 0;
-  Float32 data;
-  Float32 scale;
-};
-
-template <typename Float32>
-std::shared_ptr<SrgbLut<Float32>> get_srgb_lut() {
-  static absl::NoDestructor<absl::Mutex> mu;
-  static absl::NoDestructor<std::weak_ptr<SrgbLut<Float32>>> cached;
-  absl::MutexLock lock(*mu);
-  if (auto lut = cached->lock()) return lut;
-
-  fs::path path = file_resolver()->resolve("data/srgb.coeff");
-  std::ifstream f(path, std::ios::binary);
-  char header[4] = {};
-  uint32_t res = 0;
-  if (!f.read(header, 4) || std::memcmp(header, "SPEC", 4) != 0 ||
-      !f.read(reinterpret_cast<char*>(&res), sizeof(res)) || res < 2) {
-    Throw("Could not load sRGB-to-spectrum upsampling model ('%s')",
-          path.string());
-  }
-  std::vector<float> host_scale(res);
-  std::vector<float> host_data(size_t(res) * res * res * 9);
-  if (!f.read(reinterpret_cast<char*>(host_scale.data()),
-              host_scale.size() * sizeof(float)) ||
-      !f.read(reinterpret_cast<char*>(host_data.data()),
-              host_data.size() * sizeof(float))) {
-    Throw("Truncated sRGB-to-spectrum upsampling model ('%s')", path.string());
-  }
-
-  auto lut = std::make_shared<SrgbLut<Float32>>();
-  lut->res = res;
-  lut->scale = dr::load<Float32>(host_scale.data(), host_scale.size());
-  lut->data = dr::load<Float32>(host_data.data(), host_data.size());
-  *cached = lut;
-  return lut;
-}
-
-// Mirrors `mitsuba::SRGBModel::fetch_jit()` (`mitsuba/src/render/srgb.cpp`),
-// reading from the traversable `lut` of `MtlxExprTexture`.
-template <typename Float, typename Spectrum,
-          typename Float32 = dr::float32_array_t<dr::detached_t<Float>>>
-MI_INLINE dr::Array<Float, 3> fetch_srgb(const Color<Float, 3>& color,
-                                         const SrgbLut<Float32>* lut) {
-  if constexpr (!dr::is_jit_v<Float>) {
-    (void)lut;
-    return SRGBModel<Float, Spectrum>::fetch(color);
-  } else {
-    using Array3f = dr::Array<Float, 3>;
-    using UInt32 = dr::uint32_array_t<Float>;
-    using Mask = dr::mask_t<Float>;
-
-    uint32_t res = lut->res;
-    float res_f = static_cast<float>(res);
-    Color<Float, 3> c = dr::clip(color, 0.f, 1.f);
-
-    Mask g_ge_r = c.g() >= c.r();
-    Float rg = dr::select(g_ge_r, c.g(), c.r());
-    Mask b_largest = c.b() >= rg;
-
-    UInt32 i = dr::select(b_largest, 2u, dr::select(g_ge_r, 1u, 0u));
-    Float z = dr::select(b_largest, c.b(), rg),
-          x = dr::select(b_largest, c.r(), dr::select(g_ge_r, c.b(), c.g())),
-          y = dr::select(b_largest, c.g(), dr::select(g_ge_r, c.r(), c.b()));
-
-    Float scale = (res_f - 1.f) / dr::maximum(z, 1e-9f);
-    x *= scale;
-    y *= scale;
-
-    auto scale_at = [&](const UInt32& idx) {
-      return Float(dr::gather<Float32>(lut->scale, dr::detach<false>(idx)));
-    };
-    UInt32 zi =
-        dr::binary_search<UInt32>(
-            1, res - 1, [&](const UInt32& idx) { return scale_at(idx) <= z; }) -
-        1;
-    Float z0 = scale_at(zi), z1 = scale_at(zi + 1);
-
-    UInt32 xi = dr::minimum(UInt32(x), res - 2),
-           yi = dr::minimum(UInt32(y), res - 2);
-    Float wx = x - Float(xi), wy = y - Float(yi), wz = (z - z0) / (z1 - z0);
-
-    UInt32 index = ((i * res + zi) * res + yi) * res + xi, dy = res,
-           dz = res * res;
-    auto fetch = [&](const UInt32& idx) {
-      return Array3f(
-          dr::gather<dr::Array<Float32, 3>>(lut->data, dr::detach<false>(idx)));
-    };
-    auto lerp_x = [&](const UInt32& idx) {
-      return dr::lerp(fetch(idx), fetch(idx + 1), wx);
-    };
-    Array3f result =
-        dr::lerp(dr::lerp(lerp_x(index), lerp_x(index + dy), wy),
-                 dr::lerp(lerp_x(index + dz), lerp_x(index + dz + dy), wy), wz);
-
-    Float v = c.r();
-    Mask mono = (c.g() == v) && (c.b() == v);
-    Float mono_c2 = dr::select(
-        v <= 0.f, -8192.f,
-        dr::select(v >= 1.f, 8192.f, (v - .5f) * dr::rsqrt(v * (1.f - v))));
-    Array3f mono_coeff(0.f, 0.f, mono_c2);
-    if constexpr (dr::is_diff_v<Float>) {
-      mono_coeff = dr::replace_grad(mono_coeff, result);
-    }
-    return dr::select(mono, mono_coeff, result);
-  }
-}
-
-// Spectral upsampling of an RGB color computed at render time. `SRGBModel`
-// upsamples colors in [0, 1], so an unbounded color `c` maps to
-// `2 * max(c) * S(c / (2 * max(c)))`, like `D65Spectrum::normalization` for
-// constant colors: the brightest channel sits at 0.5 inside the smooth
-// interior of the model, and the mapping remains homogeneous of degree 1 for
-// unbounded HDR emission.
-template <typename Float, typename Spectrum, typename Float32>
-MI_INLINE unpolarized_spectrum_t<Spectrum> upsample_rgb(
-    const Color<Float, 3>& c, bool unbounded,
-    const wavelength_t<Spectrum>& wavelengths, const SrgbLut<Float32>* lut) {
-  if (!unbounded) {
-    return srgb_model_eval<unpolarized_spectrum_t<Spectrum>>(
-        fetch_srgb<Float, Spectrum>(c, lut), wavelengths);
-  }
-  Color<Float, 3> rgb = dr::maximum(c, 0.f);
-  Float z = dr::max(rgb) * 2.f;
-  auto active = z > 0.f;
-  return srgb_model_eval<unpolarized_spectrum_t<Spectrum>>(
-             fetch_srgb<Float, Spectrum>(
-                 dr::select(active, rgb / dr::select(active, z, 1.f),
-                            Color<Float, 3>(0.5f)),
-                 lut),
-             wavelengths) *
-         z;
-}
 
 /**!
 
@@ -983,15 +1005,10 @@ template <typename Float, typename Spectrum>
 class MtlxExprTexture final : public Texture<Float, Spectrum> {
  public:
   MI_IMPORT_TYPES(Texture)
-  using SrgbFloat32 = dr::float32_array_t<dr::detached_t<Float>>;
 
   explicit MtlxExprTexture(const Properties& props) : Texture(props) {
     m_eval.compile(props);
-    if constexpr (is_spectral_v<Spectrum> && dr::is_jit_v<Float>) {
-      if (!m_eval.program().result_uniform) {
-        m_srgb_lut = get_srgb_lut<SrgbFloat32>();
-      }
-    }
+    if (!m_eval.program().result_uniform) m_eval.load_srgb_lut();
   }
 
   void traverse(TraversalCallback* cb) override { m_eval.traverse(cb); }
@@ -1013,8 +1030,7 @@ class MtlxExprTexture final : public Texture<Float, Spectrum> {
         return UnpolarizedSpectrum(prog.unbounded ? dr::maximum(c.x(), 0.f)
                                                   : dr::clip(c.x(), 0.f, 1.f));
       }
-      return upsample_rgb<Float, Spectrum>(c, prog.unbounded, si.wavelengths,
-                                           m_srgb_lut.get());
+      return m_eval.upsample_rgb(c, si.wavelengths, prog.unbounded);
     }
   }
 
@@ -1065,17 +1081,10 @@ class MtlxExprTexture final : public Texture<Float, Spectrum> {
     }
     Texture::traverse_cb(payload, cb);
     m_eval.traverse_cb(payload, cb);
-    if constexpr (is_spectral_v<Spectrum> && dr::is_jit_v<Float>) {
-      if (m_srgb_lut) {
-        DR_TRAVERSE_MEMBER(m_srgb_lut->scale)
-        DR_TRAVERSE_MEMBER(m_srgb_lut->data)
-      }
-    }
   }
 
  private:
   MtlxEvaluator<Float, Spectrum> m_eval;
-  std::shared_ptr<SrgbLut<SrgbFloat32>> m_srgb_lut;
 };
 
 }  // namespace

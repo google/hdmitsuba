@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -179,6 +180,82 @@ constexpr uint8_t result_channels(Op op, uint16_t imm = 0) {
   return 3;
 }
 
+inline constexpr int kMaxClosureArgs = 7;
+
+enum ScatterMode : int {
+  kScatterR = 0,
+  kScatterT = 1,
+  kScatterRT = 2,
+  kScatterModeMask = 3,
+  kScatterThinWalled = 4,
+  kScatterTwoSided = 8
+};
+
+enum class ClosureOp : int32_t {
+  Null,
+  OrenNayarDiffuse,
+  Translucent,
+  Dielectric,
+  Conductor,
+  Layer,
+  Mix,
+  Add,
+  Multiply
+};
+
+// Layout of `ClosureNode::args` for leaf closures. Unless marked as a literal,
+// each entry is a VM temporary slot (-1 if absent).
+namespace leaf_arg {
+inline constexpr int kWeight = 0;
+// Primary color: diffuse/translucent/subsurface `color`, dielectric `tint`,
+// or conductor `ior`.
+inline constexpr int kColor = 1;
+inline constexpr int kRoughness = 2;
+// Literal mode: Oren-Nayar `energy_compensation` (0 or 1), or dielectric
+// `ScatterMode` flags.
+inline constexpr int kMode = 3;
+// Dielectric scalar `ior` or conductor RGB `extinction`.
+inline constexpr int kIor = 4, kExtinction = 4;
+inline constexpr int kNormal = 5, kTangent = 6;
+}  // namespace leaf_arg
+
+// Layout of `ClosureNode::args` for combinators: Layer (top, base),
+// Mix (fg, bg), Add (in1, in2) and Multiply (in1).
+namespace combinator_arg {
+inline constexpr int kFirst = 0, kSecond = 1;
+// Slot of the Mix weight or Multiply factor.
+inline constexpr int kWeight = 2;
+}  // namespace combinator_arg
+static_assert(leaf_arg::kTangent + 1 == kMaxClosureArgs);
+
+struct ClosureNode {
+  ClosureOp op = ClosureOp::Null;
+  int args[kMaxClosureArgs] = {-1, -1, -1, -1, -1, -1, -1};
+
+  explicit ClosureNode(ClosureOp op = ClosureOp::Null) : op(op) {}
+};
+static_assert(std::has_unique_object_representations_v<ClosureNode>);
+
+template <typename Vec>
+Vec safe_normalize(const Vec& v, const Vec& fallback = Vec(0.0f),
+                   dr::scalar_t<Vec> min_len2 = 0.0f) {
+  auto len2 = dr::squared_norm(v);
+  auto valid = len2 > min_len2;
+  return dr::select(valid, v * dr::rsqrt(dr::select(valid, len2, 1.0f)),
+                    fallback);
+}
+
+template <typename SurfaceInteraction>
+auto geom_tangent_world(const SurfaceInteraction& si) {
+  using Vec3 = std::decay_t<decltype(si.sh_frame.s)>;
+  return safe_normalize(
+      Vec3(si.dp_du - si.sh_frame.n * dr::dot(si.sh_frame.n, si.dp_du)),
+      si.sh_frame.s, dr::scalar_t<Vec3>(1e-20f));
+}
+
+template <typename Float32>
+struct SrgbLut;
+
 // Variant-independent compiled MaterialX program passed via `Properties`.
 //
 // A program has at most `kMaxImm` constants, opaque values and temporaries
@@ -188,10 +265,14 @@ struct MtlxProgram {
   std::vector<double> consts = {0.0, 1.0};
   std::vector<double> opaques;
   std::vector<std::string> attr_names;
+  std::vector<ClosureNode> closures;
+  std::vector<uint8_t> tmp_channels;
+  int opacity_slot = -1;
   bool result_uniform = false;
   bool unbounded = false;
-  uint32_t num_tmps = 0;
   uint32_t stack_size = 1;
+
+  bool is_tmp_uniform(int k) const { return tmp_channels[k] == 1; }
 };
 
 // Evaluates an `MtlxProgram` for the variant `Float`/`Spectrum`, given its
@@ -205,6 +286,7 @@ class MtlxEvaluator {
   using Val = Vector<Float, 4>;
 
   void compile(const Properties& props);
+  void load_srgb_lut();
 
   const MtlxProgram& program() const { return m_prog; }
 
@@ -214,23 +296,33 @@ class MtlxEvaluator {
   void parameters_changed();
 
   // Returns the indented code size and texture inputs, one per line, for
-  // `MtlxExprTexture::to_string()`.
+  // `MtlxExprTexture::to_string()` and `MtlxBsdf::to_string()`.
   std::string to_string() const;
 
   // Returns true if the program reads geometric intrinsics or samples a
   // spatially varying (or re-parameterized) input.
   bool is_spatially_varying() const;
 
-  // Evaluates the program and returns its result.
-  Val eval(const SurfaceInteraction3f& si, Mask active) const;
+  // Evaluates the program and returns its result. If `out_tmps` is given, it
+  // receives the evaluated temporaries; if `stop_after_tmp >= 0`, evaluation
+  // returns right after storing temporary `stop_after_tmp`.
+  Val eval(const SurfaceInteraction3f& si, Mask active, Val* out_tmps = nullptr,
+           int stop_after_tmp = -1) const;
 
   // Returns the luminance of 3-channel results, like Mitsuba's `bitmap`.
   Float eval_1(const SurfaceInteraction3f& si, Mask active) const;
   Color3f eval_3(const SurfaceInteraction3f& si, Mask active) const;
 
+  // Upsamples an RGB color to a spectrum using the traversable sRGB LUT.
+  UnpolarizedSpectrum upsample_rgb(const Color3f& c,
+                                   const Wavelength& wavelengths,
+                                   bool unbounded) const;
+
   void traverse_cb(void* payload, const drjit::TraverseVisitor& cb);
 
  private:
+  using SrgbFloat32 = dr::float32_array_t<dr::detached_t<Float>>;
+
   static Float elementwise(Op op, const Val* sp, int c);
 
   MtlxProgram m_prog;
@@ -238,14 +330,16 @@ class MtlxEvaluator {
   // Opaque scalars (`dr::opaque`), passed as kernel inputs rather than
   // literals.
   std::vector<Float> m_opaques;
+  std::shared_ptr<SrgbLut<SrgbFloat32>> m_srgb_lut;
 };
 
-// Registers the `materialx_expr` texture with Mitsuba's plugin manager.
-// Idempotent and thread-safe. Must be called before creating a
-// `materialx_expr` texture; deliberately not done in a static initializer to
-// avoid depending on the initialization order of Mitsuba's `PluginManager`
-// singleton.
+// Register the `materialx_expr` texture and `materialx_bsdf` BSDF with
+// Mitsuba's plugin manager. Idempotent and thread-safe. Must be called before
+// creating the corresponding plugin; deliberately not done in a static
+// initializer to avoid depending on the initialization order of Mitsuba's
+// `PluginManager` singleton.
 void RegisterMaterialXExprTexture();
+void RegisterMaterialXBsdf();
 
 }  // namespace mtlx
 NAMESPACE_END(mitsuba)

@@ -42,7 +42,6 @@
 #include <absl/synchronization/mutex.h>
 #include <mitsuba/core/config.h>
 #include <mitsuba/core/logger.h>
-#include <mitsuba/core/plugin.h>
 #include <mitsuba/core/properties.h>
 #include <mitsuba/core/spectrum.h>
 #include <pxr/base/gf/matrix3d.h>
@@ -396,6 +395,46 @@ class DocumentBuilder {
   absl::flat_hash_set<SdfPath, SdfPath::Hash> visiting_;
 };
 
+// Flattens compound subgraphs in `doc`, preserving `thin_walled` /
+// `geometry_thin_walled` on flattened surface shaders (which MaterialX's
+// `flattenSubgraphs()` otherwise drops).
+void FlattenMaterialXDocument(const mx::DocumentPtr& doc) {
+  auto is_true = [](mx::NodePtr node, std::string name) {
+    while (mx::NodePtr up = node->getConnectedNode(name)) {
+      const std::string& cat = up->getCategory();
+      if (cat != "dot" && cat != "constant") return false;
+      node = std::move(up);
+      name = cat == "constant" ? "value" : "in";
+    }
+    mx::InputPtr in = node->getInput(name);
+    if (!in) {
+      if (mx::NodeDefPtr nd = node->getNodeDef()) in = nd->getActiveInput(name);
+    }
+    return in &&
+           (in->getValueString() == "true" || in->getValueString() == "1");
+  };
+  std::vector<mx::OutputPtr> tw_outputs;
+  for (const mx::NodePtr& n : doc->getNodes()) {
+    if (n->getType() != mx::SURFACE_SHADER_TYPE_STRING ||
+        n->getCategory() == "surface") {
+      continue;
+    }
+    if (is_true(n, "thin_walled") || is_true(n, "geometry_thin_walled")) {
+      mx::OutputPtr out =
+          doc->addOutput(doc->createValidChildName("__mtlx_tw"), n->getType());
+      out->setConnectedNode(n);
+      tw_outputs.push_back(out);
+    }
+  }
+  doc->flattenSubgraphs();
+  for (const mx::OutputPtr& out : tw_outputs) {
+    mx::NodePtr s = out->getConnectedNode();
+    while (s && s->getCategory() == "dot") s = s->getConnectedNode("in");
+    if (s) s->setInputValue("thin_walled", true);
+    doc->removeOutput(out->getName());
+  }
+}
+
 // Upgrades `doc` while preserving constant `which >= 5` on 10-input 1.39
 // `switch` nodes (`in6`..`in10` authored) when `mtlx:version` was not set.
 void UpgradeMaterialXDocument(const mx::DocumentPtr& doc,
@@ -459,7 +498,7 @@ std::shared_ptr<const PreparedMaterialX> PrepareMaterialXNetwork(
 
     absl::ReaderMutexLock rlock(mtlx_mu);
     doc->setDataLibrary(GetMaterialXStdLibraries());
-    doc->flattenSubgraphs();
+    FlattenMaterialXDocument(doc);
     mx::OutputPtr out = doc->getOutput("out");
     mx::NodePtr shader_node = out ? out->getConnectedNode() : nullptr;
     if (!shader_node) return prepared;
@@ -506,17 +545,7 @@ TranslatedMaterial TranslateMaterialXNetwork(
       res.shape_emitter_props = std::move(emitter_props);
     }
 
-    mitsuba::Properties bsdf_props("diffuse");
-    bsdf_props.set("reflectance", 0.0f);
-    res.bsdf = mitsuba::PluginManager::instance()->create_object(
-        bsdf_props, variant, mitsuba::ObjectType::BSDF);
-    if (compiled.opacity_texture) {
-      mitsuba::Properties mask_props("mask");
-      mask_props.set("opacity", compiled.opacity_texture);
-      mask_props.set("nested_bsdf", res.bsdf);
-      res.bsdf = mitsuba::PluginManager::instance()->create_object(
-          mask_props, variant, mitsuba::ObjectType::BSDF);
-    }
+    res.bsdf = std::move(compiled.bsdf);
     return res;
   } catch (const std::exception& e) {
     TF_WARN("Failed to translate MaterialX network '%s': %s", id.GetText(),

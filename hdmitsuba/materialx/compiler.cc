@@ -55,6 +55,8 @@ using mitsuba::ObjectType;
 using mitsuba::PluginManager;
 using mitsuba::Properties;
 using mitsuba::ref;
+using mitsuba::mtlx::ClosureNode;
+using mitsuba::mtlx::ClosureOp;
 using mitsuba::mtlx::elementwise_arity;
 using mitsuba::mtlx::Inst;
 using mitsuba::mtlx::kFractalDynamicOctaves;
@@ -64,10 +66,19 @@ using mitsuba::mtlx::kMaxImm;
 using mitsuba::mtlx::kMtlxFloatEps;
 using mitsuba::mtlx::kNoise3D;
 using mitsuba::mtlx::kNoiseVec3;
+using mitsuba::mtlx::kScatterModeMask;
+using mitsuba::mtlx::kScatterR;
+using mitsuba::mtlx::kScatterRT;
+using mitsuba::mtlx::kScatterT;
+using mitsuba::mtlx::kScatterThinWalled;
+using mitsuba::mtlx::kScatterTwoSided;
 using mitsuba::mtlx::MtlxProgram;
 using mitsuba::mtlx::Op;
+using mitsuba::mtlx::RegisterMaterialXBsdf;
 using mitsuba::mtlx::RegisterMaterialXExprTexture;
 using mitsuba::mtlx::result_channels;
+namespace leaf_arg = mitsuba::mtlx::leaf_arg;
+namespace combinator_arg = mitsuba::mtlx::combinator_arg;
 
 struct Expr;
 
@@ -298,13 +309,16 @@ class MtlxExprCompiler {
   // `add`, `mix`) into a radiance `Expr`, or `Expr::zero()` if none.
   Expr CompileEdf(const mx::NodePtr& edf_node);
 
-  // Compiles surface cutout `opacity` (`[0, 1]`) for `surface`,
-  // `surface_unlit`, and `mix` (`surfaceshader`) nodes, or `Expr::one()`.
-  Expr CompileOpacity(const mx::NodePtr& shader_node);
+  // Compiles a MaterialX surface shader or BSDF closure DAG into
+  // `prog_.closures` and `prog_.opacity_slot`.
+  void CompileBsdf(const mx::NodePtr& shader_node);
 
   ref<Object> CreateExprTexture(const Expr& expr, bool unbounded,
                                 std::string_view variant,
                                 MeshAttributeRequests& mesh_attributes);
+
+  ref<Object> CreateBsdf(std::string_view variant,
+                         MeshAttributeRequests& mesh_attributes);
 
  private:
   // A 3x3 or 4x4 matrix as the expressions of its `n` rows.
@@ -333,11 +347,21 @@ class MtlxExprCompiler {
   // tuples are baked into the program to enable constant simplifications, while
   // other values become opaque scalars exposed via traversal.
   Expr EmitTuple(std::initializer_list<float> vals);
+  int EmitTmp(const Expr& expr);
   Expr EmitTmpExpr(const Expr& expr);
   Expr LoadTmp(int slot) const {
     return Expr({Op::LoadTmp, 0, static_cast<uint16_t>(slot)},
-                tmp_channels_[slot]);
+                prog_.tmp_channels[slot]);
   }
+  Expr CompileOpacity(const mx::NodePtr& shader_node);
+  bool HasThinWalledSurface(const mx::NodePtr& shader_node);
+  int CompileBsdfClosure(const mx::NodePtr& node, bool thin_walled = false);
+  void MarkTwoSidedDielectrics(int root);
+  int EmitClosure(ClosureOp op,
+                  std::initializer_list<std::pair<int, int>> args);
+  ref<Object> CreatePlugin(std::string_view name, ObjectType type,
+                           std::string_view variant,
+                           MeshAttributeRequests& mesh_attributes);
 
   TfToken ResolveSourceColorSpace(std::string_view color_space);
   GfVec3f ToLinearRec709(GfVec3f rgb_val, std::string_view color_space);
@@ -370,11 +394,11 @@ class MtlxExprCompiler {
   const DiscoverTextureFn* discover_texture_ = nullptr;
   MtlxProgram prog_;
   std::vector<std::pair<std::string, int>> attr_requests_;
-  std::vector<uint8_t> tmp_channels_;
   absl::flat_hash_map<std::pair<const mx::Node*, std::string>, Expr>
       node_output_expr_;
   absl::flat_hash_map<const mx::Node*, Expr> edf_expr_;
   absl::flat_hash_map<const mx::Node*, Expr> opacity_expr_;
+  absl::flat_hash_map<const mx::Node*, int> bsdf_closure_;
   absl::flat_hash_map<std::pair<const mx::Node*, std::string>, Expr>
       value_input_expr_;
   absl::flat_hash_map<const mx::Node*, MatExpr> node_matrix_expr_;
@@ -506,22 +530,28 @@ Expr MtlxExprCompiler::EmitTuple(std::initializer_list<float> vals) {
   return n == 3 ? c3 : vec4(c3, e[3]);
 }
 
-Expr MtlxExprCompiler::EmitTmpExpr(const Expr& expr) {
-  if (expr.code.size() == 1 && expr.code[0].op <= Op::LoadTmp) return expr;
+int MtlxExprCompiler::EmitTmp(const Expr& expr) {
+  if (expr.code.size() == 1 && expr.code[0].op == Op::LoadTmp) {
+    return expr.code[0].imm;
+  }
+  size_t next_slot = prog_.tmp_channels.size();
   auto [it, inserted] =
-      expr_to_slot_.try_emplace(expr, static_cast<int>(prog_.num_tmps));
+      expr_to_slot_.try_emplace(expr, static_cast<int>(next_slot));
   if (inserted) {
-    if (prog_.num_tmps >= kMaxImm) {
+    if (next_slot >= kMaxImm) {
       throw std::runtime_error("materialx_expr: too many temporaries");
     }
     prog_.code.insert(prog_.code.end(), expr.code.begin(), expr.code.end());
-    prog_.code.push_back(
-        {Op::StoreTmp, 0, static_cast<uint16_t>(prog_.num_tmps)});
+    prog_.code.push_back({Op::StoreTmp, 0, static_cast<uint16_t>(next_slot)});
     prog_.stack_size = std::max(prog_.stack_size, expr.max_depth);
-    tmp_channels_.push_back(expr.channels);
-    ++prog_.num_tmps;
+    prog_.tmp_channels.push_back(expr.channels);
   }
-  return LoadTmp(it->second);
+  return it->second;
+}
+
+Expr MtlxExprCompiler::EmitTmpExpr(const Expr& expr) {
+  if (expr.code.size() == 1 && expr.code[0].op <= Op::LoadTmp) return expr;
+  return LoadTmp(EmitTmp(expr));
 }
 
 Expr MtlxExprCompiler::CompileValueElement(const mx::ValueElementPtr& elem,
@@ -615,7 +645,7 @@ Expr MtlxExprCompiler::CompileIfCondition(const mx::NodePtr& node,
 
 MtlxExprCompiler::MatExpr MtlxExprCompiler::MatrixOp(Op op, const MatExpr& a,
                                                      const MatExpr* b) {
-  if (prog_.num_tmps + a.n > kMaxImm) {
+  if (prog_.tmp_channels.size() + a.n > kMaxImm) {
     throw std::runtime_error("materialx_expr: too many temporaries");
   }
   uint32_t depth = 0;
@@ -630,10 +660,10 @@ MtlxExprCompiler::MatExpr MtlxExprCompiler::MatrixOp(Op op, const MatExpr& a,
   };
   emit_rows(a);
   if (b) emit_rows(*b);
-  uint16_t first = static_cast<uint16_t>(prog_.num_tmps);
+  uint16_t first = static_cast<uint16_t>(prog_.tmp_channels.size());
   prog_.code.push_back({op, static_cast<uint8_t>(a.n), first});
-  tmp_channels_.insert(tmp_channels_.end(), a.n, static_cast<uint8_t>(a.n));
-  prog_.num_tmps += a.n;
+  prog_.tmp_channels.insert(prog_.tmp_channels.end(), a.n,
+                            static_cast<uint8_t>(a.n));
   MatExpr out;
   out.n = a.n;
   for (int i = 0; i < a.n; ++i) out.rows[i] = LoadTmp(first + i);
@@ -1426,7 +1456,7 @@ Expr MtlxExprCompiler::CompileEdf(const mx::NodePtr& edf_node) {
     }
   } else if (cat == "mix") {
     res = CompileMix(
-        CompileInputExpr(node, "mix"),
+        saturate(CompileInputExpr(node, "mix")),
         [&] { return CompileEdf(node->getConnectedNode("fg")); },
         [&] { return CompileEdf(node->getConnectedNode("bg")); });
   }
@@ -1448,31 +1478,270 @@ Expr MtlxExprCompiler::CompileOpacity(const mx::NodePtr& shader_node) {
   } else if (cat == "mix" &&
              node->getType() == mx::SURFACE_SHADER_TYPE_STRING) {
     res = CompileMix(
-        CompileInputExpr(node, "mix"),
+        saturate(CompileInputExpr(node, "mix")),
         [&] { return CompileOpacity(node->getConnectedNode("fg")); },
         [&] { return CompileOpacity(node->getConnectedNode("bg")); });
   }
+  if (!res.uniform()) res = call(Op::Dot, res, Const(1.0 / 3.0));
   if (res.code.size() > 1) res = EmitTmpExpr(res);
   opacity_expr_[node.get()] = res;
   return res;
+}
+
+bool MtlxExprCompiler::HasThinWalledSurface(const mx::NodePtr& shader_node) {
+  mx::NodePtr node = UnwrapShaderNode(shader_node);
+  if (!node || node->getType() != mx::SURFACE_SHADER_TYPE_STRING ||
+      CompileOpacity(node).is_zero()) {
+    return false;
+  }
+  if (!CompileInputExpr(node, "thin_walled").is_zero()) return true;
+  if (NodeCategory(node) != "mix") return false;
+  Expr mix_expr = saturate(CompileInputExpr(node, "mix"));
+  return (!mix_expr.is_zero() &&
+          HasThinWalledSurface(node->getConnectedNode("fg"))) ||
+         (!mix_expr.is_one() &&
+          HasThinWalledSurface(node->getConnectedNode("bg")));
+}
+
+void MtlxExprCompiler::MarkTwoSidedDielectrics(int root) {
+  if (root < 0) return;
+  std::vector<int> stack = {root};
+  std::vector<uint8_t> visited(prog_.closures.size(), 0);
+  std::vector<int> dielectrics;
+  while (!stack.empty()) {
+    int idx = stack.back();
+    stack.pop_back();
+    if (visited[idx]) continue;
+    visited[idx] = 1;
+    const ClosureNode& c = prog_.closures[idx];
+    if (c.op == ClosureOp::Dielectric) {
+      int mode = c.args[leaf_arg::kMode];
+      if ((mode & kScatterModeMask) != kScatterR &&
+          !(mode & kScatterThinWalled)) {
+        return;
+      }
+      dielectrics.push_back(idx);
+    } else if (c.op >= ClosureOp::Layer) {
+      stack.push_back(c.args[combinator_arg::kFirst]);
+      if (c.op != ClosureOp::Multiply) {
+        stack.push_back(c.args[combinator_arg::kSecond]);
+      }
+    }
+  }
+  for (int idx : dielectrics) {
+    prog_.closures[idx].args[leaf_arg::kMode] |= kScatterTwoSided;
+  }
+}
+
+int MtlxExprCompiler::EmitClosure(
+    ClosureOp op, std::initializer_list<std::pair<int, int>> args) {
+  ClosureNode& c = prog_.closures.emplace_back(op);
+  for (auto [k, v] : args) c.args[k] = v;
+  return static_cast<int>(prog_.closures.size()) - 1;
+}
+
+int MtlxExprCompiler::CompileBsdfClosure(const mx::NodePtr& raw_node,
+                                         bool thin_walled) {
+  mx::NodePtr node = UnwrapShaderNode(raw_node);
+  if (!node) return -1;
+  if (auto it = bsdf_closure_.find(node.get()); it != bsdf_closure_.end()) {
+    return it->second;
+  }
+
+  std::string cat = NodeCategory(node);
+  int idx = -1;
+
+  auto slot = [&](const std::string& name, const Expr& def = Expr::zero()) {
+    return EmitTmp(CompileInputExpr(node, name, def));
+  };
+  auto frame_slot = [&](const std::string& name) {
+    Expr base = name == "normal" ? Expr::n_world() : Expr::t_world();
+    Expr e = CompileInputExpr(node, name, base);
+    return e == base ? -1 : EmitTmp(e);
+  };
+
+  // Skip leaf BSDF lobes whose weight is statically zero (e.g. disabled coat,
+  // sheen, subsurface, or transmission lobes in `standard_surface`).
+  Expr w_expr = Expr::one();
+  if (node->getType() == mx::BSDF_TYPE_STRING &&
+      InputType(node, "weight") == "float") {
+    w_expr = CompileInputExpr(node, "weight", Expr::one());
+    if (w_expr.is_zero()) {
+      bsdf_closure_[node.get()] = -1;
+      return -1;
+    }
+  }
+
+  if (cat == "oren_nayar_diffuse_bsdf" || cat == "subsurface_bsdf" ||
+      cat == "translucent_bsdf") {
+    int mode = cat == "oren_nayar_diffuse_bsdf" &&
+                       !CompileInputExpr(node, "energy_compensation").is_zero()
+                   ? 1
+                   : 0;
+    idx = EmitClosure(cat == "translucent_bsdf" ? ClosureOp::Translucent
+                                                : ClosureOp::OrenNayarDiffuse,
+                      {{leaf_arg::kWeight, EmitTmp(w_expr)},
+                       {leaf_arg::kColor, slot("color", Expr::one())},
+                       {leaf_arg::kRoughness,
+                        cat == "translucent_bsdf" ? -1 : slot("roughness")},
+                       {leaf_arg::kMode, mode},
+                       {leaf_arg::kNormal, frame_slot("normal")}});
+  } else if (cat == "dielectric_bsdf" || cat == "conductor_bsdf") {
+    if (!CompileInputExpr(node, "thinfilm_thickness").is_zero()) {
+      WarnUnsupported("Unsupported MaterialX '" + cat +
+                      "' thinfilm_thickness; ignoring thin film.");
+    }
+    if (!CompileInputExpr(node, "retroreflective").is_zero()) {
+      WarnUnsupported("Unsupported MaterialX '" + cat +
+                      "' retroreflective; using standard reflection.");
+    }
+    bool is_dielectric = cat == "dielectric_bsdf";
+    int mode = 0;
+    if (is_dielectric) {
+      std::string sm = GetNodeInputString(node, "scatter_mode");
+      mode = (sm == "T"    ? kScatterT
+              : sm == "RT" ? kScatterRT
+                           : kScatterR) |
+             (thin_walled ? kScatterThinWalled | kScatterTwoSided : 0);
+    }
+    idx = EmitClosure(
+        is_dielectric ? ClosureOp::Dielectric : ClosureOp::Conductor,
+        {{leaf_arg::kWeight, EmitTmp(w_expr)},
+         {leaf_arg::kColor, slot(is_dielectric ? "tint" : "ior", Expr::one())},
+         {leaf_arg::kRoughness, slot("roughness")},
+         {leaf_arg::kMode, mode},
+         {is_dielectric ? leaf_arg::kIor : leaf_arg::kExtinction,
+          is_dielectric ? slot("ior", Expr::one()) : slot("extinction")},
+         {leaf_arg::kNormal, frame_slot("normal")},
+         {leaf_arg::kTangent, frame_slot("tangent")}});
+  } else if (node->getType() == mx::VDF_TYPE_STRING) {
+    if ((cat == "anisotropic_vdf" || cat == "absorption_vdf") &&
+        !CompileInputExpr(node, "absorption").is_zero()) {
+      WarnUnsupported("Unsupported MaterialX VDF closure '" + cat +
+                      "'; ignoring volume absorption.");
+    }
+  } else if (cat == "layer" || cat == "add") {
+    bool is_layer = cat == "layer";
+    int c0 = CompileBsdfClosure(
+        node->getConnectedNode(is_layer ? "top" : "in1"), thin_walled);
+    int c1 = CompileBsdfClosure(
+        node->getConnectedNode(is_layer ? "base" : "in2"), thin_walled);
+    if (c0 < 0) {
+      idx = c1;
+    } else if (c1 < 0) {
+      idx = c0;
+    } else {
+      idx = EmitClosure(
+          is_layer ? ClosureOp::Layer : ClosureOp::Add,
+          {{combinator_arg::kFirst, c0}, {combinator_arg::kSecond, c1}});
+    }
+  } else if (cat == "mix") {
+    Expr mix_expr = saturate(CompileInputExpr(node, "mix"));
+    if (mix_expr.is_zero()) {
+      idx = CompileBsdfClosure(node->getConnectedNode("bg"), thin_walled);
+    } else if (mix_expr.is_one()) {
+      idx = CompileBsdfClosure(node->getConnectedNode("fg"), thin_walled);
+    } else {
+      int fg_idx =
+          CompileBsdfClosure(node->getConnectedNode("fg"), thin_walled);
+      int bg_idx =
+          CompileBsdfClosure(node->getConnectedNode("bg"), thin_walled);
+      if (fg_idx == bg_idx) {
+        idx = fg_idx;
+      } else if (fg_idx < 0 || bg_idx < 0) {
+        idx = EmitClosure(
+            ClosureOp::Multiply,
+            {{combinator_arg::kFirst, fg_idx < 0 ? bg_idx : fg_idx},
+             {combinator_arg::kWeight,
+              EmitTmp(fg_idx < 0 ? Expr::one() - mix_expr : mix_expr)}});
+      } else {
+        idx = EmitClosure(ClosureOp::Mix,
+                          {{combinator_arg::kFirst, fg_idx},
+                           {combinator_arg::kSecond, bg_idx},
+                           {combinator_arg::kWeight, EmitTmp(mix_expr)}});
+      }
+    }
+  } else if (cat == "multiply") {
+    Expr factor = saturate(CompileInputExpr(node, "in2", Expr::one()));
+    if (!factor.is_zero()) {
+      int c1_idx =
+          CompileBsdfClosure(node->getConnectedNode("in1"), thin_walled);
+      idx = (c1_idx < 0 || factor.is_one())
+                ? c1_idx
+                : EmitClosure(ClosureOp::Multiply,
+                              {{combinator_arg::kFirst, c1_idx},
+                               {combinator_arg::kWeight, EmitTmp(factor)}});
+    }
+  } else if (cat == "surface") {
+    Expr op = CompileOpacity(node);
+    if (!op.is_zero()) {
+      // Scope BSDF deduplication to this surface so `MarkTwoSidedDielectrics`
+      // cannot mutate a closure shared with another mixed surface.
+      absl::flat_hash_map<const mx::Node*, int> saved;
+      std::swap(bsdf_closure_, saved);
+      idx = CompileBsdfClosure(node->getConnectedNode("bsdf"), thin_walled);
+      MarkTwoSidedDielectrics(idx);
+      std::swap(bsdf_closure_, saved);
+      if (idx >= 0 && !op.is_one()) {
+        idx = EmitClosure(ClosureOp::Multiply,
+                          {{combinator_arg::kFirst, idx},
+                           {combinator_arg::kWeight, EmitTmp(op)}});
+      }
+    }
+  } else if (cat == "surface_unlit") {
+    // Unlit surfaces emit radiance only and have a null BSDF.
+  } else {
+    WarnUnsupported("Unsupported MaterialX closure '" + cat +
+                    "'; using a null BSDF.");
+  }
+
+  bsdf_closure_[node.get()] = idx;
+  return idx;
+}
+
+void MtlxExprCompiler::CompileBsdf(const mx::NodePtr& shader_node) {
+  mx::NodePtr node = UnwrapShaderNode(shader_node);
+  Expr op_expr = CompileOpacity(node);
+  if (!op_expr.is_one()) prog_.opacity_slot = EmitTmp(op_expr);
+  int root = op_expr.is_zero()
+                 ? -1
+                 : CompileBsdfClosure(node, HasThinWalledSurface(node));
+  if (root < 0) {
+    prog_.closures = {ClosureNode(ClosureOp::Null)};
+  } else if (node->getType() != mx::SURFACE_SHADER_TYPE_STRING) {
+    MarkTwoSidedDielectrics(root);
+  }
+}
+
+ref<Object> MtlxExprCompiler::CreatePlugin(
+    std::string_view name, ObjectType type, std::string_view variant,
+    MeshAttributeRequests& mesh_attributes) {
+  Properties props(name);
+  for (size_t i = 0; i < inputs_.size(); ++i) {
+    props.set("in" + std::to_string(i), std::move(inputs_[i]));
+  }
+  mesh_attributes.insert(attr_requests_.begin(), attr_requests_.end());
+  props.set_any("program", std::move(prog_));
+  return PluginManager::instance()->create_object(props, variant, type);
 }
 
 ref<Object> MtlxExprCompiler::CreateExprTexture(
     const Expr& expr, bool unbounded, std::string_view variant,
     MeshAttributeRequests& mesh_attributes) {
   RegisterMaterialXExprTexture();
-  Properties props("materialx_expr");
-  for (size_t i = 0; i < inputs_.size(); ++i) {
-    props.set("in" + std::to_string(i), std::move(inputs_[i]));
-  }
   prog_.code.insert(prog_.code.end(), expr.code.begin(), expr.code.end());
-  mesh_attributes.insert(attr_requests_.begin(), attr_requests_.end());
   prog_.stack_size = std::max(prog_.stack_size, expr.max_depth);
   prog_.result_uniform = expr.uniform();
   prog_.unbounded = unbounded;
-  props.set_any("program", std::move(prog_));
-  return PluginManager::instance()->create_object(props, variant,
-                                                  ObjectType::Texture);
+  return CreatePlugin("materialx_expr", ObjectType::Texture, variant,
+                      mesh_attributes);
+}
+
+ref<Object> MtlxExprCompiler::CreateBsdf(
+    std::string_view variant, MeshAttributeRequests& mesh_attributes) {
+  RegisterMaterialXBsdf();
+  return CreatePlugin("materialx_bsdf", ObjectType::BSDF, variant,
+                      mesh_attributes);
 }
 
 }  // namespace
@@ -1485,18 +1754,15 @@ CompiledSurfaceShader CompileSurfaceShader(
   CompiledSurfaceShader out;
   {
     MtlxExprCompiler compiler(lookup_texture, warned);
+    compiler.CompileBsdf(shader_node);
+    out.bsdf = compiler.CreateBsdf(variant, out.mesh_attributes);
+  }
+  {
+    MtlxExprCompiler compiler(lookup_texture, warned);
     Expr radiance = compiler.CompileEdf(shader_node);
     if (!radiance.is_zero()) {
       out.radiance_texture = compiler.CreateExprTexture(
           radiance, /*unbounded=*/true, variant, out.mesh_attributes);
-    }
-  }
-  {
-    MtlxExprCompiler compiler(lookup_texture, warned);
-    Expr opacity = compiler.CompileOpacity(shader_node);
-    if (!opacity.is_one()) {
-      out.opacity_texture = compiler.CreateExprTexture(
-          opacity, /*unbounded=*/false, variant, out.mesh_attributes);
     }
   }
   return out;
@@ -1506,8 +1772,8 @@ void DiscoverSurfaceShaderTextures(
     const mx::NodePtr& shader_node,
     const std::function<void(const TextureKey&)>& callback) {
   MtlxExprCompiler compiler(callback);
+  compiler.CompileBsdf(shader_node);
   compiler.CompileEdf(shader_node);
-  compiler.CompileOpacity(shader_node);
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE
