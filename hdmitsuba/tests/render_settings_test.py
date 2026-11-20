@@ -476,6 +476,36 @@ def test_denoise_render_settings(variant: str):
       unguided_results["normal"], noisy_results["normal"], atol=1e-5
   )
 
+  # User-configured `aov` integrator prepends its channels before Hydra AOVs;
+  # guided denoising must offset albedo/normal channels past user AOVs.
+  UsdRender.Product(
+      stage.GetPrimAtPath("/root/Render/Products/MainOutput")
+  ).GetOrderedVarsRel().SetTargets([
+      Sdf.Path("/root/Render/Vars/color"),
+      Sdf.Path("/root/Render/Vars/albedo"),
+      Sdf.Path("/root/Render/Vars/normal"),
+  ])
+  settings_prim = stage.GetPrimAtPath("/root/Render/Settings")
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:type", Sdf.ValueTypeNames.String
+  ).Set("aov")
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:aovs", Sdf.ValueTypeNames.String
+  ).Set("dd.y:depth")
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:sub:type", Sdf.ValueTypeNames.String
+  ).Set("path")
+  user_aov_denoised = render(denoise=True)
+  np.testing.assert_allclose(
+      user_aov_denoised["color"][..., :3], denoised_rgb, rtol=1e-5, atol=1e-5
+  )
+  np.testing.assert_allclose(
+      user_aov_denoised["albedo"], noisy_results["albedo"], atol=1e-5
+  )
+  np.testing.assert_allclose(
+      user_aov_denoised["normal"], noisy_results["normal"], atol=1e-5
+  )
+
 
 def test_render_settings_prim_precedence():
   """The active RenderSettings prim applies, unless it is overridden."""
@@ -612,3 +642,124 @@ def test_switch_active_render_settings_prim():
   second_settings.GetPrim().RemoveProperty("mitsuba:sample_count")
   engine.render()
   assert engine.get_render_stats()["totalSamples"] == 128
+
+
+def test_nested_integrator_settings():
+  stage = Usd.Stage.CreateInMemory()
+  stage.GetRootLayer().subLayerPaths.append(
+      f"{test_helpers.TEST_ASSETS_PATH}/render_settings/nested_integrator.usda"
+  )
+  stage.SetMetadata(UsdRender.Tokens.renderSettingsPrimPath, "/Render/Settings")
+  settings_prim = stage.GetPrimAtPath("/Render/Settings")
+
+  # Invalid non-string `:type` or empty `:id` entries must not create ghost
+  # child specs.
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:ghost_int:type", Sdf.ValueTypeNames.Int
+  ).Set(123)
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:ghost_empty:id", Sdf.ValueTypeNames.String
+  ).Set("")
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  outputs = engine.render()
+  image_hd = outputs["color"]
+  assert "albedo" in outputs
+  scene_dict = usd_mitsuba.convert_to_mitsuba(stage)
+  image_mi = np.array(mi.render(mi.load_dict(scene_dict), spp=4))
+  test_helpers.robust_assert_close(
+      image_hd[..., :3], image_mi[..., :3], atol=0.05
+  )
+  np.testing.assert_allclose(image_hd[0, 0, :3], [0.2, 0.4, 0.6], atol=1e-4)
+  assert np.mean(image_hd[16, 16, :3]) > 0.25
+
+  # Deprecated `mitsuba:integrator:hide_emitters` is ignored in both pipelines.
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:hide_emitters", Sdf.ValueTypeNames.Bool
+  ).Set(True)
+  ignored_hd = engine.render()["color"]
+  np.testing.assert_allclose(ignored_hd[0, 0, :3], [0.2, 0.4, 0.6], atol=1e-4)
+  ignored_dict = usd_mitsuba.convert_to_mitsuba(stage)["integrator"]
+  assert "hide_emitters" not in ignored_dict
+  assert "hide_emitters" not in ignored_dict["integrator"]
+
+  # Incompatible plugin type (`diffuse`) or child missing `:type` falls back
+  # cleanly to the default `path` tracer without crashing.
+  type_attr = settings_prim.GetAttribute("mitsuba:integrator:type")
+  type_attr.Set("diffuse")
+  assert np.mean(engine.render()["color"][16, 16, :3]) > 0.25
+  type_attr.Set("aov")
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:missing_child:max_depth", Sdf.ValueTypeNames.Int
+  ).Set(2)
+  assert np.mean(engine.render()["color"][16, 16, :3]) > 0.25
+
+
+def test_sampler_render_settings():
+  stage = Usd.Stage.CreateInMemory()
+  stage.GetRootLayer().subLayerPaths.append(
+      f"{test_helpers.TEST_ASSETS_PATH}/render_settings/sampler_stratified.usda"
+  )
+  stage.SetMetadata(UsdRender.Tokens.renderSettingsPrimPath, "/Render/Settings")
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  stratified_hd, _ = test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      output_prefix="test_sampler_stratified",
+      spp=None,
+      atol=0.05,
+      engine=engine,
+  )
+  assert engine.get_render_stats()["totalSamples"] == 16
+
+  # Host overrides: initial Frame-1 override and switching between aliases.
+  override_engine = usd_render.RenderEngine(stage)
+  override_engine.configure(
+      hydra_delegate_id="HdMitsubaRendererPlugin",
+      overrides={"mitsuba:sampler:sample_count": 12},
+  )
+  override_engine.render()
+  assert override_engine.get_render_stats()["totalSamples"] == 12
+  override_engine.configure(
+      hydra_delegate_id="HdMitsubaRendererPlugin",
+      overrides={"mitsuba:sample_count": 8},
+  )
+  override_engine.render()
+  assert override_engine.get_render_stats()["totalSamples"] == 8
+
+  # Live update of sampler plugin type without calling configure().
+  sampler_type_attr = stage.GetPrimAtPath("/Render/Settings").GetAttribute(
+      "mitsuba:sampler:type"
+  )
+  sampler_type_attr.Set("independent")
+  independent_hd = engine.render()["color"]
+  assert not np.allclose(
+      stratified_hd[..., :3], independent_hd[..., :3], atol=1e-4
+  )
+
+  # Interactive progressive rendering uses `independent` so structured samplers
+  # with `jitter = false` do not collapse 1-SPP passes to identical grids.
+  sampler_type_attr.Set("stratified")
+  engine.configure(
+      hydra_delegate_id="HdMitsubaRendererPlugin",
+      overrides={"enableInteractive": True, "mitsuba:sample_count": 2},
+  )
+  pass1 = engine.render()["color"]
+  pass2 = engine.render()["color"]
+  assert not np.allclose(pass1[..., :3], pass2[..., :3], atol=1e-4)
+
+
+def test_mitsuba_plugin_specs_usda():
+  stage = Usd.Stage.Open(
+      f"{test_helpers.TEST_ASSETS_PATH}/render_settings/mitsuba_plugin_specs.usda"
+  )
+  image_hd, image_mi = test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      output_prefix="test_mitsuba_plugin_specs_usda",
+      spp=None,
+      atol=0.05,
+  )
+  assert np.max(image_hd[..., :3]) > 0.1
+  assert np.max(image_mi) > 0.1

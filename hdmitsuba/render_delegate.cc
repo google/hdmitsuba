@@ -97,16 +97,41 @@ const TfTokenVector& HdMitsubaRenderDelegate::GetSupportedBprimTypes() const {
   return *kSupportedBprimTypes;
 }
 
+namespace {
+
+TfToken CanonicalSettingKey(const TfToken& key) {
+  return key == HdMitsubaRenderSettingsTokens->sampler_sample_count
+             ? HdMitsubaRenderSettingsTokens->sample_count
+             : key;
+}
+
+HdRenderSettingsMap CanonicalizeSettingsMap(
+    const HdRenderSettingsMap& settings_map) {
+  auto it =
+      settings_map.find(HdMitsubaRenderSettingsTokens->sampler_sample_count);
+  if (it == settings_map.end()) return settings_map;
+  HdRenderSettingsMap result = settings_map;
+  if (!it->second.IsEmpty()) {
+    result[HdMitsubaRenderSettingsTokens->sample_count] = it->second;
+  }
+  result.erase(HdMitsubaRenderSettingsTokens->sampler_sample_count);
+  return result;
+}
+
+}  // namespace
+
 HdMitsubaRenderDelegate::HdMitsubaRenderDelegate() : HdRenderDelegate() {
   Initialize();
 }
 
 HdMitsubaRenderDelegate::HdMitsubaRenderDelegate(
     const HdRenderSettingsMap& settingsMap)
-    : HdRenderDelegate(settingsMap) {
+    : HdRenderDelegate(CanonicalizeSettingsMap(settingsMap)) {
   Initialize();
-  for (const auto& [key, _] : settingsMap) {
-    delegate_settings_.insert(key);
+  for (const auto& [key, value] : settingsMap) {
+    if (!value.IsEmpty()) {
+      delegate_settings_.insert(CanonicalSettingKey(key));
+    }
   }
 }
 
@@ -129,6 +154,8 @@ void HdMitsubaRenderDelegate::Initialize() {
        HdMitsubaRenderSettingsTokens->integrator_max_depth, VtValue()},
       {"Integrator Russian Roulette Depth",
        HdMitsubaRenderSettingsTokens->integrator_rr_depth, VtValue()},
+      {"Sampler Type", HdMitsubaRenderSettingsTokens->sampler_type,
+       VtValue(std::string("independent"))},
       {"Enable Interactive Mode", HdRenderSettingsTokens->enableInteractive,
        VtValue(true)},
       {"Enable Kernel Freezing (Experimental)",
@@ -301,8 +328,9 @@ void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* /*tracker*/) {
   scene_impl_->CommitResources();
 }
 
-void HdMitsubaRenderDelegate::SetRenderSetting(const TfToken& key,
+void HdMitsubaRenderDelegate::SetRenderSetting(const TfToken& raw_key,
                                                const VtValue& value) {
+  const TfToken key = CanonicalSettingKey(raw_key);
   HdRenderDelegate::SetRenderSetting(key, value);
   // An empty value unsets the setting.
   settings_dirty_ |= value.IsEmpty() ? delegate_settings_.erase(key) > 0
@@ -312,14 +340,24 @@ void HdMitsubaRenderDelegate::SetRenderSetting(const TfToken& key,
 
 void HdMitsubaRenderDelegate::SyncPrimSettings(
     const VtDictionary& namespaced_settings) {
+  VtDictionary canonical = namespaced_settings;
+  if (auto it = canonical.find(
+          HdMitsubaRenderSettingsTokens->sampler_sample_count.GetString());
+      it != canonical.end()) {
+    if (!it->second.IsEmpty()) {
+      canonical[HdMitsubaRenderSettingsTokens->sample_count.GetString()] =
+          it->second;
+    }
+    canonical.erase(it);
+  }
   for (const auto& [key, value] : prim_settings_) {
-    auto it = namespaced_settings.find(key);
-    if ((it == namespaced_settings.end() || it->second != value) &&
+    auto it = canonical.find(key);
+    if ((it == canonical.end() || it->second != value) &&
         recent_delegate_settings_.count(TfToken(key)) == 0) {
       delegate_settings_.erase(TfToken(key));
     }
   }
-  prim_settings_ = namespaced_settings;
+  prim_settings_ = std::move(canonical);
   settings_dirty_ = true;
 }
 

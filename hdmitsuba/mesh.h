@@ -23,6 +23,7 @@
 #include <pxr/base/tf/token.h>
 #include <pxr/base/vt/types.h>
 #include <pxr/imaging/hd/changeTracker.h>
+#include <pxr/imaging/hd/dataSource.h>
 #include <pxr/imaging/hd/mesh.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
@@ -32,6 +33,7 @@
 
 #include "hdmitsuba/mesh/geometry_processor.h"
 #include "hdmitsuba/mesh/subdivision.h"
+#include "hdmitsuba/plugin_builder.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -39,13 +41,24 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 TF_DECLARE_PUBLIC_TOKENS(HdMitsubaMeshTokens, HDMITSUBA_MESH_TOKENS);
 
+class HdMitsubaRenderParam;
 class SceneManager;
+
+// Parses `mitsuba:shape:*` and `mitsuba:emitter:*` from `prim_source` when
+// `!in_scene` or `DirtyMitsubaParams` is set, updates `shape_spec` and
+// `mitsuba_emitter_spec`, sets `DirtyTransform` in `dirty_bits` if `to_world`
+// changed, and returns whether the shape must be rebuilt.
+bool SyncShapePluginSpecs(const HdContainerDataSourceHandle& prim_source,
+                          HdMitsubaRenderParam* render_param, bool in_scene,
+                          HdDirtyBits* dirty_bits, PluginSpecNode* shape_spec,
+                          PluginSpecNode* mitsuba_emitter_spec);
 
 class HdMitsubaMesh final : public HdMesh {
  public:
-  // Custom dirty bit for mesh lights (may be removed in the future once
-  // Hydra tracks these correctly automatically)
+  // Custom dirty bits for mesh lights and `mitsuba:*` attributes.
   static constexpr HdDirtyBits DirtyLight = HdChangeTracker::CustomBitsBegin;
+  static constexpr HdDirtyBits DirtyMitsubaParams =
+      HdChangeTracker::CustomBitsBegin << 1;
 
   explicit HdMitsubaMesh(const SdfPath& id);
   ~HdMitsubaMesh() override = default;
@@ -65,6 +78,8 @@ class HdMitsubaMesh final : public HdMesh {
 
   // Topology (after subdivision), face materials and (refined) primvars.
   MeshGeometry geometry_;
+  PluginSpecNode shape_spec_;
+  PluginSpecNode mitsuba_emitter_spec_;
 
   // Resolves the effective subdivision level from the display style and the
   // optional `mitsuba:subdivision_level` override.

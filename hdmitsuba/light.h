@@ -18,6 +18,7 @@
 #include <string>
 #include <tuple>
 
+#include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/tf/token.h>
 #include <pxr/imaging/hd/dataSource.h>
@@ -27,6 +28,7 @@
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
 
+#include "hdmitsuba/plugin_builder.h"
 #include "hdmitsuba/spec_types.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -45,6 +47,14 @@ GfVec3f GetLightBaseEmission(
 // case).
 ShapingSpec GetShapingSpec(const HdContainerDataSourceHandle& light_container,
                            const SdfPath& id);
+
+// Returns the `MeshLightAPI` emitter specification for shape `id`, or
+// `std::nullopt` if `id` carries no `MeshLightAPI` intensity. `local_prefix`
+// pre-multiplies the prim transform (used to undo implicit-surface axis
+// adjustments before computing the IES light frame).
+std::optional<LightSpec> GetMeshEmitterSpec(
+    const HdContainerDataSourceHandle& prim_source, const SdfPath& id,
+    const GfMatrix4d& local_prefix = GfMatrix4d(1.0));
 
 class HdMitsubaLight final : public HdLight {
  public:
@@ -69,6 +79,8 @@ class HdMitsubaLight final : public HdLight {
 
   TfToken type_id_;
   std::optional<RebuildKey> rebuild_key_;
+  PluginSpecNode emitter_spec_;
+  PluginSpecNode shape_spec_;
   bool warned_unsupported_motion_ = false;
 };
 

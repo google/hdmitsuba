@@ -1,0 +1,94 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "Camera"
+    {
+        float2 clippingRange = (0.1, 100)
+        float focalLength = 35
+        double3 xformOp:translate = (0, 0, 6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "Backdrop"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-3, -3, -2.5), (3, -3, -2.5), (3, 3, -2.5), (-3, 3, -2.5)]
+        uniform token subdivisionScheme = "none"
+        custom string mitsuba:emitter:type = "area"
+        custom string mitsuba:emitter:radiance:type = "rgb"
+        custom color3f mitsuba:emitter:radiance:value = (1.0, 1.0, 1.0)
+    }
+
+    def Sphere "MediumSphere"
+    {
+        double radius = 0.75
+        double3 xformOp:translate = (-1.1, -0.7, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        custom string mitsuba:shape:id = "hero_medium_sphere"
+        custom string mitsuba:shape:interior:type = "homogeneous"
+        custom float mitsuba:shape:interior:scale = 1.5
+        custom string mitsuba:shape:interior:sigma_t:type = "rgb"
+        custom color3f mitsuba:shape:interior:sigma_t:value = (0.8, 0.2, 0.2)
+        custom string mitsuba:shape:interior:albedo:type = "rgb"
+        custom color3f mitsuba:shape:interior:albedo:value = (0.1, 0.2, 0.8)
+        custom string mitsuba:shape:interior:phase:type = "hg"
+        custom float mitsuba:shape:interior:phase:g = 0.2
+    }
+
+    def Mesh "Quad"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-0.6, -0.35, 0), (0.6, -0.35, 0), (0.6, 0.35, 0), (-0.6, 0.35, 0)]
+        uniform token subdivisionScheme = "none"
+        double3 xformOp:translate = (-1.1, 0.75, 0)
+        float xformOp:rotateY = 20
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateY"]
+        custom bool mitsuba:shape:flip_normals = false
+        custom matrix4d mitsuba:shape:to_world = ((0.8191520442889918, 0.573576436351046, 0, 0), (-0.573576436351046, 0.8191520442889918, 0, 0), (0, 0, 1, 0), (0.35, -0.2, 0, 1))
+        custom string mitsuba:emitter:type = "area"
+        custom string mitsuba:emitter:radiance:type = "rgb"
+        custom color3f mitsuba:emitter:radiance:value = (0.9, 0.2, 0.2)
+    }
+
+    def Cube "Cube"
+    {
+        double size = 0.8
+        double3 xformOp:translate = (1.1, 0.75, 0)
+        float xformOp:rotateX = 25
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+        custom matrix4d mitsuba:shape:to_world = ((0.8191520442889918, 0.573576436351046, 0, 0), (-0.573576436351046, 0.8191520442889918, 0, 0), (0, 0, 1, 0), (0.35, -0.2, 0, 1))
+        custom string mitsuba:emitter:type = "area"
+        custom string mitsuba:emitter:radiance:type = "rgb"
+        custom color3f mitsuba:emitter:radiance:value = (0.2, 0.9, 0.2)
+    }
+
+    def Cylinder "Cylinder"
+    {
+        uniform token axis = "X"
+        double height = 1.1
+        double radius = 0.3
+        double3 xformOp:translate = (0.9, -0.8, 0)
+        float xformOp:rotateZ = -20
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+        custom matrix4d mitsuba:shape:to_world = ((0.8191520442889918, 0.573576436351046, 0, 0), (-0.573576436351046, 0.8191520442889918, 0, 0), (0, 0, 1, 0), (0.35, -0.2, 0, 1))
+        custom string mitsuba:emitter:type = "area"
+        custom string mitsuba:emitter:radiance:type = "rgb"
+        custom color3f mitsuba:emitter:radiance:value = (0.2, 0.2, 0.9)
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "PrimarySettings"
+    {
+        custom string mitsuba:integrator:type = "volpath"
+    }
+}

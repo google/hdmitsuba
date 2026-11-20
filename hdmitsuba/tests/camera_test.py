@@ -238,15 +238,29 @@ def test_camera_update_focal_length():
   assert image2.shape[2] == 3
 
 
-def test_irradiancemeter_render():
+@pytest.mark.parametrize(
+    ('scene_name', 'camera_path', 'expected_irradiance'),
+    [
+        ('irradiancemeter', '/root/Camera/Camera', None),
+        ('irradiancemeter_subsets', '/root/Camera/Camera', 0.5 * np.pi),
+        ('irradiancemeter_subsets', '/root/PlaneMeter', 0.5 * np.pi),
+    ],
+)
+def test_irradiancemeter_render(
+    scene_name: str, camera_path: str, expected_irradiance: float | None
+):
   stage = Usd.Stage.Open(
-      f'{test_helpers.TEST_ASSETS_PATH}/shapes/irradiancemeter.usda'
+      f'{test_helpers.TEST_ASSETS_PATH}/shapes/{scene_name}.usda'
   )
-  test_helpers.create_render_settings(stage, resolution=(128, 128))
+  test_helpers.create_render_settings(stage, resolution=(64, 64))
 
-  test_helpers.assert_hydra_equal_to_offline(
-      stage, '/root/Camera/Camera', 'test_irradiancemeter_render', atol=0.05
+  image_hd, _ = test_helpers.assert_hydra_equal_to_offline(
+      stage, camera_path, f'test_{scene_name}_render', atol=0.05
   )
+  if expected_irradiance is not None:
+    np.testing.assert_allclose(
+        image_hd[..., :3], expected_irradiance, atol=0.02
+    )
 
 
 def test_irradiancemeter_rebind():
@@ -319,3 +333,206 @@ def test_irradiancemeter_target_mesh_rebuild():
   test_helpers.robust_assert_close(
       image_initial[..., :3], image_rebuilt[..., :3], atol=0.05
   )
+
+
+@pytest.mark.parametrize(
+    'camera_path',
+    ['/root/ThinLensCamera', '/root/RadianceMeter', '/root/DistantSensor'],
+)
+def test_sensor_specs_render(camera_path: str):
+  stage = Usd.Stage.CreateInMemory()
+  stage.GetRootLayer().subLayerPaths.append(
+      f'{test_helpers.TEST_ASSETS_PATH}/shapes/sensor_specs.usda'
+  )
+  is_signal = camera_path != '/root/ThinLensCamera'
+  test_helpers.create_render_settings(
+      stage, resolution=(8, 8) if is_signal else (64, 32), spp=16
+  )
+
+  if not is_signal:
+    image_hd, _ = test_helpers.assert_hydra_equal_to_offline(
+        stage, camera_path, 'test_sensor_specs_thinlens', spp=None, atol=0.05
+    )
+    assert np.max(image_hd[..., :3]) > 0.05
+    return
+
+  if camera_path == '/root/DistantSensor':
+    UsdGeom.Sphere.Define(stage, '/root/Marker').CreateRadiusAttr(0.1)
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin', camera_path=camera_path
+  )
+  image_hd = engine.render()['color']
+  assert image_hd.shape[:2] == (8, 8)
+
+  mi_id = camera_path.replace('/', '_')
+  scene = mi.load_dict(usd_mitsuba.convert_to_mitsuba(stage))
+  sensor = next(s for s in scene.sensors() if s.id() == mi_id)
+  image_mi = np.broadcast_to(
+      np.array(mi.render(scene, sensor=sensor, spp=16)), (8, 8, 3)
+  )
+  test_helpers.robust_assert_close(image_hd[..., :3], image_mi, atol=0.05)
+
+  if camera_path == '/root/DistantSensor':
+    # Expanding the scene bounding box in place must re-notify `DistantSensor`
+    # via `set_scene` so its bounding sphere stays accurate.
+    UsdGeom.Xformable(stage.GetPrimAtPath('/root/Marker')).AddTranslateOp().Set(
+        (6.0, 0.0, 0.0)
+    )
+    moved_hd = engine.render()['color']
+    moved_scene = mi.load_dict(usd_mitsuba.convert_to_mitsuba(stage))
+    moved_sensor = next(s for s in moved_scene.sensors() if s.id() == mi_id)
+    moved_mi = np.broadcast_to(
+        np.array(mi.render(moved_scene, sensor=moved_sensor, spp=16)), (8, 8, 3)
+    )
+    assert not np.allclose(image_hd[..., :3], moved_hd[..., :3], atol=0.005)
+    test_helpers.robust_assert_close(moved_hd[..., :3], moved_mi, atol=0.005)
+
+
+def test_sensor_dynamic_updates_and_crop():
+  stage = Usd.Stage.CreateInMemory()
+  _setup_stage(stage)
+  test_helpers.create_render_settings(stage, resolution=(32, 32), spp=16)
+
+  # Unattached `irradiancemeter` without `mitsuba:sensor:shape` is skipped.
+  UsdGeom.Camera.Define(stage, '/orphan_meter').GetPrim().CreateAttribute(
+      'mitsuba:sensor:type', Sdf.ValueTypeNames.String
+  ).Set('irradiancemeter')
+
+  camera_prim = stage.GetPrimAtPath('/camera')
+  camera_prim.CreateAttribute(
+      'mitsuba:sensor:type', Sdf.ValueTypeNames.String
+  ).Set('thinlens')
+  aperture_attr = camera_prim.CreateAttribute(
+      'mitsuba:sensor:aperture_radius', Sdf.ValueTypeNames.Float
+  )
+  aperture_attr.Set(0.0)
+  camera_prim.CreateAttribute(
+      'mitsuba:sensor:focus_distance', Sdf.ValueTypeNames.Float
+  ).Set(1.5)
+  fov_attr = camera_prim.CreateAttribute(
+      'mitsuba:sensor:fov', Sdf.ValueTypeNames.Float
+  )
+  fov_attr.Set(45.0)
+  camera_prim.CreateAttribute(
+      'mitsuba:sensor:film:rfilter:type', Sdf.ValueTypeNames.String
+  ).Set('gaussian')
+  stddev_attr = camera_prim.CreateAttribute(
+      'mitsuba:sensor:film:rfilter:stddev', Sdf.ValueTypeNames.Float
+  )
+  stddev_attr.Set(0.25)
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin', camera_path='/camera'
+  )
+  sharp = engine.render()['color']
+
+  # Live in-place leaf update, attribute removal fallback, and filter rebuild.
+  aperture_attr.Set(1.2)
+  fov_attr.Set(60.0)
+  blurred = engine.render()['color']
+  assert not np.allclose(sharp[..., :3], blurred[..., :3], atol=0.02)
+
+  camera_prim.RemoveProperty('mitsuba:sensor:fov')
+  stddev_attr.Set(2.5)
+  test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      '/camera',
+      'test_sensor_dynamic_updates',
+      spp=16,
+      atol=0.05,
+      engine=engine,
+  )
+
+  # Structural plugin-type switch (`thinlens` -> `perspective`) rebuilds sensor.
+  camera_prim.GetAttribute('mitsuba:sensor:type').Set('perspective')
+  camera_prim.RemoveProperty('mitsuba:sensor:aperture_radius')
+  camera_prim.RemoveProperty('mitsuba:sensor:focus_distance')
+  test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      '/camera',
+      'test_sensor_type_switch_perspective',
+      spp=16,
+      atol=0.05,
+      engine=engine,
+  )
+
+  # Authored `mitsuba:sensor:film:crop_*` and live crop resize.
+  for key, val in (
+      ('crop_offset_x', 8),
+      ('crop_offset_y', 4),
+      ('crop_width', 16),
+      ('crop_height', 12),
+  ):
+    camera_prim.CreateAttribute(
+        f'mitsuba:sensor:film:{key}', Sdf.ValueTypeNames.Int
+    ).Set(val)
+  cropped_hd = engine.render()['color']
+  scene_dict = usd_mitsuba.convert_to_mitsuba(stage)
+  assert '_orphan_meter' not in scene_dict
+  cropped_mi = np.array(mi.render(mi.load_dict(scene_dict), spp=16))
+  assert cropped_mi.shape == (12, 16, 3)
+  test_helpers.robust_assert_close(
+      cropped_hd[4:16, 8:24, :3], cropped_mi, atol=0.05
+  )
+  np.testing.assert_array_equal(cropped_hd[:4, :, :3], 0.0)
+
+
+def test_sensor_film_formats_and_interactive_sampler():
+  stage = Usd.Stage.CreateInMemory()
+  stage.GetRootLayer().subLayerPaths.append(
+      f'{test_helpers.TEST_ASSETS_PATH}/shapes/sensor_specs.usda'
+  )
+  settings = test_helpers.create_render_settings(
+      stage, resolution=(16, 16), spp=16, color_data_type='color4f'
+  )
+  settings_prim = settings.GetPrim()
+  cam_prim = stage.GetPrimAtPath('/root/ThinLensCamera')
+  cam_prim.CreateAttribute(
+      'mitsuba:sensor:film:sample_border', Sdf.ValueTypeNames.Bool
+  ).Set(True)
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      camera_path='/root/ThinLensCamera',
+  )
+  rgba = engine.render()['color']
+  assert rgba.shape == (16, 16, 4)
+  np.testing.assert_allclose(rgba[0, 0, 3], 0.0, atol=1e-5)
+  np.testing.assert_allclose(rgba[8, 8, 3], 1.0, atol=1e-3)
+
+  # Explicit `pixel_format` is preserved across 3/4-channel AOV toggles.
+  fmt_attr = cam_prim.CreateAttribute(
+      'mitsuba:sensor:film:pixel_format', Sdf.ValueTypeNames.String
+  )
+  fmt_attr.Set('xyz')
+  xyz = engine.render()['color']
+  offline_xyz = np.array(
+      mi.render(mi.load_dict(usd_mitsuba.convert_to_mitsuba(stage)))
+  )
+  test_helpers.robust_assert_close(xyz[..., :3], offline_xyz, atol=0.05)
+
+  # RGBE 3-channel film + per-camera sampler SPP converge progressively, even
+  # when an unrelated RenderSettings attribute changes mid-accumulation.
+  cam_prim.RemoveProperty('mitsuba:sensor:film:pixel_format')
+  cam_prim.CreateAttribute(
+      'mitsuba:sensor:film:file_format', Sdf.ValueTypeNames.String
+  ).Set('rgbe')
+  cam_prim.GetAttribute('mitsuba:sensor:sampler:sample_count').Set(4)
+  settings_prim.GetAttribute('mitsuba:sample_count').Set(2)
+  settings_prim.CreateAttribute(
+      'mitsuba:interactive_samples_per_pass', Sdf.ValueTypeNames.Int
+  ).Set(2)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      camera_path='/root/ThinLensCamera',
+      overrides={'enableInteractive': True},
+  )
+  engine.render()
+  assert not engine.is_converged()
+  engine.render()
+  assert engine.is_converged()
+  assert engine.get_render_stats()['totalSamples'] == 4
