@@ -48,7 +48,7 @@ class Denoiser {
 
   void Denoise(TensorXf& display_result, const Sensor* sensor,
                const std::vector<AovRequest>& aov_requests,
-               size_t base_channels);
+               size_t base_channels, size_t aov_start_channel);
 
  private:
   struct Impl;

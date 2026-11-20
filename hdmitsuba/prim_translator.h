@@ -42,10 +42,6 @@ PXR_NAMESPACE_OPEN_SCOPE
 const HdMaterialConnection2* FindTerminalConnection(
     const HdMaterialNetwork2& network, const TfToken& terminal);
 
-void SetMitsubaPropertyFromValue(mitsuba::Properties& props,
-                                 std::string_view name, const pxr::VtValue& val,
-                                 bool invert_float = false);
-
 struct PreparedMaterialX;
 
 // Invokes `callback` with the key of every texture the material parsers will
