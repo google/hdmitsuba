@@ -44,6 +44,7 @@ add_library(hdMitsuba SHARED
   scene_manager.cc
   particle_field.cc
   traversal.cc
+  plugin_builder.cc
   prim_translator.cc
   texture_cache.cc
   utils.cc
@@ -62,6 +63,7 @@ target_link_libraries(hdMitsuba
     absl::flat_hash_map
     absl::flat_hash_set
     absl::inlined_vector
+    absl::node_hash_map
     absl::strings
     absl::time
     ar

@@ -28,6 +28,7 @@
 #include <pxr/imaging/hd/material.h>
 #include <pxr/pxr.h>
 
+#include "hdmitsuba/plugin_builder.h"
 #include "hdmitsuba/spec_types.h"
 #include "hdmitsuba/texture_cache.h"
 #include "hdmitsuba/traversal.h"
@@ -41,10 +42,6 @@ PXR_NAMESPACE_OPEN_SCOPE
 // `inputs:displacement` connection (nullptr if unconnected).
 const HdMaterialConnection2* FindTerminalConnection(
     const HdMaterialNetwork2& network, const TfToken& terminal);
-
-void SetMitsubaPropertyFromValue(mitsuba::Properties& props,
-                                 std::string_view name, const pxr::VtValue& val,
-                                 bool invert_float = false);
 
 struct PreparedMaterialX;
 
@@ -135,7 +132,8 @@ class PrimTranslator {
                                  const LightSpec& spec);
 
   static mitsuba::ref<mitsuba::Sensor<Float, Spectrum>> BuildSensor(
-      const CameraSpec& spec, bool is_interactive = false);
+      const CameraSpec& spec, bool is_interactive = false,
+      const PluginSpecNode& sampler_spec = {});
 
   static void UpdateSensorInPlace(mitsuba::Object* sensor_obj,
                                   const CameraSpec& spec);
