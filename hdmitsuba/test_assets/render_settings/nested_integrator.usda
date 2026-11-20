@@ -1,0 +1,75 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    renderSettingsPrimPath = "/Render/Settings"
+    upAxis = "Y"
+)
+
+def Scope "Render"
+{
+    def RenderSettings "Settings"
+    {
+        custom string mitsuba:integrator:aovs = "dd.y:depth"
+        custom int mitsuba:integrator:sub_integrator:max_depth = 2
+        custom string mitsuba:integrator:sub_integrator:type = "path"
+        custom string mitsuba:integrator:type = "aov"
+        custom int mitsuba:sample_count = 4
+        rel products = </Render/Products/Main>
+        uniform int2 resolution = (32, 32)
+    }
+
+    def Scope "Products"
+    {
+        def RenderProduct "Main"
+        {
+            rel camera = </World/Camera>
+            rel orderedVars = [
+                </Render/Vars/color>,
+                </Render/Vars/albedo>,
+            ]
+        }
+    }
+
+    def Scope "Vars"
+    {
+        def RenderVar "color"
+        {
+            token dataType = "color3f"
+            string sourceName = "color"
+        }
+
+        def RenderVar "albedo"
+        {
+            token dataType = "color3f"
+            string sourceName = "albedo"
+        }
+    }
+}
+
+def Xform "World"
+{
+    def Camera "Camera"
+    {
+        float2 clippingRange = (0.1, 100)
+        float focalLength = 50
+        float horizontalAperture = 36
+        float verticalAperture = 36
+        double3 xformOp:translate = (0, 0, 5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "Dome"
+    {
+        color3f inputs:color = (0.2, 0.4, 0.6)
+        float inputs:intensity = 1
+    }
+
+    def Mesh "Cube"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-0.8, -0.8, 0), (0.8, -0.8, 0), (0.8, 0.8, 0), (-0.8, 0.8, 0)]
+        color3f[] primvars:displayColor = [(0.8, 0.8, 0.8)]
+    }
+}

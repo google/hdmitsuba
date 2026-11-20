@@ -476,6 +476,36 @@ def test_denoise_render_settings(variant: str):
       unguided_results["normal"], noisy_results["normal"], atol=1e-5
   )
 
+  # User-configured `aov` integrator prepends its channels before Hydra AOVs;
+  # guided denoising must offset albedo/normal channels past user AOVs.
+  UsdRender.Product(
+      stage.GetPrimAtPath("/root/Render/Products/MainOutput")
+  ).GetOrderedVarsRel().SetTargets([
+      Sdf.Path("/root/Render/Vars/color"),
+      Sdf.Path("/root/Render/Vars/albedo"),
+      Sdf.Path("/root/Render/Vars/normal"),
+  ])
+  settings_prim = stage.GetPrimAtPath("/root/Render/Settings")
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:type", Sdf.ValueTypeNames.String
+  ).Set("aov")
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:aovs", Sdf.ValueTypeNames.String
+  ).Set("dd.y:depth")
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:sub:type", Sdf.ValueTypeNames.String
+  ).Set("path")
+  user_aov_denoised = render(denoise=True)
+  np.testing.assert_allclose(
+      user_aov_denoised["color"][..., :3], denoised_rgb, rtol=1e-5, atol=1e-5
+  )
+  np.testing.assert_allclose(
+      user_aov_denoised["albedo"], noisy_results["albedo"], atol=1e-5
+  )
+  np.testing.assert_allclose(
+      user_aov_denoised["normal"], noisy_results["normal"], atol=1e-5
+  )
+
 
 def test_render_settings_prim_precedence():
   """The active RenderSettings prim applies, unless it is overridden."""
@@ -612,3 +642,65 @@ def test_switch_active_render_settings_prim():
   second_settings.GetPrim().RemoveProperty("mitsuba:sample_count")
   engine.render()
   assert engine.get_render_stats()["totalSamples"] == 128
+
+
+def test_nested_integrator_settings():
+  stage = Usd.Stage.CreateInMemory()
+  stage.GetRootLayer().subLayerPaths.append(
+      f"{test_helpers.TEST_ASSETS_PATH}/render_settings/nested_integrator.usda"
+  )
+  stage.SetMetadata(UsdRender.Tokens.renderSettingsPrimPath, "/Render/Settings")
+  settings_prim = stage.GetPrimAtPath("/Render/Settings")
+
+  # Invalid non-string `:type` or empty `:id` entries must not create ghost
+  # child specs.
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:ghost_int:type", Sdf.ValueTypeNames.Int
+  ).Set(123)
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:ghost_empty:id", Sdf.ValueTypeNames.String
+  ).Set("")
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  outputs = engine.render()
+  image_hd = outputs["color"]
+  assert "albedo" in outputs
+  scene_dict = usd_mitsuba.convert_to_mitsuba(stage)
+  image_mi = np.array(mi.render(mi.load_dict(scene_dict), spp=4))
+  test_helpers.robust_assert_close(
+      image_hd[..., :3], image_mi[..., :3], atol=0.05
+  )
+  np.testing.assert_allclose(image_hd[0, 0, :3], [0.2, 0.4, 0.6], atol=1e-4)
+  assert np.mean(image_hd[16, 16, :3]) > 0.25
+
+  # Deprecated `mitsuba:integrator:hide_emitters` is ignored in both pipelines.
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:hide_emitters", Sdf.ValueTypeNames.Bool
+  ).Set(True)
+  ignored_hd = engine.render()["color"]
+  np.testing.assert_allclose(ignored_hd[0, 0, :3], [0.2, 0.4, 0.6], atol=1e-4)
+  ignored_dict = usd_mitsuba.convert_to_mitsuba(stage)["integrator"]
+  assert "hide_emitters" not in ignored_dict
+  assert "hide_emitters" not in ignored_dict["integrator"]
+
+  # Incompatible plugin type (`diffuse`) falls back to the default `path`
+  # tracer, and malformed child entries warn and are skipped without aborting
+  # the valid parent integrator.
+  type_attr = settings_prim.GetAttribute("mitsuba:integrator:type")
+  type_attr.Set("diffuse")
+  assert np.mean(engine.render()["color"][16, 16, :3]) > 0.25
+  type_attr.Set("aov")
+  settings_prim.CreateAttribute(
+      "mitsuba:integrator:missing_child:max_depth", Sdf.ValueTypeNames.Int
+  ).Set(2)
+  for bad_name, bad_type in [
+      ("bad_rgb", "rgb"),
+      ("bad_vec", "vector"),
+      ("bad_spec", "spectrum"),
+      ("bad_plugin", "nonexistent_plugin"),
+  ]:
+    settings_prim.CreateAttribute(
+        f"mitsuba:integrator:{bad_name}:type", Sdf.ValueTypeNames.String
+    ).Set(bad_type)
+  assert np.mean(engine.render()["color"][16, 16, :3]) > 0.25

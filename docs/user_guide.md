@@ -111,8 +111,8 @@ You can configure the render delegate by authoring a `RenderSettings` prim insid
 *   **`mitsuba:sample_count`** : The target samples per pixel (SPP) for high-quality offline renders.
 *   **`mitsuba:seed`**: The random number generator seed offset (int, default `0`) passed to the Mitsuba integrator. Changing `mitsuba:seed` resets progressive accumulation.
 *   **`mitsuba:interactive_samples_per_pass`**: Number of samples per pixel rendered in each Hydra pass while `enableInteractive` is `true` (default `1`). Larger values reduce per-pass overhead (and, with kernel freezing enabled, are replayed as a single frozen kernel) at the cost of coarser progressive updates. Changing `mitsuba:interactive_samples_per_pass` or `mitsuba:sample_count` resets progressive accumulation.
-*   **`mitsuba:integrator:type`**: The Mitsuba integrator to use (e.g., `path`, `aov`, `direct`).
-*   **`mitsuba:integrator:<param>`**: Any other setting in the `mitsuba:integrator:` namespace is forwarded as the property `<param>` to the Mitsuba integrator (e.g., `mitsuba:integrator:max_depth` or `mitsuba:integrator:rr_depth` for path-tracing integrators). Unset properties use the Mitsuba integrator's defaults, and properties not supported by the integrator are ignored with a warning. Changing these settings recreates the integrator and resets progressive accumulation.
+*   **`mitsuba:integrator:type`**: The Mitsuba integrator to use (e.g., `path`, `volpath`, `aov`, `direct`).
+*   **`mitsuba:integrator:<param>`**: Any flat or nested setting in the `mitsuba:integrator:` namespace is forwarded to the Mitsuba integrator (e.g., `mitsuba:integrator:max_depth`, `mitsuba:integrator:rr_depth`, or nested child integrators). Unset properties use the Mitsuba integrator's defaults, and properties not supported by the integrator are ignored with a warning. Changing these settings recreates the integrator and resets progressive accumulation.
 *   **`mitsuba:use_kernel_freezing`**: Enables Dr.Jit's kernel freezing. When enabled, the JIT compilation is frozen after the first frame, drastically reducing JIT tracing overhead for subsequent frames (extremely beneficial for interactive camera navigation in viewports). This is currently disabled by default, as it is still in a somewhat experimental state in its Hydra integration, and also will not work in all Mitsuba 3 scenes.
 *   **`mitsuba:denoise`**: Denoises the rendered `color` image (bool, default
     `false`) using NVIDIA OptiX on CUDA variants (`cuda_*`) or Intel
@@ -121,6 +121,24 @@ You can configure the render delegate by authoring a `RenderSettings` prim insid
     when requested (normal guidance requires `albedo`). Enabling
     `mitsuba:denoise` forces the `box` pixel filter so pixel noise remains
     uncorrelated.
+
+### Hierarchical Mitsuba Plugin Specs (`mitsuba:<plugin>:*`)
+
+Both `hdMitsuba` and the offline `usd_mitsuba` translator share a uniform USD
+namespace convention for configuring native Mitsuba plugins and nested child
+plugins:
+
+*   **Supported Namespaces**: `mitsuba:integrator:*` on `RenderSettings` prims.
+*   **Hierarchy & Plugin Selection**: Colon-separated attribute names map to
+    nested Mitsuba plugin properties. `:type` selects a plugin type, `:id`
+    assigns a Mitsuba object ID, and nested `:child:type` / `:child:<param>`
+    entries recursively instantiate child plugins.
+*   **Value Conversions**: `color3f` attributes convert to RGB spectra, spatial
+    `point3f` / `vector3f` / `normal3f` attributes convert to Mitsuba 3-vectors,
+    `matrix3d` / `matrix4d` convert to Mitsuba transforms, `float[]` arrays
+    convert to comma-separated strings, `asset` paths resolve through USD's
+    asset resolver, and inline child specs support `:type = "rgb"`, `"spectrum"`
+    (wavelength:weight pairs or uniform float), and `"vector"`.
 
 ### Standard Hydra Viewport Settings
 *   **`enableInteractive`**:
