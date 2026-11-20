@@ -1,0 +1,69 @@
+#usda 1.0
+(
+    defaultPrim = "root"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "root"
+{
+    def Camera "ThinLensCamera"
+    {
+        float2 clippingRange = (0.1, 100)
+        float focalLength = 50
+        float horizontalAperture = 36
+        float verticalAperture = 18
+        double3 xformOp:translate = (0, 0, 5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        custom float mitsuba:sensor:aperture_radius = 0.25
+        custom float mitsuba:sensor:film:rfilter:stddev = 1.2
+        custom string mitsuba:sensor:film:rfilter:type = "gaussian"
+        custom float mitsuba:sensor:focus_distance = 3
+        custom float mitsuba:sensor:fov = 35
+        custom string mitsuba:sensor:fov_axis = "y"
+        custom bool mitsuba:sensor:sampler:jitter = 0
+        custom int mitsuba:sensor:sampler:sample_count = 16
+        custom string mitsuba:sensor:sampler:type = "stratified"
+        custom string mitsuba:sensor:type = "thinlens"
+    }
+
+    def Camera "RadianceMeter"
+    {
+        custom vector3f mitsuba:sensor:direction = (0, 0, -1)
+        custom point3f mitsuba:sensor:origin = (0, 0, 5)
+        custom string mitsuba:sensor:type = "radiancemeter"
+    }
+
+    def Camera "DistantSensor"
+    {
+        custom vector3f mitsuba:sensor:direction = (0, 0, -1)
+        custom string mitsuba:sensor:type = "distant"
+    }
+
+    def Sphere "Sphere" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </root/Material>
+        double radius = 1
+    }
+
+    def Material "Material"
+    {
+        token outputs:surface.connect = </root/Material/Surface.outputs:surface>
+
+        def Shader "Surface"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.85, 0.2, 0.15)
+            float inputs:roughness = 0.4
+            token outputs:surface
+        }
+    }
+
+    def DistantLight "KeyLight"
+    {
+        float inputs:intensity = 2
+        bool inputs:normalize = 1
+    }
+}

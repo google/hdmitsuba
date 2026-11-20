@@ -153,6 +153,27 @@ def extract_nested_dict(
   return result
 
 
+def deep_merge_dict(
+    base: dict[str, Any], overrides: dict[str, Any]
+) -> dict[str, Any]:
+  """Recursively merges `overrides` into `base` in place and returns `base`."""
+  for key, value in overrides.items():
+    base_val = base.get(key)
+    if (
+        isinstance(value, dict)
+        and isinstance(base_val, dict)
+        and (
+            'type' not in value
+            or 'type' not in base_val
+            or value['type'] == base_val['type']
+        )
+    ):
+      deep_merge_dict(base_val, value)
+    else:
+      base[key] = value
+  return base
+
+
 def parse_ray_visibility(value: str | None, fallback: str | None) -> str | None:
   """Validates the value of a `mitsuba:visibility` attribute or primvar.
 

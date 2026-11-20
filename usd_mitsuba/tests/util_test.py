@@ -152,3 +152,24 @@ def test_extract_nested_dict_gf_roles_spectra_and_transforms(tmp_path):
   if mi.variant() is None:
     mi.set_variant("scalar_rgb")
   assert mi.load_dict(extracted["spec_file"]) is not None
+
+
+def test_deep_merge_dict():
+  base = {
+      "type": "hdrfilm",
+      "width": 200,
+      "rfilter": {"type": "gaussian", "stddev": 1.0},
+  }
+  util.deep_merge_dict(
+      base,
+      {
+          "crop_width": 50,
+          "rfilter": {"type": "box"},
+      },
+  )
+  assert base == {
+      "type": "hdrfilm",
+      "width": 200,
+      "crop_width": 50,
+      "rfilter": {"type": "box"},
+  }

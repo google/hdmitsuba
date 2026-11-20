@@ -44,6 +44,7 @@
 #include <pxr/base/vt/dictionary.h>
 #include <pxr/base/vt/types.h>
 #include <pxr/base/vt/value.h>
+#include <pxr/imaging/hd/dataSource.h>
 #include <pxr/pxr.h>
 
 #include "hdmitsuba/utils.h"
@@ -298,6 +299,91 @@ PluginSpecNode ParsePluginSpec(const VtDictionary& settings,
     root.plugin_type = std::string(default_type);
   }
   return root;
+}
+
+PluginSpecNode ParsePluginSpec(const HdContainerDataSourceHandle& container,
+                               std::string_view prefix,
+                               std::string_view default_type) {
+  PluginSpecNode root;
+  if (container) {
+    for (const TfToken& token : container->GetNames()) {
+      std::string_view key = token.GetString();
+      if (!absl::StartsWith(key, prefix)) {
+        continue;
+      }
+      std::string_view rel_path = key.substr(prefix.size());
+      HdDataSourceBaseHandle child_ds = container->Get(token);
+      if (auto sampled = HdSampledDataSource::Cast(child_ds)) {
+        InsertPropertyPath(&root, rel_path, sampled->GetValue(0.0f));
+      } else if (auto typed_container = HdContainerDataSource::Cast(child_ds)) {
+        auto type_ds =
+            HdSampledDataSource::Cast(typed_container->Get(TfToken("type")));
+        auto val_ds =
+            HdSampledDataSource::Cast(typed_container->Get(TfToken("value")));
+        if (type_ds && val_ds) {
+          InsertPropertyPath(&root, absl::StrCat(rel_path, ":type"),
+                             type_ds->GetValue(0.0f));
+          InsertPropertyPath(&root, absl::StrCat(rel_path, ":value"),
+                             val_ds->GetValue(0.0f));
+        }
+      }
+    }
+  }
+  if (root.plugin_type.empty() && !default_type.empty()) {
+    root.plugin_type = std::string(default_type);
+  }
+  return root;
+}
+
+bool CanUpdatePluginStructureInPlace(const PluginSpecNode& old_spec,
+                                     const PluginSpecNode& new_spec) {
+  if (old_spec.plugin_type != new_spec.plugin_type ||
+      old_spec.id != new_spec.id) {
+    return false;
+  }
+  for (const auto& [param_key, _] : old_spec.params) {
+    if (new_spec.params.find(param_key) == new_spec.params.end()) {
+      return false;
+    }
+  }
+  if (old_spec.children.size() != new_spec.children.size()) {
+    return false;
+  }
+  auto is_special_value_child = [](const PluginSpecNode& node) {
+    return node.plugin_type == "rgb" || node.plugin_type == "vector" ||
+           node.plugin_type == "spectrum";
+  };
+  for (const auto& [child_key, old_child] : old_spec.children) {
+    auto new_it = new_spec.children.find(child_key);
+    if (new_it == new_spec.children.end()) {
+      return false;
+    }
+    const PluginSpecNode& new_child = new_it->second;
+    if (is_special_value_child(old_child) ||
+        is_special_value_child(new_child)) {
+      if (old_child.plugin_type != new_child.plugin_type ||
+          !old_child.id.empty() || !new_child.id.empty() ||
+          !old_child.children.empty() || !new_child.children.empty()) {
+        return false;
+      }
+      if (old_child != new_child) {
+        auto val_it = new_child.params.find("value");
+        if (val_it == new_child.params.end() || new_child.params.size() != 1) {
+          return false;
+        }
+        if (new_child.plugin_type == "spectrum" &&
+            (val_it->second.IsHolding<bool>() ||
+             !VtValue::Cast<double>(val_it->second).IsHolding<double>())) {
+          return false;
+        }
+      }
+      continue;
+    }
+    if (!CanUpdatePluginStructureInPlace(old_child, new_child)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 void MergePluginProperties(mitsuba::Properties* props,

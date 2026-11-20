@@ -48,9 +48,8 @@ TraversalCallback::TraversalCallback(
 }
 
 void TraversalCallback::put_value(std::string_view name, void* value,
-                                  uint32_t /*flags*/,
-                                  const std::type_info& type) {
-  data.insert({absl::StrCat(prefix_, name), {value, type}});
+                                  uint32_t flags, const std::type_info& type) {
+  data.insert({absl::StrCat(prefix_, name), ValueEntry{value, type, flags}});
 }
 
 /// Actual implementation for Object references [To be provided by subclass]
