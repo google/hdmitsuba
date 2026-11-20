@@ -124,6 +124,13 @@ inline HdContainerDataSourceHandle GetPrimDataSource(
   return scene_index->GetPrim(id).dataSource;
 }
 
+inline HdContainerDataSourceHandle GetMitsubaDataSource(
+    const HdContainerDataSourceHandle& prim_source) {
+  if (!prim_source) return nullptr;
+  static const TfToken kMitsubaToken("mitsuba", TfToken::Immortal);
+  return HdContainerDataSource::Cast(prim_source->Get(kMitsubaToken));
+}
+
 inline bool GetPrimVisible(const HdContainerDataSourceHandle& prim_source,
                            bool default_visible = true) {
   if (auto schema = HdVisibilitySchema::GetFromParent(prim_source)) {
@@ -205,6 +212,16 @@ inline std::optional<ScalarAffineTransform4f> ExtractTransform4f(
 // Returns the resolved path of an `SdfAssetPath` value (or its asset path if
 // it is unresolved), or an empty string otherwise.
 std::string ResolvePathFromValue(const VtValue& value);
+
+inline std::string ExtractStringOrToken(const VtValue& value) {
+  if (value.IsHolding<std::string>()) {
+    return value.UncheckedGet<std::string>();
+  }
+  if (value.IsHolding<TfToken>()) {
+    return value.UncheckedGet<TfToken>().GetString();
+  }
+  return ResolvePathFromValue(value);
+}
 
 // Creates the Mitsuba object of type `type` described by `props`, and returns
 // the first object of its expansion (e.g. the texture that a `bitmap` plugin
