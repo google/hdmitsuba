@@ -694,3 +694,58 @@ def test_nested_integrator_settings():
       "mitsuba:integrator:missing_child:max_depth", Sdf.ValueTypeNames.Int
   ).Set(2)
   assert np.mean(engine.render()["color"][16, 16, :3]) > 0.25
+
+
+def test_sampler_render_settings():
+  stage = Usd.Stage.CreateInMemory()
+  stage.GetRootLayer().subLayerPaths.append(
+      f"{test_helpers.TEST_ASSETS_PATH}/render_settings/sampler_stratified.usda"
+  )
+  stage.SetMetadata(UsdRender.Tokens.renderSettingsPrimPath, "/Render/Settings")
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
+  stratified_hd, _ = test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      output_prefix="test_sampler_stratified",
+      spp=None,
+      atol=0.05,
+      engine=engine,
+  )
+  assert engine.get_render_stats()["totalSamples"] == 16
+
+  # Host overrides: initial Frame-1 override and switching between aliases.
+  override_engine = usd_render.RenderEngine(stage)
+  override_engine.configure(
+      hydra_delegate_id="HdMitsubaRendererPlugin",
+      overrides={"mitsuba:sampler:sample_count": 12},
+  )
+  override_engine.render()
+  assert override_engine.get_render_stats()["totalSamples"] == 12
+  override_engine.configure(
+      hydra_delegate_id="HdMitsubaRendererPlugin",
+      overrides={"mitsuba:sample_count": 8},
+  )
+  override_engine.render()
+  assert override_engine.get_render_stats()["totalSamples"] == 8
+
+  # Live update of sampler plugin type without calling configure().
+  sampler_type_attr = stage.GetPrimAtPath("/Render/Settings").GetAttribute(
+      "mitsuba:sampler:type"
+  )
+  sampler_type_attr.Set("independent")
+  independent_hd = engine.render()["color"]
+  assert not np.allclose(
+      stratified_hd[..., :3], independent_hd[..., :3], atol=1e-4
+  )
+
+  # Interactive progressive rendering uses `independent` so structured samplers
+  # with `jitter = false` do not collapse 1-SPP passes to identical grids.
+  sampler_type_attr.Set("stratified")
+  engine.configure(
+      hydra_delegate_id="HdMitsubaRendererPlugin",
+      overrides={"enableInteractive": True, "mitsuba:sample_count": 2},
+  )
+  pass1 = engine.render()["color"]
+  pass2 = engine.render()["color"]
+  assert not np.allclose(pass1[..., :3], pass2[..., :3], atol=1e-4)
