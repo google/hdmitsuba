@@ -381,18 +381,29 @@ def _convert_curves(
   return curve_obj
 
 
+def _strip_deprecated_hide_emitters(spec: dict[str, Any]) -> bool:
+  """Removes deprecated `hide_emitters` entries recursively from `spec`."""
+  removed = 'hide_emitters' in spec
+  spec.pop('hide_emitters', None)
+  for value in spec.values():
+    if isinstance(value, dict):
+      removed = _strip_deprecated_hide_emitters(value) or removed
+  return removed
+
+
 def _convert_render_settings(
     stage: Usd.Stage,
     render_settings: UsdRender.Settings | None,
     render_product_path: str | None = None,
     variant_name: str | None = None,
+    time: Usd.TimeCode = Usd.TimeCode.Default(),
 ) -> dict[str, Any]:
   """Handles the render settings and returns the integrator dictionary."""
   resolved_variant = variant_name
   if not resolved_variant and render_settings:
     prim = render_settings.GetPrim()
     if variant_attr := prim.GetAttribute('mitsuba:variant'):
-      resolved_variant = variant_attr.Get()
+      resolved_variant = variant_attr.Get(time)
 
   if resolved_variant:
     if resolved_variant != mi.variant():
@@ -405,9 +416,14 @@ def _convert_render_settings(
     return {'type': 'path'}
 
   prim = render_settings.GetPrim()
-  integrator_dict = util.extract_nested_dict(prim, 'mitsuba:integrator:')
-  if not integrator_dict.setdefault('type', 'path'):
-    raise ValueError('mitsuba:integrator:type cannot be empty, if specified.')
+  integrator_dict = util.extract_nested_dict(prim, 'mitsuba:integrator:', time)
+  if _strip_deprecated_hide_emitters(integrator_dict):
+    Tf.Warn(
+        "The 'mitsuba:integrator:hide_emitters' render setting is deprecated"
+        ' and ignored; set \'mitsuba:visibility\' to "secondary" on the'
+        ' desired lights or shapes instead.'
+    )
+  integrator_dict.setdefault('type', 'path')
 
   render_color, aovs = render_settings_lib.parse_aovs(
       stage, render_settings, render_product_path
@@ -450,6 +466,7 @@ def convert_to_mitsuba(
       render_settings,
       render_product_path,
       variant_name,
+      time=time,
   )
 
   prototype_paths = instancing.get_prototype_paths(stage)

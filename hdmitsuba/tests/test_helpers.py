@@ -171,7 +171,9 @@ def assert_hydra_equal_to_offline(
   write_image(image_hd, f'{output_prefix}_hd.png')
   write_image(image_usd, f'{output_prefix}_usd.png')
 
-  robust_assert_close(image_hd[..., :3], image_usd, atol=atol, rtol=rtol)
+  robust_assert_close(
+      image_hd[..., :3], image_usd[..., :3], atol=atol, rtol=rtol
+  )
   return image_hd, image_usd
 
 
