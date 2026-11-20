@@ -21,7 +21,6 @@
 #include <vector>
 
 #include <absl/container/flat_hash_map.h>
-#include <mitsuba/core/vector.h>
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/vec2f.h>
 #include <pxr/base/gf/vec3f.h>
@@ -36,8 +35,6 @@
 #include <pxr/imaging/hd/enums.h>
 #include <pxr/imaging/hd/extComputationUtils.h>
 #include <pxr/imaging/hd/geomSubset.h>
-#include <pxr/imaging/hd/light.h>
-#include <pxr/imaging/hd/lightSchema.h>
 #include <pxr/imaging/hd/mesh.h>
 #include <pxr/imaging/hd/meshTopology.h>
 #include <pxr/imaging/hd/renderDelegate.h>
@@ -93,31 +90,41 @@ bool ValidatePrimvarSize(const VtValue& value, HdInterpolation interpolation,
   }
 }
 
-std::optional<LightSpec> GetMeshEmitterSpec(HdSceneDelegate* sceneDelegate,
-                                            const SdfPath& id) {
-  const HdContainerDataSourceHandle prim_source =
-      GetPrimDataSource(sceneDelegate, id);
-  const HdContainerDataSourceHandle light =
-      HdLightSchema::GetFromParent(prim_source).GetContainer();
-  if (!light ||
-      !HdSampledDataSource::Cast(light->Get(HdLightTokens->intensity))) {
-    return std::nullopt;
-  }
-  LightSpec spec;
-  spec.id = id;
-  spec.emission = GetLightBaseEmission(light);
-  spec.shaping = GetShapingSpec(light, id);
-  // Meshes bake their transform into the vertices, so the `ies` light frame is
-  // given explicitly. USD lights emit along -Z, the `ies` emitter along +Z.
-  spec.transform = MotionTransform::Static(
-      UsdToMitsubaTransform(GetPrimTransform(prim_source)) *
-      ScalarAffineTransform4f::rotate(mitsuba::Vector<float, 3>(1, 0, 0), 180));
-  return spec;
-}
-
 }  // namespace
 
 TF_DEFINE_PUBLIC_TOKENS(HdMitsubaMeshTokens, HDMITSUBA_MESH_TOKENS);
+
+bool SyncShapePluginSpecs(const HdContainerDataSourceHandle& prim_source,
+                          HdMitsubaRenderParam* render_param, bool in_scene,
+                          HdDirtyBits* dirty_bits, PluginSpecNode* shape_spec,
+                          PluginSpecNode* mitsuba_emitter_spec) {
+  if (in_scene && (*dirty_bits & HdMitsubaMesh::DirtyMitsubaParams) == 0) {
+    return false;
+  }
+  ScopedResolverCache resolver_cache(render_param->ResolverCacheData());
+  HdContainerDataSourceHandle mitsuba_source =
+      GetMitsubaDataSource(prim_source);
+  PluginSpecNode parsed_shape_spec =
+      ParsePluginSpec(mitsuba_source, "mitsuba:shape:");
+  PluginSpecNode parsed_emitter_spec =
+      ParsePluginSpec(mitsuba_source, "mitsuba:emitter:");
+  if (parsed_shape_spec == *shape_spec &&
+      parsed_emitter_spec == *mitsuba_emitter_spec) {
+    return false;
+  }
+  const bool needs_rebuild =
+      !in_scene ||
+      !CanUpdatePluginStructureInPlace(*shape_spec, parsed_shape_spec) ||
+      !CanUpdatePluginStructureInPlace(*mitsuba_emitter_spec,
+                                       parsed_emitter_spec) ||
+      shape_spec->ParamChanged(parsed_shape_spec, "flip_normals");
+  if (shape_spec->ParamChanged(parsed_shape_spec, "to_world")) {
+    *dirty_bits |= HdChangeTracker::DirtyTransform;
+  }
+  *shape_spec = std::move(parsed_shape_spec);
+  *mitsuba_emitter_spec = std::move(parsed_emitter_spec);
+  return needs_rebuild;
+}
 
 HdMitsubaMesh::HdMitsubaMesh(const SdfPath& id) : HdMesh(id) {}
 
@@ -179,7 +186,8 @@ void HdMitsubaMesh::Sync(HdSceneDelegate* sceneDelegate,
       (*dirtyBits &
        (HdChangeTracker::DirtyTransform | HdChangeTracker::DirtyInstancer |
         HdChangeTracker::DirtyInstanceIndex |
-        HdChangeTracker::DirtyDoubleSided | HdMitsubaMesh::DirtyLight)) != 0;
+        HdChangeTracker::DirtyDoubleSided | HdMitsubaMesh::DirtyLight |
+        HdMitsubaMesh::DirtyMitsubaParams)) != 0;
 
   if (topology_dirty) {
     *dirtyBits |= HdChangeTracker::DirtyTopology |
@@ -291,7 +299,9 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
     return;
   }
 
-  std::optional<LightSpec> emitter_spec = GetMeshEmitterSpec(sceneDelegate, id);
+  const HdContainerDataSourceHandle prim_source =
+      GetPrimDataSource(sceneDelegate, id);
+  std::optional<LightSpec> emitter_spec = GetMeshEmitterSpec(prim_source, id);
 
   GfMatrix4d transform = sceneDelegate->GetTransform(id);
   std::vector<MotionTransform> instance_transforms;
@@ -305,8 +315,8 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
     }
   } else {
     MotionTransform motion_transform =
-        SampleTransform(GetPrimDataSource(sceneDelegate, id),
-                        GetMotionInterval(sceneDelegate), /*uniform=*/true)
+        SampleTransform(prim_source, GetMotionInterval(sceneDelegate),
+                        /*uniform=*/true)
             .Map([](const GfMatrix4d& m) { return UsdToMitsubaTransform(m); });
     if (motion_transform.IsAnimated()) {
       // Transform motion blur requires wrapping the mesh in a Mitsuba instance.
@@ -334,20 +344,37 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
   const uint8_t layout = (has_primvar(HdTokens->normals, GfVec3f()) ? 1 : 0) |
                          (has_primvar(kSt, GfVec2f()) ? 2 : 0);
 
+  bool needs_rebuild = (*dirtyBits & HdChangeTracker::DirtyTopology) != 0 ||
+                       layout != primvar_layout_;
+  primvar_layout_ = layout;
+
+  if (SyncShapePluginSpecs(prim_source, mitsuba_render_param, in_scene_,
+                           dirtyBits, &shape_spec_, &mitsuba_emitter_spec_)) {
+    needs_rebuild = true;
+  }
+  if ((*dirtyBits &
+       (HdChangeTracker::DirtyPoints | HdChangeTracker::DirtyTransform |
+        HdChangeTracker::DirtyNormals | HdChangeTracker::DirtyPrimvar)) != 0) {
+    if (auto it = shape_spec_.params.find("flip_normals");
+        it != shape_spec_.params.end() && it->second.IsHolding<bool>() &&
+        it->second.UncheckedGet<bool>()) {
+      needs_rebuild = true;
+    }
+  }
+
   MeshSpec spec;
   spec.id = id;
   spec.geometry = geometry_;
   spec.transform = transform;
   spec.emitter_spec = std::move(emitter_spec);
+  spec.shape_spec = shape_spec_;
+  spec.mitsuba_emitter_spec = mitsuba_emitter_spec_;
   spec.instance_transforms = std::move(instance_transforms);
   spec.motion_wrapped = motion_wrapped;
-  spec.needs_rebuild =
-      (dirtyBits && (*dirtyBits & HdChangeTracker::DirtyTopology)) ||
-      layout != primvar_layout_;
-  primvar_layout_ = layout;
-  spec.dirty_bits = dirtyBits ? *dirtyBits : HdChangeTracker::Clean;
+  spec.needs_rebuild = needs_rebuild;
+  spec.dirty_bits = *dirtyBits;
   spec.double_sided = IsDoubleSided(sceneDelegate);
-  spec.visibility = GetShapeVisibility(GetPrimDataSource(sceneDelegate, id));
+  spec.visibility = GetShapeVisibility(prim_source);
   scene->SyncMesh(std::move(spec));
   in_scene_ = true;
 }
@@ -356,6 +383,8 @@ void HdMitsubaMesh::RemoveFromScene(SceneManager* scene) {
   if (in_scene_) {
     scene->RemoveShape(GetId());
     in_scene_ = false;
+    shape_spec_ = {};
+    mitsuba_emitter_spec_ = {};
   }
 }
 

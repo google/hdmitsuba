@@ -1,0 +1,48 @@
+#usda 1.0
+(
+    subLayers = [@./ies_base.usda@]
+)
+
+def RectLight "rect_flipped"
+{
+    float inputs:height = 0.4
+    float inputs:width = 0.4
+    double3 xformOp:translate = (-0.9, 0.8, 1)
+    float xformOp:rotateX = 180
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    custom bool mitsuba:shape:flip_normals = true
+    custom string mitsuba:emitter:radiance:type = "rgb"
+    custom color3f mitsuba:emitter:radiance:value = (4.0, 1.0, 0.5)
+}
+
+def DiskLight "ies_disk" (
+    prepend apiSchemas = ["ShapingAPI"]
+)
+{
+    float inputs:intensity = 2
+    float inputs:radius = 0.05
+    asset inputs:shaping:ies:file = @./textures/ies/asymmetric.ies@
+    double3 xformOp:translate = (0.9, 0.8, 1)
+    float xformOp:rotateZ = 30
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+    custom string mitsuba:emitter:type = "ies"
+    custom float mitsuba:emitter:angle_scale = 0.8
+}
+
+def SphereLight "spot_from_point"
+{
+    bool inputs:treatAsPoint = true
+    double3 xformOp:translate = (-0.9, -0.8, 1.2)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+    custom string mitsuba:emitter:type = "spot"
+    custom float mitsuba:emitter:cutoff_angle = 25
+    custom string mitsuba:emitter:intensity:type = "rgb"
+    custom color3f mitsuba:emitter:intensity:value = (0.5, 4.0, 1.0)
+}
+
+def DomeLight "dome"
+{
+    float inputs:intensity = 0.15
+    asset inputs:texture:file = @./textures/envmap.png@
+    custom asset mitsuba:emitter:filename = @./textures/envmap_1x1.png@
+}

@@ -749,3 +749,17 @@ def test_sampler_render_settings():
   pass1 = engine.render()["color"]
   pass2 = engine.render()["color"]
   assert not np.allclose(pass1[..., :3], pass2[..., :3], atol=1e-4)
+
+
+def test_mitsuba_plugin_specs_usda():
+  stage = Usd.Stage.Open(
+      f"{test_helpers.TEST_ASSETS_PATH}/render_settings/mitsuba_plugin_specs.usda"
+  )
+  image_hd, image_mi = test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      output_prefix="test_mitsuba_plugin_specs_usda",
+      spp=None,
+      atol=0.05,
+  )
+  assert np.max(image_hd[..., :3]) > 0.1
+  assert np.max(image_mi) > 0.1

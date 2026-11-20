@@ -1,0 +1,100 @@
+#usda 1.0
+(
+    defaultPrim = "root"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "root"
+{
+    def DomeLight "Dome"
+    {
+        float inputs:intensity = 0.5
+    }
+
+    def Mesh "Blocker"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-20, -20, -1.5), (20, -20, -1.5), (20, 20, -1.5), (-20, 20, -1.5)]
+        color3f[] primvars:displayColor = [(0, 0, 0)]
+        uniform token subdivisionScheme = "none"
+    }
+
+    def Mesh "TwoSubsetMesh"
+    {
+        int[] faceVertexCounts = [4, 4]
+        int[] faceVertexIndices = [0, 1, 2, 3, 4, 5, 6, 7]
+        point3f[] points = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0), (-1, -1, -1), (-1, 1, -1), (1, 1, -1), (1, -1, -1)]
+        uniform token subdivisionScheme = "none"
+        uniform token subsetFamily:materialBind:familyType = "nonOverlapping"
+
+        def GeomSubset "subset_0" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            uniform token elementType = "face"
+            uniform token familyName = "materialBind"
+            int[] indices = [0]
+            rel material:binding = </root/Mat0>
+        }
+
+        def GeomSubset "subset_1" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            uniform token elementType = "face"
+            uniform token familyName = "materialBind"
+            int[] indices = [1]
+            rel material:binding = </root/Mat1>
+        }
+    }
+
+    def Plane "SensorPlane"
+    {
+        uniform token axis = "Z"
+        double length = 2
+        double width = 2
+    }
+
+    def Material "Mat0"
+    {
+        token outputs:surface.connect = </root/Mat0/Surface.outputs:surface>
+
+        def Shader "Surface"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.8, 0.2, 0.2)
+            token outputs:surface
+        }
+    }
+
+    def Material "Mat1"
+    {
+        token outputs:surface.connect = </root/Mat1/Surface.outputs:surface>
+
+        def Shader "Surface"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.2, 0.2, 0.8)
+            token outputs:surface
+        }
+    }
+
+    def Xform "Camera"
+    {
+        def Camera "Camera"
+        {
+            custom string mitsuba:sensor:type = "irradiancemeter"
+            custom string mitsuba:sensor:shape = "/root/TwoSubsetMesh"
+            custom string mitsuba:sensor:film:pixel_filter:type = "box"
+        }
+    }
+
+    def Camera "PlaneMeter"
+    {
+        custom string mitsuba:sensor:type = "irradiancemeter"
+        custom string mitsuba:sensor:shape = "/root/SensorPlane"
+        custom string mitsuba:sensor:film:pixel_filter:type = "box"
+    }
+}

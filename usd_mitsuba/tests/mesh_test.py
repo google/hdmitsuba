@@ -248,3 +248,32 @@ def test_points_shared_by_displaced_subsets_are_displaced_once():
     on_edge = np.isclose(points[:, 0], 1.0)
     np.testing.assert_allclose(points[on_edge, 2], 1.0)
     np.testing.assert_allclose(points[~on_edge, 2], offset)
+
+
+def test_mesh_plugin_properties_and_custom_id():
+  props = mi.Properties('shapegroup')
+  mesh_lib._set_plugin_properties(
+      props,
+      {
+          'child': {
+              'type': 'merge',
+              's0': {'type': 'sphere'},
+              's1': {'type': 'rectangle'},
+          }
+      },
+  )
+  assert 'child_0' in props and 'child_1' in props
+
+  stage = Usd.Stage.CreateInMemory()
+  mesh = UsdGeom.Mesh.Define(stage, '/Mesh')
+  mesh.CreatePointsAttr(_POINTS)
+  mesh.CreateFaceVertexCountsAttr(_COUNTS)
+  mesh.CreateFaceVertexIndicesAttr(_INDICES)
+  mesh.GetPrim().CreateAttribute(
+      'mitsuba:shape:id', Sdf.ValueTypeNames.String
+  ).Set('hero_mesh')
+  converted = mesh_lib.convert_mesh(
+      mesh.GetPrim(), 0, Usd.TimeCode.Default(), {}
+  )
+  assert list(converted) == ['hero_mesh']
+  assert converted['hero_mesh'].id() == 'hero_mesh'

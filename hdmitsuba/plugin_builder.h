@@ -48,6 +48,18 @@ struct PluginSpecNode {
     return params.contains(key) || children.contains(key);
   }
 
+  bool ParamChanged(const PluginSpecNode& other, std::string_view key) const {
+    auto it = params.find(key);
+    auto other_it = other.params.find(key);
+    if (it == params.end() && other_it == other.params.end()) {
+      return false;
+    }
+    if (it == params.end() || other_it == other.params.end()) {
+      return true;
+    }
+    return it->second != other_it->second;
+  }
+
   PluginSpecNode() = default;
   explicit PluginSpecNode(std::string type) : plugin_type(std::move(type)) {}
 

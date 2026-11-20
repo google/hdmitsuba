@@ -47,6 +47,7 @@
 #include <pxr/imaging/hd/dataSource.h>
 #include <pxr/pxr.h>
 
+#include "hdmitsuba/ies_emitter.h"
 #include "hdmitsuba/utils.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -225,6 +226,9 @@ std::vector<mitsuba::ref<mitsuba::Object>> InstantiateAndExpand(
   mitsuba::Properties props = BuildPluginProperties(spec, variant);
   if (props.id().empty() && !fallback_id.empty()) {
     props.set_id(fallback_id);
+  }
+  if (props.plugin_name() == "ies") {
+    RegisterIesEmitter();
   }
   mitsuba::ref<mitsuba::Object> object =
       mitsuba::PluginManager::instance()->create_object(props, variant,

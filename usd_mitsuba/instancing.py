@@ -132,22 +132,44 @@ def convert_point_instancer(
           group_dict[f'shape_{shape_idx}'] = mesh_obj
           shape_idx += 1
       elif parts := util.get_implicit_surface_parts(child_prim, time):
+        shape_overrides = util.extract_nested_dict(
+            child_prim, 'mitsuba:shape:', time
+        )
+        shape_overrides.pop('id', None)
+        shape_overrides.pop('emitter', None)
+        shape_overrides.pop('sensor', None)
+        extra_to_world = shape_overrides.pop('to_world', None)
+        extra_flip_normals = bool(shape_overrides.pop('flip_normals', False))
         child_to_prototype = util.to_mitsuba_transform(
             UsdGeom.Xformable(child_prim).ComputeLocalToWorldTransform(time)
             * proto_to_local_transform
         )
+        if extra_to_world is not None:
+          child_to_prototype = child_to_prototype @ extra_to_world
         # Like mesh prototypes, these carry no emitter, which Mitsuba does not
         # support on instances.
         bsdf, _, _, interior_medium = material.convert_material(
             child_prim, time=time
         )
+        has_medium = (
+            interior_medium is not None
+            or 'interior' in shape_overrides
+            or 'exterior' in shape_overrides
+        )
         for part in parts.values():
           part['to_world'] = child_to_prototype @ part['to_world']
           part['visibility'] = util.get_ray_visibility(child_prim, time)
-          if bsdf is not None:
-            part['bsdf'] = bsdf
+          if extra_flip_normals:
+            part['flip_normals'] = not part.get('flip_normals', False)
           if interior_medium is not None:
             part['interior'] = interior_medium
+          if shape_overrides:
+            util.deep_merge_dict(part, shape_overrides)
+          if 'bsdf' not in part:
+            if bsdf is not None:
+              part['bsdf'] = bsdf
+            elif has_medium:
+              part['bsdf'] = {'type': 'null'}
           group_dict[f'shape_{shape_idx}'] = part
           shape_idx += 1
       elif child_prim.IsA(UsdGeom.Points):
