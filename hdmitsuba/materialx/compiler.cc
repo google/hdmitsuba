@@ -1506,22 +1506,55 @@ int MtlxExprCompiler::CompileBsdfClosure(const mx::NodePtr& raw_node) {
                               {combinator_arg::kWeight, EmitTmp(w)}});
   };
 
+  auto frame_slot = [&](const std::string& name, const Expr& def) {
+    Expr e = CompileInputExpr(node, name, def);
+    return e == def ? -1 : EmitTmp(e);
+  };
+
   int idx = -1;
   if (cat == "oren_nayar_diffuse_bsdf" || cat == "subsurface_bsdf" ||
-      cat == "translucent_bsdf") {
+      cat == "translucent_bsdf" || cat == "conductor_bsdf") {
     Expr w_expr = CompileInputExpr(node, "weight", Expr::one());
     if (w_expr.is_zero()) {
       // Opaque leaves still block `layer` bases (`throughput = 0`) at
-      // `weight == 0`, without compiling dead color/roughness/normal inputs.
+      // `weight == 0`, without compiling dead inputs.
       int z = EmitTmp(Expr::zero());
       idx = EmitClosure(ClosureOp::OrenNayarDiffuse, {{leaf_arg::kWeight, z},
                                                       {leaf_arg::kColor, z},
                                                       {leaf_arg::kRoughness, z},
                                                       {leaf_arg::kMode, 0},
                                                       {leaf_arg::kNormal, -1}});
+    } else if (cat == "conductor_bsdf") {
+      auto is_nonzero_input = [&](const std::string& name) {
+        mx::InputPtr in = GetValueInput(node, name);
+        if (!in) return node->getConnectedNode(name) != nullptr;
+        if (in->getType() == "boolean") {
+          const std::string& s = in->getValueString();
+          return s == "true" || s == "1";
+        }
+        mx::ValuePtr v = in->getValue();
+        return v && v->isA<float>() && v->asA<float>() > 0.0f;
+      };
+      if (is_nonzero_input("thinfilm_thickness")) {
+        WarnUnsupported(
+            "Unsupported MaterialX 'conductor_bsdf' thinfilm_thickness; "
+            "ignoring thin film.");
+      }
+      if (is_nonzero_input("retroreflective")) {
+        WarnUnsupported(
+            "Unsupported MaterialX 'conductor_bsdf' retroreflective; using "
+            "standard reflection.");
+      }
+      idx = EmitClosure(
+          ClosureOp::Conductor,
+          {{leaf_arg::kWeight, EmitTmp(w_expr)},
+           {leaf_arg::kColor, slot("ior", Expr::one())},
+           {leaf_arg::kRoughness, slot("roughness")},
+           {leaf_arg::kExtinction, slot("extinction")},
+           {leaf_arg::kNormal, frame_slot("normal", Expr::n_world())},
+           {leaf_arg::kTangent, frame_slot("tangent", Expr::t_world())}});
     } else {
       bool is_translucent = cat == "translucent_bsdf";
-      Expr n_expr = CompileInputExpr(node, "normal", Expr::n_world());
       idx = EmitClosure(
           is_translucent ? ClosureOp::Translucent : ClosureOp::OrenNayarDiffuse,
           {{leaf_arg::kWeight, EmitTmp(w_expr)},
@@ -1530,8 +1563,7 @@ int MtlxExprCompiler::CompileBsdfClosure(const mx::NodePtr& raw_node) {
            {leaf_arg::kMode,
             cat == "oren_nayar_diffuse_bsdf" &&
                 !CompileInputExpr(node, "energy_compensation").is_zero()},
-           {leaf_arg::kNormal,
-            n_expr == Expr::n_world() ? -1 : EmitTmp(n_expr)}});
+           {leaf_arg::kNormal, frame_slot("normal", Expr::n_world())}});
     }
   } else if (cat == "layer" || cat == "add") {
     bool is_layer = cat == "layer";
