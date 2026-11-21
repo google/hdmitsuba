@@ -40,6 +40,7 @@
 #include <mitsuba/render/integrator.h>
 #include <mitsuba/render/scene.h>
 #include <mitsuba/render/sensor.h>
+#include <mitsuba/render/shape.h>
 #include <pxr/base/tf/diagnostic.h>
 #include <pxr/pxr.h>
 
@@ -85,10 +86,18 @@ JITInputs<Float, Spectrum> GatherAllJitInputs(
       kSlotLeaf,
     };
 
+    struct VarMeta {
+      VarType type;
+      size_t size;
+      bool unaligned;
+    };
+
     struct CollectPayload {
       JITInputs<Float, Spectrum>* inputs;
       absl::flat_hash_map<uint32_t, uint32_t> slot_of_index;
       absl::flat_hash_map<dr::TraversableBase*, uint32_t> visited_objects;
+      std::vector<VarMeta> var_metas;
+      bool any_scheduled = false;
       const dr::TraverseVisitor* visitor;
     };
 
@@ -113,11 +122,13 @@ JITInputs<Float, Spectrum> GatherAllJitInputs(
       }
       if (info.state != VarState::Evaluated) {
         ::jit_var_schedule(index);
+        state->any_scheduled = true;
       }
       auto [it, inserted] = state->slot_of_index.try_emplace(
           index, static_cast<uint32_t>(state->inputs->flat_indices.size()));
       if (inserted) {
         state->inputs->flat_indices.push_back(index);
+        state->var_metas.push_back({info.type, info.size, info.unaligned});
       }
       state->inputs->Append(Tag::kSlotLeaf);
       state->inputs->Append(it->second);
@@ -127,6 +138,16 @@ JITInputs<Float, Spectrum> GatherAllJitInputs(
     auto child_cb = [](void* p, dr::TraversableBase* obj, const char*) {
       auto* state = static_cast<CollectPayload*>(p);
       if (!obj) {
+        state->inputs->Append(Tag::kNullObject);
+        return;
+      }
+      // Mitsuba unregisters Instance shapes from the JIT registry and packs
+      // their transforms into Scene::m_instance_transforms /
+      // m_instance_kf_data; shape groups are traversed via
+      // Scene::m_shapegroups.
+      if (const auto* shape =
+              dynamic_cast<const mitsuba::Shape<Float, Spectrum>*>(obj);
+          shape && shape->is_instance()) {
         state->inputs->Append(Tag::kNullObject);
         return;
       }
@@ -151,7 +172,7 @@ JITInputs<Float, Spectrum> GatherAllJitInputs(
 
     dr::TraverseVisitor visitor{dr::TraverseRole::Freeze, collect_cb, child_cb,
                                 state_cb};
-    CollectPayload payload{&inputs, {}, {}, &visitor};
+    CollectPayload payload{&inputs, {}, {}, {}, false, &visitor};
 
     dr::traverse_fn(scene, &payload, visitor);
     dr::traverse_fn(sensor, &payload, visitor);
@@ -188,11 +209,19 @@ JITInputs<Float, Spectrum> GatherAllJitInputs(
 
     // Force evaluation of all input JIT variables before recording or replay.
     ::jit_eval();
-    for (uint32_t idx : inputs.flat_indices) {
-      VarInfo info = ::jit_var_info(idx);
-      inputs.Append(info.type);
-      inputs.Append(info.size);
-      inputs.Append(info.unaligned);
+    if (payload.any_scheduled) {
+      for (uint32_t idx : inputs.flat_indices) {
+        VarInfo info = ::jit_var_info(idx);
+        inputs.Append(info.type);
+        inputs.Append(info.size);
+        inputs.Append(info.unaligned);
+      }
+    } else {
+      for (const VarMeta& meta : payload.var_metas) {
+        inputs.Append(meta.type);
+        inputs.Append(meta.size);
+        inputs.Append(meta.unaligned);
+      }
     }
   }
 
