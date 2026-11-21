@@ -49,6 +49,12 @@ def _sample_inputs(
   return rng.next_float32(), mi.Point2f(rng.next_float32(), rng.next_float32())
 
 
+_CONDUCTOR_KW: dict[str, Any] = {
+    'ior': (0.18, 0.42, 1.37),
+    'extinction': (3.42, 2.35, 1.77),
+    'roughness': (0.25, 0.45),
+}
+
 _LOBE_CASES = [
     pytest.param(
         'ND_oren_nayar_diffuse_bsdf',
@@ -87,9 +93,19 @@ _LOBE_CASES = [
         id='subsurface',
     ),
     pytest.param(
+        'ND_conductor_bsdf',
+        {
+            **_CONDUCTOR_KW,
+            'normal': Gf.Vec3f(0.2, -0.3, 0.9327379),
+            'tangent': Gf.Vec3f(0.0, 1.0, 0.0),
+        },
+        {},
+        id='conductor_frame',
+    ),
+    pytest.param(
         'ND_mix_bsdf',
         {
-            'fg': ('ND_translucent_bsdf', {'color': (0.6, 0.4, 0.2)}),
+            'fg': ('ND_conductor_bsdf', _CONDUCTOR_KW),
             'bg': (
                 'ND_oren_nayar_diffuse_bsdf',
                 {'color': (0.2, 0.7, 0.4), 'roughness': 0.4},
@@ -253,6 +269,61 @@ def test_bsdf_layer_throughput() -> None:
         rtol=1e-4,
         atol=1e-5,
     )
+
+
+def test_conductor_bsdf() -> None:
+  """Tests conductor zero-IOR, height-correlated G2, tangent, and thinfilm."""
+  ctx = mi.BSDFContext()
+  si_n = mtlx.make_test_si(wi=(0.0, 0.0, 1.0))
+  bsdf_zero = _compile_bsdf(
+      'ND_conductor_bsdf',
+      ior=(0.0, 0.0, 0.0),
+      extinction=(0.0, 0.0, 0.0),
+      roughness=(0.2, 0.2),
+  )
+  val_zero, pdf_zero = bsdf_zero.eval_pdf(ctx, si_n, mi.Vector3f(0.0, 0.0, 1.0))
+  assert dr.allclose(pdf_zero, dr.inv_pi / (4.0 * 0.2**2), rtol=1e-4)
+  assert dr.allclose(val_zero, 2.08759, rtol=1e-4)
+
+  # Height-correlated Smith G2 at grazing incidence (G2 = 1/5 vs separable 1/9).
+  bsdf_white = _compile_bsdf(
+      'ND_conductor_bsdf',
+      ior=(1.0, 1.0, 1.0),
+      extinction=(1e4, 1e4, 1e4),
+      roughness=(1.0, 1.0),
+  )
+  sin_g = math.sqrt(1.0 - 0.2**2)
+  val_g = bsdf_white.eval(
+      ctx,
+      mtlx.make_test_si(wi=(sin_g, 0.0, 0.2)),
+      mi.Vector3f(-sin_g, 0.0, 0.2),
+  )
+  assert dr.allclose(val_g, 0.124298, rtol=1e-4)
+
+  # Rotating `tangent` by 90° matches swapping `(alpha_x, alpha_y)`.
+  bsdf_ref = _compile_bsdf('ND_conductor_bsdf', **_CONDUCTOR_KW)
+  bsdf_ty = _compile_bsdf(
+      'ND_conductor_bsdf', **_CONDUCTOR_KW, tangent=Gf.Vec3f(0.0, 1.0, 0.0)
+  )
+  bsdf_swap = _compile_bsdf(
+      'ND_conductor_bsdf', **{**_CONDUCTOR_KW, 'roughness': (0.45, 0.25)}
+  )
+  wo_x = mi.Vector3f(0.5, 0.0, math.sqrt(0.75))
+  assert dr.allclose(
+      bsdf_ty.eval_pdf(ctx, si_n, wo_x),
+      bsdf_swap.eval_pdf(ctx, si_n, wo_x),
+      rtol=1e-4,
+  )
+  assert not dr.allclose(
+      bsdf_ty.eval(ctx, si_n, wo_x), bsdf_ref.eval(ctx, si_n, wo_x), rtol=1e-2
+  )
+
+  # Ignored `thinfilm_thickness` (literal or connected) emits no dead opaques.
+  for tf in (500.0, ('ND_add_float', {'in1': 200.0, 'in2': 300.0})):
+    bsdf_tf = _compile_bsdf(
+        'ND_conductor_bsdf', thinfilm_thickness=tf, **_CONDUCTOR_KW
+    )
+    assert len(mi.traverse(bsdf_tf)) == len(mi.traverse(bsdf_ref))
 
 
 def test_bsdf_combinator_context_masking() -> None:
@@ -424,22 +495,75 @@ def test_spectral_bsdf() -> None:
   assert dr.allclose(bs_c.pdf, pdf_s, rtol=1e-4, atol=1e-5)
   assert dr.allclose(w_c * bs_c.pdf, val_s, rtol=1e-4, atol=1e-5)
 
+  # Unbounded spectral upsampling of conductor extinction (also covers
+  # extinction-only sRGB LUT loading when `ior` is uniform).
+  bsdf_cond = _compile_bsdf(
+      'ND_conductor_bsdf',
+      ior=('ND_convert_float_color3', {'in_': 0.5}),
+      extinction=(3.42, 2.35, 1.77),
+      roughness=(0.25, 0.25),
+  )
+  z_k = 2.0 * 3.42
+  k_spec = up((3.42 / z_k, 2.35 / z_k, 1.77 / z_k)) * z_k
+  f0_spec = (0.25 + dr.square(k_spec)) / (2.25 + dr.square(k_spec))
+  ess = 0.9187085
+  val_cond, pdf_cond = bsdf_cond.eval_pdf(ctx, si, wo)
+  assert dr.allclose(pdf_cond, dr.inv_pi / (4.0 * 0.25**2), rtol=1e-4)
+  assert dr.allclose(
+      val_cond,
+      f0_spec * (1.0 + f0_spec * (1.0 - ess) / ess) * pdf_cond,
+      rtol=1e-4,
+  )
+  bs_k, w_k = bsdf_cond.sample(
+      ctx, si, mi.Float(0.5), mi.Point2f([0.2, 0.8], [0.3, 0.7])
+  )
+  val_ks, pdf_ks = bsdf_cond.eval_pdf(ctx, si, bs_k.wo)
+  assert dr.allclose(bs_k.pdf, pdf_ks, rtol=1e-4, atol=1e-5)
+  assert dr.allclose(w_k * bs_k.pdf, val_ks, rtol=1e-4, atol=1e-5)
+
 
 def test_bsdf_ad_gradients() -> None:
-  """Tests unbiased AD gradients and detached PDFs for opacity and mix."""
+  """Tests unbiased detached AD gradients for roughness, opacity, and mix."""
   ctx = mi.BSDFContext()
   si = mtlx.make_test_si()
   u1, u2 = _sample_inputs(n=65536, seed=42)
 
+  def _enable_param(bsdf: mi.BSDF, val: float) -> tuple[Any, str]:
+    params = mi.traverse(bsdf)
+    key = next(
+        k for k in params.keys() if dr.allclose(params[k], val, atol=1e-6)
+    )
+    dr.enable_grad(params[key])
+    params.update()
+    return params, key
+
+  # Detached `wo` and `pdf` yield unbiased roughness gradients.
+  bsdf = _compile_bsdf('ND_conductor_bsdf', **_CONDUCTOR_KW)
+  r0 = _CONDUCTOR_KW['roughness'][0]
+  params, r_key = _enable_param(bsdf, r0)
+  val_c, pdf_c = bsdf.eval_pdf(ctx, si, mi.Vector3f(0.0, 0.0, 1.0))
+  assert dr.grad_enabled(val_c) and not dr.grad_enabled(pdf_c)
+  bs, w = bsdf.sample(ctx, si, u1, u2)
+  assert not dr.grad_enabled(bs.wo)
+  # Directional-cosine target `E[w * wo.z]` has non-zero roughness sensitivity.
+  dr.backward(dr.mean(w * bs.wo.z, axis=None))
+  ad_grad = dr.grad(params[r_key])
+
+  eps = 2e-3
+  vals = []
+  for delta in (-eps, eps):
+    params[r_key] = mi.Float(r0 + delta)
+    params.update()
+    bs_fd, w_fd = bsdf.sample(ctx, si, u1, u2)
+    vals.append(dr.mean(w_fd * bs_fd.wo.z, axis=None))
+  assert dr.allclose(
+      ad_grad, (vals[1] - vals[0]) / (2.0 * eps), rtol=0.15, atol=0.02
+  )
+
   bsdf_op = _compile_bsdf(
       'ND_oren_nayar_diffuse_bsdf', opacity=0.6, color=(0.4, 0.4, 0.4)
   )
-  params_op = mi.traverse(bsdf_op)
-  op_key = next(
-      k for k in params_op.keys() if dr.allclose(params_op[k], 0.6, atol=1e-6)
-  )
-  dr.enable_grad(params_op[op_key])
-  params_op.update()
+  params_op, op_key = _enable_param(bsdf_op, 0.6)
   assert not dr.grad_enabled(bsdf_op.pdf(ctx, si, mi.Vector3f(0.0, 0.0, 1.0)))
   bs_op, w_op = bsdf_op.sample(ctx, si, u1, u2)
   assert not dr.grad_enabled(bs_op.wo)
@@ -453,12 +577,7 @@ def test_bsdf_ad_gradients() -> None:
       bg=('ND_oren_nayar_diffuse_bsdf', {'color': (0.2, 0.2, 0.2)}),
       mix=0.5,
   )
-  params_mix = mi.traverse(bsdf_mix)
-  mix_key = next(
-      k for k in params_mix.keys() if dr.allclose(params_mix[k], 0.5, atol=1e-6)
-  )
-  dr.enable_grad(params_mix[mix_key])
-  params_mix.update()
+  params_mix, mix_key = _enable_param(bsdf_mix, 0.5)
   val_m, pdf_m = bsdf_mix.eval_pdf(ctx, si, mi.Vector3f(0.0, 0.0, 1.0))
   assert dr.grad_enabled(val_m) and not dr.grad_enabled(pdf_m)
   # E[w_mix] = mix * 0.8 + (1 - mix) * 0.2 => d/d(mix) = 0.6.
@@ -468,7 +587,7 @@ def test_bsdf_ad_gradients() -> None:
 
 
 def test_eval_features() -> None:
-  """Tests denoiser feature extraction for diffuse, translucent, and opacity."""
+  """Tests denoiser features for diffuse, translucent, conductor, and opacity."""
   si = mtlx.make_test_si(wi=(0.2, -0.3, 0.9327379))
 
   # Cutout + perturbed normal: albedo scales by opacity, transparency sets wt
@@ -517,3 +636,12 @@ def test_eval_features() -> None:
   assert dr.allclose(feat_tr.specular_transmittance, 0.0, atol=1e-6)
   assert dr.allclose(feat_tr.roughness, 1.0, atol=1e-6)
   assert dr.allclose(feat_tr.wt, 0.0, atol=1e-6)
+
+  # Conductor reports specular_reflectance and max(alpha_x, alpha_y) roughness.
+  bsdf_cond = _compile_bsdf('ND_conductor_bsdf', **_CONDUCTOR_KW)
+  feat_c = bsdf_cond.eval_features(si)
+  assert dr.allclose(feat_c.diffuse_albedo, 0.0, atol=1e-6)
+  assert dr.allclose(
+      feat_c.specular_reflectance, [0.93676, 0.74977, 0.33681], atol=1e-4
+  )
+  assert dr.allclose(feat_c.roughness, 0.45, atol=1e-6)

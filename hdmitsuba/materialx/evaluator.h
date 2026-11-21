@@ -180,12 +180,13 @@ constexpr uint8_t result_channels(Op op, uint16_t imm = 0) {
   return 3;
 }
 
-inline constexpr int kMaxClosureArgs = 5;
+inline constexpr int kMaxClosureArgs = 7;
 
 enum class ClosureOp : int32_t {
   Null,
   OrenNayarDiffuse,
   Translucent,
+  Conductor,
   Layer,
   Mix,
   Add,
@@ -201,13 +202,16 @@ constexpr bool is_combinator(ClosureOp op) { return op >= ClosureOp::Layer; }
 // each entry is a VM temporary slot (-1 if absent).
 namespace leaf_arg {
 inline constexpr int kWeight = 0;
+// Primary color: diffuse/translucent/subsurface `color` or conductor `ior`.
 inline constexpr int kColor = 1;
 inline constexpr int kRoughness = 2;
 // Literal mode: Oren-Nayar `energy_compensation` (0 or 1).
 inline constexpr int kMode = 3;
-inline constexpr int kNormal = 4;
+// Conductor RGB `extinction`.
+inline constexpr int kExtinction = 4;
+inline constexpr int kNormal = 5, kTangent = 6;
 }  // namespace leaf_arg
-static_assert(leaf_arg::kNormal + 1 == kMaxClosureArgs);
+static_assert(leaf_arg::kTangent + 1 == kMaxClosureArgs);
 
 // Layout of `ClosureNode::args` for combinators: `kFirst`/`kSecond` index
 // `MtlxProgram::closures` — Layer (top, base), Mix (fg, bg), Add (in1, in2),
@@ -221,7 +225,7 @@ static_assert(combinator_arg::kWeight < kMaxClosureArgs);
 
 struct ClosureNode {
   ClosureOp op = ClosureOp::Null;
-  int args[kMaxClosureArgs] = {-1, -1, -1, -1, -1};
+  int args[kMaxClosureArgs] = {-1, -1, -1, -1, -1, -1, -1};
 
   explicit ClosureNode(ClosureOp op = ClosureOp::Null) : op(op) {}
 };

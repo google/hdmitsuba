@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include <utility>
+
 #include <mitsuba/core/math.h>
 
 NAMESPACE_BEGIN(mitsuba)
@@ -70,6 +72,35 @@ Spectrum oren_nayar_compensated(const Float& n_dot_v, const Float& n_dot_l,
   return dr::maximum(
       color * (a * dr::fmadd(roughness, stinv, 1.0f)) + col_ms * ms_weight,
       0.0f);
+}
+
+// Rational quadratic fit to GGX directional albedo (MaterialX
+// `mx_ggx_dir_albedo_analytic`). Returns `(A, B)` such that the directional
+// albedo is `F0 * A + F90 * B`.
+template <typename Float>
+std::pair<Float, Float> ggx_dir_albedo_ab(const Float& n_dot_v,
+                                          const Float& alpha) {
+  using Vec4 = dr::Array<Float, 4>;
+  Float x = dr::clip(n_dot_v, 0.0f, 1.0f), y = dr::clip(alpha, 0.0f, 1.0f);
+  Float x2 = dr::square(x), y2 = dr::square(y);
+  Vec4 r = Vec4(0.1003f, 0.9345f, 1.0f, 1.0f) +
+           Vec4(-0.6303f, -2.323f, -1.765f, 0.2281f) * x +
+           Vec4(9.748f, 2.229f, 8.263f, 15.94f) * y +
+           Vec4(-2.038f, -3.748f, 11.53f, -55.83f) * (x * y) +
+           Vec4(29.34f, 1.424f, 28.96f, 13.08f) * x2 +
+           Vec4(-8.245f, -0.7684f, -7.507f, 41.26f) * y2 +
+           Vec4(-26.44f, 1.436f, -36.11f, 54.9f) * (x2 * y) +
+           Vec4(19.99f, 0.2913f, 15.86f, 300.2f) * (x * y2) +
+           Vec4(-5.448f, 0.6286f, 33.37f, -285.1f) * (x2 * y2);
+  return {dr::clip(r.x() / r.z(), 0.0f, 1.0f),
+          dr::clip(r.y() / r.w(), 0.0f, 1.0f)};
+}
+
+// Turquin (2019) GGX multi-scattering energy compensation factor from
+// single-scattering directional albedo `ess = A + B`.
+template <typename Float, typename Spectrum>
+Spectrum ggx_energy_compensation(const Float& ess, const Spectrum& fss) {
+  return dr::fmadd(fss, (1.0f - ess) / ess, 1.0f);
 }
 
 }  // namespace mtlx::detail
