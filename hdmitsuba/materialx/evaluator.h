@@ -180,6 +180,34 @@ constexpr uint8_t result_channels(Op op, uint16_t imm = 0) {
   return 3;
 }
 
+inline constexpr int kMaxClosureArgs = 5;
+
+enum class ClosureOp : int32_t {
+  Null,
+  OrenNayarDiffuse,
+  Translucent,
+};
+
+// Layout of `ClosureNode::args` for leaf closures. Unless marked as a literal,
+// each entry is a VM temporary slot (-1 if absent).
+namespace leaf_arg {
+inline constexpr int kWeight = 0;
+inline constexpr int kColor = 1;
+inline constexpr int kRoughness = 2;
+// Literal mode: Oren-Nayar `energy_compensation` (0 or 1).
+inline constexpr int kMode = 3;
+inline constexpr int kNormal = 4;
+}  // namespace leaf_arg
+static_assert(leaf_arg::kNormal + 1 == kMaxClosureArgs);
+
+struct ClosureNode {
+  ClosureOp op = ClosureOp::Null;
+  int args[kMaxClosureArgs] = {-1, -1, -1, -1, -1};
+
+  explicit ClosureNode(ClosureOp op = ClosureOp::Null) : op(op) {}
+};
+static_assert(std::has_unique_object_representations_v<ClosureNode>);
+
 template <typename Vec>
 Vec safe_normalize(const Vec& v, const Vec& fallback = Vec(0.0f),
                    dr::scalar_t<Vec> min_len2 = 0.0f) {
@@ -209,7 +237,9 @@ struct MtlxProgram {
   std::vector<double> consts = {0.0, 1.0};
   std::vector<double> opaques;
   std::vector<std::string> attr_names;
+  std::vector<ClosureNode> closures;
   std::vector<uint8_t> tmp_channels;
+  int opacity_slot = -1;
   bool result_uniform = false;
   bool unbounded = false;
   uint32_t stack_size = 1;
@@ -238,7 +268,7 @@ class MtlxEvaluator {
   void parameters_changed();
 
   // Returns the indented code size and texture inputs, one per line, for
-  // `MtlxExprTexture::to_string()`.
+  // `MtlxExprTexture::to_string()` and `MtlxBsdf::to_string()`.
   std::string to_string() const;
 
   // Returns true if the program reads geometric intrinsics or samples a
@@ -275,12 +305,13 @@ class MtlxEvaluator {
   std::shared_ptr<SrgbLut<SrgbFloat32>> m_srgb_lut;
 };
 
-// Registers the `materialx_expr` texture with Mitsuba's plugin manager.
-// Idempotent and thread-safe. Must be called before creating a
-// `materialx_expr` texture; deliberately not done in a static initializer to
-// avoid depending on the initialization order of Mitsuba's `PluginManager`
-// singleton.
+// Register the `materialx_expr` texture and `materialx_bsdf` BSDF with
+// Mitsuba's plugin manager. Idempotent and thread-safe. Must be called before
+// creating the corresponding plugin; deliberately not done in a static
+// initializer to avoid depending on the initialization order of Mitsuba's
+// `PluginManager` singleton.
 void RegisterMaterialXExprTexture();
+void RegisterMaterialXBsdf();
 
 }  // namespace mtlx
 NAMESPACE_END(mitsuba)

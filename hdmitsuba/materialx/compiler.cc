@@ -55,6 +55,8 @@ using mitsuba::ObjectType;
 using mitsuba::PluginManager;
 using mitsuba::Properties;
 using mitsuba::ref;
+using mitsuba::mtlx::ClosureNode;
+using mitsuba::mtlx::ClosureOp;
 using mitsuba::mtlx::elementwise_arity;
 using mitsuba::mtlx::Inst;
 using mitsuba::mtlx::kFractalDynamicOctaves;
@@ -66,8 +68,10 @@ using mitsuba::mtlx::kNoise3D;
 using mitsuba::mtlx::kNoiseVec3;
 using mitsuba::mtlx::MtlxProgram;
 using mitsuba::mtlx::Op;
+using mitsuba::mtlx::RegisterMaterialXBsdf;
 using mitsuba::mtlx::RegisterMaterialXExprTexture;
 using mitsuba::mtlx::result_channels;
+namespace leaf_arg = mitsuba::mtlx::leaf_arg;
 
 struct Expr;
 
@@ -298,13 +302,16 @@ class MtlxExprCompiler {
   // `add`, `mix`) into a radiance `Expr`, or `Expr::zero()` if none.
   Expr CompileEdf(const mx::NodePtr& edf_node);
 
-  // Compiles surface cutout `opacity` (`[0, 1]`) for `surface`,
-  // `surface_unlit`, and `mix` (`surfaceshader`) nodes, or `Expr::one()`.
-  Expr CompileOpacity(const mx::NodePtr& shader_node);
+  // Compiles a MaterialX surface shader or BSDF closure DAG into
+  // `prog_.closures` and `prog_.opacity_slot`.
+  void CompileBsdf(const mx::NodePtr& shader_node);
 
   ref<Object> CreateExprTexture(const Expr& expr, bool unbounded,
                                 std::string_view variant,
                                 MeshAttributeRequests& mesh_attributes);
+
+  ref<Object> CreateBsdf(std::string_view variant,
+                         MeshAttributeRequests& mesh_attributes);
 
  private:
   // A 3x3 or 4x4 matrix as the expressions of its `n` rows.
@@ -339,6 +346,10 @@ class MtlxExprCompiler {
     return Expr({Op::LoadTmp, 0, static_cast<uint16_t>(slot)},
                 prog_.tmp_channels[slot]);
   }
+  Expr CompileOpacity(const mx::NodePtr& shader_node);
+  int CompileBsdfClosure(const mx::NodePtr& node);
+  int EmitClosure(ClosureOp op,
+                  std::initializer_list<std::pair<int, int>> args);
   ref<Object> CreatePlugin(std::string_view name, ObjectType type,
                            std::string_view variant,
                            MeshAttributeRequests& mesh_attributes);
@@ -1457,13 +1468,74 @@ Expr MtlxExprCompiler::CompileOpacity(const mx::NodePtr& shader_node) {
   } else if (cat == "mix" &&
              node->getType() == mx::SURFACE_SHADER_TYPE_STRING) {
     res = CompileMix(
-        CompileInputExpr(node, "mix"),
+        saturate(CompileInputExpr(node, "mix")),
         [&] { return CompileOpacity(node->getConnectedNode("fg")); },
         [&] { return CompileOpacity(node->getConnectedNode("bg")); });
   }
+  if (!res.uniform()) res = call(Op::Dot, res, Const(1.0 / 3.0));
   if (res.code.size() > 1) res = EmitTmpExpr(res);
   opacity_expr_[node.get()] = res;
   return res;
+}
+
+int MtlxExprCompiler::EmitClosure(
+    ClosureOp op, std::initializer_list<std::pair<int, int>> args) {
+  ClosureNode& c = prog_.closures.emplace_back(op);
+  for (auto [k, v] : args) c.args[k] = v;
+  return static_cast<int>(prog_.closures.size()) - 1;
+}
+
+int MtlxExprCompiler::CompileBsdfClosure(const mx::NodePtr& raw_node) {
+  mx::NodePtr node = UnwrapShaderNode(raw_node);
+  if (!node) return -1;
+
+  std::string cat = NodeCategory(node);
+  auto slot = [&](const std::string& name, const Expr& def = Expr::zero()) {
+    return EmitTmp(CompileInputExpr(node, name, def));
+  };
+
+  // Skip leaf BSDF lobes whose weight is statically zero.
+  Expr w_expr = Expr::one();
+  if (node->getType() == mx::BSDF_TYPE_STRING &&
+      InputType(node, "weight") == "float") {
+    w_expr = CompileInputExpr(node, "weight", Expr::one());
+    if (w_expr.is_zero()) return -1;
+  }
+
+  if (cat == "oren_nayar_diffuse_bsdf" || cat == "subsurface_bsdf" ||
+      cat == "translucent_bsdf") {
+    bool is_translucent = cat == "translucent_bsdf";
+    Expr n_expr = CompileInputExpr(node, "normal", Expr::n_world());
+    return EmitClosure(
+        is_translucent ? ClosureOp::Translucent : ClosureOp::OrenNayarDiffuse,
+        {{leaf_arg::kWeight, EmitTmp(w_expr)},
+         {leaf_arg::kColor, slot("color", Expr::one())},
+         {leaf_arg::kRoughness, is_translucent ? -1 : slot("roughness")},
+         {leaf_arg::kMode,
+          cat == "oren_nayar_diffuse_bsdf" &&
+              !CompileInputExpr(node, "energy_compensation").is_zero()},
+         {leaf_arg::kNormal,
+          n_expr == Expr::n_world() ? -1 : EmitTmp(n_expr)}});
+  }
+  if (cat == "surface") {
+    return CompileBsdfClosure(node->getConnectedNode("bsdf"));
+  }
+  if (cat == "surface_unlit") {
+    // Unlit surfaces emit radiance only and have a null BSDF.
+    return -1;
+  }
+  WarnUnsupported("Unsupported MaterialX closure '" + cat +
+                  "'; using a null BSDF.");
+  return -1;
+}
+
+void MtlxExprCompiler::CompileBsdf(const mx::NodePtr& shader_node) {
+  mx::NodePtr node = UnwrapShaderNode(shader_node);
+  Expr op_expr = CompileOpacity(node);
+  if (!op_expr.is_one()) prog_.opacity_slot = EmitTmp(op_expr);
+  if (op_expr.is_zero() || CompileBsdfClosure(node) < 0) {
+    prog_.closures = {ClosureNode(ClosureOp::Null)};
+  }
 }
 
 ref<Object> MtlxExprCompiler::CreatePlugin(
@@ -1490,6 +1562,13 @@ ref<Object> MtlxExprCompiler::CreateExprTexture(
                       mesh_attributes);
 }
 
+ref<Object> MtlxExprCompiler::CreateBsdf(
+    std::string_view variant, MeshAttributeRequests& mesh_attributes) {
+  RegisterMaterialXBsdf();
+  return CreatePlugin("materialx_bsdf", ObjectType::BSDF, variant,
+                      mesh_attributes);
+}
+
 }  // namespace
 
 CompiledSurfaceShader CompileSurfaceShader(
@@ -1500,18 +1579,15 @@ CompiledSurfaceShader CompileSurfaceShader(
   CompiledSurfaceShader out;
   {
     MtlxExprCompiler compiler(lookup_texture, warned);
+    compiler.CompileBsdf(shader_node);
+    out.bsdf = compiler.CreateBsdf(variant, out.mesh_attributes);
+  }
+  {
+    MtlxExprCompiler compiler(lookup_texture, warned);
     Expr radiance = compiler.CompileEdf(shader_node);
     if (!radiance.is_zero()) {
       out.radiance_texture = compiler.CreateExprTexture(
           radiance, /*unbounded=*/true, variant, out.mesh_attributes);
-    }
-  }
-  {
-    MtlxExprCompiler compiler(lookup_texture, warned);
-    Expr opacity = compiler.CompileOpacity(shader_node);
-    if (!opacity.is_one()) {
-      out.opacity_texture = compiler.CreateExprTexture(
-          opacity, /*unbounded=*/false, variant, out.mesh_attributes);
     }
   }
   return out;
@@ -1521,8 +1597,8 @@ void DiscoverSurfaceShaderTextures(
     const mx::NodePtr& shader_node,
     const std::function<void(const TextureKey&)>& callback) {
   MtlxExprCompiler compiler(callback);
+  compiler.CompileBsdf(shader_node);
   compiler.CompileEdf(shader_node);
-  compiler.CompileOpacity(shader_node);
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

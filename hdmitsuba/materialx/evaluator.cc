@@ -867,7 +867,9 @@ void MtlxEvaluator<Float, Spectrum>::traverse_cb(
   for (const std::string& s : m_prog.attr_names) {
     put_span(s, "attr_names");
   }
+  put_span(m_prog.closures, "closures");
   put_span(m_prog.tmp_channels, "tmp_channels");
+  DR_TRAVERSE_STATE(m_prog.opacity_slot)
   DR_TRAVERSE_STATE(m_prog.result_uniform)
   DR_TRAVERSE_STATE(m_prog.unbounded)
 }
