@@ -21,6 +21,12 @@ contributors). See [README.md](README.md) for build and test instructions and
 *   No process-global state.
 *   Avoid defensive programming: only handle conditions that can actually
     occur.
+*   **Match Mitsuba and Dr.Jit conventions in custom plugins.** Follow Mitsuba's
+    built-in plugin style (`UnpolarizedSpectrum` internally with
+    `depolarizer<Spectrum>` at the boundary, `snake_case` locals, plain float
+    literals like `1.0f`), use `dr::any_or`/`dr::none_or` instead of Dr.Jit
+    internals, and reuse Dr.Jit/Mitsuba math, frame, and epsilon helpers
+    (`dr::Epsilon<Float>`, `Frame3f`).
 
 ## Tests
 
@@ -31,6 +37,8 @@ contributors). See [README.md](README.md) for build and test instructions and
 *   Write in-memory tests only for dynamic behavior that a static scene cannot
     express (e.g., changing a setting between renders), and keep them short.
 *   Use tolerances when comparing floating point values.
+*   For custom BSDF tests, reuse `mi.chi2.ChiSquareTest` and Mitsuba/Dr.Jit
+    helpers (`dr.allclose`, `mi.has_flag`, `mi.PCG32`).
 *   Check that a new test fails without the change it covers.
 
 ## Workflow
