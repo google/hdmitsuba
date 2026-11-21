@@ -103,5 +103,20 @@ Spectrum ggx_energy_compensation(const Float& ess, const Spectrum& fss) {
   return dr::fmadd(fss, (1.0f - ess) / ess, 1.0f);
 }
 
+// Energy-compensated GGX directional albedo from `(F0, F(n_dot_v))`.
+template <typename Float, typename Spectrum>
+Spectrum ggx_refl_albedo(const Float& n_dot_v, const Float& alpha,
+                         const Spectrum& f0, const Spectrum& f_nv) {
+  auto [a, b] = ggx_dir_albedo_ab(n_dot_v, alpha);
+  return ggx_energy_compensation(a + b, f_nv) * dr::fmadd(f0, a, b);
+}
+
+// Height-correlated Smith masking-shadowing ratio `G2 / G1(wi)`.
+template <typename Float>
+Float ggx_g2_over_g1(const Float& g1_i, const Float& g1_o) {
+  return g1_o /
+         dr::maximum(dr::fmadd(g1_o, 1.0f - g1_i, g1_i), dr::Epsilon<Float>);
+}
+
 }  // namespace mtlx::detail
 NAMESPACE_END(mitsuba)

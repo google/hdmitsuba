@@ -33,10 +33,17 @@ def _enable_materialx_and_variant(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _compile_bsdf(
-    node_id: str, *, opacity: Any = 1.0, **inputs: Any
+    node_id: str,
+    *,
+    opacity: Any = 1.0,
+    thin_walled: Any = False,
+    **inputs: Any,
 ) -> mi.BSDF:
   bsdf, _ = mtlx.compile_mtlx_material(
-      'ND_surface', bsdf=(node_id, inputs), opacity=opacity
+      'ND_surface',
+      bsdf=(node_id, inputs),
+      opacity=opacity,
+      thin_walled=thin_walled,
   )
   assert bsdf is not None
   return bsdf
@@ -54,6 +61,16 @@ _CONDUCTOR_KW: dict[str, Any] = {
     'extinction': (3.42, 2.35, 1.77),
     'roughness': (0.25, 0.45),
 }
+
+
+def _diel_kw(mode: str, roughness: float = 0.3, **extra: Any) -> dict[str, Any]:
+  return {
+      'ior': 1.5,
+      'roughness': (roughness, roughness),
+      'scatter_mode': mode,
+      **extra,
+  }
+
 
 _LOBE_CASES = [
     pytest.param(
@@ -103,9 +120,42 @@ _LOBE_CASES = [
         id='conductor_frame',
     ),
     pytest.param(
+        'ND_dielectric_bsdf',
+        _diel_kw('RT', 0.25),
+        {'wi': (0.8, 0.0, -0.6)},
+        id='dielectric_RT_tir',
+    ),
+    pytest.param(
+        'ND_dielectric_bsdf',
+        _diel_kw('T', 0.35),
+        {'wi': (0.8, 0.0, -0.6)},
+        id='dielectric_T_tir',
+    ),
+    pytest.param(
+        'ND_dielectric_bsdf',
+        _diel_kw('RT'),
+        {'thin_walled': True, 'opacity': 0.75},
+        id='dielectric_thin',
+    ),
+    pytest.param(
+        'ND_layer_bsdf',
+        {
+            'top': (
+                'ND_dielectric_bsdf',
+                _diel_kw('R', 0.25, ior=2.5),
+            ),
+            'base': (
+                'ND_oren_nayar_diffuse_bsdf',
+                {'color': (0.7, 0.3, 0.2), 'roughness': 0.4},
+            ),
+        },
+        {},
+        id='layer_dielectric',
+    ),
+    pytest.param(
         'ND_mix_bsdf',
         {
-            'fg': ('ND_conductor_bsdf', _CONDUCTOR_KW),
+            'fg': ('ND_dielectric_bsdf', _diel_kw('RT')),
             'bg': (
                 'ND_oren_nayar_diffuse_bsdf',
                 {'color': (0.2, 0.7, 0.4), 'roughness': 0.4},
@@ -154,26 +204,24 @@ _LOBE_CASES = [
 ]
 
 
-@pytest.mark.parametrize('node_id, lobe_kw, extra', _LOBE_CASES)
-def test_bsdf_lobe_sampling_consistency_and_conservation(
-    node_id: str, lobe_kw: dict[str, Any], extra: dict[str, Any]
-) -> None:
-  """Tests sample/eval_pdf consistency, chi2 goodness-of-fit, and energy.
-
-  Args:
-    node_id: MaterialX BSDF NodeDef identifier.
-    lobe_kw: Input parameters passed to the BSDF node.
-    extra: Optional overrides (`opacity`, `wi`).
-  """
-  bsdf = _compile_bsdf(node_id, opacity=extra.get('opacity', 1.0), **lobe_kw)
+def _check_bsdf_sampling(
+    bsdf: mi.BSDF, si: mi.SurfaceInteraction3f | None = None
+) -> mi.BSDFSample3f:
   u1, u2 = _sample_inputs()
-  si = mtlx.make_test_si(extra['wi']) if 'wi' in extra else mtlx.make_test_si()
+  if si is None:
+    si = mtlx.make_test_si()
   ctx = mi.BSDFContext()
 
   bs, weight = bsdf.sample(ctx, si, u1, u2)
   val, pdf = bsdf.eval_pdf(ctx, si, bs.wo)
   val2, pdf2, bs2, weight2 = bsdf.eval_pdf_sample(ctx, si, bs.wo, u1, u2)
-  for a, b in ((val, val2), (pdf, pdf2), (weight, weight2), (bs.wo, bs2.wo)):
+  for a, b in (
+      (val, val2),
+      (pdf, pdf2),
+      (weight, weight2),
+      (bs.wo, bs2.wo),
+      (bs.eta, bs2.eta),
+  ):
     assert dr.allclose(a, b, rtol=1e-4, atol=1e-4)
 
   valid = (bs.pdf > 1e-5) & ~bs.is_null()
@@ -192,6 +240,29 @@ def test_bsdf_lobe_sampling_consistency_and_conservation(
       atol=1e-4,
   )
   assert dr.all(dr.mean(weight * dr.square(bs.eta), axis=1) <= 1.02, axis=None)
+  return bs
+
+
+@pytest.mark.parametrize('node_id, lobe_kw, extra', _LOBE_CASES)
+def test_bsdf_lobe_sampling_consistency_and_conservation(
+    node_id: str, lobe_kw: dict[str, Any], extra: dict[str, Any]
+) -> None:
+  """Tests sample/eval_pdf consistency, chi2 goodness-of-fit, and energy.
+
+  Args:
+    node_id: MaterialX BSDF NodeDef identifier.
+    lobe_kw: Input parameters passed to the BSDF node.
+    extra: Optional overrides (`opacity`, `thin_walled`, `wi`).
+  """
+  bsdf = _compile_bsdf(
+      node_id,
+      opacity=extra.get('opacity', 1.0),
+      thin_walled=extra.get('thin_walled', False),
+      **lobe_kw,
+  )
+  si = mtlx.make_test_si(extra['wi']) if 'wi' in extra else mtlx.make_test_si()
+  _check_bsdf_sampling(bsdf, si)
+  ctx = mi.BSDFContext()
 
   def _sample_func(sample: Any) -> tuple[mi.Vector3f, mi.Float]:
     bs_c, w_c = bsdf.sample(
@@ -225,7 +296,7 @@ def test_bsdf_reciprocity() -> None:
 
 
 def test_bsdf_layer_throughput() -> None:
-  """Tests layer blocking for opaque/multiplied tops and partial mix/add tops."""
+  """Tests layer throughput for opaque, dielectric, multiplied, and mixed tops."""
   ctx = mi.BSDFContext()
   si = mtlx.make_test_si(wi=(0.0, 0.0, 1.0))
   wo = mi.Vector3f(0.3, 0.4, 0.8660254)
@@ -269,6 +340,51 @@ def test_bsdf_layer_throughput() -> None:
         rtol=1e-4,
         atol=1e-5,
     )
+
+  # Transmissive dielectric top blocks the base layer (`throughput = 0`).
+  kw_rt = _diel_kw('RT', 0.2)
+  bsdf_blocked = _compile_bsdf(
+      'ND_layer_bsdf', top=('ND_dielectric_bsdf', kw_rt), base=base
+  )
+  bsdf_top = _compile_bsdf('ND_dielectric_bsdf', **kw_rt)
+  assert dr.allclose(
+      bsdf_blocked.eval(ctx, si, wo),
+      bsdf_top.eval(ctx, si, wo),
+      rtol=1e-5,
+      atol=1e-5,
+  )
+
+  # Tinted dielectric coat over white diffuse base does not doubly tint the base
+  # and stays two-sided from the back face (no TIR blackout).
+  u1, u2 = _sample_inputs(seed=7)
+  coat = (
+      'ND_dielectric_bsdf',
+      _diel_kw('R', 0.1, tint=(1.0, 0.0, 0.0)),
+  )
+  bsdf_coat = _compile_bsdf('ND_layer_bsdf', top=coat, base=base)
+  _, w_front = bsdf_coat.sample(ctx, si, u1, u2)
+  assert dr.allclose(
+      dr.mean(w_front, axis=1), mi.Color3f(1.0, 0.96, 0.96), atol=0.015
+  )
+  bs_back, w_back = bsdf_coat.sample(
+      ctx, mtlx.make_test_si(wi=(0.8, 0.0, -0.6)), u1, u2
+  )
+  assert dr.all((bs_back.wo.z < 0.0) | (bs_back.pdf <= 0.0))
+  assert dr.allclose(
+      dr.mean(w_back, axis=1), mi.Color3f(1.01, 0.948, 0.948), atol=0.015
+  )
+
+  # Height-correlated G2 on rough dielectric coat preserves white-furnace
+  # energy at grazing incidence against `detail::ggx_dir_albedo_ab`.
+  bsdf_rough_coat = _compile_bsdf(
+      'ND_layer_bsdf',
+      top=('ND_dielectric_bsdf', _diel_kw('R', 1.0, ior=100.0)),
+      base=base,
+  )
+  _, w_furnace = bsdf_rough_coat.sample(
+      ctx, mtlx.make_test_si(wi=(math.sqrt(0.96), 0.0, 0.2)), u1, u2
+  )
+  assert dr.allclose(dr.mean(w_furnace, axis=1), 1.0, atol=0.03)
 
 
 def test_conductor_bsdf() -> None:
@@ -523,7 +639,7 @@ def test_spectral_bsdf() -> None:
 
 
 def test_bsdf_ad_gradients() -> None:
-  """Tests unbiased detached AD gradients for roughness, opacity, and mix."""
+  """Tests detached AD gradients for roughness, IOR, opacity, and mix."""
   ctx = mi.BSDFContext()
   si = mtlx.make_test_si()
   u1, u2 = _sample_inputs(n=65536, seed=42)
@@ -537,27 +653,37 @@ def test_bsdf_ad_gradients() -> None:
     params.update()
     return params, key
 
-  # Detached `wo` and `pdf` yield unbiased roughness gradients.
-  bsdf = _compile_bsdf('ND_conductor_bsdf', **_CONDUCTOR_KW)
-  r0 = _CONDUCTOR_KW['roughness'][0]
-  params, r_key = _enable_param(bsdf, r0)
-  val_c, pdf_c = bsdf.eval_pdf(ctx, si, mi.Vector3f(0.0, 0.0, 1.0))
-  assert dr.grad_enabled(val_c) and not dr.grad_enabled(pdf_c)
-  bs, w = bsdf.sample(ctx, si, u1, u2)
-  assert not dr.grad_enabled(bs.wo)
-  # Directional-cosine target `E[w * wo.z]` has non-zero roughness sensitivity.
-  dr.backward(dr.mean(w * bs.wo.z, axis=None))
-  ad_grad = dr.grad(params[r_key])
+  def _check_fd_grad(bsdf: mi.BSDF, val0: float, objective: Any) -> None:
+    params, key = _enable_param(bsdf, val0)
+    val_p, pdf_p = bsdf.eval_pdf(ctx, si, mi.Vector3f(0.0, 0.0, 1.0))
+    assert dr.grad_enabled(val_p) and not dr.grad_enabled(pdf_p)
+    bs_p, w_p = bsdf.sample(ctx, si, u1, u2)
+    assert not dr.grad_enabled(bs_p.wo)
+    dr.backward(dr.mean(objective(bs_p, w_p), axis=None))
+    ad_grad = dr.grad(params[key])
 
-  eps = 2e-3
-  vals = []
-  for delta in (-eps, eps):
-    params[r_key] = mi.Float(r0 + delta)
-    params.update()
-    bs_fd, w_fd = bsdf.sample(ctx, si, u1, u2)
-    vals.append(dr.mean(w_fd * bs_fd.wo.z, axis=None))
-  assert dr.allclose(
-      ad_grad, (vals[1] - vals[0]) / (2.0 * eps), rtol=0.15, atol=0.02
+    eps = 2e-3
+    vals = []
+    for delta in (-eps, eps):
+      params[key] = mi.Float(val0 + delta)
+      params.update()
+      bs_fd, w_fd = bsdf.sample(ctx, si, u1, u2)
+      vals.append(dr.mean(objective(bs_fd, w_fd), axis=None))
+    assert dr.allclose(
+        ad_grad, (vals[1] - vals[0]) / (2.0 * eps), rtol=0.15, atol=0.02
+    )
+
+  # Detached `wo` and `pdf` yield unbiased roughness and `ior` gradients.
+  # Directional-cosine target `E[w * wo.z]` has non-zero roughness sensitivity.
+  _check_fd_grad(
+      _compile_bsdf('ND_conductor_bsdf', **_CONDUCTOR_KW),
+      _CONDUCTOR_KW['roughness'][0],
+      lambda bs, w: w * bs.wo.z,
+  )
+  _check_fd_grad(
+      _compile_bsdf('ND_dielectric_bsdf', **_diel_kw('RT')),
+      1.5,
+      lambda _, w: w,
   )
 
   bsdf_op = _compile_bsdf(
@@ -587,7 +713,7 @@ def test_bsdf_ad_gradients() -> None:
 
 
 def test_eval_features() -> None:
-  """Tests denoiser features for diffuse, translucent, conductor, and opacity."""
+  """Tests denoiser features for BSDF lobes and cutout opacity."""
   si = mtlx.make_test_si(wi=(0.2, -0.3, 0.9327379))
 
   # Cutout + perturbed normal: albedo scales by opacity, transparency sets wt
@@ -645,3 +771,230 @@ def test_eval_features() -> None:
       feat_c.specular_reflectance, [0.93676, 0.74977, 0.33681], atol=1e-4
   )
   assert dr.allclose(feat_c.roughness, 0.45, atol=1e-6)
+
+  # Dielectric RT splits reflectance/transmittance and reports refracted `wt`.
+  bsdf_diel = _compile_bsdf(
+      'ND_dielectric_bsdf', ior=1.5, roughness=(0.15, 0.25), scatter_mode='RT'
+  )
+  feat_d = bsdf_diel.eval_features(si)
+  assert dr.allclose(feat_d.diffuse_albedo, 0.0, atol=1e-6)
+  assert dr.allclose(feat_d.specular_reflectance, 0.04034, atol=1e-4)
+  assert dr.allclose(feat_d.specular_transmittance, 0.95966, atol=1e-4)
+  assert dr.allclose(feat_d.roughness, 0.25, atol=1e-6)
+  assert dr.allclose(
+      feat_d.wt,
+      [-0.2 / 1.5, 0.3 / 1.5, -math.sqrt(1.0 - (0.2**2 + 0.3**2) / 1.5**2)],
+      atol=1e-4,
+  )
+
+
+def test_dielectric_bsdf() -> None:
+  """Tests dielectric energy, unit IOR, relative eta, TIR, and ignored VDFs."""
+  ctx = mi.BSDFContext()
+  u1, u2 = _sample_inputs(seed=7)
+
+  # Smooth dielectric conserves energy under front incidence and back-side TIR.
+  bsdf_glass = _compile_bsdf('ND_dielectric_bsdf', **_diel_kw('RT', 0.0))
+  for wi, is_tir in [((0.6, 0.0, 0.8), False), ((0.8, 0.0, -0.6), True)]:
+    bs, w = bsdf_glass.sample(ctx, mtlx.make_test_si(wi=wi), u1, u2)
+    scaled = w * dr.square(bs.eta)
+    assert dr.allclose(
+        scaled if is_tir else dr.mean(scaled, axis=1), 1.0, atol=0.015
+    )
+
+  # Unit IOR produces exact zero reflection on reflection-only coats and
+  # thin-walled transmissive dielectrics (even at grazing incidence where
+  # `1 - cos_i^2` rounds to `1` in float32).
+  si_grazing = mtlx.make_test_si(wi=(math.sqrt(1.0 - 1e-8), 0.0, 1e-4))
+  bsdf_unit = _compile_bsdf(
+      'ND_layer_bsdf',
+      top=('ND_dielectric_bsdf', _diel_kw('R', 0.1, ior=1.0)),
+      base=('ND_oren_nayar_diffuse_bsdf', {'color': (1.0, 1.0, 1.0)}),
+  )
+  assert dr.allclose(
+      bsdf_unit.eval(ctx, si_grazing, mi.Vector3f(0.0, 0.0, 1.0)),
+      dr.inv_pi,
+      atol=1e-5,
+  )
+  feat_u = bsdf_unit.eval_features(si_grazing)
+  assert dr.allclose(feat_u.specular_reflectance, 0.0, atol=1e-7)
+  assert dr.allclose(feat_u.diffuse_albedo, 1.0, atol=1e-5)
+
+  feat_thin = _compile_bsdf(
+      'ND_dielectric_bsdf',
+      thin_walled=True,
+      **_diel_kw('RT', 0.1, ior=1.0),
+  ).eval_features(si_grazing)
+  assert dr.allclose(feat_thin.specular_reflectance, 0.0, atol=1e-7)
+  assert dr.allclose(feat_thin.specular_transmittance, 1.0, atol=1e-5)
+
+  for thin, ior, mode, wi, exp_eta, exp_wz_pos in [
+      (False, 1.5, 'T', (0.0, 0.0, 1.0), 1.5, False),
+      (False, 1.5, 'T', (0.0, 0.0, -1.0), 1.0 / 1.5, True),
+      (True, 1.5, 'T', (0.0, 0.0, 1.0), 1.0, False),
+      (False, 0.75, 'RT', (0.8, 0.0, 0.6), 1.0, True),
+      (False, 0.75, 'RT', (0.0, 0.0, 1.0), 0.75, False),
+  ]:
+    bsdf = _compile_bsdf(
+        'ND_dielectric_bsdf',
+        thin_walled=thin,
+        **_diel_kw(mode, 0.0, ior=ior),
+    )
+    bs, w = bsdf.sample(
+        ctx, mtlx.make_test_si(wi=wi), mi.Float(0.99), mi.Point2f(0.5, 0.5)
+    )
+    assert dr.all(bs.wo.z > 0.0) == exp_wz_pos
+    assert dr.allclose(bs.eta, exp_eta, atol=1e-5)
+    assert dr.allclose(w * dr.square(bs.eta), 1.0, atol=2e-3)
+
+  # Ignored VDF absorption emits no dead opaque parameters.
+  bsdf_vdf_ref = _compile_bsdf('ND_dielectric_bsdf', **_diel_kw('T'))
+  bsdf_vdf = _compile_bsdf(
+      'ND_layer_vdf',
+      top=('ND_dielectric_bsdf', _diel_kw('T')),
+      base=(
+          'ND_absorption_vdf',
+          {
+              'absorption': (
+                  'ND_add_vector3',
+                  {
+                      'in1': Gf.Vec3f(0.1, 0.2, 0.3),
+                      'in2': Gf.Vec3f(0.4, 0.5, 0.6),
+                  },
+              )
+          },
+      ),
+  )
+  assert len(mi.traverse(bsdf_vdf)) == len(mi.traverse(bsdf_vdf_ref))
+
+
+def test_dielectric_mixing() -> None:
+  """Tests mixed-surface dielectric two-sidedness, thin_walled, and TIR PDF."""
+  ctx = mi.BSDFContext()
+
+  # Mixing a solid glass surface with an opaque coated surface keeps the opaque
+  # surface's reflection-only dielectric two-sided on the back face.
+  bsdf_mixed, _ = mtlx.compile_mtlx_material(
+      'ND_mix_surfaceshader',
+      fg=('ND_surface', {'bsdf': ('ND_dielectric_bsdf', _diel_kw('RT', 0.1))}),
+      bg=(
+          'ND_surface',
+          {
+              'bsdf': (
+                  'ND_layer_bsdf',
+                  {
+                      'top': ('ND_dielectric_bsdf', _diel_kw('R', 0.1)),
+                      'base': (
+                          'ND_oren_nayar_diffuse_bsdf',
+                          {'color': (1.0, 1.0, 1.0)},
+                      ),
+                  },
+              )
+          },
+      ),
+      mix=0.01,
+  )
+  assert bsdf_mixed is not None
+  feat_back = bsdf_mixed.eval_features(mtlx.make_test_si(wi=(0.8, 0.0, -0.6)))
+  assert dr.allclose(feat_back.diffuse_albedo, 0.99 * 0.948, atol=2e-3)
+
+  # MaterialX PBR spec: `thin_walled` takes precedence across mixed surfaces.
+  bsdf_mix_tw, _ = mtlx.compile_mtlx_material(
+      'ND_mix_surfaceshader',
+      fg=(
+          'ND_surface',
+          {
+              'bsdf': ('ND_dielectric_bsdf', _diel_kw('T', 0.0)),
+              'thin_walled': True,
+          },
+      ),
+      bg=(
+          'ND_surface',
+          {
+              'bsdf': ('ND_dielectric_bsdf', _diel_kw('T', 0.0)),
+              'thin_walled': False,
+          },
+      ),
+      mix=0.5,
+  )
+  assert bsdf_mix_tw is not None
+  bs_tw, _ = bsdf_mix_tw.sample(
+      ctx,
+      mtlx.make_test_si(wi=(0.0, 0.0, 1.0)),
+      mi.Float(0.25, 0.75),
+      mi.Point2f(0.5, 0.5),
+  )
+  assert dr.all(bs_tw.wo.z < 0.0)
+  assert dr.allclose(bs_tw.eta, 1.0, atol=1e-5)
+
+  # Multi-leaf rough `scatter_mode='T'` keeps non-zero PDF under macrosurface
+  # TIR so rough microfacet transmission remains importance-sampled.
+  bsdf_mix_t = _compile_bsdf(
+      'ND_mix_bsdf',
+      fg=('ND_dielectric_bsdf', _diel_kw('T', 0.35)),
+      bg=('ND_oren_nayar_diffuse_bsdf', {'color': (0.5, 0.5, 0.5)}),
+      mix=0.5,
+  )
+  si_tir = mtlx.make_test_si(wi=(0.8, 0.0, -0.6))
+  wo_tir = mi.Vector3f(-0.933029, -0.000816, 0.359801)
+  val_t, pdf_t = _compile_bsdf(
+      'ND_dielectric_bsdf', **_diel_kw('T', 0.35)
+  ).eval_pdf(ctx, si_tir, wo_tir)
+  val_tir, pdf_tir = bsdf_mix_t.eval_pdf(ctx, si_tir, wo_tir)
+  assert dr.allclose(val_t, 2.4628, rtol=1e-3)
+  assert dr.allclose(val_tir, 0.5 * val_t, rtol=1e-4)
+  assert dr.allclose(pdf_tir, (2.0 / 3.0) * pdf_t, rtol=1e-4)
+
+
+_STANDARD_SURFACE_TRANS_KW: dict[str, Any] = {
+    'base_color': (0.2, 0.6, 0.8),
+    'specular_roughness': 0.3,
+    'transmission': 0.5,
+}
+
+
+@pytest.mark.parametrize(
+    'kwargs, exp_trans_eta',
+    [
+        pytest.param(
+            {
+                'base_color': (0.7, 0.2, 0.1),
+                'metalness': 0.3,
+                'specular_roughness': 0.25,
+                'coat': 0.5,
+            },
+            None,
+            id='opaque_coated',
+        ),
+        pytest.param(
+            {**_STANDARD_SURFACE_TRANS_KW, 'thin_walled': False},
+            1.5,
+            id='transmissive_solid',
+        ),
+        pytest.param(
+            {**_STANDARD_SURFACE_TRANS_KW, 'thin_walled': True},
+            1.0,
+            id='transmissive_thin_walled',
+        ),
+    ],
+)
+def test_standard_surface(
+    kwargs: dict[str, Any], exp_trans_eta: float | None
+) -> None:
+  """Tests `standard_surface` compilation and sampling (solid and thin-walled).
+
+  Args:
+    kwargs: Input parameters passed to `ND_standard_surface_surfaceshader`.
+    exp_trans_eta: Expected relative IOR on transmitted samples, or None if
+      opaque.
+  """
+  bsdf, _ = mtlx.compile_mtlx_material(
+      'ND_standard_surface_surfaceshader', **kwargs
+  )
+  assert bsdf is not None
+  bs = _check_bsdf_sampling(bsdf)
+  trans = bs.wo.z < 0.0
+  assert dr.any(trans) == (exp_trans_eta is not None)
+  assert dr.allclose(
+      bs.eta, dr.select(trans, exp_trans_eta or 1.0, 1.0), atol=1e-5
+  )
