@@ -1034,11 +1034,14 @@ PrimTranslator<Float, Spectrum>::CreateAreaEmitter(const LightSpec& spec) {
 
 MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateAreaEmitterInPlace(
     mitsuba::Emitter<Float, Spectrum>* emitter, const LightSpec& spec) {
-  TraversalCallback cb;
-  UpdateIesFrameInPlace<Float, Spectrum>(emitter, spec)->traverse(&cb);
-  SetSpectrumParameter(
-      cb, spec.texture_file_path.empty() ? "radiance" : kTexturedEmissionKey,
-      spec.emission);
+  auto* target = UpdateIesFrameInPlace<Float, Spectrum>(emitter, spec);
+  if (spec.emission_dirty) {
+    TraversalCallback cb;
+    target->traverse(&cb);
+    SetSpectrumParameter(
+        cb, spec.texture_file_path.empty() ? "radiance" : kTexturedEmissionKey,
+        spec.emission);
+  }
   emitter->parameters_changed();
 }
 
@@ -1122,11 +1125,16 @@ PrimTranslator<Float, Spectrum>::BuildLightProperties(const LightSpec& spec) {
 MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateLightInPlace(
     mitsuba::Object* light_obj, const LightSpec& spec) {
   if (auto* shape = dynamic_cast<mitsuba::Shape<Float, Spectrum>*>(light_obj)) {
-    TraversalCallback cb_shape;
-    shape->traverse(&cb_shape);
-    SetTransformParameter(cb_shape, AreaShapeTransform(spec));
-    shape->parameters_changed();
-    if (shape->is_emitter()) {
+    if (spec.transform_dirty) {
+      TraversalCallback cb_shape(
+          "", nullptr, /*recurse_objects=*/spec.transform.IsAnimated());
+      shape->traverse(&cb_shape);
+      SetTransformParameter(cb_shape, AreaShapeTransform(spec));
+      shape->parameters_changed({"to_world"});
+    }
+    if (shape->is_emitter() &&
+        (spec.emission_dirty ||
+         (spec.transform_dirty && spec.shaping.IsActive()))) {
       UpdateAreaEmitterInPlace(shape->emitter(), spec);
     }
   } else if (auto* emitter =

@@ -55,6 +55,13 @@ struct MotionSamples {
     return samples.front().second;
   }
 
+  bool operator==(const MotionSamples& other) const {
+    return samples == other.samples;
+  }
+  bool operator!=(const MotionSamples& other) const {
+    return samples != other.samples;
+  }
+
   // Returns these samples, collapsed to Static if all values match.
   MotionSamples Collapsed() && {
     if (std::all_of(samples.begin() + 1, samples.end(),
