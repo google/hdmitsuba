@@ -88,10 +88,14 @@ namespace mx = MaterialX;
 // while flattening and compiling against `std_libs`.
 ABSL_CONST_INIT absl::Mutex mtlx_mu(absl::kConstInit);
 
-// `importLibrary` and `flattenSubgraphs` drop enclosing `<materialx>` /
-// `<nodegraph>` `fileprefix` attributes, so resolve non-empty relative
-// filenames in library documents before flattening.
-void ResolveLibraryFilenames(const mx::DocumentPtr& doc) {
+// Prepares a MaterialX library document before `flattenSubgraphs()`:
+// 1. Resolves non-empty relative filenames (`importLibrary` and
+//    `flattenSubgraphs` drop enclosing `<materialx>` / `<nodegraph>`
+//    `fileprefix` attributes).
+// 2. Forwards `thin_walled` / `geometry_thin_walled` onto `<surface>` nodes
+//    inside `surfaceshader` implementation nodegraphs when omitted (e.g.,
+//    `standard_surface.mtlx`), matching `open_pbr_surface.mtlx`.
+void PrepareLibraryDocument(const mx::DocumentPtr& doc) {
   std::vector<mx::ElementPtr> with_prefix;
   for (const mx::ElementPtr& elem : doc->traverseTree()) {
     if (elem->hasFilePrefix()) with_prefix.push_back(elem);
@@ -106,6 +110,19 @@ void ResolveLibraryFilenames(const mx::DocumentPtr& doc) {
   }
   for (const mx::ElementPtr& elem : with_prefix) {
     elem->removeAttribute(mx::Element::FILE_PREFIX_ATTRIBUTE);
+  }
+  for (const mx::NodeDefPtr& nd : doc->getNodeDefs()) {
+    if (nd->getType() != mx::SURFACE_SHADER_TYPE_STRING) continue;
+    mx::InputPtr tw = nd->getActiveInput("thin_walled");
+    if (!tw) tw = nd->getActiveInput("geometry_thin_walled");
+    mx::ElementPtr impl = tw ? nd->getImplementation() : nullptr;
+    auto ng = impl ? impl->asA<mx::NodeGraph>() : nullptr;
+    if (!ng) continue;
+    for (const mx::NodePtr& s : ng->getNodes("surface")) {
+      if (!s->getInput("thin_walled")) {
+        s->addInput("thin_walled", "boolean")->setInterfaceName(tw->getName());
+      }
+    }
   }
 }
 
@@ -128,7 +145,7 @@ const mx::DocumentPtr& GetMaterialXStdLibraries() {
     }
     mx::DocumentPtr doc = mx::createDocument();
     mx::loadLibraries({}, search_path, doc);
-    ResolveLibraryFilenames(doc);
+    PrepareLibraryDocument(doc);
     return doc;
   }());
   return *std_libs;
@@ -241,7 +258,7 @@ mx::NodeDefPtr ResolveNodeDef(const TfToken& hd_node_type,
   if (uri.empty() || !loaded_uris->insert(uri).second) return nullptr;
   mx::DocumentPtr lib_doc = mx::createDocument();
   mx::readFromXmlFile(lib_doc, uri);
-  ResolveLibraryFilenames(lib_doc);
+  PrepareLibraryDocument(lib_doc);
   std_libs->importLibrary(lib_doc);
   return std_libs->getNodeDef(sdr_node->GetImplementationName());
 }

@@ -249,6 +249,23 @@ def Xform "root"
             }
         }
 
+        # Lit standard_surface exercising MaterialX BSDF closures under the dome light.
+        def Material "mtlx_standard_surface"
+        {
+            token outputs:mtlx:surface.connect = </root/_materials/mtlx_standard_surface/Surface.outputs:out>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_standard_surface_surfaceshader"
+                color3f inputs:base_color = (0.75, 0.25, 0.15)
+                float inputs:metalness = 0.2
+                float inputs:specular_roughness = 0.25
+                float inputs:coat = 0.6
+                float inputs:coat_roughness = 0.1
+                token outputs:out
+            }
+        }
+
         # Unresolvable mtlx:surface and mtlx:volume: renders with the default
         # material rather than the universal UsdPreviewSurface and medium.
         def Material "mtlx_unresolved"
@@ -343,6 +360,14 @@ def Xform "root"
             normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (interpolation = "vertex")
             point3f[] points = [(0.1, -1.1, 0.05), (1.1, -1.1, 0.05), (1.1, -0.1, 0.05), (0.1, -0.1, 0.05)]
             texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "faceVarying")
+        }
+
+        def Sphere "BsdfSphere" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            rel material:binding = </root/_materials/mtlx_standard_surface>
+            double radius = 0.3
+            double3 xformOp:translate = (0, 0, 0.35)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
         }
 
         def Mesh "UnresolvedQuad" (prepend apiSchemas = ["MaterialBindingAPI"])

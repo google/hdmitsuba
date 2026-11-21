@@ -182,10 +182,17 @@ constexpr uint8_t result_channels(Op op, uint16_t imm = 0) {
 
 inline constexpr int kMaxClosureArgs = 7;
 
+// Dielectric `leaf_arg::kMode` scatter mode values (`kScatterModeMask`) and
+// flags.
+inline constexpr int kScatterR = 0, kScatterT = 1, kScatterRT = 2;
+inline constexpr int kScatterModeMask = 3, kScatterThinWalled = 4,
+                     kScatterTwoSided = 8;
+
 enum class ClosureOp : int32_t {
   Null,
   OrenNayarDiffuse,
   Translucent,
+  Dielectric,
   Conductor,
   Layer,
   Mix,
@@ -202,13 +209,15 @@ constexpr bool is_combinator(ClosureOp op) { return op >= ClosureOp::Layer; }
 // each entry is a VM temporary slot (-1 if absent).
 namespace leaf_arg {
 inline constexpr int kWeight = 0;
-// Primary color: diffuse/translucent/subsurface `color` or conductor `ior`.
+// Primary color: diffuse/translucent/subsurface `color`, dielectric `tint`,
+// or conductor `ior`.
 inline constexpr int kColor = 1;
 inline constexpr int kRoughness = 2;
-// Literal mode: Oren-Nayar `energy_compensation` (0 or 1).
+// Literal mode: Oren-Nayar `energy_compensation` (0 or 1), or dielectric
+// `kScatter*` flags.
 inline constexpr int kMode = 3;
-// Conductor RGB `extinction`.
-inline constexpr int kExtinction = 4;
+// Dielectric scalar `ior` or conductor RGB `extinction`.
+inline constexpr int kIor = 4, kExtinction = 4;
 inline constexpr int kNormal = 5, kTangent = 6;
 }  // namespace leaf_arg
 static_assert(leaf_arg::kTangent + 1 == kMaxClosureArgs);
