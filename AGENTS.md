@@ -9,9 +9,9 @@ contributors). See [README.md](README.md) for build and test instructions and
 *   **Parity is a hard requirement.** The Hydra delegate (`hdmitsuba/`) and the
     offline translator (`usd_mitsuba/`) must produce the same result: every
     feature or fix lands in both.
-*   **Follow the USD specification** (e.g., UsdPreviewSurface) rather than
-    heuristics. Matching the specification takes precedence over preserving the
-    previous appearance.
+*   **Follow the USD and MaterialX specifications** (e.g., UsdPreviewSurface,
+    MaterialX pbrlib) rather than heuristics. Matching the specification takes
+    precedence over preserving the previous appearance.
 *   **Check for existing mechanisms first.** Before adding a `mitsuba:*` render
     setting or primvar, check whether USD or Hydra already provides one (e.g.,
     display style, complexity, standard schemas) and what other renderers do.
@@ -21,12 +21,17 @@ contributors). See [README.md](README.md) for build and test instructions and
 *   No process-global state.
 *   Avoid defensive programming: only handle conditions that can actually
     occur.
+*   Prefer returning values over mutating out-parameters unless measured
+    performance requires it.
 *   **Match Mitsuba and Dr.Jit conventions in custom plugins.** Follow Mitsuba's
     built-in plugin style (`UnpolarizedSpectrum` internally with
     `depolarizer<Spectrum>` at the boundary, `snake_case` locals, plain float
     literals like `1.0f`), use `dr::any_or`/`dr::none_or` instead of Dr.Jit
     internals, and reuse Dr.Jit/Mitsuba math, frame, and epsilon helpers
-    (`dr::Epsilon<Float>`, `Frame3f`).
+    (`dr::Epsilon<Float>`, `Frame3f`). Detaching at sampling/PDF boundaries
+    (`dr::detach`) is idiomatic—don't add complexity just to avoid discarded AD
+    graphs—and skip statically disabled branches explicitly since
+    `dr::none_or<false>` does not short-circuit in JIT variants.
 
 ## Tests
 
@@ -39,6 +44,9 @@ contributors). See [README.md](README.md) for build and test instructions and
 *   Use tolerances when comparing floating point values.
 *   For custom BSDF tests, reuse `mi.chi2.ChiSquareTest` and Mitsuba/Dr.Jit
     helpers (`dr.allclose`, `mi.has_flag`, `mi.PCG32`).
+*   Assert concrete numerical values (not just `> 0` / `isfinite` smoke checks),
+    and avoid duplicating heavy tests (e.g., `ChiSquareTest`) over identical
+    sampling paths.
 *   Check that a new test fails without the change it covers.
 
 ## Workflow
