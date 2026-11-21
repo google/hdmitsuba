@@ -841,7 +841,9 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::SetTransformParameter(
   using AnimatedTransform = mitsuba::AnimatedTransform<Float, Spectrum>;
   using TensorXf = typename AnimatedTransform::TensorXf;
   if (!transform.IsAnimated()) {
-    cb.set<AffineTransform4f>("to_world", AffineTransform4f(transform.First()));
+    AffineTransform4f t(transform.First());
+    dr::make_opaque(t);
+    cb.set<AffineTransform4f>("to_world", t);
     return;
   }
   // Copy the keyframe tensors of a new animation into the existing one.
@@ -880,6 +882,19 @@ PrimTranslator<Float, Spectrum>::BuildLight(const LightSpec& spec) {
     res.shape = mitsuba::PluginManager::instance()
                     ->create_object<mitsuba::Shape<Float, Spectrum>>(props);
     res.shape->set_id(id_str);
+    if constexpr (dr::is_jit_v<Float>) {
+      // Mitsuba's rectangle/disk constructors leave transforms or tangent
+      // vectors as JIT literals; make them opaque from Frame 1 to avoid
+      // recompilation and frozen-kernel re-recording on moves/resizes.
+      if ((spec.prim_type == HdPrimTypeTokens->rectLight ||
+           spec.prim_type == HdPrimTypeTokens->diskLight) &&
+          !spec.transform.IsAnimated()) {
+        TraversalCallback cb("", nullptr, /*recurse_objects=*/false);
+        res.shape->traverse(&cb);
+        SetTransformParameter(cb, spec.transform);
+        res.shape->parameters_changed({"to_world"});
+      }
+    }
   } else {
     res.emitter = mitsuba::PluginManager::instance()
                       ->create_object<mitsuba::Emitter<Float, Spectrum>>(props);
