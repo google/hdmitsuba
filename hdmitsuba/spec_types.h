@@ -103,6 +103,20 @@ struct LightSpec : public BaseSpec {
   // Whether the `lightLink` collection includes everything (the default).
   bool light_link_everything = true;
   ShapingSpec shaping;
+  bool transform_dirty = true;
+  bool emission_dirty = true;
+
+  void FoldPendingFrom(const LightSpec& prev) {
+    transform_dirty = (transform != prev.transform) || prev.transform_dirty;
+    emission_dirty = (emission != prev.emission) || prev.emission_dirty;
+    BaseSpec::FoldPendingFrom(prev);
+  }
+
+  void MarkClean() {
+    BaseSpec::MarkClean();
+    transform_dirty = false;
+    emission_dirty = false;
+  }
 
   // Area lights are represented as Mitsuba shapes with an attached area
   // emitter, rather than standalone emitter objects.
