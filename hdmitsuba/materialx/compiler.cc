@@ -72,6 +72,7 @@ using mitsuba::mtlx::RegisterMaterialXBsdf;
 using mitsuba::mtlx::RegisterMaterialXExprTexture;
 using mitsuba::mtlx::result_channels;
 namespace leaf_arg = mitsuba::mtlx::leaf_arg;
+namespace combinator_arg = mitsuba::mtlx::combinator_arg;
 
 struct Expr;
 
@@ -389,6 +390,7 @@ class MtlxExprCompiler {
       node_output_expr_;
   absl::flat_hash_map<const mx::Node*, Expr> edf_expr_;
   absl::flat_hash_map<const mx::Node*, Expr> opacity_expr_;
+  absl::flat_hash_map<const mx::Node*, int> bsdf_closure_;
   absl::flat_hash_map<std::pair<const mx::Node*, std::string>, Expr>
       value_input_expr_;
   absl::flat_hash_map<const mx::Node*, MatExpr> node_matrix_expr_;
@@ -1488,45 +1490,105 @@ int MtlxExprCompiler::EmitClosure(
 int MtlxExprCompiler::CompileBsdfClosure(const mx::NodePtr& raw_node) {
   mx::NodePtr node = UnwrapShaderNode(raw_node);
   if (!node) return -1;
+  if (auto it = bsdf_closure_.find(node.get()); it != bsdf_closure_.end()) {
+    return it->second;
+  }
 
   std::string cat = NodeCategory(node);
   auto slot = [&](const std::string& name, const Expr& def = Expr::zero()) {
     return EmitTmp(CompileInputExpr(node, name, def));
   };
+  auto scale = [&](int c, const Expr& w) {
+    return (c < 0 || w.is_one())
+               ? c
+               : EmitClosure(ClosureOp::Multiply,
+                             {{combinator_arg::kFirst, c},
+                              {combinator_arg::kWeight, EmitTmp(w)}});
+  };
 
-  // Skip leaf BSDF lobes whose weight is statically zero.
-  Expr w_expr = Expr::one();
-  if (node->getType() == mx::BSDF_TYPE_STRING &&
-      InputType(node, "weight") == "float") {
-    w_expr = CompileInputExpr(node, "weight", Expr::one());
-    if (w_expr.is_zero()) return -1;
-  }
-
+  int idx = -1;
   if (cat == "oren_nayar_diffuse_bsdf" || cat == "subsurface_bsdf" ||
       cat == "translucent_bsdf") {
-    bool is_translucent = cat == "translucent_bsdf";
-    Expr n_expr = CompileInputExpr(node, "normal", Expr::n_world());
-    return EmitClosure(
-        is_translucent ? ClosureOp::Translucent : ClosureOp::OrenNayarDiffuse,
-        {{leaf_arg::kWeight, EmitTmp(w_expr)},
-         {leaf_arg::kColor, slot("color", Expr::one())},
-         {leaf_arg::kRoughness, is_translucent ? -1 : slot("roughness")},
-         {leaf_arg::kMode,
-          cat == "oren_nayar_diffuse_bsdf" &&
-              !CompileInputExpr(node, "energy_compensation").is_zero()},
-         {leaf_arg::kNormal,
-          n_expr == Expr::n_world() ? -1 : EmitTmp(n_expr)}});
-  }
-  if (cat == "surface") {
-    return CompileBsdfClosure(node->getConnectedNode("bsdf"));
-  }
-  if (cat == "surface_unlit") {
+    Expr w_expr = CompileInputExpr(node, "weight", Expr::one());
+    if (w_expr.is_zero()) {
+      // Opaque leaves still block `layer` bases (`throughput = 0`) at
+      // `weight == 0`, without compiling dead color/roughness/normal inputs.
+      int z = EmitTmp(Expr::zero());
+      idx = EmitClosure(ClosureOp::OrenNayarDiffuse, {{leaf_arg::kWeight, z},
+                                                      {leaf_arg::kColor, z},
+                                                      {leaf_arg::kRoughness, z},
+                                                      {leaf_arg::kMode, 0},
+                                                      {leaf_arg::kNormal, -1}});
+    } else {
+      bool is_translucent = cat == "translucent_bsdf";
+      Expr n_expr = CompileInputExpr(node, "normal", Expr::n_world());
+      idx = EmitClosure(
+          is_translucent ? ClosureOp::Translucent : ClosureOp::OrenNayarDiffuse,
+          {{leaf_arg::kWeight, EmitTmp(w_expr)},
+           {leaf_arg::kColor, slot("color", Expr::one())},
+           {leaf_arg::kRoughness, is_translucent ? -1 : slot("roughness")},
+           {leaf_arg::kMode,
+            cat == "oren_nayar_diffuse_bsdf" &&
+                !CompileInputExpr(node, "energy_compensation").is_zero()},
+           {leaf_arg::kNormal,
+            n_expr == Expr::n_world() ? -1 : EmitTmp(n_expr)}});
+    }
+  } else if (cat == "layer" || cat == "add") {
+    bool is_layer = cat == "layer";
+    int c0 =
+        CompileBsdfClosure(node->getConnectedNode(is_layer ? "top" : "in1"));
+    int c1 =
+        CompileBsdfClosure(node->getConnectedNode(is_layer ? "base" : "in2"));
+    if (c0 < 0) {
+      idx = c1;
+    } else if (c1 < 0) {
+      idx = c0;
+    } else {
+      idx = EmitClosure(
+          is_layer ? ClosureOp::Layer : ClosureOp::Add,
+          {{combinator_arg::kFirst, c0}, {combinator_arg::kSecond, c1}});
+    }
+  } else if (cat == "mix") {
+    Expr mix_expr = CompileInputExpr(node, "mix");
+    if (mix_expr.is_zero()) {
+      idx = CompileBsdfClosure(node->getConnectedNode("bg"));
+    } else if (mix_expr.is_one()) {
+      idx = CompileBsdfClosure(node->getConnectedNode("fg"));
+    } else {
+      int fg_idx = CompileBsdfClosure(node->getConnectedNode("fg"));
+      int bg_idx = CompileBsdfClosure(node->getConnectedNode("bg"));
+      if (fg_idx == bg_idx) {
+        idx = fg_idx;
+      } else {
+        if (fg_idx < 0) fg_idx = EmitClosure(ClosureOp::Null, {});
+        if (bg_idx < 0) bg_idx = EmitClosure(ClosureOp::Null, {});
+        idx = EmitClosure(ClosureOp::Mix,
+                          {{combinator_arg::kFirst, fg_idx},
+                           {combinator_arg::kSecond, bg_idx},
+                           {combinator_arg::kWeight, EmitTmp(mix_expr)}});
+      }
+    }
+  } else if (cat == "multiply") {
+    Expr w = CompileInputExpr(node, "in2", Expr::one());
+    idx = scale(CompileBsdfClosure(node->getConnectedNode("in1")), w);
+  } else if (cat == "surface") {
+    if (Expr op = CompileOpacity(node); !op.is_zero()) {
+      idx = scale(CompileBsdfClosure(node->getConnectedNode("bsdf")), op);
+    }
+  } else if (cat == "surface_unlit") {
     // Unlit surfaces emit radiance only and have a null BSDF.
-    return -1;
+  } else if (node->getType() == mx::BSDF_TYPE_STRING &&
+             InputType(node, "weight") == "float" &&
+             CompileInputExpr(node, "weight", Expr::one()).is_zero()) {
+    // Skip inactive unsupported lobes (e.g. zero-weight lobes in
+    // `standard_surface`) without warning.
+  } else {
+    WarnUnsupported("Unsupported MaterialX closure '" + cat +
+                    "'; using a null BSDF.");
   }
-  WarnUnsupported("Unsupported MaterialX closure '" + cat +
-                  "'; using a null BSDF.");
-  return -1;
+
+  bsdf_closure_[node.get()] = idx;
+  return idx;
 }
 
 void MtlxExprCompiler::CompileBsdf(const mx::NodePtr& shader_node) {
