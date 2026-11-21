@@ -679,6 +679,13 @@ class SceneModel final : public SceneManager {
       samples_to_render =
           std::max(0, std::min(interactive_samples_per_pass_, remaining));
     }
+    auto average_accum = [&]() {
+      return TensorXf(
+          accum_buffer_.array() *
+              dr::opaque<Float>(
+                  1.0f / static_cast<float>(current_progressive_sample_)),
+          accum_buffer_.shape());
+    };
     TensorXf display_result;
     if (samples_to_render > 0) {
       // 3. Render a chunk of samples
@@ -717,32 +724,30 @@ class SceneModel final : public SceneManager {
         // samples; weight by samples_to_render so passes of different sizes
         // (e.g. 7 spp at 2 spp/pass -> 2, 2, 2, 1) contribute equally per
         // sample.
-        TensorXf weighted(
-            result.array() * static_cast<float>(samples_to_render),
-            result.shape());
+        auto weighted = [&]() {
+          return result.array() *
+                 dr::opaque<Float>(static_cast<float>(samples_to_render));
+        };
         if (current_progressive_sample_ == samples_to_render ||
             accum_buffer_.empty()) {
-          accum_buffer_ = std::move(weighted);
+          accum_buffer_ = samples_to_render == 1
+                              ? result
+                              : TensorXf(weighted(), result.shape());
+          display_result = std::move(result);
         } else {
-          accum_buffer_.array() += weighted.array();
+          accum_buffer_.array() += weighted();
+          display_result = average_accum();
         }
         if constexpr (dr::is_jit_v<Float>) {
-          dr::eval(accum_buffer_);  // keep the JIT graph bounded across passes
+          dr::schedule(accum_buffer_, display_result);
+          dr::eval();
         }
-        // Average for display
-        display_result =
-            TensorXf(accum_buffer_.array() /
-                         static_cast<float>(current_progressive_sample_),
-                     result.shape());
       } else {
         display_result = std::move(result);
       }
     } else if (denoise_dirty && !accum_buffer_.empty() &&
                current_progressive_sample_ > 0) {
-      display_result =
-          TensorXf(accum_buffer_.array() /
-                       static_cast<float>(current_progressive_sample_),
-                   accum_buffer_.shape());
+      display_result = average_accum();
     } else {
       // Already converged, ensure buffers are marked as converged.
       bool converged = true;
