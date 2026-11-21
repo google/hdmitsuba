@@ -333,11 +333,15 @@ class MtlxExprCompiler {
   // tuples are baked into the program to enable constant simplifications, while
   // other values become opaque scalars exposed via traversal.
   Expr EmitTuple(std::initializer_list<float> vals);
+  int EmitTmp(const Expr& expr);
   Expr EmitTmpExpr(const Expr& expr);
   Expr LoadTmp(int slot) const {
     return Expr({Op::LoadTmp, 0, static_cast<uint16_t>(slot)},
-                tmp_channels_[slot]);
+                prog_.tmp_channels[slot]);
   }
+  ref<Object> CreatePlugin(std::string_view name, ObjectType type,
+                           std::string_view variant,
+                           MeshAttributeRequests& mesh_attributes);
 
   TfToken ResolveSourceColorSpace(std::string_view color_space);
   GfVec3f ToLinearRec709(GfVec3f rgb_val, std::string_view color_space);
@@ -370,7 +374,6 @@ class MtlxExprCompiler {
   const DiscoverTextureFn* discover_texture_ = nullptr;
   MtlxProgram prog_;
   std::vector<std::pair<std::string, int>> attr_requests_;
-  std::vector<uint8_t> tmp_channels_;
   absl::flat_hash_map<std::pair<const mx::Node*, std::string>, Expr>
       node_output_expr_;
   absl::flat_hash_map<const mx::Node*, Expr> edf_expr_;
@@ -506,22 +509,28 @@ Expr MtlxExprCompiler::EmitTuple(std::initializer_list<float> vals) {
   return n == 3 ? c3 : vec4(c3, e[3]);
 }
 
-Expr MtlxExprCompiler::EmitTmpExpr(const Expr& expr) {
-  if (expr.code.size() == 1 && expr.code[0].op <= Op::LoadTmp) return expr;
+int MtlxExprCompiler::EmitTmp(const Expr& expr) {
+  if (expr.code.size() == 1 && expr.code[0].op == Op::LoadTmp) {
+    return expr.code[0].imm;
+  }
+  size_t next_slot = prog_.tmp_channels.size();
   auto [it, inserted] =
-      expr_to_slot_.try_emplace(expr, static_cast<int>(prog_.num_tmps));
+      expr_to_slot_.try_emplace(expr, static_cast<int>(next_slot));
   if (inserted) {
-    if (prog_.num_tmps >= kMaxImm) {
+    if (next_slot >= kMaxImm) {
       throw std::runtime_error("materialx_expr: too many temporaries");
     }
     prog_.code.insert(prog_.code.end(), expr.code.begin(), expr.code.end());
-    prog_.code.push_back(
-        {Op::StoreTmp, 0, static_cast<uint16_t>(prog_.num_tmps)});
+    prog_.code.push_back({Op::StoreTmp, 0, static_cast<uint16_t>(next_slot)});
     prog_.stack_size = std::max(prog_.stack_size, expr.max_depth);
-    tmp_channels_.push_back(expr.channels);
-    ++prog_.num_tmps;
+    prog_.tmp_channels.push_back(expr.channels);
   }
-  return LoadTmp(it->second);
+  return it->second;
+}
+
+Expr MtlxExprCompiler::EmitTmpExpr(const Expr& expr) {
+  if (expr.code.size() == 1 && expr.code[0].op <= Op::LoadTmp) return expr;
+  return LoadTmp(EmitTmp(expr));
 }
 
 Expr MtlxExprCompiler::CompileValueElement(const mx::ValueElementPtr& elem,
@@ -615,7 +624,7 @@ Expr MtlxExprCompiler::CompileIfCondition(const mx::NodePtr& node,
 
 MtlxExprCompiler::MatExpr MtlxExprCompiler::MatrixOp(Op op, const MatExpr& a,
                                                      const MatExpr* b) {
-  if (prog_.num_tmps + a.n > kMaxImm) {
+  if (prog_.tmp_channels.size() + a.n > kMaxImm) {
     throw std::runtime_error("materialx_expr: too many temporaries");
   }
   uint32_t depth = 0;
@@ -630,10 +639,10 @@ MtlxExprCompiler::MatExpr MtlxExprCompiler::MatrixOp(Op op, const MatExpr& a,
   };
   emit_rows(a);
   if (b) emit_rows(*b);
-  uint16_t first = static_cast<uint16_t>(prog_.num_tmps);
+  uint16_t first = static_cast<uint16_t>(prog_.tmp_channels.size());
   prog_.code.push_back({op, static_cast<uint8_t>(a.n), first});
-  tmp_channels_.insert(tmp_channels_.end(), a.n, static_cast<uint8_t>(a.n));
-  prog_.num_tmps += a.n;
+  prog_.tmp_channels.insert(prog_.tmp_channels.end(), a.n,
+                            static_cast<uint8_t>(a.n));
   MatExpr out;
   out.n = a.n;
   for (int i = 0; i < a.n; ++i) out.rows[i] = LoadTmp(first + i);
@@ -1457,22 +1466,28 @@ Expr MtlxExprCompiler::CompileOpacity(const mx::NodePtr& shader_node) {
   return res;
 }
 
+ref<Object> MtlxExprCompiler::CreatePlugin(
+    std::string_view name, ObjectType type, std::string_view variant,
+    MeshAttributeRequests& mesh_attributes) {
+  Properties props(name);
+  for (size_t i = 0; i < inputs_.size(); ++i) {
+    props.set("in" + std::to_string(i), std::move(inputs_[i]));
+  }
+  mesh_attributes.insert(attr_requests_.begin(), attr_requests_.end());
+  props.set_any("program", std::move(prog_));
+  return PluginManager::instance()->create_object(props, variant, type);
+}
+
 ref<Object> MtlxExprCompiler::CreateExprTexture(
     const Expr& expr, bool unbounded, std::string_view variant,
     MeshAttributeRequests& mesh_attributes) {
   RegisterMaterialXExprTexture();
-  Properties props("materialx_expr");
-  for (size_t i = 0; i < inputs_.size(); ++i) {
-    props.set("in" + std::to_string(i), std::move(inputs_[i]));
-  }
   prog_.code.insert(prog_.code.end(), expr.code.begin(), expr.code.end());
-  mesh_attributes.insert(attr_requests_.begin(), attr_requests_.end());
   prog_.stack_size = std::max(prog_.stack_size, expr.max_depth);
   prog_.result_uniform = expr.uniform();
   prog_.unbounded = unbounded;
-  props.set_any("program", std::move(prog_));
-  return PluginManager::instance()->create_object(props, variant,
-                                                  ObjectType::Texture);
+  return CreatePlugin("materialx_expr", ObjectType::Texture, variant,
+                      mesh_attributes);
 }
 
 }  // namespace

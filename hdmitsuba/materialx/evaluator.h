@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -179,6 +180,26 @@ constexpr uint8_t result_channels(Op op, uint16_t imm = 0) {
   return 3;
 }
 
+template <typename Vec>
+Vec safe_normalize(const Vec& v, const Vec& fallback = Vec(0.0f),
+                   dr::scalar_t<Vec> min_len2 = 0.0f) {
+  auto len2 = dr::squared_norm(v);
+  auto valid = len2 > min_len2;
+  return dr::select(valid, v * dr::rsqrt(dr::select(valid, len2, 1.0f)),
+                    fallback);
+}
+
+template <typename SurfaceInteraction>
+auto geom_tangent_world(const SurfaceInteraction& si) {
+  using Vec3 = std::decay_t<decltype(si.sh_frame.s)>;
+  return safe_normalize(
+      Vec3(si.dp_du - si.sh_frame.n * dr::dot(si.sh_frame.n, si.dp_du)),
+      si.sh_frame.s, dr::scalar_t<Vec3>(1e-20f));
+}
+
+template <typename Float32>
+struct SrgbLut;
+
 // Variant-independent compiled MaterialX program passed via `Properties`.
 //
 // A program has at most `kMaxImm` constants, opaque values and temporaries
@@ -188,10 +209,12 @@ struct MtlxProgram {
   std::vector<double> consts = {0.0, 1.0};
   std::vector<double> opaques;
   std::vector<std::string> attr_names;
+  std::vector<uint8_t> tmp_channels;
   bool result_uniform = false;
   bool unbounded = false;
-  uint32_t num_tmps = 0;
   uint32_t stack_size = 1;
+
+  bool is_tmp_uniform(int k) const { return tmp_channels[k] == 1; }
 };
 
 // Evaluates an `MtlxProgram` for the variant `Float`/`Spectrum`, given its
@@ -205,6 +228,7 @@ class MtlxEvaluator {
   using Val = Vector<Float, 4>;
 
   void compile(const Properties& props);
+  void load_srgb_lut();
 
   const MtlxProgram& program() const { return m_prog; }
 
@@ -221,16 +245,26 @@ class MtlxEvaluator {
   // spatially varying (or re-parameterized) input.
   bool is_spatially_varying() const;
 
-  // Evaluates the program and returns its result.
-  Val eval(const SurfaceInteraction3f& si, Mask active) const;
+  // Evaluates the program and returns its result. If `out_tmps` is given, it
+  // receives the evaluated temporaries; if `stop_after_tmp >= 0`, evaluation
+  // returns right after storing temporary `stop_after_tmp`.
+  Val eval(const SurfaceInteraction3f& si, Mask active, Val* out_tmps = nullptr,
+           int stop_after_tmp = -1) const;
 
   // Returns the luminance of 3-channel results, like Mitsuba's `bitmap`.
   Float eval_1(const SurfaceInteraction3f& si, Mask active) const;
   Color3f eval_3(const SurfaceInteraction3f& si, Mask active) const;
 
+  // Upsamples an RGB color to a spectrum using the traversable sRGB LUT.
+  UnpolarizedSpectrum upsample_rgb(const Color3f& c,
+                                   const Wavelength& wavelengths,
+                                   bool unbounded) const;
+
   void traverse_cb(void* payload, const drjit::TraverseVisitor& cb);
 
  private:
+  using SrgbFloat32 = dr::float32_array_t<dr::detached_t<Float>>;
+
   static Float elementwise(Op op, const Val* sp, int c);
 
   MtlxProgram m_prog;
@@ -238,6 +272,7 @@ class MtlxEvaluator {
   // Opaque scalars (`dr::opaque`), passed as kernel inputs rather than
   // literals.
   std::vector<Float> m_opaques;
+  std::shared_ptr<SrgbLut<SrgbFloat32>> m_srgb_lut;
 };
 
 // Registers the `materialx_expr` texture with Mitsuba's plugin manager.
