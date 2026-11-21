@@ -450,7 +450,7 @@ def test_materialx_translation(monkeypatch: pytest.MonkeyPatch) -> None:
   bsdf, emitter, displacement, medium = material.convert_material(
       mesh, time=Usd.TimeCode(0.0)
   )
-  assert isinstance(bsdf, mi.BSDF) and bsdf.class_name() == 'SmoothDiffuse'
+  assert isinstance(bsdf, mi.BSDF) and bsdf.class_name() == 'MtlxBsdf'
   assert isinstance(emitter, mi.Emitter)
   assert displacement is None and medium is None
   assert isinstance(

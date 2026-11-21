@@ -529,7 +529,8 @@ def test_colorspace_and_cycle_handling(
     capfd: Pytest fd capture fixture.
   """
   # `UsdColorSpaceAPI` converts sRGB `(0.5, 0.5, 0.5)` to linear Rec.709 while
-  # keeping opaque `opacity = (1, 1, 1)` exact so `MaskBSDF` is elided.
+  # keeping opaque `opacity = (1, 1, 1)` exact so cutout opacity (`Null`) is
+  # elided.
   cs_stage = Usd.Stage.CreateInMemory()
   cs_mat = UsdShade.Material.Define(cs_stage, '/mesh/Material')
   Usd.ColorSpaceAPI.Apply(cs_mat.GetPrim()).CreateColorSpaceNameAttr(
@@ -542,7 +543,8 @@ def test_colorspace_and_cycle_handling(
       emission_color=(0.5, 0.5, 0.5),
       opacity=(1.0, 1.0, 1.0),
   )
-  assert bsdf is not None and bsdf.class_name() == 'SmoothDiffuse'
+  assert bsdf is not None and bsdf.class_name() == 'MtlxBsdf'
+  assert not mi.has_flag(bsdf.flags(), mi.BSDFFlags.Null)
   assert emitter is not None
   expected_lin = Gf.ColorSpace(Gf.ColorSpaceNames.LinearRec709).Convert(
       Gf.ColorSpace(Gf.ColorSpaceNames.SRGBRec709), Gf.Vec3f(0.5, 0.5, 0.5)

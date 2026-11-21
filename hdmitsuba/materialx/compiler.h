@@ -26,21 +26,22 @@
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-// The `materialx_expr` textures and mesh attributes of a compiled surface
-// shader.
+// The compiled `materialx_bsdf`, optional `materialx_expr` radiance texture,
+// and mesh attributes of a MaterialX surface shader.
 struct CompiledSurfaceShader {
+  // Compiled `materialx_bsdf` BSDF (including cutout opacity).
+  mitsuba::ref<mitsuba::Object> bsdf;
   // Emitted radiance, or null if there is no emission.
   mitsuba::ref<mitsuba::Object> radiance_texture;
-  // Cutout opacity, or null if it is identically 1.
-  mitsuba::ref<mitsuba::Object> opacity_texture;
   // Primvars read as mesh attributes by the compiled shader.
   MeshAttributeRequests mesh_attributes;
 };
 
-// Compiles the emission (`edf`, weighted by `opacity`) and cutout `opacity` of
-// a flattened MaterialX surface shader (`surface`, `surface_unlit`, `mix`,
-// `surfacematerial`, or raw EDF closures). This reads the node definitions of
-// the data library of the document, which must not be modified concurrently.
+// Compiles the BSDF closures (including cutout `opacity`) and emission (`edf`,
+// weighted by `opacity`) of a flattened MaterialX surface shader (`surface`,
+// `surface_unlit`, `mix`, `surfacematerial`, or raw BSDF/EDF closures). This
+// reads the node definitions of the data library of the document, which must
+// not be modified concurrently.
 CompiledSurfaceShader CompileSurfaceShader(
     const MaterialX::NodePtr& shader_node, std::string_view variant,
     const std::function<const CachedTexture*(const TextureKey&)>&

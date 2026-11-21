@@ -42,7 +42,6 @@
 #include <absl/synchronization/mutex.h>
 #include <mitsuba/core/config.h>
 #include <mitsuba/core/logger.h>
-#include <mitsuba/core/plugin.h>
 #include <mitsuba/core/properties.h>
 #include <mitsuba/core/spectrum.h>
 #include <pxr/base/gf/matrix3d.h>
@@ -506,17 +505,7 @@ TranslatedMaterial TranslateMaterialXNetwork(
       res.shape_emitter_props = std::move(emitter_props);
     }
 
-    mitsuba::Properties bsdf_props("diffuse");
-    bsdf_props.set("reflectance", 0.0f);
-    res.bsdf = mitsuba::PluginManager::instance()->create_object(
-        bsdf_props, variant, mitsuba::ObjectType::BSDF);
-    if (compiled.opacity_texture) {
-      mitsuba::Properties mask_props("mask");
-      mask_props.set("opacity", compiled.opacity_texture);
-      mask_props.set("nested_bsdf", res.bsdf);
-      res.bsdf = mitsuba::PluginManager::instance()->create_object(
-          mask_props, variant, mitsuba::ObjectType::BSDF);
-    }
+    res.bsdf = std::move(compiled.bsdf);
     return res;
   } catch (const std::exception& e) {
     TF_WARN("Failed to translate MaterialX network '%s': %s", id.GetText(),
