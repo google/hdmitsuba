@@ -717,32 +717,48 @@ class SceneModel final : public SceneManager {
         // samples; weight by samples_to_render so passes of different sizes
         // (e.g. 7 spp at 2 spp/pass -> 2, 2, 2, 1) contribute equally per
         // sample.
-        TensorXf weighted(
-            result.array() * static_cast<float>(samples_to_render),
-            result.shape());
         if (current_progressive_sample_ == samples_to_render ||
             accum_buffer_.empty()) {
-          accum_buffer_ = std::move(weighted);
+          if (samples_to_render == 1) {
+            accum_buffer_ = result;
+          } else {
+            accum_buffer_ = TensorXf(
+                result.array() *
+                    dr::opaque<Float>(static_cast<float>(samples_to_render)),
+                result.shape());
+            if constexpr (dr::is_jit_v<Float>) {
+              dr::eval(accum_buffer_);
+            }
+          }
+          display_result = std::move(result);
         } else {
-          accum_buffer_.array() += weighted.array();
+          if (samples_to_render == 1) {
+            accum_buffer_.array() += result.array();
+          } else {
+            accum_buffer_.array() +=
+                result.array() *
+                dr::opaque<Float>(static_cast<float>(samples_to_render));
+          }
+          display_result = TensorXf(
+              accum_buffer_.array() *
+                  dr::opaque<Float>(
+                      1.0f / static_cast<float>(current_progressive_sample_)),
+              result.shape());
+          if constexpr (dr::is_jit_v<Float>) {
+            dr::schedule(accum_buffer_, display_result);
+            dr::eval();
+          }
         }
-        if constexpr (dr::is_jit_v<Float>) {
-          dr::eval(accum_buffer_);  // keep the JIT graph bounded across passes
-        }
-        // Average for display
-        display_result =
-            TensorXf(accum_buffer_.array() /
-                         static_cast<float>(current_progressive_sample_),
-                     result.shape());
       } else {
         display_result = std::move(result);
       }
     } else if (denoise_dirty && !accum_buffer_.empty() &&
                current_progressive_sample_ > 0) {
-      display_result =
-          TensorXf(accum_buffer_.array() /
-                       static_cast<float>(current_progressive_sample_),
-                   accum_buffer_.shape());
+      display_result = TensorXf(
+          accum_buffer_.array() *
+              dr::opaque<Float>(
+                  1.0f / static_cast<float>(current_progressive_sample_)),
+          accum_buffer_.shape());
     } else {
       // Already converged, ensure buffers are marked as converged.
       bool converged = true;
@@ -1718,6 +1734,9 @@ class SceneModel final : public SceneManager {
       scene_dirty_ = false;
     } else if (scene_) {
       scene_->parameters_changed();
+      if (frozen_render_) {
+        frozen_render_->InvalidateInputs();
+      }
     }
 
     // Run Garbage Collection after all resources are committed, ensuring

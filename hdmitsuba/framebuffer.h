@@ -182,10 +182,6 @@ void PerformBatchedCopy(
   if constexpr (dr::is_cuda_v<Float> || dr::is_metal_v<Float>) {
     using Int32 = dr::int32_array_t<Float>;
     using UInt32 = dr::uint32_array_t<Float>;
-    using MigratedFloat = std::decay_t<decltype(dr::migrate(
-        std::declval<Float>(), JitBackend::None))>;
-    using MigratedInt = std::decay_t<decltype(dr::migrate(std::declval<Int32>(),
-                                                          JitBackend::None))>;
 
     std::vector<std::variant<Float, Int32>> gathered_vars;
     gathered_vars.reserve(destinations.size());
@@ -246,34 +242,66 @@ void PerformBatchedCopy(
     }
     dr::eval();
 
-    // Migrate result back to host memory.
-    std::vector<std::variant<MigratedFloat, MigratedInt>> migrated_vars;
-    migrated_vars.reserve(destinations.size());
-    for (size_t i = 0; i < destinations.size(); ++i) {
-      std::visit(
-          [&](auto& var) {
-            migrated_vars.push_back(dr::migrate(var, JitBackend::None));
-          },
-          gathered_vars[i]);
-    }
-    dr::sync_thread();
+    if constexpr (dr::is_cuda_v<Float>) {
+      for (size_t i = 0; i < destinations.size(); ++i) {
+        const auto& dest = destinations[i];
+        void* dst_ptr = dest.buffer->Map();
+        int dst_channels = HdGetComponentCount(dest.buffer->GetFormat());
+        size_t dst_width = dest.buffer->GetWidth();
+        size_t dst_height = dest.buffer->GetHeight();
+        size_t element_size = dest.is_int ? sizeof(int32_t) : sizeof(float);
+        size_t size_bytes =
+            dst_width * dst_height * dst_channels * element_size;
 
-    for (size_t i = 0; i < destinations.size(); ++i) {
-      const auto& dest = destinations[i];
-      void* dst_ptr = dest.buffer->Map();
-      int dst_channels = HdGetComponentCount(dest.buffer->GetFormat());
-      size_t dst_width = dest.buffer->GetWidth();
-      size_t dst_height = dest.buffer->GetHeight();
-      size_t element_size = dest.is_int ? sizeof(int32_t) : sizeof(float);
-      size_t size_bytes = dst_width * dst_height * dst_channels * element_size;
+        std::visit(
+            [&](const auto& dev_arr) {
+              jit_memcpy_async(JitBackend::CUDA, dst_ptr, dev_arr.data(),
+                               size_bytes);
+            },
+            gathered_vars[i]);
+      }
+      dr::sync_thread();
 
-      std::visit(
-          [&](auto& host_arr) {
-            std::memcpy(dst_ptr, host_arr.data(), size_bytes);
-          },
-          migrated_vars[i]);
-      dest.buffer->SetConverged(true);
-      dest.buffer->Unmap();
+      for (const auto& dest : destinations) {
+        dest.buffer->SetConverged(true);
+        dest.buffer->Unmap();
+      }
+    } else {
+      using MigratedFloat = std::decay_t<decltype(dr::migrate(
+          std::declval<Float>(), JitBackend::None))>;
+      using MigratedInt = std::decay_t<decltype(dr::migrate(
+          std::declval<Int32>(), JitBackend::None))>;
+
+      // Migrate result back to host memory.
+      std::vector<std::variant<MigratedFloat, MigratedInt>> migrated_vars;
+      migrated_vars.reserve(destinations.size());
+      for (size_t i = 0; i < destinations.size(); ++i) {
+        std::visit(
+            [&](auto& var) {
+              migrated_vars.push_back(dr::migrate(var, JitBackend::None));
+            },
+            gathered_vars[i]);
+      }
+      dr::sync_thread();
+
+      for (size_t i = 0; i < destinations.size(); ++i) {
+        const auto& dest = destinations[i];
+        void* dst_ptr = dest.buffer->Map();
+        int dst_channels = HdGetComponentCount(dest.buffer->GetFormat());
+        size_t dst_width = dest.buffer->GetWidth();
+        size_t dst_height = dest.buffer->GetHeight();
+        size_t element_size = dest.is_int ? sizeof(int32_t) : sizeof(float);
+        size_t size_bytes =
+            dst_width * dst_height * dst_channels * element_size;
+
+        std::visit(
+            [&](auto& host_arr) {
+              std::memcpy(dst_ptr, host_arr.data(), size_bytes);
+            },
+            migrated_vars[i]);
+        dest.buffer->SetConverged(true);
+        dest.buffer->Unmap();
+      }
     }
   } else {
     if constexpr (dr::is_jit_v<Float>) {

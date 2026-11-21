@@ -254,3 +254,63 @@ def test_kernel_freezing_light_emission_updates(kind: str) -> None:
   assert dr.KernelRecordingMode.Replayed in modes
   assert dr.KernelRecordingMode.Recorded not in modes
   assert np.max(img) == 0.0
+
+
+def _render_area_light_frames(
+    kind: str, freeze_enabled: bool
+) -> list[np.ndarray]:
+  stage, engine = _create_engine(freeze_enabled=freeze_enabled)
+  stage.RemovePrim('/light')
+  if kind == 'rect':
+    light = UsdLux.RectLight.Define(stage, '/test_light')
+    width = light.CreateWidthAttr(1.0)
+    height = light.CreateHeightAttr(1.0)
+    resize = lambda: (width.Set(2.0), height.Set(1.5))
+  elif kind == 'disk':
+    light = UsdLux.DiskLight.Define(stage, '/test_light')
+    radius = light.CreateRadiusAttr(0.5)
+    resize = lambda: radius.Set(1.0)
+  elif kind == 'sphere':
+    light = UsdLux.SphereLight.Define(stage, '/test_light')
+    radius = light.CreateRadiusAttr(0.5)
+    resize = lambda: radius.Set(0.8)
+  else:
+    light = UsdLux.CylinderLight.Define(stage, '/test_light')
+    radius = light.CreateRadiusAttr(0.3)
+    length = light.CreateLengthAttr(1.0)
+    resize = lambda: (radius.Set(0.6), length.Set(2.0))
+
+  translate = light.AddTranslateOp()
+  translate.Set((0.0, 2.0, 0.0))
+  light.AddRotateXOp().Set(-90)
+  light.CreateIntensityAttr(4.0)
+
+  def render(expect_replay: bool = False) -> np.ndarray:
+    with dr.kernel_history() as kh:
+      img = engine.render()['color']
+    if freeze_enabled and expect_replay:
+      modes = {entry.recording_mode for entry in kh}
+      assert dr.KernelRecordingMode.Replayed in modes
+      assert dr.KernelRecordingMode.Recorded not in modes
+    return img
+
+  frames = [render()]  # Warm-up.
+  translate.Set((-0.8, 2.0, 0.3))
+  frames.append(render())  # Records the frozen kernel.
+  translate.Set((0.8, 1.5, -0.3))
+  frames.append(render(expect_replay=True))
+  resize()
+  frames.append(render(expect_replay=True))
+  return frames
+
+
+@pytest.mark.parametrize('kind', ['rect', 'disk', 'sphere', 'cylinder'])
+def test_kernel_freezing_area_light_updates(kind: str) -> None:
+  """Tests that area light moves and resizes replay without re-recording."""
+  # Render sequentially: a live second engine would invalidate the recording.
+  frozen_frames = _render_area_light_frames(kind, freeze_enabled=True)
+  ref_frames = _render_area_light_frames(kind, freeze_enabled=False)
+  for prev, curr in zip(frozen_frames, frozen_frames[1:]):
+    assert not np.allclose(prev, curr, atol=1e-3)
+  for frozen, ref in zip(frozen_frames, ref_frames):
+    np.testing.assert_allclose(frozen, ref, atol=1e-4, rtol=1e-4)

@@ -841,7 +841,9 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::SetTransformParameter(
   using AnimatedTransform = mitsuba::AnimatedTransform<Float, Spectrum>;
   using TensorXf = typename AnimatedTransform::TensorXf;
   if (!transform.IsAnimated()) {
-    cb.set<AffineTransform4f>("to_world", AffineTransform4f(transform.First()));
+    AffineTransform4f t(transform.First());
+    dr::make_opaque(t);
+    cb.set<AffineTransform4f>("to_world", t);
     return;
   }
   // Copy the keyframe tensors of a new animation into the existing one.
@@ -880,6 +882,19 @@ PrimTranslator<Float, Spectrum>::BuildLight(const LightSpec& spec) {
     res.shape = mitsuba::PluginManager::instance()
                     ->create_object<mitsuba::Shape<Float, Spectrum>>(props);
     res.shape->set_id(id_str);
+    if constexpr (dr::is_jit_v<Float>) {
+      // Mitsuba's rectangle/disk constructors leave transforms or tangent
+      // vectors as JIT literals; make them opaque from Frame 1 to avoid
+      // recompilation and frozen-kernel re-recording on moves/resizes.
+      if ((spec.prim_type == HdPrimTypeTokens->rectLight ||
+           spec.prim_type == HdPrimTypeTokens->diskLight) &&
+          !spec.transform.IsAnimated()) {
+        TraversalCallback cb("", nullptr, /*recurse_objects=*/false);
+        res.shape->traverse(&cb);
+        SetTransformParameter(cb, spec.transform);
+        res.shape->parameters_changed({"to_world"});
+      }
+    }
   } else {
     res.emitter = mitsuba::PluginManager::instance()
                       ->create_object<mitsuba::Emitter<Float, Spectrum>>(props);
@@ -1019,11 +1034,14 @@ PrimTranslator<Float, Spectrum>::CreateAreaEmitter(const LightSpec& spec) {
 
 MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateAreaEmitterInPlace(
     mitsuba::Emitter<Float, Spectrum>* emitter, const LightSpec& spec) {
-  TraversalCallback cb;
-  UpdateIesFrameInPlace<Float, Spectrum>(emitter, spec)->traverse(&cb);
-  SetSpectrumParameter(
-      cb, spec.texture_file_path.empty() ? "radiance" : kTexturedEmissionKey,
-      spec.emission);
+  auto* target = UpdateIesFrameInPlace<Float, Spectrum>(emitter, spec);
+  if (spec.emission_dirty) {
+    TraversalCallback cb;
+    target->traverse(&cb);
+    SetSpectrumParameter(
+        cb, spec.texture_file_path.empty() ? "radiance" : kTexturedEmissionKey,
+        spec.emission);
+  }
   emitter->parameters_changed();
 }
 
@@ -1107,11 +1125,16 @@ PrimTranslator<Float, Spectrum>::BuildLightProperties(const LightSpec& spec) {
 MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateLightInPlace(
     mitsuba::Object* light_obj, const LightSpec& spec) {
   if (auto* shape = dynamic_cast<mitsuba::Shape<Float, Spectrum>*>(light_obj)) {
-    TraversalCallback cb_shape;
-    shape->traverse(&cb_shape);
-    SetTransformParameter(cb_shape, AreaShapeTransform(spec));
-    shape->parameters_changed();
-    if (shape->is_emitter()) {
+    if (spec.transform_dirty) {
+      TraversalCallback cb_shape(
+          "", nullptr, /*recurse_objects=*/spec.transform.IsAnimated());
+      shape->traverse(&cb_shape);
+      SetTransformParameter(cb_shape, AreaShapeTransform(spec));
+      shape->parameters_changed({"to_world"});
+    }
+    if (shape->is_emitter() &&
+        (spec.emission_dirty ||
+         (spec.transform_dirty && spec.shaping.IsActive()))) {
       UpdateAreaEmitterInPlace(shape->emitter(), spec);
     }
   } else if (auto* emitter =
