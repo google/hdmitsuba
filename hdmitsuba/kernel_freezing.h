@@ -40,6 +40,7 @@
 #include <mitsuba/render/integrator.h>
 #include <mitsuba/render/scene.h>
 #include <mitsuba/render/sensor.h>
+#include <mitsuba/render/shape.h>
 #include <pxr/base/tf/diagnostic.h>
 #include <pxr/pxr.h>
 
@@ -85,10 +86,18 @@ JITInputs<Float, Spectrum> GatherAllJitInputs(
       kSlotLeaf,
     };
 
+    struct VarMeta {
+      VarType type;
+      size_t size;
+      bool unaligned;
+    };
+
     struct CollectPayload {
       JITInputs<Float, Spectrum>* inputs;
       absl::flat_hash_map<uint32_t, uint32_t> slot_of_index;
       absl::flat_hash_map<dr::TraversableBase*, uint32_t> visited_objects;
+      std::vector<VarMeta> var_metas;
+      bool any_scheduled = false;
       const dr::TraverseVisitor* visitor;
     };
 
@@ -113,11 +122,13 @@ JITInputs<Float, Spectrum> GatherAllJitInputs(
       }
       if (info.state != VarState::Evaluated) {
         ::jit_var_schedule(index);
+        state->any_scheduled = true;
       }
       auto [it, inserted] = state->slot_of_index.try_emplace(
           index, static_cast<uint32_t>(state->inputs->flat_indices.size()));
       if (inserted) {
         state->inputs->flat_indices.push_back(index);
+        state->var_metas.push_back({info.type, info.size, info.unaligned});
       }
       state->inputs->Append(Tag::kSlotLeaf);
       state->inputs->Append(it->second);
@@ -127,6 +138,12 @@ JITInputs<Float, Spectrum> GatherAllJitInputs(
     auto child_cb = [](void* p, dr::TraversableBase* obj, const char*) {
       auto* state = static_cast<CollectPayload*>(p);
       if (!obj) {
+        state->inputs->Append(Tag::kNullObject);
+        return;
+      }
+      if (const auto* shape =
+              dynamic_cast<const mitsuba::Shape<Float, Spectrum>*>(obj);
+          shape && shape->is_instance()) {
         state->inputs->Append(Tag::kNullObject);
         return;
       }
@@ -151,7 +168,7 @@ JITInputs<Float, Spectrum> GatherAllJitInputs(
 
     dr::TraverseVisitor visitor{dr::TraverseRole::Freeze, collect_cb, child_cb,
                                 state_cb};
-    CollectPayload payload{&inputs, {}, {}, &visitor};
+    CollectPayload payload{&inputs, {}, {}, {}, false, &visitor};
 
     dr::traverse_fn(scene, &payload, visitor);
     dr::traverse_fn(sensor, &payload, visitor);
@@ -187,12 +204,20 @@ JITInputs<Float, Spectrum> GatherAllJitInputs(
     }
 
     // Force evaluation of all input JIT variables before recording or replay.
-    ::jit_eval();
-    for (uint32_t idx : inputs.flat_indices) {
-      VarInfo info = ::jit_var_info(idx);
-      inputs.Append(info.type);
-      inputs.Append(info.size);
-      inputs.Append(info.unaligned);
+    if (payload.any_scheduled) {
+      ::jit_eval();
+      for (uint32_t idx : inputs.flat_indices) {
+        VarInfo info = ::jit_var_info(idx);
+        inputs.Append(info.type);
+        inputs.Append(info.size);
+        inputs.Append(info.unaligned);
+      }
+    } else {
+      for (const VarMeta& meta : payload.var_metas) {
+        inputs.Append(meta.type);
+        inputs.Append(meta.size);
+        inputs.Append(meta.unaligned);
+      }
     }
   }
 
@@ -210,6 +235,8 @@ class FrozenRender {
 
   bool HasRecording() const { return recording_ != nullptr; }
 
+  void InvalidateInputs() { inputs_valid_ = false; }
+
   void Clear() {
     TF_DEBUG(HDMITSUBA_LIFECYCLE)
         .Msg("Clear(): destroying recording %p\n", (void*)recording_);
@@ -220,6 +247,11 @@ class FrozenRender {
     output_indices_.clear();
     output_shape_.clear();
     recorded_layout_.clear();
+    cached_inputs_ = {};
+    inputs_valid_ = false;
+    cached_scene_ = nullptr;
+    cached_sensor_ = nullptr;
+    cached_integrator_ = nullptr;
     render_count_ = 0;  // Reset the recording warm-up count!
     TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("Clear(): done\n");
   }
@@ -297,6 +329,15 @@ class FrozenRender {
 
       using UInt32 = dr::uint32_array_t<Float>;
       UInt32 seed_var = dr::opaque<UInt32>(sample_index);
+      if (render_count_ >= 2 && inputs_valid_ && recording_ &&
+          scene == cached_scene_ && sensor == cached_sensor_ &&
+          integrator == cached_integrator_) {
+        TF_DEBUG(HDMITSUBA_LIFECYCLE)
+            .Msg("FrozenRender: Replaying frozen kernel (cached inputs)\n");
+        cached_inputs_.flat_indices.back() = seed_var.index();
+        return Replay(cached_inputs_);
+      }
+
       auto inputs = GatherAllJitInputs(scene, sensor, integrator);
       inputs.flat_indices.push_back(seed_var.index());
       auto render_fn = [&]() {
@@ -314,7 +355,13 @@ class FrozenRender {
         if (CanReplay(inputs)) {
           TF_DEBUG(HDMITSUBA_LIFECYCLE)
               .Msg("FrozenRender: Replaying frozen kernel (Frame 3+)\n");
-          return Replay(inputs);
+          TensorXf result = Replay(inputs);
+          cached_inputs_ = std::move(inputs);
+          cached_scene_ = scene;
+          cached_sensor_ = sensor;
+          cached_integrator_ = integrator;
+          inputs_valid_ = true;
+          return result;
         } else {
           TF_DEBUG(HDMITSUBA_LIFECYCLE)
               .Msg("FrozenRender: Replay dry-run failed, re-recording...\n");
@@ -335,6 +382,11 @@ class FrozenRender {
   std::vector<uint32_t> output_indices_;
   dr::vector<size_t> output_shape_;
   std::vector<uint8_t> recorded_layout_;
+  JITInputs<Float, Spectrum> cached_inputs_;
+  bool inputs_valid_ = false;
+  const mitsuba::Scene<Float, Spectrum>* cached_scene_ = nullptr;
+  const mitsuba::Sensor<Float, Spectrum>* cached_sensor_ = nullptr;
+  const mitsuba::Integrator<Float, Spectrum>* cached_integrator_ = nullptr;
   uint32_t recorded_samples_to_render_ = 0;
   int render_count_ = 0;
 };
@@ -357,6 +409,7 @@ class FrozenRender {
   FrozenRender(T&&) {}
   ~FrozenRender() {}
 
+  void InvalidateInputs() {}
   void Clear() {}
 
   TensorXf Render(mitsuba::Scene<Float, Spectrum>* scene,

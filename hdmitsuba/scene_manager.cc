@@ -1734,6 +1734,9 @@ class SceneModel final : public SceneManager {
       scene_dirty_ = false;
     } else if (scene_) {
       scene_->parameters_changed();
+      if (frozen_render_) {
+        frozen_render_->InvalidateInputs();
+      }
     }
 
     // Run Garbage Collection after all resources are committed, ensuring
