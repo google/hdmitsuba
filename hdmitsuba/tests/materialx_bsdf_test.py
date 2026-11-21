@@ -86,6 +86,55 @@ _LOBE_CASES = [
         {},
         id='subsurface',
     ),
+    pytest.param(
+        'ND_mix_bsdf',
+        {
+            'fg': ('ND_translucent_bsdf', {'color': (0.6, 0.4, 0.2)}),
+            'bg': (
+                'ND_oren_nayar_diffuse_bsdf',
+                {'color': (0.2, 0.7, 0.4), 'roughness': 0.4},
+            ),
+            'mix': 0.4,
+        },
+        {'opacity': 0.75},
+        id='mix_opacity',
+    ),
+    pytest.param(
+        'ND_layer_bsdf',
+        {
+            'top': (
+                'ND_mix_bsdf',
+                {
+                    'fg': (
+                        'ND_multiply_bsdfC',
+                        {
+                            'in1': (
+                                'ND_oren_nayar_diffuse_bsdf',
+                                {'color': (0.6, 0.4, 0.2), 'roughness': 0.4},
+                            ),
+                            'in2': (0.8, 0.5, 0.2),
+                        },
+                    ),
+                    'mix': 0.4,
+                },
+            ),
+            'base': (
+                'ND_add_bsdf',
+                {
+                    'in1': ('ND_translucent_bsdf', {'color': (0.3, 0.5, 0.4)}),
+                    'in2': (
+                        'ND_oren_nayar_diffuse_bsdf',
+                        {
+                            'color': (0.2, 0.2, 0.2),
+                            'normal': Gf.Vec3f(0.2, -0.3, 0.9327379),
+                        },
+                    ),
+                },
+            ),
+        },
+        {},
+        id='combinator_dag_multi_normal',
+    ),
 ]
 
 
@@ -157,6 +206,113 @@ def test_bsdf_reciprocity() -> None:
       rtol=1e-4,
       atol=1e-5,
   )
+
+
+def test_bsdf_layer_throughput() -> None:
+  """Tests layer blocking for opaque/multiplied tops and partial mix/add tops."""
+  ctx = mi.BSDFContext()
+  si = mtlx.make_test_si(wi=(0.0, 0.0, 1.0))
+  wo = mi.Vector3f(0.3, 0.4, 0.8660254)
+  top = ('ND_oren_nayar_diffuse_bsdf', {'color': (0.2, 0.2, 0.2)})
+  base = ('ND_oren_nayar_diffuse_bsdf', {'color': (1.0, 1.0, 1.0)})
+
+  cases = (
+      # Opaque top (even at weight=0) and multiplied tops block base (tp = 0).
+      (top, (0.2, 0.2, 0.2)),
+      (
+          (
+              'ND_oren_nayar_diffuse_bsdf',
+              {'color': (0.2, 0.2, 0.2), 'weight': 0.0},
+          ),
+          (0.0, 0.0, 0.0),
+      ),
+      (
+          ('ND_multiply_bsdfC', {'in1': top, 'in2': (1.0, 0.0, 0.0)}),
+          (0.2, 0.0, 0.0),
+      ),
+      (('ND_multiply_bsdfF', {'in1': top, 'in2': 0.0}), (0.0, 0.0, 0.0)),
+      # Partial mix (unconnected bg = Null, tp = 1) and add throughputs.
+      (('ND_mix_bsdf', {'fg': top, 'mix': 0.5}), (0.6, 0.6, 0.6)),
+      (
+          (
+              'ND_add_bsdf',
+              {
+                  'in1': ('ND_mix_bsdf', {'fg': top, 'mix': 0.3}),
+                  'in2': ('ND_mix_bsdf', {'fg': top, 'mix': 0.4}),
+              },
+          ),
+          (0.44, 0.44, 0.44),
+      ),
+  )
+  for top_spec, expected in cases:
+    bsdf = _compile_bsdf('ND_layer_bsdf', top=top_spec, base=base)
+    assert mi.has_flag(bsdf.flags(), mi.BSDFFlags.NonSymmetric)
+    assert dr.allclose(
+        bsdf.eval(ctx, si, wo),
+        mi.Color3f(*expected) * (wo.z * dr.inv_pi),
+        rtol=1e-4,
+        atol=1e-5,
+    )
+
+
+def test_bsdf_combinator_context_masking() -> None:
+  """Tests BSDFContext lobe masking on mixed BSDFs."""
+  bsdf = _compile_bsdf(
+      'ND_mix_bsdf',
+      fg=('ND_translucent_bsdf', {'color': (0.6, 0.4, 0.2)}),
+      bg=('ND_oren_nayar_diffuse_bsdf', {'color': (0.2, 0.7, 0.4)}),
+      mix=0.5,
+  )
+  si = mtlx.make_test_si(wi=(0.0, 0.0, 1.0))
+  ctx_refl = mi.BSDFContext()
+  ctx_refl.type_mask = int(mi.BSDFFlags.DiffuseReflection)
+  u1, u2 = _sample_inputs(n=256, seed=7)
+  bs, weight = bsdf.sample(ctx_refl, si, u1, u2)
+  assert dr.all(bs.pdf > 0.0)
+  assert dr.all(bs.sampled_type == int(mi.BSDFFlags.DiffuseReflection))
+  assert dr.allclose(bs.pdf, bs.wo.z * dr.inv_pi, rtol=1e-4, atol=1e-5)
+  assert dr.allclose(weight, mi.Color3f(0.1, 0.35, 0.2), rtol=1e-4, atol=1e-5)
+
+
+def test_mix_surfaceshader_opacity() -> None:
+  """Tests mixing surfaces with distinct opacities."""
+  bsdf_mix, _ = mtlx.compile_mtlx_material(
+      'ND_mix_surfaceshader',
+      fg=(
+          'ND_surface',
+          {
+              'bsdf': (
+                  'ND_oren_nayar_diffuse_bsdf',
+                  {'color': (1.0, 0.0, 0.0)},
+              ),
+              'opacity': 0.2,
+          },
+      ),
+      bg=(
+          'ND_surface',
+          {
+              'bsdf': (
+                  'ND_oren_nayar_diffuse_bsdf',
+                  {'color': (0.0, 1.0, 0.0)},
+              ),
+              'opacity': 1.0,
+          },
+      ),
+      mix=0.5,
+  )
+  assert bsdf_mix is not None
+  ctx = mi.BSDFContext()
+  si = mtlx.make_test_si(wi=(0.0, 0.0, 1.0))
+  wo = mi.Vector3f(0.0, 0.0, 1.0)
+  assert dr.allclose(bsdf_mix.eval_null(si), 0.4, atol=1e-5)
+  val, pdf = bsdf_mix.eval_pdf(ctx, si, wo)
+  assert dr.allclose(
+      val, mi.Color3f(0.1, 0.5, 0.0) * dr.inv_pi, rtol=1e-4, atol=1e-5
+  )
+  assert dr.allclose(pdf, 0.6 * dr.inv_pi, rtol=1e-4, atol=1e-5)
+  feat = bsdf_mix.eval_features(si)
+  assert dr.allclose(feat.diffuse_albedo, [0.1, 0.5, 0.0], atol=1e-5)
+  assert dr.allclose(feat.specular_transmittance, 0.4, atol=1e-5)
 
 
 def test_bsdf_cutout_opacity() -> None:
@@ -240,9 +396,37 @@ def test_spectral_bsdf() -> None:
   ).eval(ctx, si, wo)
   assert dr.allclose(v_uni * dr.pi, 1.0, atol=1e-5)
 
+  # Spectral combinator weight upsampling and spectral selection_weight.
+  bsdf_comb = _compile_bsdf(
+      'ND_mix_bsdf',
+      fg=(
+          'ND_multiply_bsdfC',
+          {
+              'in1': ('ND_oren_nayar_diffuse_bsdf', {'color': (0.8, 0.4, 0.2)}),
+              'in2': (0.5, 0.7, 0.9),
+          },
+      ),
+      bg=('ND_translucent_bsdf', {'color': (0.2, 0.6, 0.3)}),
+      mix=0.6,
+  )
+  up = lambda c: mi.srgb_model_eval(
+      mi.srgb_model_fetch(mi.Color3f(*c)), si.wavelengths
+  )
+  s_fg = 0.6 * up((0.8, 0.4, 0.2)) * up((0.5, 0.7, 0.9))
+  p_fg = dr.mean(s_fg) / (dr.mean(s_fg) + dr.mean(0.4 * up((0.2, 0.6, 0.3))))
+  val_c, pdf_c = bsdf_comb.eval_pdf(ctx, si, wo)
+  assert dr.allclose(val_c, s_fg * dr.inv_pi, rtol=1e-4, atol=1e-5)
+  assert dr.allclose(pdf_c, p_fg * dr.inv_pi, rtol=1e-4, atol=1e-5)
+  bs_c, w_c = bsdf_comb.sample(
+      ctx, si, mi.Float(0.25, 0.75), mi.Point2f(0.5, 0.5)
+  )
+  val_s, pdf_s = bsdf_comb.eval_pdf(ctx, si, bs_c.wo)
+  assert dr.allclose(bs_c.pdf, pdf_s, rtol=1e-4, atol=1e-5)
+  assert dr.allclose(w_c * bs_c.pdf, val_s, rtol=1e-4, atol=1e-5)
+
 
 def test_bsdf_ad_gradients() -> None:
-  """Tests unbiased AD gradients for cutout opacity."""
+  """Tests unbiased AD gradients and detached PDFs for opacity and mix."""
   ctx = mi.BSDFContext()
   si = mtlx.make_test_si()
   u1, u2 = _sample_inputs(n=65536, seed=42)
@@ -256,11 +440,31 @@ def test_bsdf_ad_gradients() -> None:
   )
   dr.enable_grad(params_op[op_key])
   params_op.update()
+  assert not dr.grad_enabled(bsdf_op.pdf(ctx, si, mi.Vector3f(0.0, 0.0, 1.0)))
   bs_op, w_op = bsdf_op.sample(ctx, si, u1, u2)
   assert not dr.grad_enabled(bs_op.wo)
   # E[w_op] = opacity * 0.4 + (1 - opacity) * 1.0 => d/d(opacity) = -0.6.
   dr.backward(dr.mean(w_op, axis=None))
   assert dr.allclose(dr.grad(params_op[op_key]), -0.6, atol=0.02)
+
+  bsdf_mix = _compile_bsdf(
+      'ND_mix_bsdf',
+      fg=('ND_translucent_bsdf', {'color': (0.8, 0.8, 0.8)}),
+      bg=('ND_oren_nayar_diffuse_bsdf', {'color': (0.2, 0.2, 0.2)}),
+      mix=0.5,
+  )
+  params_mix = mi.traverse(bsdf_mix)
+  mix_key = next(
+      k for k in params_mix.keys() if dr.allclose(params_mix[k], 0.5, atol=1e-6)
+  )
+  dr.enable_grad(params_mix[mix_key])
+  params_mix.update()
+  val_m, pdf_m = bsdf_mix.eval_pdf(ctx, si, mi.Vector3f(0.0, 0.0, 1.0))
+  assert dr.grad_enabled(val_m) and not dr.grad_enabled(pdf_m)
+  # E[w_mix] = mix * 0.8 + (1 - mix) * 0.2 => d/d(mix) = 0.6.
+  _, w_mix = bsdf_mix.sample(ctx, si, u1, u2)
+  dr.backward(dr.mean(w_mix, axis=None))
+  assert dr.allclose(dr.grad(params_mix[mix_key]), 0.6, atol=0.02)
 
 
 def test_eval_features() -> None:
@@ -283,6 +487,28 @@ def test_eval_features() -> None:
   assert dr.allclose(feat.roughness, 0.0, atol=1e-6)
   assert dr.allclose(feat.wt, -si.to_world(si.wi), atol=1e-5)
   assert dr.allclose(feat.sh_frame.n, n_tilt, atol=1e-5)
+
+  # Multi-normal mix selects the dominant leaf's shading frame per lane.
+  n_bg = (0.5, 0.0, math.sqrt(0.75))
+  bsdf_mix_n = _compile_bsdf(
+      'ND_mix_bsdf',
+      fg=('ND_oren_nayar_diffuse_bsdf', {'normal': n_tilt}),
+      bg=('ND_oren_nayar_diffuse_bsdf', {'normal': n_bg}),
+      mix=(
+          'ND_extract_vector2',
+          {'in_': ('ND_texcoord_vector2', {}), 'index': 0},
+      ),
+  )
+  si_uv = mtlx.make_test_si(wi=(0.0, 0.0, 1.0))
+  si_uv.uv = mi.Point2f([0.0, 1.0], [0.5, 0.5])
+  feat_n = bsdf_mix_n.eval_features(si_uv)
+  assert dr.allclose(
+      feat_n.sh_frame.n,
+      mi.Vector3f(
+          [n_bg[0], n_tilt[0]], [n_bg[1], n_tilt[1]], [n_bg[2], n_tilt[2]]
+      ),
+      atol=1e-5,
+  )
 
   # Translucent reports diffuse transmission in diffuse_albedo and roughness=1.
   bsdf_tr = _compile_bsdf('ND_translucent_bsdf', color=(0.5, 0.3, 0.2))

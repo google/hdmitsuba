@@ -186,7 +186,16 @@ enum class ClosureOp : int32_t {
   Null,
   OrenNayarDiffuse,
   Translucent,
+  Layer,
+  Mix,
+  Add,
+  Multiply
 };
+
+constexpr bool is_leaf(ClosureOp op) {
+  return op > ClosureOp::Null && op < ClosureOp::Layer;
+}
+constexpr bool is_combinator(ClosureOp op) { return op >= ClosureOp::Layer; }
 
 // Layout of `ClosureNode::args` for leaf closures. Unless marked as a literal,
 // each entry is a VM temporary slot (-1 if absent).
@@ -199,6 +208,16 @@ inline constexpr int kMode = 3;
 inline constexpr int kNormal = 4;
 }  // namespace leaf_arg
 static_assert(leaf_arg::kNormal + 1 == kMaxClosureArgs);
+
+// Layout of `ClosureNode::args` for combinators: `kFirst`/`kSecond` index
+// `MtlxProgram::closures` — Layer (top, base), Mix (fg, bg), Add (in1, in2),
+// Multiply (in1); `kWeight` is the VM temporary slot of the Mix weight or
+// Multiply factor.
+namespace combinator_arg {
+inline constexpr int kFirst = 0, kSecond = 1;
+inline constexpr int kWeight = 2;
+}  // namespace combinator_arg
+static_assert(combinator_arg::kWeight < kMaxClosureArgs);
 
 struct ClosureNode {
   ClosureOp op = ClosureOp::Null;
@@ -237,6 +256,7 @@ struct MtlxProgram {
   std::vector<double> consts = {0.0, 1.0};
   std::vector<double> opaques;
   std::vector<std::string> attr_names;
+  // Topological post-order closure DAG; non-empty with root at `back()`.
   std::vector<ClosureNode> closures;
   std::vector<uint8_t> tmp_channels;
   int opacity_slot = -1;
