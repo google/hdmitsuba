@@ -416,6 +416,23 @@ def test_conductor_bsdf() -> None:
   )
   assert dr.allclose(val_g, 0.124298, rtol=1e-4)
 
+  # Grazing incidence with alpha -> 0: clamped `ess <= 1` keeps energy
+  # compensation >= 1 (exact `G2 / G1` when `F = 1`, `alpha = 1e-3`).
+  bsdf_smooth = _compile_bsdf(
+      'ND_conductor_bsdf',
+      ior=(1.0, 1.0, 1.0),
+      extinction=(1e4, 1e4, 1e4),
+      roughness=(0.0, 0.0),
+  )
+  sin_e = math.sqrt(1.0 - 1e-8)
+  val_e, pdf_e = bsdf_smooth.eval_pdf(
+      ctx,
+      mtlx.make_test_si(wi=(sin_e, 0.0, 1e-4)),
+      mi.Vector3f(-sin_e, 0.0, 1e-4),
+  )
+  g1_e = 2.0 / (1.0 + math.sqrt(1.0 + (1e-3 * sin_e / 1e-4) ** 2))
+  assert dr.allclose(val_e / pdf_e, 1.0 / (2.0 - g1_e), rtol=1e-4)
+
   # Rotating `tangent` by 90° matches swapping `(alpha_x, alpha_y)`.
   bsdf_ref = _compile_bsdf('ND_conductor_bsdf', **_CONDUCTOR_KW)
   bsdf_ty = _compile_bsdf(

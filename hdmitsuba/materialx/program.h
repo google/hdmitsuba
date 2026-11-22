@@ -378,10 +378,8 @@ constexpr bool is_spatially_varying_op(Op op) {
   return false;
 }
 
-inline constexpr int kMaxClosureArgs = 7;
-
-// Dielectric `leaf_arg::kMode` scatter mode values (`kScatterModeMask`) and
-// flags.
+// Dielectric `ClosureNode::Dielectric::mode` scatter mode values
+// (`kScatterModeMask`) and flags.
 inline constexpr int kScatterR = 0, kScatterT = 1, kScatterRT = 2;
 inline constexpr int kScatterModeMask = 3, kScatterThinWalled = 4,
                      kScatterTwoSided = 8;
@@ -403,39 +401,102 @@ constexpr bool is_leaf(ClosureOp op) {
 }
 constexpr bool is_combinator(ClosureOp op) { return op >= ClosureOp::Layer; }
 
-// Layout of `ClosureNode::args` for leaf closures. Unless marked as a literal,
-// each entry is a VM temporary slot (-1 if absent).
-namespace leaf_arg {
-inline constexpr int kWeight = 0;
-// Primary color: diffuse/translucent/subsurface `color`, dielectric `tint`,
-// or conductor `ior`.
-inline constexpr int kColor = 1;
-inline constexpr int kRoughness = 2;
-// Literal mode: Oren-Nayar `energy_compensation` (0 or 1), or dielectric
-// `kScatter*` flags.
-inline constexpr int kMode = 3;
-// Dielectric scalar `ior` or conductor RGB `extinction`.
-inline constexpr int kIor = 4, kExtinction = 4;
-inline constexpr int kNormal = 5, kTangent = 6;
-}  // namespace leaf_arg
-static_assert(leaf_arg::kTangent + 1 == kMaxClosureArgs);
-
-// Layout of `ClosureNode::args` for combinators: `kFirst`/`kSecond` index
-// `MtlxProgram::closures` — Layer (top, base), Mix (fg, bg), Add (in1, in2),
-// Multiply (in1); `kWeight` is the VM temporary slot of the Mix weight or
-// Multiply factor.
-namespace combinator_arg {
-inline constexpr int kFirst = 0, kSecond = 1;
-inline constexpr int kWeight = 2;
-}  // namespace combinator_arg
-static_assert(combinator_arg::kWeight < kMaxClosureArgs);
-
+// Tagged POD closure node stored in `MtlxProgram::closures`. Unless noted as a
+// literal or closure index, each field is a VM temporary slot (-1 if absent).
 struct ClosureNode {
-  ClosureOp op = ClosureOp::Null;
-  int args[kMaxClosureArgs] = {-1, -1, -1, -1, -1, -1, -1};
+  struct Diffuse {
+    int weight, color, roughness, energy_comp, normal;
+    int _pad[2] = {};
+  };
+  struct Translucent {
+    int weight, color, normal;
+    int _pad[4] = {};
+  };
+  struct Dielectric {
+    int weight, tint, roughness, mode, ior, normal, tangent;
+  };
+  struct Conductor {
+    int weight, ior, roughness, extinction, normal, tangent;
+    int _pad[1] = {};
+  };
+  // Combinator args: `first`/`second` index `MtlxProgram::closures` — Layer
+  // (top, base), Mix (fg, bg), Add (in1, in2), Multiply (in1, -1); `weight` is
+  // the VM temporary slot of the Mix weight or Multiply factor (-1 otherwise).
+  struct Comb {
+    int first, second, weight;
+    int _pad[4] = {};
+  };
 
-  explicit ClosureNode(ClosureOp op = ClosureOp::Null) : op(op) {}
+  ClosureOp op = ClosureOp::Null;
+  union {
+    int raw[7] = {};
+    Diffuse diffuse;
+    Translucent translucent;
+    Dielectric dielectric;
+    Conductor conductor;
+    Comb comb;
+  };
+
+  ClosureNode() = default;
+
+  static ClosureNode MakeNull() { return ClosureNode(ClosureOp::Null); }
+
+  static ClosureNode MakeDiffuse(int weight, int color, int roughness,
+                                 int energy_comp, int normal) {
+    ClosureNode n(ClosureOp::OrenNayarDiffuse);
+    n.diffuse = {weight, color, roughness, energy_comp, normal};
+    return n;
+  }
+
+  static ClosureNode MakeTranslucent(int weight, int color, int normal) {
+    ClosureNode n(ClosureOp::Translucent);
+    n.translucent = {weight, color, normal};
+    return n;
+  }
+
+  static ClosureNode MakeDielectric(int weight, int tint, int roughness,
+                                    int mode, int ior, int normal,
+                                    int tangent) {
+    ClosureNode n(ClosureOp::Dielectric);
+    n.dielectric = {weight, tint, roughness, mode, ior, normal, tangent};
+    return n;
+  }
+
+  static ClosureNode MakeConductor(int weight, int ior, int roughness,
+                                   int extinction, int normal, int tangent) {
+    ClosureNode n(ClosureOp::Conductor);
+    n.conductor = {weight, ior, roughness, extinction, normal, tangent};
+    return n;
+  }
+
+  static ClosureNode MakeLayer(int top, int base) {
+    ClosureNode n(ClosureOp::Layer);
+    n.comb = {top, base, -1};
+    return n;
+  }
+
+  static ClosureNode MakeMix(int fg, int bg, int weight) {
+    ClosureNode n(ClosureOp::Mix);
+    n.comb = {fg, bg, weight};
+    return n;
+  }
+
+  static ClosureNode MakeAdd(int in1, int in2) {
+    ClosureNode n(ClosureOp::Add);
+    n.comb = {in1, in2, -1};
+    return n;
+  }
+
+  static ClosureNode MakeMultiply(int in1, int factor) {
+    ClosureNode n(ClosureOp::Multiply);
+    n.comb = {in1, -1, factor};
+    return n;
+  }
+
+ private:
+  explicit ClosureNode(ClosureOp op) : op(op) {}
 };
+static_assert(sizeof(ClosureNode) == 32);
 static_assert(std::has_unique_object_representations_v<ClosureNode>);
 
 // Variant-independent compiled MaterialX program passed via `Properties`.
