@@ -392,8 +392,9 @@ std::optional<TextureKey> ExtractTextureKey(const HdMaterialNetwork2& network,
       bool ok = true;
       if (name == "filename" || name == "fallback") {
         // Consumed above / by the material parser's fallback texture.
-      } else if (absl::StartsWith(name, "colorSpace:")) {
-        // Color space metadata of another parameter.
+      } else if (absl::StartsWith(name, "colorSpace:") ||
+                 absl::StartsWith(name, "typeName:")) {
+        // Color space or type metadata of another parameter.
       } else if (name == "raw") {
         ok = set_as(val, key.raw);
       } else if (name == "accel") {

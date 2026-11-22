@@ -14,13 +14,12 @@
 
 #include "hdmitsuba/materialx/translator.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <exception>
 #include <functional>
-#include <locale>
 #include <memory>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -32,12 +31,12 @@
 #include <MaterialXFormat/File.h>
 #include <MaterialXFormat/Util.h>
 #include <MaterialXFormat/XmlIo.h>
-#include <absl/base/const_init.h>
 #include <absl/base/no_destructor.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
+#include <absl/strings/str_format.h>
 #include <absl/strings/strip.h>
 #include <absl/synchronization/mutex.h>
 #include <mitsuba/core/config.h>
@@ -82,12 +81,6 @@ namespace {
 
 namespace mx = MaterialX;
 
-// Protects `std_libs` and synthetic `swizzle` definitions: an exclusive lock is
-// held while resolving `NodeDef`s (which may load custom Sdr `.mtlx` assets or
-// synthesize 1.38 `swizzle` definitions), and a shared reader lock is held
-// while flattening and compiling against `std_libs`.
-ABSL_CONST_INIT absl::Mutex mtlx_mu(absl::kConstInit);
-
 // Prepares a MaterialX library document before `flattenSubgraphs()`:
 // 1. Resolves non-empty relative filenames (`importLibrary` and
 //    `flattenSubgraphs` drop enclosing `<materialx>` / `<nodegraph>`
@@ -126,9 +119,9 @@ void PrepareLibraryDocument(const mx::DocumentPtr& doc) {
   }
 }
 
-// Returns the MaterialX standard libraries, which are protected by `mtlx_mu`.
-const mx::DocumentPtr& GetMaterialXStdLibraries() {
-  static const absl::NoDestructor<mx::DocumentPtr> std_libs([] {
+// Returns the immutable MaterialX standard libraries (initialized once).
+const mx::ConstDocumentPtr& GetMaterialXStdLibraries() {
+  static const absl::NoDestructor<mx::ConstDocumentPtr> std_libs([] {
     mx::FileSearchPath search_path;
     for (const char* env :
          {"PXR_MTLX_PLUGIN_SEARCH_PATHS", "PXR_MTLX_STDLIB_SEARCH_PATHS"}) {
@@ -146,9 +139,29 @@ const mx::DocumentPtr& GetMaterialXStdLibraries() {
     mx::DocumentPtr doc = mx::createDocument();
     mx::loadLibraries({}, search_path, doc);
     PrepareLibraryDocument(doc);
-    return doc;
+    return mx::ConstDocumentPtr(std::move(doc));
   }());
   return *std_libs;
+}
+
+// Loads and caches an immutable custom Sdr `.mtlx` library by URI.
+mx::ConstDocumentPtr LoadCustomLibrary(const std::string& uri) {
+  static absl::NoDestructor<absl::Mutex> cache_mu;
+  static absl::NoDestructor<
+      absl::flat_hash_map<std::string, mx::ConstDocumentPtr>>
+      cache;
+  {
+    absl::MutexLock lock(*cache_mu);
+    if (auto it = cache->find(uri); it != cache->end()) return it->second;
+  }
+  mx::DocumentPtr raw_doc = mx::createDocument();
+  mx::readFromXmlFile(raw_doc, uri);
+  PrepareLibraryDocument(raw_doc);
+  mx::DocumentPtr lib_doc = mx::createDocument();
+  lib_doc->importLibrary(raw_doc);
+  absl::MutexLock lock(*cache_mu);
+  return cache->try_emplace(uri, mx::ConstDocumentPtr(std::move(lib_doc)))
+      .first->second;
 }
 
 bool IsMaterialXNode(const HdMaterialNode2& node) {
@@ -174,48 +187,69 @@ std::optional<std::string> ConvertToMtlxString(const VtValue& val) {
   if (val.IsHolding<std::string>()) return val.UncheckedGet<std::string>();
   if (val.IsHolding<TfToken>()) return val.UncheckedGet<TfToken>().GetString();
 
-  std::ostringstream oss;
-  oss.imbue(std::locale::classic());
-  oss.precision(9);
-  auto write_span = [&](const auto* p, int n) {
+  auto format_span = [](const auto* p, int n) {
+    std::string out;
     for (int i = 0; i < n; ++i) {
-      if (i) oss << ", ";
-      oss << p[i];
+      if (i) out += ", ";
+      absl::StrAppendFormat(&out, "%.9g", p[i]);
     }
+    return out;
   };
   if (val.IsHolding<float>()) {
-    oss << val.UncheckedGet<float>();
-  } else if (val.IsHolding<double>()) {
-    oss << val.UncheckedGet<double>();
-  } else if (val.IsHolding<GfVec2f>()) {
-    write_span(val.UncheckedGet<GfVec2f>().data(), 2);
-  } else if (val.IsHolding<GfVec2d>()) {
-    write_span(val.UncheckedGet<GfVec2d>().data(), 2);
-  } else if (val.IsHolding<GfVec3f>()) {
-    write_span(val.UncheckedGet<GfVec3f>().data(), 3);
-  } else if (val.IsHolding<GfVec3d>()) {
-    write_span(val.UncheckedGet<GfVec3d>().data(), 3);
-  } else if (val.IsHolding<GfVec4f>()) {
-    write_span(val.UncheckedGet<GfVec4f>().data(), 4);
-  } else if (val.IsHolding<GfVec4d>()) {
-    write_span(val.UncheckedGet<GfVec4d>().data(), 4);
-  } else if (val.IsHolding<GfMatrix3d>()) {
-    write_span(val.UncheckedGet<GfMatrix3d>().data(), 9);
-  } else if (val.IsHolding<GfMatrix4d>()) {
-    write_span(val.UncheckedGet<GfMatrix4d>().data(), 16);
-  } else {
-    TF_WARN("Unsupported MaterialX parameter type '%s'",
-            val.GetTypeName().c_str());
+    return absl::StrFormat("%.9g", val.UncheckedGet<float>());
+  }
+  if (val.IsHolding<double>()) {
+    return absl::StrFormat("%.9g", val.UncheckedGet<double>());
+  }
+  if (val.IsHolding<GfVec2f>()) {
+    return format_span(val.UncheckedGet<GfVec2f>().data(), 2);
+  }
+  if (val.IsHolding<GfVec2d>()) {
+    return format_span(val.UncheckedGet<GfVec2d>().data(), 2);
+  }
+  if (val.IsHolding<GfVec3f>()) {
+    return format_span(val.UncheckedGet<GfVec3f>().data(), 3);
+  }
+  if (val.IsHolding<GfVec3d>()) {
+    return format_span(val.UncheckedGet<GfVec3d>().data(), 3);
+  }
+  if (val.IsHolding<GfVec4f>()) {
+    return format_span(val.UncheckedGet<GfVec4f>().data(), 4);
+  }
+  if (val.IsHolding<GfVec4d>()) {
+    return format_span(val.UncheckedGet<GfVec4d>().data(), 4);
+  }
+  if (val.IsHolding<GfMatrix3d>()) {
+    return format_span(val.UncheckedGet<GfMatrix3d>().data(), 9);
+  }
+  if (val.IsHolding<GfMatrix4d>()) {
+    return format_span(val.UncheckedGet<GfMatrix4d>().data(), 16);
+  }
+  TF_WARN("Unsupported MaterialX parameter type '%s'",
+          val.GetTypeName().c_str());
+  return std::nullopt;
+}
+
+// Parses legacy MaterialX 1.38 `ND_swizzle_<in>_<out>` identifiers into
+// `{in_type, out_type}` so `mx::Document::upgradeVersion()` upgrades them to
+// `extract` / `combine`.
+std::optional<std::pair<std::string_view, std::string_view>>
+ParseSwizzleNodeDef(std::string_view type_str) {
+  if (!absl::ConsumePrefix(&type_str, "ND_swizzle_")) return std::nullopt;
+  size_t sep = type_str.find('_');
+  if (sep == std::string_view::npos || sep == 0 || sep + 1 >= type_str.size() ||
+      type_str.find('_', sep + 1) != std::string_view::npos) {
     return std::nullopt;
   }
-  return oss.str();
+  return std::pair<std::string_view, std::string_view>(
+      type_str.substr(0, sep), type_str.substr(sep + 1));
 }
 
 // Resolves a MaterialX `NodeDef` from `std_libs`, handling legacy 1.38
-// `ND_normalmap` / `ND_swizzle_<in>_<out>` identifiers and custom Sdr `.mtlx`
-// assets. Caller must hold an exclusive lock on `mtlx_mu`.
+// `ND_normalmap` and custom Sdr `.mtlx` assets (recorded in `custom_libs`).
 mx::NodeDefPtr ResolveNodeDef(const TfToken& hd_node_type,
-                              const mx::DocumentPtr& std_libs) {
+                              const mx::ConstDocumentPtr& std_libs,
+                              std::vector<mx::ConstDocumentPtr>& custom_libs) {
   const std::string& type_str = hd_node_type.GetString();
   if (mx::NodeDefPtr nd = std_libs->getNodeDef(type_str)) return nd;
   if (type_str == "ND_normalmap") {
@@ -224,49 +258,31 @@ mx::NodeDefPtr ResolveNodeDef(const TfToken& hd_node_type,
     }
   }
 
-  // MaterialX 1.39 removed `swizzle` NodeDefs; synthesize a temporary 1.38
-  // `NodeDef` so `mx::Document::upgradeVersion()` upgrades it to `extract` /
-  // `combine`.
-  std::string_view swz = type_str;
-  if (absl::ConsumePrefix(&swz, "ND_swizzle_")) {
-    size_t sep = swz.find('_');
-    if (sep != std::string_view::npos && sep > 0 && sep + 1 < swz.size() &&
-        swz.find('_', sep + 1) == std::string_view::npos) {
-      static const absl::NoDestructor<mx::DocumentPtr> swizzle_doc(
-          mx::createDocument());
-      if (mx::NodeDefPtr nd = (*swizzle_doc)->getNodeDef(type_str)) return nd;
-      mx::NodeDefPtr nd =
-          (*swizzle_doc)
-              ->addNodeDef(type_str, std::string(swz.substr(sep + 1)),
-                           "swizzle");
-      nd->addInput("in", std::string(swz.substr(0, sep)));
-      nd->addInput("channels", "string");
-      return nd;
-    }
-  }
-
   SdrShaderNodeConstPtr sdr_node =
       SdrRegistry::GetInstance().GetShaderNodeByIdentifierAndType(
           hd_node_type, TfToken("mtlx"));
   if (!sdr_node) return nullptr;
-  if (mx::NodeDefPtr nd =
-          std_libs->getNodeDef(sdr_node->GetImplementationName())) {
+  const std::string& impl_name = sdr_node->GetImplementationName();
+  if (mx::NodeDefPtr nd = std_libs->getNodeDef(impl_name)) return nd;
+  const std::string& uri = sdr_node->GetResolvedImplementationURI();
+  if (uri.empty()) return nullptr;
+  mx::ConstDocumentPtr lib = LoadCustomLibrary(uri);
+  if (mx::NodeDefPtr nd = lib->getNodeDef(impl_name)) {
+    if (std::find(custom_libs.begin(), custom_libs.end(), lib) ==
+        custom_libs.end()) {
+      custom_libs.push_back(std::move(lib));
+    }
     return nd;
   }
-  const std::string& uri = sdr_node->GetResolvedImplementationURI();
-  static absl::NoDestructor<absl::flat_hash_set<std::string>> loaded_uris;
-  if (uri.empty() || !loaded_uris->insert(uri).second) return nullptr;
-  mx::DocumentPtr lib_doc = mx::createDocument();
-  mx::readFromXmlFile(lib_doc, uri);
-  PrepareLibraryDocument(lib_doc);
-  std_libs->importLibrary(lib_doc);
-  return std_libs->getNodeDef(sdr_node->GetImplementationName());
+  return nullptr;
 }
 
-std::string InferMtlxParamType(const mx::NodeDef& nd,
+std::string InferMtlxParamType(const mx::NodeDef* nd,
                                const HdMaterialNode2& hd_node,
                                const std::string& name, const VtValue& val) {
-  if (mx::InputPtr p = nd.getActiveInput(name)) return p->getType();
+  if (nd) {
+    if (mx::InputPtr p = nd->getActiveInput(name)) return p->getType();
+  }
 
   std::string_view usd_type;
   if (auto it =
@@ -304,35 +320,54 @@ const std::string* GetMtlxVersion(const HdMaterialNetwork2& net2) {
 }
 
 // Populates a standalone `mx::Document` with the subgraph rooted at
-// `term_conn`. Caller must hold `mtlx_mu`.
+// `term_conn`.
 class DocumentBuilder {
  public:
   using BuiltNode = std::pair<mx::NodePtr, mx::NodeDefPtr>;
 
+  struct Result {
+    mx::DocumentPtr doc;
+    std::vector<mx::ConstDocumentPtr> custom_libs;
+  };
+
   DocumentBuilder(const HdMaterialNetwork2& net2,
-                  const mx::DocumentPtr& std_libs, const std::string* version)
+                  const mx::ConstDocumentPtr& std_libs,
+                  const std::string* version)
       : net2_(net2), std_libs_(std_libs), doc_(mx::createDocument()) {
     doc_->setVersionString(version ? *version : "1.38");
   }
 
-  mx::DocumentPtr Build(const HdMaterialConnection2& term_conn) {
-    auto [shader_node, shader_nd] = BuildNode(term_conn.upstreamNode);
-    if (!shader_node) return nullptr;
-    if (shader_node->isMultiOutputType()) {
-      mx::OutputPtr out_port =
-          shader_nd->getActiveOutput(term_conn.upstreamOutputName.GetString());
-      if (!out_port) return nullptr;
-      mx::OutputPtr doc_out = doc_->addOutput("out", out_port->getType());
-      doc_out->setConnectedNode(shader_node);
-      doc_out->setOutputString(out_port->getName());
-    } else {
-      doc_->addOutput("out", shader_node->getType())
-          ->setConnectedNode(shader_node);
+  Result Build(const HdMaterialConnection2& term_conn) {
+    BuiltNode root = BuildNode(term_conn.upstreamNode);
+    if (!ConnectPort(
+            [&](const std::string& type) {
+              return doc_->addOutput("out", type);
+            },
+            root, term_conn.upstreamOutputName)) {
+      return {};
     }
-    return doc_;
+    return {std::move(doc_), std::move(custom_libs_)};
   }
 
  private:
+  template <typename AddPortFn>
+  static bool ConnectPort(AddPortFn&& add_port, const BuiltNode& up,
+                          const TfToken& output_name) {
+    const auto& [up_node, up_nd] = up;
+    if (!up_node) return false;
+    if (up_node->isMultiOutputType()) {
+      mx::OutputPtr out_port =
+          up_nd ? up_nd->getActiveOutput(output_name.GetString()) : nullptr;
+      if (!out_port) return false;
+      mx::PortElementPtr port = add_port(out_port->getType());
+      port->setConnectedNode(up_node);
+      port->setOutputString(out_port->getName());
+    } else {
+      add_port(up_node->getType())->setConnectedNode(up_node);
+    }
+    return true;
+  }
+
   BuiltNode BuildNode(const SdfPath& path) {
     if (visiting_.contains(path)) {
       TF_WARN("Cycle detected in MaterialX network at '%s'; breaking cycle.",
@@ -343,38 +378,35 @@ class DocumentBuilder {
     auto node_it = net2_.nodes.find(path);
     if (node_it == net2_.nodes.end()) return {};
     const HdMaterialNode2& hd_node = node_it->second;
-    mx::NodeDefPtr nd = ResolveNodeDef(hd_node.nodeTypeId, std_libs_);
-    if (!nd) {
-      TF_WARN("No MaterialX NodeDef '%s' for node '%s'; ignoring the node.",
-              hd_node.nodeTypeId.GetText(), path.GetText());
-      built_.emplace(path, BuiltNode{});
-      return {};
-    }
 
     std::string mx_name = absl::StrCat("n_", built_.size());
-    mx::NodePtr mx_node = nd->getNodeString() == "swizzle"
-                              ? doc_->addNode("swizzle", mx_name, nd->getType())
-                              : doc_->addNodeInstance(nd, mx_name);
+    mx::NodePtr mx_node;
+    mx::NodeDefPtr nd;
+    auto swizzle = ParseSwizzleNodeDef(hd_node.nodeTypeId.GetString());
+    if (swizzle) {
+      mx_node = doc_->addNode("swizzle", mx_name, std::string(swizzle->second));
+    } else {
+      nd = ResolveNodeDef(hd_node.nodeTypeId, std_libs_, custom_libs_);
+      if (!nd) {
+        TF_WARN("No MaterialX NodeDef '%s' for node '%s'; ignoring the node.",
+                hd_node.nodeTypeId.GetText(), path.GetText());
+        built_.emplace(path, BuiltNode{});
+        return {};
+      }
+      mx_node = doc_->addNodeInstance(nd, mx_name);
+    }
     built_.emplace(path, BuiltNode{mx_node, nd});
 
     visiting_.insert(path);
     for (const auto& [in_tok, conns] : hd_node.inputConnections) {
       if (conns.empty()) continue;
       const HdMaterialConnection2& c = conns[0];
-      auto [up_node, up_nd] = BuildNode(c.upstreamNode);
-      if (!up_node) continue;
       const std::string& in_name = in_tok.GetString();
-      if (up_node->isMultiOutputType()) {
-        mx::OutputPtr out_port =
-            up_nd->getActiveOutput(c.upstreamOutputName.GetString());
-        if (!out_port) continue;
-        mx::InputPtr mx_in = mx_node->addInput(in_name, out_port->getType());
-        mx_in->setConnectedNode(up_node);
-        mx_in->setOutputString(out_port->getName());
-      } else {
-        mx_node->addInput(in_name, up_node->getType())
-            ->setConnectedNode(up_node);
-      }
+      ConnectPort(
+          [&](const std::string& type) {
+            return mx_node->addInput(in_name, type);
+          },
+          BuildNode(c.upstreamNode), c.upstreamOutputName);
     }
     visiting_.erase(path);
 
@@ -385,7 +417,11 @@ class DocumentBuilder {
           absl::StartsWith(p_name, "typeName:")) {
         continue;
       }
-      std::string in_type = InferMtlxParamType(*nd, hd_node, p_name, val);
+      std::string in_type =
+          (swizzle && p_name == "in") ? std::string(swizzle->first)
+          : (swizzle && p_name == "channels")
+              ? std::string("string")
+              : InferMtlxParamType(nd.get(), hd_node, p_name, val);
       std::optional<std::string> val_str =
           (in_type == "boolean" && val.IsHolding<int>())
               ? std::optional<std::string>(val.UncheckedGet<int>() ? "true"
@@ -406,8 +442,9 @@ class DocumentBuilder {
   }
 
   const HdMaterialNetwork2& net2_;
-  const mx::DocumentPtr& std_libs_;
+  const mx::ConstDocumentPtr& std_libs_;
   mx::DocumentPtr doc_;
+  std::vector<mx::ConstDocumentPtr> custom_libs_;
   absl::flat_hash_map<SdfPath, BuiltNode, SdfPath::Hash> built_;
   absl::flat_hash_set<SdfPath, SdfPath::Hash> visiting_;
 };
@@ -461,20 +498,25 @@ std::shared_ptr<const PreparedMaterialX> PrepareMaterialXNetwork(
   if (!term_conn) return nullptr;
   auto prepared = std::make_shared<PreparedMaterialX>();
   try {
+    const mx::ConstDocumentPtr& std_libs = GetMaterialXStdLibraries();
     const std::string* version = GetMtlxVersion(network);
-    mx::DocumentPtr doc;
-    {
-      absl::MutexLock lock(mtlx_mu);
-      doc = DocumentBuilder(network, GetMaterialXStdLibraries(), version)
-                .Build(*term_conn);
-      if (!doc) return prepared;
-    }
+    auto [doc, custom_libs] =
+        DocumentBuilder(network, std_libs, version).Build(*term_conn);
+    if (!doc) return prepared;
 
     // Upgrade the small standalone user graph BEFORE attaching `std_libs`.
     UpgradeMaterialXDocument(doc, version != nullptr);
 
-    absl::ReaderMutexLock rlock(mtlx_mu);
-    doc->setDataLibrary(GetMaterialXStdLibraries());
+    if (custom_libs.empty()) {
+      doc->setDataLibrary(std_libs);
+    } else {
+      mx::DocumentPtr overlay = mx::createDocument();
+      overlay->setDataLibrary(std_libs);
+      for (const mx::ConstDocumentPtr& lib : custom_libs) {
+        overlay->importLibrary(lib);
+      }
+      doc->setDataLibrary(overlay);
+    }
     doc->flattenSubgraphs();
     mx::OutputPtr out = doc->getOutput("out");
     mx::NodePtr shader_node = out ? out->getConnectedNode() : nullptr;
@@ -499,12 +541,8 @@ TranslatedMaterial TranslateMaterialXNetwork(
   if (!prepared.shader_node) return {};
   try {
     TranslatedMaterial res;
-    CompiledSurfaceShader compiled;
-    {
-      absl::ReaderMutexLock rlock(mtlx_mu);
-      compiled =
-          CompileSurfaceShader(prepared.shader_node, variant, lookup_texture);
-    }
+    CompiledSurfaceShader compiled =
+        CompileSurfaceShader(prepared.shader_node, variant, lookup_texture);
     res.mesh_attributes = std::move(compiled.mesh_attributes);
     if (compiled.radiance_texture) {
       mitsuba::ref<mitsuba::Object> radiance = compiled.radiance_texture;

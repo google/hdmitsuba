@@ -94,7 +94,6 @@
 #include "hdmitsuba/framebuffer.h"
 #include "hdmitsuba/ies_emitter.h"
 #include "hdmitsuba/kernel_freezing.h"
-#include "hdmitsuba/materialx/evaluator.h"
 #include "hdmitsuba/mesh/displacement.h"
 #include "hdmitsuba/mesh/geometry_processor.h"
 #include "hdmitsuba/prim_translator.h"
@@ -1890,7 +1889,6 @@ SceneManager* SceneManager::CreateSceneManager(const std::string& variant) {
 
 SceneManager::SceneManager() {
   RegisterIesEmitter();
-  mitsuba::mtlx::RegisterMaterialXExprTexture();
   absl::MutexLock lock(lifecycle_mutex_);
 
   // Try to determine if static initialization is already done or not.

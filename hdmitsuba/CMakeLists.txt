@@ -84,6 +84,7 @@ target_link_libraries(hdMitsuba
   PRIVATE
     absl::log
     absl::check
+    absl::str_format
     absl::synchronization
     sdr
     ${MITSUBA_LIBRARY}

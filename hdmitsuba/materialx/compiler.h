@@ -39,9 +39,7 @@ struct CompiledSurfaceShader {
 
 // Compiles the BSDF closures (including cutout `opacity`) and emission (`edf`,
 // weighted by `opacity`) of a flattened MaterialX surface shader (`surface`,
-// `surface_unlit`, `mix`, `surfacematerial`, or raw BSDF/EDF closures). This
-// reads the node definitions of the data library of the document, which must
-// not be modified concurrently.
+// `surface_unlit`, `mix`, `surfacematerial`, or raw BSDF/EDF closures).
 CompiledSurfaceShader CompileSurfaceShader(
     const MaterialX::NodePtr& shader_node, std::string_view variant,
     const std::function<const CachedTexture*(const TextureKey&)>&
