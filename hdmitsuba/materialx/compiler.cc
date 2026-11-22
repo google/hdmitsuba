@@ -43,7 +43,7 @@
 #include <pxr/usd/ar/resolver.h>
 
 #include "hdmitsuba/debug_codes.h"
-#include "hdmitsuba/materialx/evaluator.h"
+#include "hdmitsuba/materialx/program.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
