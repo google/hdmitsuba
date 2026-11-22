@@ -77,8 +77,6 @@ using mitsuba::mtlx::Op;
 using mitsuba::mtlx::RegisterMaterialXBsdf;
 using mitsuba::mtlx::RegisterMaterialXExprTexture;
 using mitsuba::mtlx::result_channels;
-namespace leaf_arg = mitsuba::mtlx::leaf_arg;
-namespace combinator_arg = mitsuba::mtlx::combinator_arg;
 
 struct Expr;
 
@@ -391,8 +389,7 @@ class MtlxExprCompiler {
   Expr CompileOpacity(const mx::NodePtr& shader_node);
   int CompileBsdfClosure(const mx::NodePtr& node);
   void MarkTwoSidedDielectrics(size_t start);
-  int EmitClosure(ClosureOp op,
-                  std::initializer_list<std::pair<int, int>> args);
+  int EmitClosure(ClosureNode node);
   ref<Object> CreatePlugin(std::string_view name, ObjectType type,
                            std::string_view variant,
                            MeshAttributeRequests& mesh_attributes);
@@ -1527,21 +1524,19 @@ void MtlxExprCompiler::MarkTwoSidedDielectrics(size_t start) {
   for (size_t i = start; i < prog_.closures.size(); ++i) {
     const ClosureNode& c = prog_.closures[i];
     if (c.op == ClosureOp::Dielectric &&
-        (c.args[leaf_arg::kMode] & kScatterModeMask) != kScatterR) {
+        (c.dielectric.mode & kScatterModeMask) != kScatterR) {
       return;
     }
   }
   for (size_t i = start; i < prog_.closures.size(); ++i) {
     if (prog_.closures[i].op == ClosureOp::Dielectric) {
-      prog_.closures[i].args[leaf_arg::kMode] |= kScatterTwoSided;
+      prog_.closures[i].dielectric.mode |= kScatterTwoSided;
     }
   }
 }
 
-int MtlxExprCompiler::EmitClosure(
-    ClosureOp op, std::initializer_list<std::pair<int, int>> args) {
-  ClosureNode& c = prog_.closures.emplace_back(op);
-  for (auto [k, v] : args) c.args[k] = v;
+int MtlxExprCompiler::EmitClosure(ClosureNode node) {
+  prog_.closures.push_back(node);
   return static_cast<int>(prog_.closures.size()) - 1;
 }
 
@@ -1559,9 +1554,7 @@ int MtlxExprCompiler::CompileBsdfClosure(const mx::NodePtr& raw_node) {
   auto scale = [&](int c, const Expr& w) {
     return (c < 0 || w.is_one())
                ? c
-               : EmitClosure(ClosureOp::Multiply,
-                             {{combinator_arg::kFirst, c},
-                              {combinator_arg::kWeight, EmitTmp(w)}});
+               : EmitClosure(ClosureNode::MakeMultiply(c, EmitTmp(w)));
   };
 
   auto frame_slot = [&](const std::string& name, const Expr& def) {
@@ -1585,12 +1578,7 @@ int MtlxExprCompiler::CompileBsdfClosure(const mx::NodePtr& raw_node) {
         // Opaque and transmissive leaves still block `layer` bases
         // (`throughput = 0`) at `weight == 0`, without compiling dead inputs.
         int z = EmitTmp(Expr::zero());
-        idx =
-            EmitClosure(ClosureOp::OrenNayarDiffuse, {{leaf_arg::kWeight, z},
-                                                      {leaf_arg::kColor, z},
-                                                      {leaf_arg::kRoughness, z},
-                                                      {leaf_arg::kMode, 0},
-                                                      {leaf_arg::kNormal, -1}});
+        idx = EmitClosure(ClosureNode::MakeDiffuse(z, z, z, 0, -1));
       }
     } else if (is_dielectric || cat == "conductor_bsdf") {
       if (IsNonZeroInput(node, "thinfilm_thickness")) {
@@ -1601,28 +1589,40 @@ int MtlxExprCompiler::CompileBsdfClosure(const mx::NodePtr& raw_node) {
         WarnUnsupported("Unsupported MaterialX '" + cat +
                         "' retroreflective; using standard reflection.");
       }
-      idx = EmitClosure(
-          is_dielectric ? ClosureOp::Dielectric : ClosureOp::Conductor,
-          {{leaf_arg::kWeight, EmitTmp(w_expr)},
-           {leaf_arg::kColor,
-            slot(is_dielectric ? "tint" : "ior", Expr::one())},
-           {leaf_arg::kRoughness, slot("roughness")},
-           {leaf_arg::kMode, is_dielectric ? sm : 0},
-           {is_dielectric ? leaf_arg::kIor : leaf_arg::kExtinction,
-            is_dielectric ? slot("ior", Expr::one()) : slot("extinction")},
-           {leaf_arg::kNormal, frame_slot("normal", Expr::n_world())},
-           {leaf_arg::kTangent, frame_slot("tangent", Expr::t_world())}});
+      int w_slot = EmitTmp(w_expr);
+      if (is_dielectric) {
+        int tint_slot = slot("tint", Expr::one());
+        int rough_slot = slot("roughness");
+        int ior_slot = slot("ior", Expr::one());
+        int n_slot = frame_slot("normal", Expr::n_world());
+        int t_slot = frame_slot("tangent", Expr::t_world());
+        idx = EmitClosure(ClosureNode::MakeDielectric(
+            w_slot, tint_slot, rough_slot, sm, ior_slot, n_slot, t_slot));
+      } else {
+        int ior_slot = slot("ior", Expr::one());
+        int rough_slot = slot("roughness");
+        int ext_slot = slot("extinction");
+        int n_slot = frame_slot("normal", Expr::n_world());
+        int t_slot = frame_slot("tangent", Expr::t_world());
+        idx = EmitClosure(ClosureNode::MakeConductor(
+            w_slot, ior_slot, rough_slot, ext_slot, n_slot, t_slot));
+      }
+    } else if (cat == "translucent_bsdf") {
+      int w_slot = EmitTmp(w_expr);
+      int color_slot = slot("color", Expr::one());
+      int n_slot = frame_slot("normal", Expr::n_world());
+      idx =
+          EmitClosure(ClosureNode::MakeTranslucent(w_slot, color_slot, n_slot));
     } else {
-      bool is_translucent = cat == "translucent_bsdf";
-      idx = EmitClosure(
-          is_translucent ? ClosureOp::Translucent : ClosureOp::OrenNayarDiffuse,
-          {{leaf_arg::kWeight, EmitTmp(w_expr)},
-           {leaf_arg::kColor, slot("color", Expr::one())},
-           {leaf_arg::kRoughness, is_translucent ? -1 : slot("roughness")},
-           {leaf_arg::kMode,
-            cat == "oren_nayar_diffuse_bsdf" &&
-                !CompileInputExpr(node, "energy_compensation").is_zero()},
-           {leaf_arg::kNormal, frame_slot("normal", Expr::n_world())}});
+      int energy_comp =
+          cat == "oren_nayar_diffuse_bsdf" &&
+          !CompileInputExpr(node, "energy_compensation").is_zero();
+      int w_slot = EmitTmp(w_expr);
+      int color_slot = slot("color", Expr::one());
+      int rough_slot = slot("roughness");
+      int n_slot = frame_slot("normal", Expr::n_world());
+      idx = EmitClosure(ClosureNode::MakeDiffuse(w_slot, color_slot, rough_slot,
+                                                 energy_comp, n_slot));
     }
   } else if (node->getType() == mx::VDF_TYPE_STRING) {
     if (cat == "anisotropic_vdf" || cat == "absorption_vdf") {
@@ -1646,9 +1646,8 @@ int MtlxExprCompiler::CompileBsdfClosure(const mx::NodePtr& raw_node) {
     } else if (c1 < 0) {
       idx = c0;
     } else {
-      idx = EmitClosure(
-          is_layer ? ClosureOp::Layer : ClosureOp::Add,
-          {{combinator_arg::kFirst, c0}, {combinator_arg::kSecond, c1}});
+      idx = EmitClosure(is_layer ? ClosureNode::MakeLayer(c0, c1)
+                                 : ClosureNode::MakeAdd(c0, c1));
     }
   } else if (cat == "mix") {
     Expr mix_expr = CompileInputExpr(node, "mix");
@@ -1662,12 +1661,10 @@ int MtlxExprCompiler::CompileBsdfClosure(const mx::NodePtr& raw_node) {
       if (fg_idx == bg_idx) {
         idx = fg_idx;
       } else {
-        if (fg_idx < 0) fg_idx = EmitClosure(ClosureOp::Null, {});
-        if (bg_idx < 0) bg_idx = EmitClosure(ClosureOp::Null, {});
-        idx = EmitClosure(ClosureOp::Mix,
-                          {{combinator_arg::kFirst, fg_idx},
-                           {combinator_arg::kSecond, bg_idx},
-                           {combinator_arg::kWeight, EmitTmp(mix_expr)}});
+        if (fg_idx < 0) fg_idx = EmitClosure(ClosureNode::MakeNull());
+        if (bg_idx < 0) bg_idx = EmitClosure(ClosureNode::MakeNull());
+        idx = EmitClosure(
+            ClosureNode::MakeMix(fg_idx, bg_idx, EmitTmp(mix_expr)));
       }
     }
   } else if (cat == "multiply") {
@@ -1706,11 +1703,11 @@ void MtlxExprCompiler::CompileBsdf(const mx::NodePtr& shader_node) {
   Expr op_expr = CompileOpacity(node);
   if (!op_expr.is_one()) prog_.opacity_slot = EmitTmp(op_expr);
   if (op_expr.is_zero() || CompileBsdfClosure(node) < 0) {
-    prog_.closures = {ClosureNode(ClosureOp::Null)};
+    prog_.closures = {ClosureNode::MakeNull()};
   } else if (thin_walled_) {
     for (ClosureNode& c : prog_.closures) {
       if (c.op == ClosureOp::Dielectric) {
-        c.args[leaf_arg::kMode] |= kScatterThinWalled | kScatterTwoSided;
+        c.dielectric.mode |= kScatterThinWalled | kScatterTwoSided;
       }
     }
   } else if (node->getType() != mx::SURFACE_SHADER_TYPE_STRING) {
