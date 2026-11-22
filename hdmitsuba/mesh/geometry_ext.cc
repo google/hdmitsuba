@@ -60,7 +60,6 @@
 
 #include "hdmitsuba/config.h"
 #include "hdmitsuba/ies_emitter.h"
-#include "hdmitsuba/materialx/evaluator.h"
 #include "hdmitsuba/materialx/translator.h"
 #include "hdmitsuba/mesh/displacement.h"
 #include "hdmitsuba/mesh/geometry_processor.h"
@@ -440,7 +439,6 @@ nb::object TranslateMaterialX(const UsdPrim& prim, UsdTimeCode time,
 
 NB_MODULE(geometry_ext, m) {
   PXR_NS::RegisterIesEmitter();
-  mitsuba::mtlx::RegisterMaterialXExprTexture();
   m.doc() = "Python bindings for hdmitsuba geometry processing utilities.";
 
   nb::class_<SubMeshOutput>(m, "SubMeshOutput")
