@@ -34,10 +34,14 @@
 
 #include "hdmitsuba/materialx/bsdf_detail.h"
 #include "hdmitsuba/materialx/evaluator.h"
+#include "hdmitsuba/materialx/math.h"
 
 NAMESPACE_BEGIN(mitsuba)
 namespace mtlx {
 namespace {
+
+using detail::geom_tangent_world;
+using detail::safe_normalize;
 
 /**!
 
