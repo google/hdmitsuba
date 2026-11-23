@@ -158,7 +158,7 @@ void ApplyDisplacement(const SdfPath& mesh_id, const MeshGeometry& mesh,
               world_norm_buf =
                   dr::load<FloatBuffer>(world_normals.data(), n_targets * 3),
               uv_buf = dr::load<FloatBuffer>(target_uvs.data(), n_targets * 2);
-  FloatBuffer tan_buf, world_tan_buf;
+  FloatBuffer tan_buf, world_tan_buf, uv_sign_buf;
   if (build_tangent_mesh) {
     auto [triangles, _] = GeometryProcessor::TriangulateWithFaceMapping(
         mesh_face_counts, mesh_face_vertices, mesh.left_handed);
@@ -186,16 +186,34 @@ void ApplyDisplacement(const SdfPath& mesh_id, const MeshGeometry& mesh,
         dr::migrate(mesh->tangents().array(), JitBackend::None);
     if constexpr (dr::is_jit_v<Float>) dr::sync_thread();
 
-    // Average the tangents of the vertices of each point and re-orthogonalize
-    // them against the normal.
+    // Average the tangents and UV handedness of the vertices of each point and
+    // re-orthogonalize the tangents against the normal.
     const float* tan_ptr = host_tan.data();
     std::vector<GfVec3f> obj_tan(n_targets, GfVec3f(0.f)), world_tan(n_targets);
+    std::vector<float> target_uv_sign(n_targets, 0.f);
     for (size_t i = 0; i < n_mesh; ++i) {
       if (const int target =
               point_targets[uv_mesh.vertex_points[mesh_vertices[i]]];
           target >= 0) {
         obj_tan[target] +=
             GfVec3f(tan_ptr[3 * i + 0], tan_ptr[3 * i + 1], tan_ptr[3 * i + 2]);
+      }
+    }
+    for (size_t f = 0; f + 2 < triangles.size(); f += 3) {
+      int i0 = triangles[f], i1 = triangles[f + 1], i2 = triangles[f + 2];
+      GfVec3f face_n = GfCross(mesh_positions[i1] - mesh_positions[i0],
+                               mesh_positions[i2] - mesh_positions[i0]);
+      GfVec2f t1 = mesh_uvs[i1] - mesh_uvs[i0],
+              t2 = mesh_uvs[i2] - mesh_uvs[i0];
+      float area2 = t1[0] * t2[1] - t1[1] * t2[0];
+      if (area2 == 0.f) continue;
+      for (int vi : {i0, i1, i2}) {
+        if (int target =
+                point_targets[uv_mesh.vertex_points[mesh_vertices[vi]]];
+            target >= 0) {
+          float det = GfDot(mesh_normals[vi], face_n) * area2;
+          if (det != 0.f) target_uv_sign[target] += det < 0.f ? -1.f : 1.f;
+        }
       }
     }
     for (size_t i = 0; i < n_targets; ++i) {
@@ -210,14 +228,17 @@ void ApplyDisplacement(const SdfPath& mesh_id, const MeshGeometry& mesh,
       }
       obj_tan[i] = t;
       world_tan[i] = GfVec3f(transform.TransformDir(t));
+      target_uv_sign[i] = target_uv_sign[i] < 0.f ? -1.f : 1.f;
     }
     tan_buf = dr::load<FloatBuffer>(obj_tan.data(), n_targets * 3);
     world_tan_buf = dr::load<FloatBuffer>(world_tan.data(), n_targets * 3);
+    uv_sign_buf = dr::load<FloatBuffer>(target_uv_sign.data(), n_targets);
   }
 
   // 3) Evaluate the displacement offsets and add them to the target points.
   // The offsets are computed in object space, while the texture is evaluated
   // in world space.
+  const float dp_dv_sign = transform.GetDeterminant() < 0.0 ? 1.0f : -1.0f;
   using mitsuba::detail::deinterleave;
   using mitsuba::detail::interleaved;
   FloatBuffer offsets =
@@ -231,24 +252,31 @@ void ApplyDisplacement(const SdfPath& mesh_id, const MeshGeometry& mesh,
         si.n = n_world;
         si.prim_index = i;
         si.sh_frame = Frame(n_world);
+        si.dp_du = si.sh_frame.s;
+        si.dp_dv = -si.sh_frame.t;
         if (!displacement.is_vector) {
           return displacement_texture->eval_1(si) * n_obj;
         }
-        si.dp_du = si.sh_frame.s;
-        si.dp_dv = si.sh_frame.t;
         Frame obj_frame(n_obj);
+        Float uv_sign = 1.0f;
         if (build_tangent_mesh) {
           Vector3f t_obj(deinterleave<3>(tan_buf, i));
+          uv_sign = deinterleave<1>(uv_sign_buf, i).x();
           obj_frame = Frame(t_obj, dr::cross(n_obj, t_obj), n_obj);
           // A non-uniform scale can shear the tangent away from the normal.
           Vector3f raw_t(deinterleave<3>(world_tan_buf, i));
           Vector3f t_world = raw_t - n_world * dr::dot(n_world, raw_t);
           si.dp_du = dr::select(dr::squared_norm(t_world) > 1e-20f,
                                 dr::normalize(t_world), si.sh_frame.s);
-          si.dp_dv = dr::cross(n_world, si.dp_du);
-          si.sh_frame = Frame(si.dp_du, si.dp_dv, n_world);
+          Vector3f b_world = dr::cross(n_world, si.dp_du);
+          // `si.uv.y` is flipped relative to USD `st.y`, so `dp/dv` opposes
+          // `cross(N, T)` unless mirrored UVs or a mirroring transform flip
+          // handedness.
+          si.dp_dv = (uv_sign * dp_dv_sign) * b_world;
+          si.sh_frame = Frame(si.dp_du, b_world, n_world);
         }
-        return obj_frame.to_world(Vector3f(displacement_texture->eval_3(si)));
+        Vector3f d(displacement_texture->eval_3(si));
+        return obj_frame.to_world(Vector3f(d.x(), uv_sign * d.y(), d.z()));
       });
 
   const FloatBuffer& host_offset = dr::migrate(offsets, JitBackend::None);

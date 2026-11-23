@@ -306,12 +306,12 @@ uint8_t TypeChannels(std::string_view type) {
   return IsFourChannelType(type) ? 4 : 3;
 }
 
-mx::NodePtr UnwrapShaderNode(mx::NodePtr node) {
+mx::NodePtr UnwrapShaderNode(mx::NodePtr node,
+                             const char* mat_input = "surfaceshader") {
   while (node) {
     std::string cat = NodeCategory(node);
     if (cat != "dot" && cat != "surfacematerial") break;
-    node = node->getConnectedNode(cat == "surfacematerial" ? "surfaceshader"
-                                                           : "in");
+    node = node->getConnectedNode(cat == "surfacematerial" ? mat_input : "in");
   }
   return node;
 }
@@ -325,6 +325,11 @@ class MtlxExprCompiler {
       std::function<const CachedTexture*(const TextureKey&)>;
   using DiscoverTextureFn = std::function<void(const TextureKey&)>;
 
+  struct DisplacementExpr {
+    Expr expr = Expr::zero();
+    bool is_vector = false;
+  };
+
   MtlxExprCompiler(const LookupTextureFn& lookup_texture,
                    absl::flat_hash_set<std::string>& warned)
       : lookup_texture_(&lookup_texture), warned_(&warned) {}
@@ -336,16 +341,24 @@ class MtlxExprCompiler {
   // `add`, `mix`) into a radiance `Expr`, or `Expr::zero()` if none.
   Expr CompileEdf(const mx::NodePtr& edf_node);
 
+  // Compiles a MaterialX displacement shader DAG (`displacement`, `mix`,
+  // `dot`, `surfacematerial`) into a scalar or 3D tangent-space `Expr`.
+  DisplacementExpr CompileDisplacement(const mx::NodePtr& disp_node);
+
   // Compiles a MaterialX surface shader or BSDF closure DAG into
   // `prog_.closures` and `prog_.opacity_slot`.
   void CompileBsdf(const mx::NodePtr& shader_node);
 
-  ref<Object> CreateExprTexture(const Expr& expr, bool unbounded,
-                                std::string_view variant,
-                                MeshAttributeRequests& mesh_attributes);
+  bool ProgramUsesUv(const Expr& expr) const;
 
-  ref<Object> CreateBsdf(std::string_view variant,
-                         MeshAttributeRequests& mesh_attributes);
+  const std::vector<std::pair<std::string, int>>& attr_requests() const {
+    return attr_requests_;
+  }
+
+  ref<Object> CreateExprTexture(const Expr& expr, bool unbounded,
+                                std::string_view variant);
+
+  ref<Object> CreateBsdf(std::string_view variant);
 
  private:
   // A 3x3 or 4x4 matrix as the expressions of its `n` rows.
@@ -393,8 +406,7 @@ class MtlxExprCompiler {
   void MarkTwoSidedDielectrics(size_t start);
   int EmitClosure(mtlx::ClosureNode node);
   ref<Object> CreatePlugin(std::string_view name, ObjectType type,
-                           std::string_view variant,
-                           MeshAttributeRequests& mesh_attributes);
+                           std::string_view variant);
 
   TfToken ResolveSourceColorSpace(std::string_view color_space);
   GfVec3f ToLinearRec709(GfVec3f rgb_val, std::string_view color_space);
@@ -455,6 +467,7 @@ class MtlxExprCompiler {
   absl::flat_hash_map<std::pair<const mx::Node*, std::string>, Expr>
       node_output_expr_;
   absl::flat_hash_map<const mx::Node*, Expr> edf_expr_;
+  absl::flat_hash_map<const mx::Node*, DisplacementExpr> disp_expr_;
   absl::flat_hash_map<const mx::Node*, Expr> opacity_expr_;
   absl::flat_hash_map<const mx::Node*, int> bsdf_closure_;
   absl::flat_hash_map<std::pair<const mx::Node*, std::string>, Expr>
@@ -464,6 +477,7 @@ class MtlxExprCompiler {
   std::vector<ref<Object>> inputs_;
   uint16_t discover_input_idx_ = 0;
   bool thin_walled_ = false;
+  bool allow_mesh_attrs_ = true;
   absl::flat_hash_set<std::string>* warned_ = nullptr;
 };
 
@@ -556,6 +570,7 @@ GfVec3f MtlxExprCompiler::ToLinearRec709(GfVec3f rgb_val,
 
 Expr MtlxExprCompiler::MeshAttr(std::string_view name, int dim,
                                 const Expr& def) {
+  if (!allow_mesh_attrs_) return def;
   std::pair<std::string, int> req{std::string(name), dim};
   auto it = std::find(attr_requests_.begin(), attr_requests_.end(), req);
   if (it == attr_requests_.end()) {
@@ -1968,35 +1983,105 @@ void MtlxExprCompiler::CompileBsdf(const mx::NodePtr& shader_node) {
   }
 }
 
-ref<Object> MtlxExprCompiler::CreatePlugin(
-    std::string_view name, ObjectType type, std::string_view variant,
-    MeshAttributeRequests& mesh_attributes) {
+MtlxExprCompiler::DisplacementExpr MtlxExprCompiler::CompileDisplacement(
+    const mx::NodePtr& disp_node) {
+  allow_mesh_attrs_ = false;
+  mx::NodePtr node = UnwrapShaderNode(disp_node, "displacementshader");
+  if (!node) return {};
+  if (auto it = disp_expr_.find(node.get()); it != disp_expr_.end()) {
+    return it->second;
+  }
+  std::string cat = NodeCategory(node);
+  DisplacementExpr res;
+  if (cat == "displacement") {
+    if (IsNonZeroInput(node, "displacement")) {
+      Expr scale = CompileInputExpr(node, "scale", Expr::one());
+      if (!scale.is_zero()) {
+        bool is_vec = InputType(node, "displacement") == "vector3";
+        Expr disp = CompileInputExpr(node, "displacement") * scale;
+        if (!disp.is_zero()) res = {is_vec ? disp : disp.x(), is_vec};
+      }
+    }
+  } else if (cat == "mix") {
+    Expr m = CompileInputExpr(node, "mix");
+    if (m.is_zero()) {
+      res = CompileDisplacement(node->getConnectedNode("bg"));
+    } else if (m.is_one()) {
+      res = CompileDisplacement(node->getConnectedNode("fg"));
+    } else {
+      DisplacementExpr fg = CompileDisplacement(node->getConnectedNode("fg"));
+      DisplacementExpr bg = CompileDisplacement(node->getConnectedNode("bg"));
+      if (!fg.expr.is_zero() || !bg.expr.is_zero()) {
+        bool is_vec = fg.is_vector || bg.is_vector;
+        auto promote = [&](const DisplacementExpr& d) {
+          return (!is_vec || d.is_vector)
+                     ? d.expr
+                     : rgb(Expr::zero(), Expr::zero(), d.expr);
+        };
+        res = {mix(promote(fg), promote(bg), m), is_vec};
+      }
+    }
+  } else {
+    WarnUnsupported("Unsupported MaterialX displacement shader '" + cat +
+                    "'; ignoring displacement.");
+  }
+  if (res.expr.code.size() > 1) res.expr = EmitTmpExpr(res.expr);
+  disp_expr_[node.get()] = res;
+  return res;
+}
+
+bool MtlxExprCompiler::ProgramUsesUv(const Expr& expr) const {
+  std::vector<bool> live(prog_.tmp_channels.size());
+  for (mtlx::Inst inst : expr.code) {
+    if (inst.op == mtlx::Op::GeomUV || inst.op == mtlx::Op::SampleInput) {
+      return true;
+    }
+    if (inst.op == mtlx::Op::LoadTmp) live[inst.imm] = true;
+  }
+  bool active = false;
+  for (auto it = prog_.code.rbegin(); it != prog_.code.rend(); ++it) {
+    if (it->op == mtlx::Op::StoreTmp) {
+      active = live[it->imm];
+    } else if (it->op == mtlx::Op::MatTranspose ||
+               it->op == mtlx::Op::MatInverse || it->op == mtlx::Op::MatMul) {
+      active = std::any_of(live.begin() + it->imm,
+                           live.begin() + it->imm + it->channels,
+                           [](bool b) { return b; });
+    } else if (active) {
+      if (it->op == mtlx::Op::GeomUV || it->op == mtlx::Op::SampleInput) {
+        return true;
+      }
+      if (it->op == mtlx::Op::LoadTmp) live[it->imm] = true;
+    }
+  }
+  return false;
+}
+
+ref<Object> MtlxExprCompiler::CreatePlugin(std::string_view name,
+                                           ObjectType type,
+                                           std::string_view variant) {
   Properties props(name);
   for (size_t i = 0; i < inputs_.size(); ++i) {
     props.set("in" + std::to_string(i), std::move(inputs_[i]));
   }
-  mesh_attributes.insert(attr_requests_.begin(), attr_requests_.end());
   props.set_any("program", std::move(prog_));
   return PluginManager::instance()->create_object(props, variant, type);
 }
 
-ref<Object> MtlxExprCompiler::CreateExprTexture(
-    const Expr& expr, bool unbounded, std::string_view variant,
-    MeshAttributeRequests& mesh_attributes) {
+ref<Object> MtlxExprCompiler::CreateExprTexture(const Expr& expr,
+                                                bool unbounded,
+                                                std::string_view variant) {
   mtlx::RegisterMaterialXExprTexture();
   prog_.code.insert(prog_.code.end(), expr.code.begin(), expr.code.end());
   prog_.stack_size = std::max(prog_.stack_size, expr.max_depth);
   prog_.result_uniform = expr.uniform();
   prog_.unbounded = unbounded;
-  return CreatePlugin("materialx_expr", ObjectType::Texture, variant,
-                      mesh_attributes);
+  return CreatePlugin("materialx_expr", ObjectType::Texture, variant);
 }
 
-ref<Object> MtlxExprCompiler::CreateBsdf(
-    std::string_view variant, MeshAttributeRequests& mesh_attributes) {
+ref<Object> MtlxExprCompiler::CreateBsdf(std::string_view variant) {
   mtlx::RegisterMaterialXBsdf();
-  return CreatePlugin("materialx_bsdf", ObjectType::BSDF, variant,
-                      mesh_attributes);
+  return CreatePlugin("materialx_bsdf", ObjectType::BSDF, variant);
 }
 
 }  // namespace
@@ -2010,14 +2095,18 @@ CompiledSurfaceShader CompileSurfaceShader(
   {
     MtlxExprCompiler compiler(lookup_texture, warned);
     compiler.CompileBsdf(shader_node);
-    out.bsdf = compiler.CreateBsdf(variant, out.mesh_attributes);
+    out.bsdf = compiler.CreateBsdf(variant);
+    out.mesh_attributes.insert(compiler.attr_requests().begin(),
+                               compiler.attr_requests().end());
   }
   {
     MtlxExprCompiler compiler(lookup_texture, warned);
     Expr radiance = compiler.CompileEdf(shader_node);
     if (!radiance.is_zero()) {
-      out.radiance_texture = compiler.CreateExprTexture(
-          radiance, /*unbounded=*/true, variant, out.mesh_attributes);
+      out.radiance_texture =
+          compiler.CreateExprTexture(radiance, /*unbounded=*/true, variant);
+      out.mesh_attributes.insert(compiler.attr_requests().begin(),
+                                 compiler.attr_requests().end());
     }
   }
   return out;
@@ -2029,6 +2118,27 @@ void DiscoverSurfaceShaderTextures(
   MtlxExprCompiler compiler(callback);
   compiler.CompileBsdf(shader_node);
   compiler.CompileEdf(shader_node);
+}
+
+MaterialDisplacement CompileDisplacementShader(
+    const mx::NodePtr& shader_node, std::string_view variant,
+    const std::function<const CachedTexture*(const TextureKey&)>&
+        lookup_texture) {
+  absl::flat_hash_set<std::string> warned;
+  MtlxExprCompiler compiler(lookup_texture, warned);
+  MtlxExprCompiler::DisplacementExpr disp =
+      compiler.CompileDisplacement(shader_node);
+  if (disp.expr.is_zero()) return {};
+  bool requires_uv = compiler.ProgramUsesUv(disp.expr);
+  return {compiler.CreateExprTexture(disp.expr, /*unbounded=*/true, variant),
+          requires_uv, disp.is_vector};
+}
+
+void DiscoverDisplacementShaderTextures(
+    const mx::NodePtr& shader_node,
+    const std::function<void(const TextureKey&)>& callback) {
+  MtlxExprCompiler compiler(callback);
+  compiler.CompileDisplacement(shader_node);
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

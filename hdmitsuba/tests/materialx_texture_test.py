@@ -27,8 +27,10 @@ from pxr import Usd
 from pxr import UsdShade
 import pytest
 
+from hdmitsuba import geometry_ext as geom_lib
 from hdmitsuba.tests import materialx_test_helpers as mtlx
 from hdmitsuba.tests import test_helpers
+from usd_mitsuba import material as material_lib
 
 
 @pytest.fixture(autouse=True)
@@ -619,3 +621,330 @@ def test_geomprop_alias_nodes(
       (0.3, 0.4, 0.5),
       atol=1e-5,
   )
+
+
+def _define_mtlx_disp(
+    stage: Usd.Stage, path: str, disp_id: str, **inputs: object
+) -> UsdShade.Material:
+  mat = UsdShade.Material.Define(stage, path)
+  disp = mtlx.define_shader(stage, f'{path}/Disp', disp_id, **inputs)
+  mat.CreateDisplacementOutput('mtlx').ConnectToSource(
+      disp.CreateOutput('out', Sdf.ValueTypeNames.Token)
+  )
+  return mat
+
+
+def _convert_mtlx_disp(
+    disp_id: str, **inputs: object
+) -> material_lib.MeshMaterial:
+  stage = Usd.Stage.CreateInMemory()
+  mat = _define_mtlx_disp(stage, '/Mat', disp_id, **inputs)
+  return material_lib.convert_mesh_material(mat.GetPrim())
+
+
+@pytest.mark.parametrize(
+    ('disp_id', 'inputs', 'requires_uv', 'is_vector', 'expected'),
+    [
+        pytest.param(
+            'ND_displacement_float',
+            {'displacement': -0.3, 'scale': 2.0},
+            False,
+            False,
+            -0.6,
+            id='scalar',
+        ),
+        pytest.param(
+            'ND_displacement_float',
+            {
+                'displacement': ('ND_image_float', {'file': _UV_QUADRANTS}),
+                'scale': 0.5,
+            },
+            True,
+            False,
+            0.5 * 60.0 / 255.0,
+            id='image',
+        ),
+        pytest.param(
+            'ND_displacement_vector3',
+            {'displacement': Gf.Vec3f(0.2, -0.4, 0.6), 'scale': 0.5},
+            False,
+            True,
+            (0.1, -0.2, 0.3),
+            id='vector3',
+        ),
+        pytest.param(
+            'ND_mix_displacementshader',
+            {
+                'fg': (
+                    'ND_displacement_vector3',
+                    {'displacement': Gf.Vec3f(0.4, -0.2, 0.8)},
+                ),
+                'bg': ('ND_displacement_float', {'displacement': 0.2}),
+                'mix': 0.25,
+            },
+            False,
+            True,
+            (0.1, -0.05, 0.35),
+            id='mix_vector_scalar',
+        ),
+        # Zero displacement with a UV-dependent scale does not leak `requires_uv`.
+        pytest.param(
+            'ND_mix_displacementshader',
+            {
+                'fg': (
+                    'ND_displacement_float',
+                    {
+                        'displacement': 0.0,
+                        'scale': ('ND_image_float', {'file': _UV_QUADRANTS}),
+                    },
+                ),
+                'bg': ('ND_displacement_float', {'displacement': 0.4}),
+                'mix': 0.5,
+            },
+            False,
+            False,
+            0.2,
+            id='zero_disp_uv_scale',
+        ),
+        # Dead UV-reading temporaries from folded branches do not leak `requires_uv`.
+        pytest.param(
+            'ND_mix_displacementshader',
+            {
+                'fg': (
+                    'ND_mix_displacementshader',
+                    {
+                        'fg': ('ND_displacement_float', {'displacement': 0.0}),
+                        'bg': ('ND_displacement_float', {'displacement': 0.0}),
+                        'mix': (
+                            'ND_ramplr_float',
+                            {'valuel': 0.0, 'valuer': 1.0},
+                        ),
+                    },
+                ),
+                'bg': ('ND_displacement_float', {'displacement': 0.4}),
+                'mix': 0.5,
+            },
+            False,
+            False,
+            0.2,
+            id='dead_uv_temp',
+        ),
+        pytest.param(
+            'ND_displacement_float',
+            {
+                'displacement': ('ND_image_float', {'file': _UV_QUADRANTS}),
+                'scale': 0.0,
+            },
+            False,
+            False,
+            None,
+            id='zero_scale',
+        ),
+    ],
+)
+def test_materialx_displacement_eval(
+    disp_id: str,
+    inputs: dict[str, object],
+    requires_uv: bool,
+    is_vector: bool,
+    expected: float | tuple[float, float, float] | None,
+) -> None:
+  """Tests MaterialX scalar, image, vector, mixed, and zero-scale displacement.
+
+  Args:
+    disp_id: MaterialX displacement shader node identifier.
+    inputs: Shader inputs passed to `define_shader`.
+    requires_uv: Expected `MeshMaterial.requires_uv` flag.
+    is_vector: Expected `MeshMaterial.is_vector` flag.
+    expected: Expected scalar/vector displacement value, or None if inactive.
+  """
+  mat = _convert_mtlx_disp(disp_id, **inputs)
+  if expected is None:
+    assert mat.displacement is None
+    return
+  assert mat.displacement is not None
+  assert (mat.requires_uv, mat.is_vector) == (requires_uv, is_vector)
+  si = mtlx.make_test_si()
+  si.uv = mi.Point2f(0.25, 0.75)
+  if isinstance(expected, tuple):
+    np.testing.assert_allclose(
+        mat.displacement.eval_3(si), mi.Color3f(*expected), atol=1e-4
+    )
+  else:
+    np.testing.assert_allclose(mat.displacement.eval_1(si), expected, atol=1e-4)
+
+
+@pytest.mark.parametrize(
+    'mirror_uv', [False, True], ids=['rh_uv', 'mirrored_uv']
+)
+@pytest.mark.parametrize('scale_x', [1.0, -1.0], ids=['pos_x', 'neg_x'])
+def test_materialx_vector_displacement_bitangent(
+    mirror_uv: bool, scale_x: float
+) -> None:
+  """Tests tangent-frame bitangent handedness under mirrored UVs and transforms.
+
+  Args:
+    mirror_uv: Whether to mirror the quad's U coordinates.
+    scale_x: X scale factor applied by the object-to-world transform.
+  """
+  stage = Usd.Stage.CreateInMemory()
+  quad = mtlx.define_quad(stage, '/Quad')
+  if mirror_uv:
+    quad.GetPrim().GetAttribute('primvars:st').Set(
+        [(1.0, 0.0), (0.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
+    )
+  mesh_data = geom_lib.extract_mesh_data(
+      stage, quad.GetPath(), Usd.TimeCode.Default()
+  )
+  base_pts = np.array(quad.GetPointsAttr().Get())
+  for disp in (
+      Gf.Vec3f(0.0, 1.0, 0.0),
+      ('ND_bitangent_vector3', {'space': 'world'}),
+  ):
+    mat = _convert_mtlx_disp(
+        'ND_displacement_vector3', displacement=disp, scale=0.25
+    )
+    (sub,) = geom_lib.process_mesh(
+        mesh_data,
+        0,
+        Gf.Matrix4d().SetScale(Gf.Vec3d(scale_x, 1.0, 1.0)),
+        [(mat.displacement, mat.requires_uv, mat.is_vector)],
+        set(),
+    )
+    np.testing.assert_allclose(
+        sub.primvars['points'],
+        base_pts * (scale_x, 1.0, 1.0) + (0.0, 0.25, 0.0),
+        atol=1e-5,
+    )
+
+
+@pytest.mark.parametrize(
+    ('surf_ctx', 'disp_ctx', 'disp_shader', 'scale', 'expected'),
+    [
+        pytest.param(
+            'mtlx',
+            '',
+            ('mitsuba_uniform', {'value': 0.15}),
+            1.0,
+            0.4,
+            id='mtlx_over_univ',
+        ),
+        pytest.param(
+            'mtlx',
+            '',
+            ('mitsuba_uniform', {'value': 0.15}),
+            0.0,
+            None,
+            id='zero_scale_no_fallback',
+        ),
+        pytest.param(
+            'mtlx',
+            '',
+            ('ND_displacement_float', {'displacement': 0.1}),
+            1.0,
+            0.4,
+            id='mtlx_over_univ_mtlx',
+        ),
+        pytest.param(
+            '',
+            'glslfx',
+            ('mitsuba_uniform', {'value': 0.15}),
+            1.0,
+            0.4,
+            id='univ_over_glslfx',
+        ),
+        pytest.param(
+            'mtlx',
+            'mitsuba',
+            ('mitsuba_uniform', {'value': 0.15}),
+            1.0,
+            0.15,
+            id='mitsuba_over_mtlx',
+        ),
+    ],
+)
+def test_materialx_surfacematerial_displacement_precedence(
+    surf_ctx: str,
+    disp_ctx: str,
+    disp_shader: tuple[str, dict[str, object]],
+    scale: float,
+    expected: float | None,
+) -> None:
+  """Tests `surfacematerial.displacementshader` render-context precedence.
+
+  Args:
+    surf_ctx: Render context for the `ND_surfacematerial` surface output.
+    disp_ctx: Render context for the competing displacement output.
+    disp_shader: `(shader_id, inputs)` for the competing displacement shader.
+    scale: Scale input on the `surfacematerial`'s `ND_displacement_float`.
+    expected: Expected scalar displacement value, or None if inactive.
+  """
+  stage = Usd.Stage.CreateInMemory()
+  mat = UsdShade.Material.Define(stage, '/Mat')
+  sm_node = mtlx.define_shader(
+      stage,
+      '/Mat/SurfMat',
+      'ND_surfacematerial',
+      surfaceshader=(
+          'ND_surface',
+          {'bsdf': ('ND_oren_nayar_diffuse_bsdf', {})},
+      ),
+      displacementshader=(
+          'ND_displacement_float',
+          {'displacement': 0.4, 'scale': scale},
+      ),
+  )
+  mat.CreateSurfaceOutput(surf_ctx).ConnectToSource(
+      sm_node.CreateOutput('out', Sdf.ValueTypeNames.Token)
+  )
+  competing = mtlx.define_shader(
+      stage, '/Mat/OtherDisp', disp_shader[0], **disp_shader[1]
+  )
+  mat.CreateDisplacementOutput(disp_ctx).ConnectToSource(
+      competing.CreateOutput('out', Sdf.ValueTypeNames.Token)
+  )
+  res = material_lib.convert_mesh_material(mat.GetPrim())
+  assert res.bsdf is not None
+  if expected is None:
+    assert res.displacement is None
+  else:
+    assert res.displacement is not None
+    np.testing.assert_allclose(
+        res.displacement.eval_1(mtlx.make_test_si()), expected, atol=1e-5
+    )
+
+
+def test_materialx_displacement_terminals(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+  """Tests `mitsuba:displacement` precedence and unsupported non-fallback.
+
+  Args:
+    capfd: Pytest file-descriptor capture fixture for verifying warnings.
+  """
+  stage = Usd.Stage.CreateInMemory()
+  mi_out = mtlx.define_shader(
+      stage, '/MiD', 'mitsuba_uniform', value=0.15
+  ).CreateOutput('out', Sdf.ValueTypeNames.Token)
+
+  # `mitsuba:displacement` takes precedence over `mtlx:displacement`.
+  mat = _define_mtlx_disp(
+      stage, '/PrecMat', 'ND_displacement_float', displacement=0.9
+  )
+  mat.CreateDisplacementOutput('mitsuba').ConnectToSource(mi_out)
+  assert (
+      geom_lib.translate_materialx(mat.GetPrim(), Usd.TimeCode.Default())
+      is None
+  )
+  res = material_lib.convert_mesh_material(mat.GetPrim())
+  assert res.displacement is not None
+  np.testing.assert_allclose(
+      res.displacement.eval_1(mtlx.make_test_si()), 0.15, atol=1e-5
+  )
+
+  # Unsupported `mtlx:displacement` warns without falling back to universal.
+  mat = _define_mtlx_disp(stage, '/BadDisp', 'ND_oren_nayar_diffuse_bsdf')
+  mat.CreateDisplacementOutput().ConnectToSource(mi_out)
+  capfd.readouterr()
+  assert material_lib.convert_mesh_material(mat.GetPrim()).displacement is None
+  assert 'Unsupported MaterialX displacement shader' in capfd.readouterr().err

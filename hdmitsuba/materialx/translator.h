@@ -18,6 +18,7 @@
 #include <memory>
 #include <optional>
 #include <string_view>
+#include <utility>
 
 #include <pxr/imaging/hd/material.h>
 #include <pxr/pxr.h>
@@ -30,17 +31,20 @@
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-// Opaque flattened MaterialX surface network shared between texture discovery
+// Opaque flattened MaterialX shading network shared between texture discovery
 // and material translation within a single Hydra commit.
 struct PreparedMaterialX;
 
 // Flattens a Hydra MaterialX shading network and invokes `callback` with the
 // `TextureKey` of every bitmap texture it consumes for parallel preloading.
-// Returns nullptr if MaterialX is disabled or `network` has no MaterialX
-// surface terminal.
+// Returns nullptr if MaterialX is disabled or `network` has no valid MaterialX
+// surface or displacement shader.
 std::shared_ptr<const PreparedMaterialX> PrepareMaterialXNetwork(
     const SdfPath& id, const HdMaterialNetwork2& network,
     const std::function<void(const TextureKey&)>& callback);
+
+bool HasMaterialXSurface(const PreparedMaterialX& prepared);
+bool HasMaterialXDisplacement(const PreparedMaterialX& prepared);
 
 // Translates a prepared MaterialX network for a specific Mitsuba variant.
 TranslatedMaterial TranslateMaterialXNetwork(
@@ -51,9 +55,10 @@ TranslatedMaterial TranslateMaterialXNetwork(
 
 // --- Offline translation (usd_mitsuba, via geometry_ext) ---
 
-// Translates a `UsdShadeMaterial` prim for `variant`, or returns `std::nullopt`
-// if MaterialX is disabled or `prim` has no active MaterialX surface shader.
-std::optional<TranslatedMaterial> TranslateUsdMaterialX(
+// Translates a `UsdShadeMaterial` prim for `variant`, returning
+// `{material, has_displacement}`, or `std::nullopt` if MaterialX is disabled
+// or `prim` has no valid MaterialX surface or displacement shader.
+std::optional<std::pair<TranslatedMaterial, bool>> TranslateUsdMaterialX(
     const UsdPrim& prim, UsdTimeCode time, std::string_view variant);
 
 PXR_NAMESPACE_CLOSE_SCOPE
