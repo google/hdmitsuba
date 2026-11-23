@@ -123,7 +123,7 @@ def test_progressive_vs_non_progressive_convergence():
       hydra_delegate_id='HdMitsubaRendererPlugin',
       width=16,
       overrides={
-          'mitsuba:sample_count': 16,
+          'mitsuba:sampler:sample_count': 16,
           'enableInteractive': False,
       },
   )
@@ -136,7 +136,7 @@ def test_progressive_vs_non_progressive_convergence():
       hydra_delegate_id='HdMitsubaRendererPlugin',
       width=16,
       overrides={
-          'mitsuba:sample_count': 16,
+          'mitsuba:sampler:sample_count': 16,
           'enableInteractive': True,
       },
   )

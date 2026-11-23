@@ -1,0 +1,49 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    renderSettingsPrimPath = "/Render/Settings"
+    upAxis = "Y"
+)
+
+def Scope "Render"
+{
+    def RenderSettings "Settings"
+    {
+        rel camera = </World/Camera>
+        custom bool mitsuba:sampler:jitter = 0
+        custom int mitsuba:sampler:sample_count = 16
+        custom string mitsuba:sampler:type = "stratified"
+        uniform int2 resolution = (16, 16)
+    }
+}
+
+def Xform "World"
+{
+    def Camera "Camera"
+    {
+        float2 clippingRange = (0.1, 100)
+        float focalLength = 50
+        float horizontalAperture = 36
+        float verticalAperture = 36
+        double3 xformOp:translate = (0, 0, 5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def SphereLight "Light"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 8
+        float inputs:radius = 1.5
+        double3 xformOp:translate = (2, 2, 3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "Quad"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-1.5, -1.5, 0), (1.5, -1.5, 0), (1.5, 1.5, 0), (-1.5, 1.5, 0)]
+        color3f[] primvars:displayColor = [(0.8, 0.8, 0.8)]
+    }
+}

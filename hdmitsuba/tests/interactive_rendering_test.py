@@ -101,7 +101,7 @@ def test_interactive_samples_per_pass_updates_dynamically(
       width=64,
       overrides={
           'enableInteractive': True,
-          'mitsuba:sample_count': 8,
+          'mitsuba:sampler:sample_count': 8,
           'mitsuba:interactive_samples_per_pass': 1,
           'mitsuba:use_kernel_freezing': use_kernel_freezing,
       },
@@ -116,7 +116,7 @@ def test_interactive_samples_per_pass_updates_dynamically(
       width=64,
       overrides={
           'enableInteractive': True,
-          'mitsuba:sample_count': 8,
+          'mitsuba:sampler:sample_count': 8,
           'mitsuba:interactive_samples_per_pass': 4,
           'mitsuba:use_kernel_freezing': use_kernel_freezing,
       },
@@ -137,7 +137,7 @@ def test_interactive_samples_per_pass_updates_dynamically(
       width=64,
       overrides={
           'enableInteractive': True,
-          'mitsuba:sample_count': 12,
+          'mitsuba:sampler:sample_count': 12,
           'mitsuba:interactive_samples_per_pass': 4,
           'mitsuba:use_kernel_freezing': use_kernel_freezing,
       },
@@ -159,7 +159,7 @@ def test_interactive_matches_non_interactive_odd_sample_count(
       width=64,
       overrides={
           'enableInteractive': False,
-          'mitsuba:sample_count': 7,
+          'mitsuba:sampler:sample_count': 7,
           'mitsuba:use_kernel_freezing': use_kernel_freezing,
       },
   )
@@ -173,7 +173,7 @@ def test_interactive_matches_non_interactive_odd_sample_count(
       width=64,
       overrides={
           'enableInteractive': True,
-          'mitsuba:sample_count': 7,
+          'mitsuba:sampler:sample_count': 7,
           'mitsuba:interactive_samples_per_pass': 2,
           'mitsuba:use_kernel_freezing': use_kernel_freezing,
       },
@@ -217,7 +217,7 @@ def test_seed_change_resets_progressive_rendering(use_kernel_freezing: bool):
       width=64,
       overrides={
           'enableInteractive': True,
-          'mitsuba:sample_count': 4,
+          'mitsuba:sampler:sample_count': 4,
           'mitsuba:interactive_samples_per_pass': 2,
           'mitsuba:seed': 0,
           'mitsuba:use_kernel_freezing': use_kernel_freezing,
@@ -235,7 +235,7 @@ def test_seed_change_resets_progressive_rendering(use_kernel_freezing: bool):
       width=64,
       overrides={
           'enableInteractive': True,
-          'mitsuba:sample_count': 4,
+          'mitsuba:sampler:sample_count': 4,
           'mitsuba:interactive_samples_per_pass': 2,
           'mitsuba:seed': 2,
           'mitsuba:use_kernel_freezing': use_kernel_freezing,
@@ -264,7 +264,7 @@ def test_interactive_denoise_preserves_raw_accumulation():
         width=64,
         overrides={
             'enableInteractive': True,
-            'mitsuba:sample_count': sample_count,
+            'mitsuba:sampler:sample_count': sample_count,
             'mitsuba:denoise': denoise,
         },
     )

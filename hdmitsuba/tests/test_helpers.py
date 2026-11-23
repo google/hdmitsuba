@@ -59,7 +59,7 @@ def create_render_settings(
       'mitsuba:variant', Sdf.ValueTypeNames.String
   ).Set(mi.variant())
   render_settings_prim.CreateAttribute(
-      'mitsuba:sample_count', Sdf.ValueTypeNames.Int
+      'mitsuba:sampler:sample_count', Sdf.ValueTypeNames.Int
   ).Set(spp)
   render_settings_prim.CreateAttribute(
       UsdRender.Tokens.resolution, Sdf.ValueTypeNames.Int2
@@ -118,7 +118,7 @@ def assert_hydra_equal_to_offline(
     stage: Usd.Stage,
     camera_path: str | None = None,
     output_prefix: str = 'test',
-    spp: int = 128,
+    spp: int | None = 128,
     atol: float = 0.05,
     rtol: float = 1e-3,
     engine: Any = None,
@@ -136,7 +136,8 @@ def assert_hydra_equal_to_offline(
     stage: The USD stage to render.
     camera_path: The camera path. If None, it will use the default camera.
     output_prefix: The prefix for written images.
-    spp: The samples per pixel for the offline render.
+    spp: The samples per pixel for the offline render, or None to use the
+      translated sensor sampler's sample_count.
     atol: Absolute tolerance for comparison.
     rtol: Relative tolerance for comparison.
     engine: Optional existing engine to reuse.
@@ -166,7 +167,9 @@ def assert_hydra_equal_to_offline(
       stage, time=time, subdivision_level=subdivision_level
   )
   scene = mi.load_dict(scene_dict)
-  image_usd = np.array(mi.render(scene, spp=spp))
+  image_usd = np.array(
+      mi.render(scene) if spp is None else mi.render(scene, spp=spp)
+  )
 
   write_image(image_hd, f'{output_prefix}_hd.png')
   write_image(image_usd, f'{output_prefix}_usd.png')

@@ -14,7 +14,7 @@ def Scope "Render"
         custom int mitsuba:integrator:sub_integrator:max_depth = 2
         custom string mitsuba:integrator:sub_integrator:type = "path"
         custom string mitsuba:integrator:type = "aov"
-        custom int mitsuba:sample_count = 4
+        custom int mitsuba:sampler:sample_count = 4
         rel products = </Render/Products/Main>
         uniform int2 resolution = (32, 32)
     }
