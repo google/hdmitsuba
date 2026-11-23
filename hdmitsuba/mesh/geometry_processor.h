@@ -145,6 +145,15 @@ class GeometryProcessor {
                                      size_t num_points,
                                      const PrimvarMap& primvars);
 
+  // Returns the values of the primvar `state` at the given points, faces or
+  // face corners (depending on its interpolation; `points[i]`, `faces[i]` and
+  // `corners[i]` describe the same sample) as `channels` floats per sample,
+  // broadcasting scalars and zero-padding vectors with fewer channels. Returns
+  // nullopt if the primvar is empty or of an unsupported type.
+  static std::optional<std::vector<float>> GatherPrimvar(
+      const PrimvarState& state, int channels, absl::Span<const int> points,
+      absl::Span<const int> faces, absl::Span<const int> corners);
+
   // Sets `mesh.material_ids` and `mesh.face_material_indices` from the
   // (material id, face indices) pairs of the GeomSubsets of the mesh. Faces not
   // covered by any subset use `mesh_material`, which is only added if it is

@@ -17,9 +17,11 @@
 #include <algorithm>
 #include <cstddef>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
+#include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/types/span.h>
 #include <drjit-core/jit.h>
@@ -28,6 +30,7 @@
 #include <mitsuba/core/vector.h>
 #include <mitsuba/render/interaction.h>
 #include <mitsuba/render/mesh.h>
+#include <mitsuba/render/shape.h>
 #include <mitsuba/render/texture.h>
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/vec2f.h>
@@ -44,8 +47,63 @@
 
 #include "hdmitsuba/mesh/geometry_processor.h"
 #include "hdmitsuba/prim_translator.h"
+#include "hdmitsuba/utils.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
+
+namespace detail {
+
+// Lightweight `mitsuba::Shape` providing the per-point mesh `attributes`
+// (`FloatBuffer`s with 1 or 3 channels, indexed by `si.prim_index`) read by a
+// displacement texture in `ApplyDisplacement`.
+template <typename Float, typename Spectrum>
+class DisplacementAttrShape final : public mitsuba::Shape<Float, Spectrum> {
+ public:
+  using Base = mitsuba::Shape<Float, Spectrum>;
+  using typename Base::Color3f;
+  using typename Base::Mask;
+  using typename Base::ScalarBoundingBox3f;
+  using typename Base::SurfaceInteraction3f;
+  using FloatBuffer = typename mitsuba::Mesh<Float, Spectrum>::FloatBuffer;
+  using AttributeMap = absl::flat_hash_map<std::string, FloatBuffer>;
+
+  explicit DisplacementAttrShape(AttributeMap attributes)
+      : attributes_(std::move(attributes)) {}
+
+  ScalarBoundingBox3f bbox() const override { return ScalarBoundingBox3f(); }
+
+  Mask has_attribute(std::string_view name,
+                     Mask /*active*/ = true) const override {
+    return attributes_.contains(name);
+  }
+
+  Float eval_attribute_1(std::string_view name, const SurfaceInteraction3f& si,
+                         Mask active = true) const override {
+    return EvalAttribute<Float>(name, si, active);
+  }
+
+  Color3f eval_attribute_3(std::string_view name,
+                           const SurfaceInteraction3f& si,
+                           Mask active = true) const override {
+    return EvalAttribute<Color3f>(name, si, active);
+  }
+
+ private:
+  // On JIT variants, the evaluator also calls this for missing attributes
+  // (with `active == false`).
+  template <typename Out>
+  Out EvalAttribute(std::string_view name, const SurfaceInteraction3f& si,
+                    Mask active) const {
+    auto it = attributes_.find(name);
+    if (it == attributes_.end()) return Out(0.0f);
+    return Out(drjit::gather<drjit::replace_scalar_t<Out, float>>(
+        it->second, si.prim_index, active));
+  }
+
+  AttributeMap attributes_;
+};
+
+}  // namespace detail
 
 // Evaluates the displacement texture of the faces of `mesh` with material
 // `material_index` at their points that are not yet set in `displaced_points`,
@@ -65,10 +123,15 @@ PXR_NAMESPACE_OPEN_SCOPE
 // evaluated with the world-space position, normal and shading frame (using
 // the object-to-world `transform`), so procedural displacement that does not
 // require UVs (`displacement.requires_uv == false`) also works on meshes
-// without "st". On JIT variants, all points are evaluated in a single
-// vectorized Dr.Jit pass and migrated back to host memory.
+// without "st". The texture can also read the mesh attributes
+// `displacement.attributes`: the object-space positions (`__p_object`) and
+// normals (`__n_object`) and the `primvars` of `mesh` (with uniform and
+// face-varying primvars sampled at the face and corner of the first vertex of
+// each point). On JIT variants, all points are evaluated in a single vectorized
+// Dr.Jit pass and migrated back to host memory.
 template <typename Float, typename Spectrum>
 void ApplyDisplacement(const SdfPath& mesh_id, const MeshGeometry& mesh,
+                       const PrimvarMap& primvars,
                        const std::vector<bool>& is_hole,
                        const MaterialDisplacement& displacement,
                        int material_index, const ExpandedMesh& uv_mesh,
@@ -102,10 +165,11 @@ void ApplyDisplacement(const SdfPath& mesh_id, const MeshGeometry& mesh,
   // Vector displacement is expressed in the UV tangent frame if possible.
   const bool build_tangent_mesh = displacement.is_vector && has_uv;
 
-  // 1) Collect the points to displace with the UV of their first vertex, and
-  // the faces of the material in the vertices of the tangent mesh.
+  // 1) Collect the points to displace with the UV, face and corner of their
+  // first vertex, and the faces of the material in the vertices of the tangent
+  // mesh.
   std::vector<int> point_targets(points.size(), -1);
-  std::vector<int> target_points;
+  std::vector<int> target_points, target_faces, target_corners;
   std::vector<GfVec2f> target_uvs;
   std::vector<int> mesh_vertices, vertex_to_mesh;
   VtIntArray mesh_face_counts, mesh_face_vertices;
@@ -125,6 +189,8 @@ void ApplyDisplacement(const SdfPath& mesh_id, const MeshGeometry& mesh,
       if (point_targets[p] < 0 && !displaced_points[p]) {
         point_targets[p] = static_cast<int>(target_points.size());
         target_points.push_back(p);
+        target_faces.push_back(static_cast<int>(face));
+        target_corners.push_back(corner);
         target_uvs.push_back(has_uv ? st[v] : GfVec2f(0.f));
       }
       if (build_tangent_mesh) {
@@ -237,7 +303,29 @@ void ApplyDisplacement(const SdfPath& mesh_id, const MeshGeometry& mesh,
 
   // 3) Evaluate the displacement offsets and add them to the target points.
   // The offsets are computed in object space, while the texture is evaluated
-  // in world space.
+  // in world space (with `attr_shape` supplying its mesh attributes).
+  mitsuba::ref<detail::DisplacementAttrShape<Float, Spectrum>> attr_shape;
+  if (!displacement.attributes.empty()) {
+    typename detail::DisplacementAttrShape<Float, Spectrum>::AttributeMap attrs;
+    for (const auto& [name, channels] : displacement.attributes) {
+      if (name == "__n_object") {
+        attrs.emplace(MeshAttributeName(name, channels), norm_buf);
+        continue;
+      }
+      // `__p_object` reads the points before displacement.
+      auto it = primvars.find(name == "__p_object" ? HdTokens->points
+                                                   : TfToken(name));
+      if (it == primvars.end()) continue;
+      if (auto host = GeometryProcessor::GatherPrimvar(
+              it->second, channels, target_points, target_faces,
+              target_corners)) {
+        attrs.emplace(MeshAttributeName(name, channels),
+                      dr::load<FloatBuffer>(host->data(), host->size()));
+      }
+    }
+    attr_shape =
+        new detail::DisplacementAttrShape<Float, Spectrum>(std::move(attrs));
+  }
   const float dp_dv_sign = transform.GetDeterminant() < 0.0 ? 1.0f : -1.0f;
   using mitsuba::detail::deinterleave;
   using mitsuba::detail::interleaved;
@@ -251,6 +339,7 @@ void ApplyDisplacement(const SdfPath& mesh_id, const MeshGeometry& mesh,
         si.p = Vector3f(deinterleave<3>(pos_buf, i));
         si.n = n_world;
         si.prim_index = i;
+        si.shape = attr_shape.get();
         si.sh_frame = Frame(n_world);
         si.dp_du = si.sh_frame.s;
         si.dp_dv = -si.sh_frame.t;
@@ -419,8 +508,8 @@ std::vector<SubMeshOutput> RunGeometryPipeline(
     for (size_t i = 0; i < mesh.material_ids.size(); ++i) {
       if (displacements[i].texture) {
         ApplyDisplacement<Float, Spectrum>(
-            id, mesh, is_hole, displacements[i], static_cast<int>(i), uv_mesh,
-            disp_normals, transform, displaced_points, points);
+            id, mesh, primvars, is_hole, displacements[i], static_cast<int>(i),
+            uv_mesh, disp_normals, transform, displaced_points, points);
       }
     }
     primvars[kPoints].value = VtValue(points);

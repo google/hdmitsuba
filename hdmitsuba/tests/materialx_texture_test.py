@@ -24,6 +24,7 @@ import numpy as np
 from pxr import Gf
 from pxr import Sdf
 from pxr import Usd
+from pxr import UsdGeom
 from pxr import UsdShade
 import pytest
 
@@ -808,7 +809,12 @@ def test_materialx_vector_displacement_bitangent(
         mesh_data,
         0,
         Gf.Matrix4d().SetScale(Gf.Vec3d(scale_x, 1.0, 1.0)),
-        [(mat.displacement, mat.requires_uv, mat.is_vector)],
+        [(
+            mat.displacement,
+            mat.requires_uv,
+            mat.is_vector,
+            mat.displacement_attributes,
+        )],
         set(),
     )
     np.testing.assert_allclose(
@@ -948,3 +954,149 @@ def test_materialx_displacement_terminals(
   capfd.readouterr()
   assert material_lib.convert_mesh_material(mat.GetPrim()).displacement is None
   assert 'Unsupported MaterialX displacement shader' in capfd.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ('disp_expr', 'primvar', 'transform', 'expected_disp'),
+    [
+        # Object-space position ignores the translation and scale in `transform`.
+        pytest.param(
+            (
+                'ND_extract_vector3',
+                {
+                    'in_': ('ND_position_vector3', {'space': 'object'}),
+                    'index': 0,
+                },
+            ),
+            None,
+            Gf.Matrix4d().SetScale(Gf.Vec3d(2.0, 2.0, 1.0))
+            * Gf.Matrix4d().SetTranslate(Gf.Vec3d(5.0, -3.0, 2.0)),
+            [-0.8, 0.8, 0.8, -0.8],
+            id='position_object',
+        ),
+        # Object-space normal stays (0, 0, 1) even when rotated 90 deg around X.
+        pytest.param(
+            (
+                'ND_extract_vector3',
+                {'in_': ('ND_normal_vector3', {'space': 'object'}), 'index': 2},
+            ),
+            None,
+            Gf.Matrix4d().SetRotate(Gf.Rotation(Gf.Vec3d(1.0, 0.0, 0.0), 90.0)),
+            [1.0, 1.0, 1.0, 1.0],
+            id='normal_object',
+        ),
+        pytest.param(
+            ('ND_geompropvalue_float', {'geomprop': 'mask'}),
+            (
+                'mask',
+                Sdf.ValueTypeNames.FloatArray,
+                'vertex',
+                [0.1, 0.2, 0.3, 0.4],
+            ),
+            Gf.Matrix4d(1.0),
+            [0.1, 0.2, 0.3, 0.4],
+            id='primvar_vertex',
+        ),
+        pytest.param(
+            ('ND_geompropvalue_float', {'geomprop': 'gain'}),
+            ('gain', Sdf.ValueTypeNames.Float, 'constant', 0.25),
+            Gf.Matrix4d(1.0),
+            [0.25, 0.25, 0.25, 0.25],
+            id='primvar_constant_scalar',
+        ),
+        pytest.param(
+            ('ND_geompropvalue_float', {'geomprop': 'face_h'}),
+            ('face_h', Sdf.ValueTypeNames.FloatArray, 'uniform', [0.2, 0.5]),
+            Gf.Matrix4d(1.0),
+            [0.2, 0.2, 0.2, 0.5],
+            id='primvar_uniform',
+        ),
+        pytest.param(
+            ('ND_geompropvalue_float', {'geomprop': 'fv_h'}),
+            (
+                'fv_h',
+                Sdf.ValueTypeNames.FloatArray,
+                'faceVarying',
+                [0.15, 0.25, 0.35, 0.99, 0.88, 0.45],
+            ),
+            Gf.Matrix4d(1.0),
+            [0.15, 0.25, 0.35, 0.45],
+            id='primvar_facevarying',
+        ),
+        pytest.param(
+            (
+                'ND_extract_color3',
+                {'in_': ('ND_geomcolor_color3', {}), 'index': 0},
+            ),
+            (
+                'displayColor',
+                Sdf.ValueTypeNames.Color3fArray,
+                'vertex',
+                [
+                    (0.2, 0.0, 0.0),
+                    (0.4, 0.0, 0.0),
+                    (0.6, 0.0, 0.0),
+                    (0.8, 0.0, 0.0),
+                ],
+            ),
+            Gf.Matrix4d(1.0),
+            [0.2, 0.4, 0.6, 0.8],
+            id='geomcolor',
+        ),
+        pytest.param(
+            ('ND_geompropvalue_float', {'geomprop': 'missing', 'default': 0.3}),
+            None,
+            Gf.Matrix4d(1.0),
+            [0.3, 0.3, 0.3, 0.3],
+            id='primvar_missing_default',
+        ),
+    ],
+)
+def test_materialx_displacement_object_space_and_primvars(
+    disp_expr: tuple[str, dict[str, object]],
+    primvar: tuple[str, object, str, object] | None,
+    transform: Gf.Matrix4d,
+    expected_disp: list[float],
+) -> None:
+  """Tests object-space intrinsics and mesh primvars in MaterialX displacement.
+
+  Args:
+    disp_expr: MaterialX scalar expression driving `ND_displacement_float`.
+    primvar: Optional `(name, sdf_type, interpolation, value)` to author.
+    transform: Object-to-world transform passed to `process_mesh`.
+    expected_disp: Expected scalar displacement at each of the quad's 4 corners.
+  """
+  stage = Usd.Stage.CreateInMemory()
+  quad = mtlx.define_quad(stage, '/Quad')
+  # Drop UVs to verify object-space intrinsics and primvars do not require `st`.
+  quad.GetPrim().RemoveProperty('primvars:st')
+  if primvar is not None:
+    name, sdf_type, interp, value = primvar
+    if interp in ('uniform', 'faceVarying'):
+      quad.CreateFaceVertexCountsAttr([3, 3])
+      quad.CreateFaceVertexIndicesAttr([0, 1, 2, 0, 2, 3])
+    UsdGeom.PrimvarsAPI(quad).CreatePrimvar(name, sdf_type, interp).Set(value)
+  mat = _convert_mtlx_disp('ND_displacement_float', displacement=disp_expr)
+  assert not mat.requires_uv
+  mesh_data = geom_lib.extract_mesh_data(
+      stage, quad.GetPath(), Usd.TimeCode.Default()
+  )
+  (sub,) = geom_lib.process_mesh(
+      mesh_data,
+      0,
+      transform,
+      [(
+          mat.displacement,
+          mat.requires_uv,
+          mat.is_vector,
+          mat.displacement_attributes,
+      )],
+      set(),
+  )
+  expected_world = np.array([
+      transform.TransformAffine(p + Gf.Vec3f(0.0, 0.0, d))
+      for p, d in zip(quad.GetPointsAttr().Get(), expected_disp)
+  ])
+  actual = np.unique(np.round(sub.primvars['points'], 6), axis=0)
+  expected = np.unique(np.round(expected_world, 6), axis=0)
+  np.testing.assert_allclose(actual, expected, atol=1e-5)

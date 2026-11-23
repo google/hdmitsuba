@@ -338,6 +338,37 @@ void GeometryProcessor::TransformPrimvars(VertexPrimvarMap& primvars,
   });
 }
 
+std::optional<std::vector<float>> GeometryProcessor::GatherPrimvar(
+    const PrimvarState& state, int channels, absl::Span<const int> points,
+    absl::Span<const int> faces, absl::Span<const int> corners) {
+  const bool is_const = state.interpolation == HdInterpolationConstant;
+  auto arr = ExtractPrimvarArray(state.value, is_const);
+  if (!arr || std::visit([](const auto& a) { return a.empty(); }, *arr)) {
+    return std::nullopt;
+  }
+  absl::Span<const int> idx =
+      state.interpolation == HdInterpolationUniform       ? faces
+      : state.interpolation == HdInterpolationFaceVarying ? corners
+                                                          : points;
+  std::vector<float> out(idx.size() * channels, 0.0f);
+  std::visit(
+      [&](const auto& src) {
+        using T = typename std::decay_t<decltype(src)>::value_type;
+        for (size_t i = 0; i < idx.size(); ++i) {
+          const T& elem = src[is_const ? 0 : idx[i]];
+          float* dst = out.data() + i * channels;
+          if constexpr (std::is_arithmetic_v<T>) {
+            std::fill_n(dst, channels, static_cast<float>(elem));
+          } else {
+            std::copy_n(elem.data(), std::min<size_t>(channels, T::dimension),
+                        dst);
+          }
+        }
+      },
+      *arr);
+  return out;
+}
+
 ExpandedMesh GeometryProcessor::ExpandPrimData(
     const VtIntArray& face_vertex_counts, const VtIntArray& face_vertex_indices,
     size_t num_points, const PrimvarMap& primvars) {

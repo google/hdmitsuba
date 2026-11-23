@@ -47,10 +47,10 @@ This document provides an overview of the USD features supported by `hdMitsuba`,
         `(dPdu, dPdv, N)` space, or an arbitrary orthonormal frame around `N`
         without `st`), plus `mix` (`displacementshader`) and `surfacematerial`
         `displacementshader` inputs. Procedural displacement graphs that do not
-        read UVs work on meshes without `st`; displacement expressions evaluate
-        in world space while offsets are applied in object space (object-space
-        intrinsics and primvars fall back to world space / default values, and
-        UV tangents are computed only for vector displacement).
+        read UVs work on meshes without `st`; displacement expressions can read
+        object- and world-space positions/normals as well as mesh primvars
+        (`geompropvalue` / `geomcolor`), while offsets are applied in object
+        space (UV tangents are computed only for vector displacement).
     *   Custom MaterialX `.mtlx` node definitions
         (`info:implementationSource = "sourceAsset"`) are also supported if
         OpenUSD is built with MaterialX support.

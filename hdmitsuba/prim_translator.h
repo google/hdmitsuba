@@ -62,10 +62,12 @@ struct MaterialDisplacement {
   // Whether `texture` returns a 3D vector displacement in
   // (dPdu, dPdv, N) tangent space, instead of a scalar along the normal.
   bool is_vector = false;
+  // Mesh attributes read by `texture`.
+  MeshAttributeRequests attributes;
 
   bool operator==(const MaterialDisplacement& other) const {
     return texture == other.texture && requires_uv == other.requires_uv &&
-           is_vector == other.is_vector;
+           is_vector == other.is_vector && attributes == other.attributes;
   }
   bool operator!=(const MaterialDisplacement& other) const {
     return !(*this == other);

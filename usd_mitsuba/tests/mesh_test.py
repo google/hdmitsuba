@@ -40,16 +40,19 @@ def _set_mitsuba_variant():
   mi.set_variant('cuda_ad_rgb', 'llvm_ad_rgb')
 
 
-def _uniform(value: float) -> tuple[Any, bool, bool]:
-  return mi.load_dict({'type': 'uniform', 'value': value}), False, False
+_Displacement = tuple[Any, bool, bool, tuple[tuple[str, int], ...]]
 
 
-def _vector(value: tuple[float, float, float]) -> tuple[Any, bool, bool]:
-  return mi.load_dict({'type': 'rgb', 'value': value}), False, True
+def _uniform(value: float) -> _Displacement:
+  return mi.load_dict({'type': 'uniform', 'value': value}), False, False, ()
+
+
+def _vector(value: tuple[float, float, float]) -> _Displacement:
+  return mi.load_dict({'type': 'rgb', 'value': value}), False, True, ()
 
 
 def _process(
-    displacement: tuple[Any, bool, bool] | None,
+    displacement: _Displacement | None,
     transform: Gf.Matrix4d | None = None,
     requested: set[str] | None = None,
     points: list[tuple[float, float, float]] | None = None,
@@ -78,7 +81,7 @@ def _process(
       mesh_data,
       0,
       transform or Gf.Matrix4d(1.0),
-      [(None, True, False) if displacement is None else displacement],
+      [(None, True, False, ()) if displacement is None else displacement],
       requested or set(),
   )
   return sub

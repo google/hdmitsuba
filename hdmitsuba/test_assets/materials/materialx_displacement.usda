@@ -70,14 +70,30 @@ def Xform "root"
             def Shader "Pos"
             {
                 uniform token info:id = "ND_position_vector3"
-                string inputs:space = "world"
+                string inputs:space = "object"
                 float3 outputs:out
+            }
+
+            def Shader "Mask"
+            {
+                uniform token info:id = "ND_geompropvalue_float"
+                float inputs:default = 0.0
+                string inputs:geomprop = "disp_mask"
+                float outputs:out
+            }
+
+            def Shader "MaskedNoise"
+            {
+                uniform token info:id = "ND_multiply_float"
+                float inputs:in1.connect = </root/_materials/noise_disp/Noise.outputs:out>
+                float inputs:in2.connect = </root/_materials/noise_disp/Mask.outputs:out>
+                float outputs:out
             }
 
             def Shader "Disp"
             {
                 uniform token info:id = "ND_displacement_float"
-                float inputs:displacement.connect = </root/_materials/noise_disp/Noise.outputs:out>
+                float inputs:displacement.connect = </root/_materials/noise_disp/MaskedNoise.outputs:out>
                 token outputs:out
             }
         }
@@ -191,6 +207,9 @@ def Xform "root"
         int[] faceVertexIndices = [0, 1, 2, 3]
         rel material:binding = </root/_materials/noise_disp>
         point3f[] points = [(-0.45, -0.45, 0), (0.45, -0.45, 0), (0.45, 0.45, 0), (-0.45, 0.45, 0)]
+        float[] primvars:disp_mask = [0.0, 1.0, 1.0, 0.25] (
+            interpolation = "vertex"
+        )
         int primvars:mitsuba:subdivision_level = 3
         uniform token subdivisionScheme = "catmullClark"
         double3 xformOp:translate = (-0.6, 0.6, 0)

@@ -479,7 +479,6 @@ class MtlxExprCompiler {
   std::vector<ref<Object>> inputs_;
   uint16_t discover_input_idx_ = 0;
   bool thin_walled_ = false;
-  bool allow_mesh_attrs_ = true;
   absl::flat_hash_set<std::string>* warned_ = nullptr;
 };
 
@@ -572,7 +571,6 @@ GfVec3f MtlxExprCompiler::ToLinearRec709(GfVec3f rgb_val,
 
 Expr MtlxExprCompiler::MeshAttr(std::string_view name, int dim,
                                 const Expr& def) {
-  if (!allow_mesh_attrs_) return def;
   std::pair<std::string, int> req{std::string(name), dim};
   auto it = std::find(attr_requests_.begin(), attr_requests_.end(), req);
   if (it == attr_requests_.end()) {
@@ -1987,7 +1985,6 @@ void MtlxExprCompiler::CompileBsdf(const mx::NodePtr& shader_node) {
 
 MtlxExprCompiler::DisplacementExpr MtlxExprCompiler::CompileDisplacement(
     const mx::NodePtr& disp_node) {
-  allow_mesh_attrs_ = false;
   mx::NodePtr node = UnwrapShaderNode(disp_node, "displacementshader");
   if (!node) return {};
   if (auto it = disp_expr_.find(node.get()); it != disp_expr_.end()) {
@@ -2133,7 +2130,9 @@ MaterialDisplacement CompileDisplacementShader(
   if (disp.expr.is_zero()) return {};
   bool requires_uv = compiler.ProgramUsesUv(disp.expr);
   return {compiler.CreateExprTexture(disp.expr, /*unbounded=*/true, variant),
-          requires_uv, disp.is_vector};
+          requires_uv, disp.is_vector,
+          MeshAttributeRequests(compiler.attr_requests().begin(),
+                                compiler.attr_requests().end())};
 }
 
 void DiscoverDisplacementShaderTextures(

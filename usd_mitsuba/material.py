@@ -660,6 +660,8 @@ class MeshMaterial:
     is_vector: Whether `displacement` returns a 3D vector in the (dPdu, dPdv, N)
       tangent frame instead of a scalar offset along the normal.
     requires_uv: Whether evaluating `displacement` requires texture coordinates.
+    displacement_attributes: `(primvar name, channel count)` pairs of the
+      primvars that `displacement` reads as mesh attributes.
     mesh_attributes: `(primvar name, channel count)` pairs of the primvars that
       the material reads as mesh attributes.
   """
@@ -670,6 +672,7 @@ class MeshMaterial:
   interior_medium: mi.Medium | None = None
   is_vector: bool = False
   requires_uv: bool = True
+  displacement_attributes: tuple[tuple[str, int], ...] = ()
   mesh_attributes: tuple[tuple[str, int], ...] = ()
 
 
@@ -699,7 +702,7 @@ def convert_mesh_material(
   """
 
   bsdf, emitter, displacement, interior_medium = None, None, None, None
-  is_vector, requires_uv = False, True
+  is_vector, requires_uv, displacement_attributes = False, True, set()
   mesh_attributes = set()
   # Like hdMitsuba, resolve the "full" purpose (falling back to allPurpose).
   if prim.IsA(UsdShade.Material):
@@ -773,7 +776,7 @@ def convert_mesh_material(
         mtlx_disp = mtlx[3]
     if mtlx_disp is not None:
       # MaterialX displacement (even if zero/unsupported) suppresses fallback.
-      displacement, requires_uv, is_vector = mtlx_disp
+      displacement, requires_uv, is_vector, displacement_attributes = mtlx_disp
 
   if (
       bsdf is None
@@ -800,6 +803,7 @@ def convert_mesh_material(
       interior_medium=interior_medium,
       is_vector=is_vector,
       requires_uv=requires_uv,
+      displacement_attributes=tuple(sorted(displacement_attributes)),
       mesh_attributes=tuple(sorted(mesh_attributes)),
   )
 
