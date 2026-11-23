@@ -1148,48 +1148,54 @@ std::optional<Expr> MtlxExprCompiler::CompileGeomNode(const mx::NodePtr& node,
                       "' index; using index 0.");
     }
   };
-  auto warn_world_space = [&](const std::string& space) {
+  auto warn_world_space = [&](std::string_view kind, std::string_view space) {
     if (space != "world") {
-      WarnUnsupported("Unsupported MaterialX " + cat + " space '" + space +
+      WarnUnsupported("Unsupported MaterialX " + std::string(kind) +
+                      " space '" + std::string(space) +
                       "'; evaluating in world space.");
     }
+  };
+  auto compile_intrinsic = [&](std::string_view kind,
+                               std::string_view space) -> Expr {
+    if (kind == "texcoord") return DefaultTexcoord(type == "vector3" ? 3 : 2);
+    if (kind == "position") {
+      if (space == "object" || space == "model") {
+        return MeshAttr("__p_object", 3, Expr::p_world());
+      }
+      warn_world_space(kind, space);
+      return Expr::p_world();
+    }
+    if (kind == "normal") {
+      if (space == "object" || space == "model") {
+        return call(mtlx::Op::Normalize,
+                    MeshAttr("__n_object", 3, Expr::n_world()));
+      }
+      if (space == "tangent") return ConstRgb(0.0, 0.0, 1.0);
+      warn_world_space(kind, space);
+      return Expr::n_world();
+    }
+    bool bitangent = kind == "bitangent";
+    if (space == "tangent") {
+      return bitangent ? ConstRgb(0.0, 1.0, 0.0) : ConstRgb(1.0, 0.0, 0.0);
+    }
+    warn_world_space(kind, space);
+    return bitangent ? Expr::b_world() : Expr::t_world();
   };
 
   if (cat == "image") return SampleImage(node);
   if (cat == "texcoord") {
     check_zero_index();
-    return DefaultTexcoord(type == "vector3" ? 3 : 2);
+    return compile_intrinsic("texcoord", "");
   }
-  if (cat == "position") {
-    std::string space = GetNodeInputString(node, "space", "object");
-    if (space == "object" || space == "model") {
-      return MeshAttr("__p_object", 3, Expr::p_world());
-    }
-    warn_world_space(space);
-    return Expr::p_world();
-  }
-  if (cat == "normal") {
-    std::string space = GetNodeInputString(node, "space", "object");
-    if (space == "object" || space == "model") {
-      return call(mtlx::Op::Normalize,
-                  MeshAttr("__n_object", 3, Expr::n_world()));
-    }
-    if (space == "tangent") return ConstRgb(0.0, 0.0, 1.0);
-    warn_world_space(space);
-    return Expr::n_world();
+  if (cat == "position" || cat == "normal") {
+    return compile_intrinsic(cat, GetNodeInputString(node, "space", "object"));
   }
   if (cat == "tangent" || cat == "bitangent") {
     check_zero_index();
-    std::string space = GetNodeInputString(node, "space", "object");
-    bool bitangent = cat == "bitangent";
-    if (space == "tangent") {
-      return bitangent ? ConstRgb(0.0, 1.0, 0.0) : ConstRgb(1.0, 0.0, 0.0);
-    }
-    warn_world_space(space);
-    return bitangent ? Expr::b_world() : Expr::t_world();
+    return compile_intrinsic(cat, GetNodeInputString(node, "space", "object"));
   }
   if (cat == "viewdirection") {
-    warn_world_space(GetNodeInputString(node, "space", "world"));
+    warn_world_space(cat, GetNodeInputString(node, "space", "world"));
     return Expr({mtlx::Op::GeomIncidentDir, 0, 0});
   }
   if (cat == "geomcolor") {
@@ -1205,6 +1211,25 @@ std::optional<Expr> MtlxExprCompiler::CompileGeomNode(const mx::NodePtr& node,
     std::string p = GetNodeInputString(node, "geomprop");
     if (p.empty()) return in("default");
     uint8_t ch = TypeChannels(type);
+    static constexpr std::pair<std::string_view,
+                               std::pair<std::string_view, std::string_view>>
+        kAliases[] = {
+            {"Pobject", {"position", "object"}},
+            {"Pworld", {"position", "world"}},
+            {"Nobject", {"normal", "object"}},
+            {"Nworld", {"normal", "world"}},
+            {"Tobject", {"tangent", "object"}},
+            {"Tworld", {"tangent", "world"}},
+            {"Bobject", {"bitangent", "object"}},
+            {"Bworld", {"bitangent", "world"}},
+            {"UV0", {"texcoord", ""}},
+    };
+    for (const auto& [alias, target] : kAliases) {
+      if (p == alias) {
+        Expr e = compile_intrinsic(target.first, target.second);
+        return ch == 1 ? e.x() : e.with_channels(ch);
+      }
+    }
     return MeshAttr(p, ch == 1 ? 1 : 3, in("default")).with_channels(ch);
   }
   if (cat == "transformpoint" || cat == "transformvector" ||
