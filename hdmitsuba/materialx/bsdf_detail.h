@@ -43,6 +43,11 @@ template <typename ScalarFloat>
 inline constexpr ScalarFloat kMinCos = ScalarFloat(1e-6f);
 
 template <typename Float>
+Float pow5(const Float& x) {
+  return dr::square(dr::square(x)) * x;
+}
+
+template <typename Float>
 Float oren_nayar_diffuse(const Float& n_dot_v, const Float& n_dot_l,
                          const Float& l_dot_v, const Float& roughness) {
   Float s = dr::fnmadd(n_dot_l, n_dot_v, l_dot_v);
@@ -421,6 +426,24 @@ std::pair<Spectrum, Float> oren_nayar_eval_pdf(const Vector<Float, 3>& wi_l,
                   : color * (pdf_val * oren_nayar_diffuse(n_dot_v, n_dot_l,
                                                           l_dot_v, roughness));
   return {dr::select(valid, val, 0.0f), dr::select(valid, pdf_val, 0.0f)};
+}
+
+template <typename Float, typename Spectrum>
+std::pair<Spectrum, Float> burley_diffuse_eval_pdf(const Vector<Float, 3>& wi_l,
+                                                   const Vector<Float, 3>& wo_l,
+                                                   const Spectrum& color,
+                                                   const Float& roughness) {
+  Float cos_i = Frame<Float>::cos_theta(wi_l),
+        cos_o = Frame<Float>::cos_theta(wo_l);
+  Float n_dot_v = dr::abs(cos_i), n_dot_l = dr::mulsign(cos_o, cos_i);
+  auto valid = (n_dot_v > 0.0f) && (n_dot_l > 0.0f);
+  Float pdf_val = n_dot_l * dr::InvPi<Float>;
+  // For unit vectors, `2 * (wo_l . h)^2 = 1 + wi_l . wo_l`.
+  Float f90_m1 = dr::fmadd(roughness, 1.0f + dr::dot(wi_l, wo_l), -0.5f);
+  Float burley = dr::fmadd(f90_m1, pow5(1.0f - n_dot_l), 1.0f) *
+                 dr::fmadd(f90_m1, pow5(1.0f - n_dot_v), 1.0f);
+  return {dr::select(valid, color * (pdf_val * burley), 0.0f),
+          dr::select(valid, pdf_val, 0.0f)};
 }
 
 template <typename Float>

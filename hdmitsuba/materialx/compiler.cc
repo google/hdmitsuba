@@ -391,7 +391,7 @@ class MtlxExprCompiler {
                 const Expr& def);
   void WarnUnsupportedMicrofacetInputs(const mx::NodePtr& node,
                                        const std::string& cat);
-  int CompileDiffuseClosure(const mx::NodePtr& node, bool has_energy_comp);
+  int CompileDiffuseClosure(const mx::NodePtr& node, const std::string& cat);
   int CompileTranslucentClosure(const mx::NodePtr& node);
   int CompileDielectricClosure(const mx::NodePtr& node);
   int CompileConductorClosure(const mx::NodePtr& node);
@@ -1683,15 +1683,19 @@ void MtlxExprCompiler::WarnUnsupportedMicrofacetInputs(const mx::NodePtr& node,
 }
 
 int MtlxExprCompiler::CompileDiffuseClosure(const mx::NodePtr& node,
-                                            bool has_energy_comp) {
+                                            const std::string& cat) {
   Expr w_expr = CompileInputExpr(node, "weight", Expr::one());
   if (w_expr.is_zero()) return EmitOpaqueBlocker();
-  int energy_comp = has_energy_comp &&
-                    !CompileInputExpr(node, "energy_compensation").is_zero();
   int w_slot = EmitTmp(w_expr);
   int color_slot = EmitTmp(CompileInputExpr(node, "color", Expr::one()));
   int rough_slot = EmitTmp(CompileInputExpr(node, "roughness"));
   int n_slot = FrameSlot(node, "normal", Expr::n_world());
+  if (cat == "burley_diffuse_bsdf") {
+    return EmitClosure(mtlx::ClosureNode::MakeBurleyDiffuse(
+        w_slot, color_slot, rough_slot, n_slot));
+  }
+  int energy_comp = cat == "oren_nayar_diffuse_bsdf" &&
+                    !CompileInputExpr(node, "energy_compensation").is_zero();
   return EmitClosure(mtlx::ClosureNode::MakeDiffuse(
       w_slot, color_slot, rough_slot, energy_comp, n_slot));
 }
@@ -1769,8 +1773,9 @@ int MtlxExprCompiler::CompileBsdfClosure(const mx::NodePtr& raw_node) {
   };
 
   int idx = -1;
-  if (cat == "oren_nayar_diffuse_bsdf" || cat == "subsurface_bsdf") {
-    idx = CompileDiffuseClosure(node, cat == "oren_nayar_diffuse_bsdf");
+  if (cat == "oren_nayar_diffuse_bsdf" || cat == "subsurface_bsdf" ||
+      cat == "burley_diffuse_bsdf") {
+    idx = CompileDiffuseClosure(node, cat);
   } else if (cat == "translucent_bsdf") {
     idx = CompileTranslucentClosure(node);
   } else if (cat == "dielectric_bsdf") {

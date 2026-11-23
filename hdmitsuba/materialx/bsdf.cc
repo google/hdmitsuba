@@ -106,6 +106,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
         Leaf leaf{i, f_idx, -1, -1};
         switch (c.op) {
           case ClosureOp::OrenNayarDiffuse:
+          case ClosureOp::BurleyDiffuse:
             leaf.primary_spec = add_spec(c.diffuse.color);
             break;
           case ClosureOp::Translucent:
@@ -375,6 +376,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
   static std::pair<int, int> leaf_frame_slots(const ClosureNode& c) {
     switch (c.op) {
       case ClosureOp::OrenNayarDiffuse:
+      case ClosureOp::BurleyDiffuse:
         return {c.diffuse.normal, -1};
       case ClosureOp::Translucent:
         return {c.translucent.normal, -1};
@@ -390,6 +392,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
   static int leaf_weight_slot(const ClosureNode& c) {
     switch (c.op) {
       case ClosureOp::OrenNayarDiffuse:
+      case ClosureOp::BurleyDiffuse:
         return c.diffuse.weight;
       case ClosureOp::Translucent:
         return c.translucent.weight;
@@ -814,6 +817,11 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
       case ClosureOp::Translucent:
         std::tie(f, pdf) = detail::translucent_eval_pdf(
             wi_l, wo_l, s.spectra[leaf.primary_spec]);
+        break;
+      case ClosureOp::BurleyDiffuse:
+        std::tie(f, pdf) = detail::burley_diffuse_eval_pdf(
+            wi_l, wo_l, s.spectra[leaf.primary_spec],
+            dr::clip(s.tmps[c.diffuse.roughness].x(), 0.0f, 1.0f));
         break;
       default:
         std::tie(f, pdf) = detail::oren_nayar_eval_pdf(

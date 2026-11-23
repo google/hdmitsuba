@@ -1015,3 +1015,44 @@ def test_standard_surface(
   assert dr.allclose(
       bs.eta, dr.select(trans, exp_trans_eta or 1.0, 1.0), atol=1e-5
   )
+
+
+def test_burley_diffuse_bsdf() -> None:
+  """Tests `burley_diffuse_bsdf` analytical values, reciprocity, and layering."""
+  ctx = mi.BSDFContext()
+  color = (0.7, 0.4, 0.2)
+  si, si_rev = mtlx.make_test_si(), mtlx.make_test_si()
+  si.wi = mi.Vector3f([0.6, 0.6, 0.6], [0.0, 0.0, 0.0], [0.8, 0.8, -0.8])
+  si_rev.wi = mi.Vector3f([-0.8, 0.8, 0.8], [0.0, 0.0, 0.0], [0.6, 0.6, -0.6])
+
+  for roughness, exp_fwd, exp_retro in (
+      (0.0, 0.9947208, 0.9947208),
+      (0.85, 1.0036964, 1.0123174),
+  ):
+    bsdf = _compile_bsdf(
+        'ND_burley_diffuse_bsdf', color=color, roughness=roughness
+    )
+    assert mi.has_flag(bsdf.flags(), mi.BSDFFlags.DiffuseReflection)
+    val, pdf = bsdf.eval_pdf(ctx, si, si_rev.wi)
+    assert dr.allclose(
+        val,
+        mi.Color3f(*color)
+        * (0.6 * dr.inv_pi * mi.Float(exp_fwd, exp_retro, exp_retro)),
+        rtol=1e-4,
+    )
+    assert dr.allclose(pdf, 0.6 * dr.inv_pi, rtol=1e-5)
+    # Reciprocity: f(wi, wo) / |cos_o| == f(wo, wi) / |cos_i|.
+    assert dr.allclose(
+        val / dr.abs(si_rev.wi.z),
+        bsdf.eval(ctx, si_rev, si.wi) / dr.abs(si.wi.z),
+        rtol=1e-5,
+    )
+    _check_bsdf_sampling(bsdf)
+
+  # Zero-weight Burley diffuse still blocks layered bases as an opaque lobe.
+  bsdf_blocked = _compile_bsdf(
+      'ND_layer_bsdf',
+      top=('ND_burley_diffuse_bsdf', {'weight': 0.0, 'color': color}),
+      base=('ND_oren_nayar_diffuse_bsdf', {'color': (1.0, 1.0, 1.0)}),
+  )
+  assert dr.allclose(bsdf_blocked.eval(ctx, si, si_rev.wi), 0.0)
