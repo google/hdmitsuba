@@ -206,6 +206,16 @@ inline std::optional<ScalarAffineTransform4f> ExtractTransform4f(
 // it is unresolved), or an empty string otherwise.
 std::string ResolvePathFromValue(const VtValue& value);
 
+inline std::string ExtractStringOrToken(const VtValue& value) {
+  if (value.IsHolding<std::string>()) {
+    return value.UncheckedGet<std::string>();
+  }
+  if (value.IsHolding<TfToken>()) {
+    return value.UncheckedGet<TfToken>().GetString();
+  }
+  return ResolvePathFromValue(value);
+}
+
 // Creates the Mitsuba object of type `type` described by `props`, and returns
 // the first object of its expansion (e.g. the texture that a `bitmap` plugin
 // expands to), or the object itself if it does not expand.
