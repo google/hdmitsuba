@@ -268,11 +268,20 @@ VtValue SubdivisionEvaluator::RefinePrimvarImpl(
   return VtValue(std::move(flattened_values));
 }
 
+bool SubdivisionEvaluator::CanRefine(const VtValue& value) {
+  return value.IsHolding<VtVec4fArray>() || value.IsHolding<VtVec3fArray>() ||
+         value.IsHolding<VtVec2fArray>() || value.IsHolding<VtFloatArray>() ||
+         value.IsHolding<VtIntArray>() || value.IsHolding<VtBoolArray>();
+}
+
 VtValue SubdivisionEvaluator::RefinePrimvar(const VtValue& value,
                                             HdInterpolation interpolation,
                                             const TfToken& token) const {
-  if (!IsSubdivided()) {
+  if (!IsSubdivided() || interpolation == HdInterpolationConstant) {
     return value;
+  }
+  if (!CanRefine(value)) {
+    return {};
   }
 
   // Uniform primvars hold one value per face, which refined faces inherit from
@@ -307,7 +316,7 @@ VtValue SubdivisionEvaluator::RefinePrimvar(const VtValue& value,
     if (value.IsHolding<VtBoolArray>()) {
       return map_to_refined(value.UncheckedGet<VtBoolArray>());
     }
-    return value;
+    return {};
   }
 
   int fvar_channel = -1;
@@ -328,7 +337,7 @@ VtValue SubdivisionEvaluator::RefinePrimvar(const VtValue& value,
   }
 
   if (!stencil) {
-    return value;
+    return {};
   }
 
   if (value.IsHolding<VtVec4fArray>()) {
@@ -355,7 +364,7 @@ VtValue SubdivisionEvaluator::RefinePrimvar(const VtValue& value,
     return RefinePrimvarImpl<VtFloatArray>(
         to_float(value.UncheckedGet<VtBoolArray>()), stencil, fvar_channel);
   }
-  return value;
+  return {};
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

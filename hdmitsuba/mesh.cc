@@ -380,9 +380,13 @@ SubdivisionEvaluator::FVarIndicesMap HdMitsubaMesh::GetFVarIndices(
   SubdivisionEvaluator::FVarIndicesMap fvar_indices;
   for (const auto& primvar :
        GetPrimvarDescriptors(sceneDelegate, HdInterpolationFaceVarying)) {
-    VtIntArray& indices = fvar_indices[primvar.name];
-    if (primvar.indexed) {
-      GetIndexedPrimvar(sceneDelegate, primvar.name, &indices);
+    VtIntArray indices;
+    const VtValue value =
+        primvar.indexed
+            ? GetIndexedPrimvar(sceneDelegate, primvar.name, &indices)
+            : GetPrimvar(sceneDelegate, primvar.name);
+    if (SubdivisionEvaluator::CanRefine(value)) {
+      fvar_indices[primvar.name] = std::move(indices);
     }
   }
   return fvar_indices;
@@ -466,6 +470,10 @@ void HdMitsubaMesh::SyncPrimvars(HdSceneDelegate* sceneDelegate,
     if (value.IsEmpty()) return;
     if (refine && subdiv_evaluator_.IsSubdivided()) {
       value = subdiv_evaluator_.RefinePrimvar(value, interpolation, name);
+      if (value.IsEmpty()) {
+        geometry_.primvars.erase(name);
+        return;
+      }
     }
     geometry_.primvars[name] = {std::move(value), interpolation};
   };

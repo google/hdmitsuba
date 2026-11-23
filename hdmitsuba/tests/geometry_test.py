@@ -502,6 +502,36 @@ def test_truncated_primvar(interpolation: str, subdivision_level: int):
   _assert_all_aovs_close(_render_aovs(stage), without_st)
 
 
+@pytest.mark.parametrize(
+    'interpolation',
+    [UsdGeom.Tokens.uniform, UsdGeom.Tokens.vertex, UsdGeom.Tokens.faceVarying],
+)
+def test_string_primvar_does_not_warn(
+    interpolation: str,
+    capfd: pytest.CaptureFixture[str],
+):
+  """Primvars that cannot be subdivided (e.g., strings) are silently ignored."""
+  stage = _create_stage()
+  mesh = _create_grid(stage)
+  counts = {
+      UsdGeom.Tokens.uniform: len(mesh.GetFaceVertexCountsAttr().Get()),
+      UsdGeom.Tokens.vertex: len(mesh.GetPointsAttr().Get()),
+      UsdGeom.Tokens.faceVarying: len(mesh.GetFaceVertexIndicesAttr().Get()),
+  }
+  _set_primvar(
+      mesh,
+      'tag',
+      Sdf.ValueTypeNames.StringArray,
+      interpolation,
+      ['a'] * counts[interpolation],
+  )
+  capfd.readouterr()
+  assert _render_aovs(stage)['depth'][_HALF, _HALF] > 0.0
+  _set_subdivision_level(mesh, 2)
+  assert _render_aovs(stage)['depth'][_HALF, _HALF] > 0.0
+  assert 'Ignoring primvar tag' not in capfd.readouterr().err
+
+
 # -----------------------------------------------------------------------------
 # Subdivision and displacement
 # -----------------------------------------------------------------------------
