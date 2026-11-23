@@ -378,11 +378,11 @@ constexpr bool is_spatially_varying_op(Op op) {
   return false;
 }
 
-// Dielectric `ClosureNode::Dielectric::mode` scatter mode values
+// Microfacet `ClosureNode::Microfacet::mode` scatter mode values
 // (`kScatterModeMask`) and flags.
 inline constexpr int kScatterR = 0, kScatterT = 1, kScatterRT = 2;
 inline constexpr int kScatterModeMask = 3, kScatterThinWalled = 4,
-                     kScatterTwoSided = 8;
+                     kScatterTwoSided = 8, kScatterRetroreflective = 16;
 
 inline constexpr int kSheenContyKulla = 0, kSheenZeltner = 1;
 
@@ -394,6 +394,7 @@ enum class ClosureOp : int32_t {
   Translucent,
   Dielectric,
   Conductor,
+  GeneralizedSchlick,
   Layer,
   Mix,
   Add,
@@ -412,34 +413,32 @@ struct ClosureNode {
   // `Sheen` (`mode = kSheen*`).
   struct Diffuse {
     int weight, color, roughness, mode, normal;
-    int _pad[2] = {};
+    int _pad[4] = {};
   };
   struct Translucent {
     int weight, color, normal;
-    int _pad[4] = {};
+    int _pad[6] = {};
   };
-  struct Dielectric {
-    int weight, tint, roughness, mode, ior, normal, tangent;
-  };
-  struct Conductor {
-    int weight, ior, roughness, extinction, normal, tangent;
-    int _pad[1] = {};
+  // Shared by `Dielectric` (`p = {tint, ior}`), `Conductor` (`p = {ior, ext}`),
+  // and `GeneralizedSchlick` (`p = {color0, color82, color90, exponent}`).
+  struct Microfacet {
+    int weight, roughness, mode, normal, tangent;
+    int p[4];
   };
   // Combinator args: `first`/`second` index `MtlxProgram::closures` — Layer
   // (top, base), Mix (fg, bg), Add (in1, in2), Multiply (in1, -1); `weight` is
   // the VM temporary slot of the Mix weight or Multiply factor (-1 otherwise).
   struct Comb {
     int first, second, weight;
-    int _pad[4] = {};
+    int _pad[6] = {};
   };
 
   ClosureOp op = ClosureOp::Null;
   union {
-    int raw[7] = {};
+    int raw[9] = {};
     Diffuse diffuse;
     Translucent translucent;
-    Dielectric dielectric;
-    Conductor conductor;
+    Microfacet microfacet;
     Comb comb;
   };
 
@@ -474,18 +473,11 @@ struct ClosureNode {
     return n;
   }
 
-  static ClosureNode MakeDielectric(int weight, int tint, int roughness,
-                                    int mode, int ior, int normal,
-                                    int tangent) {
-    ClosureNode n(ClosureOp::Dielectric);
-    n.dielectric = {weight, tint, roughness, mode, ior, normal, tangent};
-    return n;
-  }
-
-  static ClosureNode MakeConductor(int weight, int ior, int roughness,
-                                   int extinction, int normal, int tangent) {
-    ClosureNode n(ClosureOp::Conductor);
-    n.conductor = {weight, ior, roughness, extinction, normal, tangent};
+  static ClosureNode MakeMicrofacet(ClosureOp op, int weight, int roughness,
+                                    int mode, int normal, int tangent, int p0,
+                                    int p1, int p2 = -1, int p3 = -1) {
+    ClosureNode n(op);
+    n.microfacet = {weight, roughness, mode, normal, tangent, {p0, p1, p2, p3}};
     return n;
   }
 
@@ -516,7 +508,7 @@ struct ClosureNode {
  private:
   explicit ClosureNode(ClosureOp op) : op(op) {}
 };
-static_assert(sizeof(ClosureNode) == 32);
+static_assert(sizeof(ClosureNode) == 40);
 static_assert(std::has_unique_object_representations_v<ClosureNode>);
 
 // Variant-independent compiled MaterialX program passed via `Properties`.
