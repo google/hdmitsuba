@@ -387,6 +387,7 @@ inline constexpr int kScatterModeMask = 3, kScatterThinWalled = 4,
 enum class ClosureOp : int32_t {
   Null,
   OrenNayarDiffuse,
+  BurleyDiffuse,
   Translucent,
   Dielectric,
   Conductor,
@@ -445,6 +446,13 @@ struct ClosureNode {
                                  int energy_comp, int normal) {
     ClosureNode n(ClosureOp::OrenNayarDiffuse);
     n.diffuse = {weight, color, roughness, energy_comp, normal};
+    return n;
+  }
+
+  static ClosureNode MakeBurleyDiffuse(int weight, int color, int roughness,
+                                       int normal) {
+    ClosureNode n(ClosureOp::BurleyDiffuse);
+    n.diffuse = {weight, color, roughness, 0, normal};
     return n;
   }
 
