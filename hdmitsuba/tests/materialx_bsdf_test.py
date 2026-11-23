@@ -21,10 +21,15 @@ from typing import Any
 
 import drjit as dr
 import mitsuba as mi
+import numpy as np
 from pxr import Gf
+from pxr import Sdf
+from pxr import Usd
+from pxr import UsdGeom
 import pytest
 
 from hdmitsuba.tests import materialx_test_helpers as mtlx
+from usd_mitsuba import translator as usd_mitsuba_translator
 
 
 @pytest.fixture(autouse=True)
@@ -143,6 +148,22 @@ _LOBE_CASES = [
         },
         {'wi': (0.6, -0.4, 0.6928203)},
         id='generalized_schlick_RT',
+    ),
+    pytest.param(
+        'ND_chiang_hair_bsdf',
+        {
+            'tint_R': (0.9, 0.85, 0.8),
+            'tint_TT': (0.8, 0.5, 0.3),
+            'tint_TRT': (0.7, 0.4, 0.2),
+            'roughness_R': (0.15, 0.25),
+            'roughness_TT': (0.08, 0.25),
+            'roughness_TRT': (0.3, 0.3),
+            'ior': 1.55,
+            'cuticle_angle': 0.52,
+            'absorption_coefficient': Gf.Vec3f(0.2, 0.5, 0.9),
+        },
+        {},
+        id='chiang_hair',
     ),
     pytest.param(
         'ND_dielectric_bsdf',
@@ -752,6 +773,11 @@ def test_bsdf_ad_gradients() -> None:
       lambda _, w: w.x - w.z,
       eps=1.0,
       atol=1e-4,
+  )
+  _check_fd_grad(
+      _compile_bsdf('ND_chiang_hair_bsdf', cuticle_angle=0.55),
+      0.55,
+      lambda bs, w: w * bs.wo.x,
   )
 
   bsdf_op = _compile_bsdf(
@@ -1516,4 +1542,173 @@ def test_thin_film_spectral() -> None:
       spec_hw.eval(ctx, si_spec, wo_spec),
       spec_bare.eval(ctx, si_spec, wo_spec),
       rtol=1e-3,
+  )
+
+
+def test_chiang_hair_bsdf() -> None:
+  """Tests `chiang_hair_bsdf` lobes, cuticle tilt, sharpness, and features."""
+  ctx = mi.BSDFContext()
+  si = mtlx.make_test_si()
+  r_only_kw = {
+      'tint_TT': (0.0, 0.0, 0.0),
+      'tint_TRT': (0.0, 0.0, 0.0),
+      'roughness_R': (0.1, 0.2),
+  }
+
+  # `tint_TT` tints transmission proportionally while R-only has zero TT.
+  hair_r = _compile_bsdf('ND_chiang_hair_bsdf', **r_only_kw)
+  hair_tt = _compile_bsdf(
+      'ND_chiang_hair_bsdf',
+      **{**r_only_kw, 'tint_TT': (0.2, 0.6, 0.9), 'roughness_TT': (0.05, 0.2)},
+  )
+  wo_trans = mi.Vector3f(-0.3, 0.4, -0.8660254)
+  assert dr.allclose(hair_r.eval(ctx, si, wo_trans), 0.0, atol=1e-6)
+  val_tt = hair_tt.eval(ctx, si, wo_trans)
+  assert dr.all(val_tt.z > 0.0)
+  assert dr.allclose(
+      val_tt / val_tt.z, mi.Color3f(2.0 / 9.0, 6.0 / 9.0, 1.0), rtol=1e-4
+  )
+
+  # `cuticle_angle` shifts the longitudinal reflection lobe, and very low
+  # roughness stays finite and non-zero (no `sinh`/`i0` overflow).
+  wo_spec = mi.Vector3f(-0.3, 0.4, 0.8660254)
+  hair_tilt = _compile_bsdf(
+      'ND_chiang_hair_bsdf', cuticle_angle=0.58, **r_only_kw
+  )
+  assert dr.allclose(hair_r.eval(ctx, si, wo_spec), 0.12884, rtol=1e-3)
+  assert dr.allclose(hair_tilt.eval(ctx, si, wo_spec), 0.04420, rtol=1e-3)
+  hair_sharp = _compile_bsdf(
+      'ND_chiang_hair_bsdf',
+      roughness_R=(0.001, 0.001),
+      roughness_TT=(0.001, 0.001),
+      roughness_TRT=(0.001, 0.001),
+  )
+  val_s, pdf_s = hair_sharp.eval_pdf(ctx, si, wo_spec)
+  assert dr.allclose(val_s, 254.0, rtol=1e-2)
+  assert dr.allclose(pdf_s, 254.0, rtol=1e-2)
+
+  # Wire one shared multi-output `chiang_hair_roughness` node + melanin
+  # absorption into `chiang_hair_bsdf` and verify denoiser features and `wt`.
+  stage = Usd.Stage.CreateInMemory()
+  rough_node = mtlx.define_shader(
+      stage,
+      'HairRough',
+      'ND_chiang_hair_roughness',
+      longitudinal=0.2,
+      azimuthal=0.3,
+  )
+  hair_wired, _ = mtlx.compile_mtlx_material(
+      'ND_surface',
+      stage=stage,
+      bsdf=(
+          'ND_chiang_hair_bsdf',
+          {
+              **{
+                  f'roughness_{l}': rough_node.CreateOutput(
+                      f'roughness_{l}', Sdf.ValueTypeNames.Token
+                  )
+                  for l in ('R', 'TT', 'TRT')
+              },
+              'absorption_coefficient': (
+                  'ND_deon_hair_absorption_from_melanin',
+                  {'melanin_concentration': 0.3, 'melanin_redness': 0.4},
+              ),
+          },
+      ),
+  )
+  assert hair_wired is not None
+  feat = hair_wired.eval_features(si)
+  assert dr.allclose(feat.wt, -si.to_world(si.wi), atol=1e-5)
+  assert dr.allclose(
+      feat.specular_reflectance, (0.07629, 0.06784, 0.05585), rtol=1e-3
+  )
+  assert dr.allclose(
+      feat.specular_transmittance, (0.72127, 0.60426, 0.37919), rtol=1e-3
+  )
+
+  # Default `curve_direction` on Mitsuba curve shapes follows `dp_dv` (fiber
+  # axis) rather than circumferential `dp_du`.
+  curve_stage = Usd.Stage.CreateInMemory()
+  curves = UsdGeom.BasisCurves.Define(curve_stage, '/Curve')
+  curves.CreateTypeAttr(UsdGeom.Tokens.linear)
+  curves.CreateCurveVertexCountsAttr([2])
+  curves.CreatePointsAttr([(0.0, -1.0, 0.0), (0.0, 1.0, 0.0)])
+  curves.CreateWidthsAttr([0.2, 0.2])
+  curve_scene = mi.load_dict(
+      usd_mitsuba_translator.convert_to_mitsuba(curve_stage)
+  )
+  si_curve = curve_scene.ray_intersect(
+      mi.Ray3f(
+          mi.Point3f(0.0, -0.5, 1.0), dr.normalize(mi.Vector3f(0.0, 0.5, -1.0))
+      )
+  )
+  hair_y = _compile_bsdf(
+      'ND_chiang_hair_bsdf',
+      curve_direction=Gf.Vec3f(0.0, 1.0, 0.0),
+      **r_only_kw,
+  )
+  hair_x = _compile_bsdf(
+      'ND_chiang_hair_bsdf',
+      curve_direction=Gf.Vec3f(1.0, 0.0, 0.0),
+      **r_only_kw,
+  )
+  wo_curve = si_curve.to_local(dr.normalize(mi.Vector3f(0.0, 0.5, 1.0)))
+  assert dr.allclose(
+      hair_r.eval(ctx, si_curve, wo_curve),
+      hair_y.eval(ctx, si_curve, wo_curve),
+      rtol=1e-4,
+  )
+  assert not dr.allclose(
+      hair_r.eval(ctx, si_curve, wo_curve),
+      hair_x.eval(ctx, si_curve, wo_curve),
+      rtol=5e-2,
+  )
+
+
+def test_chiang_hair_helpers() -> None:
+  """Tests Chiang/d'Eon hair roughness and absorption helper nodes."""
+  for out_name, exp_v in (
+      ('roughness_R', 0.0539401),
+      ('roughness_TT', 0.0134850),
+      ('roughness_TRT', 0.2157603),
+  ):
+    np.testing.assert_allclose(
+        mtlx.eval_emission_expr((
+            'ND_convert_vector2_color3',
+            {
+                'in': (
+                    'ND_chiang_hair_roughness',
+                    {'longitudinal': 0.25, 'azimuthal': 0.4},
+                    out_name,
+                )
+            },
+        )),
+        (exp_v, 0.2970400, 0.0),
+        rtol=1e-4,
+    )
+  np.testing.assert_allclose(
+      mtlx.eval_emission_expr((
+          'ND_convert_vector3_color3',
+          {
+              'in': (
+                  'ND_chiang_hair_absorption_from_color',
+                  {'color': (0.5, 0.2, 0.1), 'azimuthal_roughness': 0.3},
+              )
+          },
+      )),
+      (0.0138565, 0.0747053, 0.1529095),
+      rtol=1e-4,
+  )
+  np.testing.assert_allclose(
+      mtlx.eval_emission_expr((
+          'ND_convert_vector3_color3',
+          {
+              'in': (
+                  'ND_deon_hair_absorption_from_melanin',
+                  {'melanin_concentration': 0.4, 'melanin_redness': 0.3},
+              )
+          },
+      )),
+      (0.1784825, 0.3105311, 0.6507917),
+      rtol=1e-4,
   )

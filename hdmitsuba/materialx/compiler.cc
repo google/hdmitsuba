@@ -388,6 +388,7 @@ class MtlxExprCompiler {
   int CompileDiffuseClosure(const mx::NodePtr& node, const std::string& cat);
   int CompileTranslucentClosure(const mx::NodePtr& node);
   int CompileMicrofacetClosure(const mx::NodePtr& node, const std::string& cat);
+  int CompileChiangHairClosure(const mx::NodePtr& node);
   void CompileVdfWarning(const mx::NodePtr& node, const std::string& cat);
   void MarkTwoSidedDielectrics(size_t start);
   int EmitClosure(mtlx::ClosureNode node);
@@ -1386,6 +1387,55 @@ std::optional<Expr> MtlxExprCompiler::CompileColorPbrNode(
     return call(mtlx::Op::Sqrt,
                 (np1 * np1 * r - nm1 * nm1) / (Expr::one() - r));
   }
+  if (cat == "chiang_hair_roughness") {
+    auto clip_in = [&](const char* name, double def) {
+      return EmitTmpExpr(
+          call(mtlx::Op::Clip, in(name, Const(def)), Const(1e-3), Expr::one()));
+    };
+    Expr lr = clip_in("longitudinal", 0.1), ar = clip_in("azimuthal", 0.2);
+    Expr v_sqrt =
+        EmitTmpExpr(Const(0.726) * lr + Const(0.812) * lr * lr +
+                    Const(3.7) * call(mtlx::Op::Pow, lr, Const(20.0)));
+    if (output_name == "roughness_TT" || output_name == "roughness_TRT") {
+      bool is_tt = output_name == "roughness_TT";
+      v_sqrt = EmitTmpExpr(v_sqrt * in(is_tt ? "scale_TT" : "scale_TRT",
+                                       Const(is_tt ? 0.5 : 2.0)));
+    }
+    Expr s = EmitTmpExpr(Const(0.265) * ar + Const(1.194) * ar * ar +
+                         Const(5.372) * call(mtlx::Op::Pow, ar, Const(22.0)));
+    return vec2(v_sqrt * v_sqrt, s);
+  }
+  if (cat == "chiang_hair_absorption_from_color") {
+    Expr c = call(mtlx::Op::Clip, in("color", Expr::one()), Const(1e-3),
+                  Expr::one());
+    Expr b = EmitTmpExpr(in("azimuthal_roughness", Const(0.2)));
+    Expr b_fac =
+        Const(5.969) +
+        b * (Const(-0.215) +
+             b * (Const(2.532) +
+                  b * (Const(-10.73) + b * (Const(5.574) + b * Const(0.245)))));
+    Expr sigma = EmitTmpExpr(call(mtlx::Op::Log, c) / b_fac);
+    return sigma * sigma;
+  }
+  if (cat == "deon_hair_absorption_from_melanin") {
+    Expr log_conc =
+        call(mtlx::Op::Log,
+             call(mtlx::Op::Max,
+                  Expr::one() - in("melanin_concentration", Const(0.25)),
+                  Const(1e-4)));
+    Expr pigment = CompileMix(
+        in("melanin_redness", Const(0.5)),
+        [&] {
+          return call(mtlx::Op::Log, in("pheomelanin_color",
+                                        ConstRgb(0.829444, 0.67032, 0.349938)));
+        },
+        [&] {
+          return call(
+              mtlx::Op::Log,
+              in("eumelanin_color", ConstRgb(0.657704, 0.498077, 0.254107)));
+        });
+    return call(mtlx::Op::Max, log_conc * pigment, Expr::zero());
+  }
   return std::nullopt;
 }
 
@@ -1755,6 +1805,22 @@ int MtlxExprCompiler::CompileMicrofacetClosure(const mx::NodePtr& node,
       EmitTmp(CompileInputExpr(node, "exponent", Const(5.0)))));
 }
 
+int MtlxExprCompiler::CompileChiangHairClosure(const mx::NodePtr& node) {
+  auto slot = [&](const char* name, const Expr& def = Expr::zero()) {
+    return EmitTmp(CompileInputExpr(node, name, def));
+  };
+  return EmitClosure(mtlx::ClosureNode::MakeChiangHair(
+      slot("tint_R", Expr::one()), slot("tint_TT", Expr::one()),
+      slot("tint_TRT", Expr::one()),
+      slot("roughness_R", vec2(Const(0.1), Const(0.1))),
+      slot("roughness_TT", vec2(Const(0.05), Const(0.05))),
+      slot("roughness_TRT", vec2(Const(0.2), Const(0.2))),
+      slot("ior", Const(1.55)), slot("absorption_coefficient"),
+      slot("cuticle_angle", Const(0.5)),
+      FrameSlot(node, "normal", Expr::n_world()),
+      FrameSlot(node, "curve_direction", Expr::t_world())));
+}
+
 void MtlxExprCompiler::CompileVdfWarning(const mx::NodePtr& node,
                                          const std::string& cat) {
   if (cat == "anisotropic_vdf" || cat == "absorption_vdf") {
@@ -1792,6 +1858,8 @@ int MtlxExprCompiler::CompileBsdfClosure(const mx::NodePtr& raw_node) {
   } else if (cat == "dielectric_bsdf" || cat == "conductor_bsdf" ||
              cat == "generalized_schlick_bsdf") {
     idx = CompileMicrofacetClosure(node, cat);
+  } else if (cat == "chiang_hair_bsdf") {
+    idx = CompileChiangHairClosure(node);
   } else if (node->getType() == mx::VDF_TYPE_STRING) {
     CompileVdfWarning(node, cat);
   } else if (cat == "layer" || cat == "add") {

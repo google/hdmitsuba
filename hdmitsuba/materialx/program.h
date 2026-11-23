@@ -395,6 +395,7 @@ enum class ClosureOp : int32_t {
   Dielectric,
   Conductor,
   GeneralizedSchlick,
+  ChiangHair,
   Layer,
   Mix,
   Add,
@@ -425,6 +426,10 @@ struct ClosureNode {
     int weight, roughness, mode, normal, tangent, tf_thickness, tf_ior;
     int p[4];
   };
+  struct ChiangHair {
+    int tint_r, tint_tt, tint_trt, roughness_r, roughness_tt, roughness_trt,
+        ior, absorption, cuticle_angle, normal, curve_direction;
+  };
   // Combinator args: `first`/`second` index `MtlxProgram::closures` — Layer
   // (top, base), Mix (fg, bg), Add (in1, in2), Multiply (in1, -1); `weight` is
   // the VM temporary slot of the Mix weight or Multiply factor (-1 otherwise).
@@ -439,6 +444,7 @@ struct ClosureNode {
     Diffuse diffuse;
     Translucent translucent;
     Microfacet microfacet;
+    ChiangHair hair;
     Comb comb;
   };
 
@@ -480,6 +486,18 @@ struct ClosureNode {
     ClosureNode n(op);
     n.microfacet = {weight,  roughness,    mode,   normal,
                     tangent, tf_thickness, tf_ior, {p0, p1, p2, p3}};
+    return n;
+  }
+
+  static ClosureNode MakeChiangHair(int tint_r, int tint_tt, int tint_trt,
+                                    int roughness_r, int roughness_tt,
+                                    int roughness_trt, int ior, int absorption,
+                                    int cuticle_angle, int normal,
+                                    int curve_direction) {
+    ClosureNode n(ClosureOp::ChiangHair);
+    n.hair = {tint_r,         tint_tt, tint_trt,   roughness_r,   roughness_tt,
+              roughness_trt,  ior,     absorption, cuticle_angle, normal,
+              curve_direction};
     return n;
   }
 

@@ -29,6 +29,7 @@
 #include <mitsuba/render/fresnel.h>
 #include <mitsuba/render/interaction.h>
 #include <mitsuba/render/microfacet.h>
+#include <mitsuba/render/shape.h>
 
 #include "hdmitsuba/materialx/math.h"
 
@@ -42,6 +43,32 @@ inline constexpr ScalarFloat kMinLen2 =
 template <typename Float>
 Float pow5(const Float& x) {
   return dr::square(dr::square(x)) * x;
+}
+
+template <typename Spectrum, typename UnpolSpec>
+auto selection_weight(const UnpolSpec& c) {
+  if constexpr (is_rgb_v<Spectrum>) {
+    return luminance(c);
+  } else {
+    return dr::mean(c);
+  }
+}
+
+// Curve tangent along the fiber axis (`dp_dv` / `sh_frame.t` on Mitsuba
+// `BSplineCurve` / `LinearCurve`, where `u` is circumferential), falling back
+// to `geom_tangent_world` (`dp_du`) on meshes and other shapes.
+template <typename SurfaceInteraction>
+auto geom_curve_tangent_world(const SurfaceInteraction& si) {
+  using Vec3 = std::decay_t<decltype(si.sh_frame.s)>;
+  if constexpr (!dr::is_jit_v<Vec3>) {
+    if (!si.shape) return geom_tangent_world(si);
+  }
+  auto is_curve = (si.shape->shape_type() &
+                   (+ShapeType::BSplineCurve | +ShapeType::LinearCurve)) != 0u;
+  Vec3 raw = dr::select(is_curve, si.dp_dv, si.dp_du);
+  Vec3 fallback = dr::select(is_curve, si.sh_frame.t, si.sh_frame.s);
+  return safe_normalize(Vec3(raw - si.sh_frame.n * dr::dot(si.sh_frame.n, raw)),
+                        fallback, dr::scalar_t<Vec3>(1e-20f));
 }
 
 template <typename Float>
@@ -682,6 +709,209 @@ std::pair<Spectrum, Float> translucent_eval_pdf(const Vector<Float, 3>& wi_l,
   Float pdf_val = n_dot_l * dr::InvPi<Float>;
   return {dr::select(valid, color * pdf_val, 0.0f),
           dr::select(valid, pdf_val, 0.0f)};
+}
+
+// Longitudinal (`Mp`) and trimmed-logistic azimuthal (`Np`) scattering
+// functions for Chiang et al. (2016) hair (`mx_chiang_hair_bsdf.glsl`).
+template <typename Float>
+Float hair_mp(const Float& sin_theta_i, const Float& cos_theta_i,
+              const Float& sin_theta_o, const Float& cos_theta_o,
+              const Float& v) {
+  Float inv_v = dr::rcp(v);
+  Float a = cos_theta_i * cos_theta_o * inv_v;
+  Float st = sin_theta_i * sin_theta_o;
+  Float i0_lo = warp::detail::i0(dr::minimum(a, 12.0f));
+  Float a_hi = dr::maximum(a, 12.0f);
+  Float log_i0 = dr::select(
+      a > 12.0f,
+      a + 0.5f * (-dr::log(dr::TwoPi<Float> * a_hi) + dr::rcp(8.0f * a_hi)),
+      dr::log(i0_lo));
+  // Bound `inv_v_lo` so eager SIMD/JIT evaluation of the `v >= 0.1` branch
+  // never overflows `sinh` in float32 when `v` is small.
+  Float inv_v_lo = dr::minimum(inv_v, 20.0f);
+  return dr::select(
+      v < 0.1f, dr::exp(log_i0 - st * inv_v - inv_v + dr::log(inv_v)),
+      dr::exp(-st * inv_v_lo) * i0_lo * inv_v_lo / (2.0f * dr::sinh(inv_v_lo)));
+}
+
+template <typename Float>
+Float hair_trimmed_logistic(const Float& x, const Float& s) {
+  Float e = dr::exp(-dr::abs(x) / s);
+  Float e_pi = dr::exp(-dr::Pi<Float> / s);
+  return e / (s * dr::square(1.0f + e)) * (1.0f + e_pi) /
+         dr::maximum(1.0f - e_pi, 1e-7f);
+}
+
+template <typename Float>
+Float hair_trimmed_logistic_sample(const Float& u, const Float& s) {
+  Float e_pi = dr::exp(-dr::Pi<Float> / s);
+  return dr::clip(-s * dr::log(dr::lerp(Float(1.0f), e_pi, u) /
+                               dr::lerp(e_pi, Float(1.0f), u)),
+                  -dr::Pi<Float>, dr::Pi<Float>);
+}
+
+template <typename Float, typename UnpolSpec>
+struct ChiangHairParams {
+  UnpolSpec ap[4];
+  Float ap_pdf[4], sin_vp[4], cos_vp[4], v[4], s_az[3];
+  Float gamma_t, phi_i;
+};
+
+template <typename Float>
+Vector<Float, 3> to_hair_local(const Vector<Float, 3>& v, const Float& cos_i) {
+  return Vector<Float, 3>(v.x(), v.y(), dr::mulsign(v.z(), cos_i));
+}
+
+template <typename Float, typename UnpolSpec>
+Float hair_phi(const Float& p, const ChiangHairParams<Float, UnpolSpec>& hp) {
+  return p * (2.0f * hp.gamma_t + dr::Pi<Float>)-2.0f * hp.phi_i +
+         dr::Pi<Float>;
+}
+
+template <typename Float, typename Spectrum, typename UnpolSpec>
+ChiangHairParams<Float, UnpolSpec> build_chiang_hair_params(
+    const Vector<Float, 3>& wi_l, const UnpolSpec& tint_r,
+    const UnpolSpec& tint_tt, const UnpolSpec& tint_trt,
+    const Vector<Float, 2>& r_r, const Vector<Float, 2>& r_tt,
+    const Vector<Float, 2>& r_trt, const Float& ior_raw,
+    const UnpolSpec& sigma_a, const Float& cuticle_angle) {
+  using Scalar = dr::scalar_t<Float>;
+  Vector<Float, 3> wi_h = to_hair_local(wi_l, Frame<Float>::cos_theta(wi_l));
+  Float ior = dr::maximum(ior_raw, 1.0001f);
+
+  Float sin_theta_v = dr::clip(wi_h.x(), -1.0f, 1.0f);
+  Float cos_theta_v = warp::circ(sin_theta_v);
+
+  Float inv_eta_p = dr::safe_rsqrt(dr::square(ior) - dr::square(sin_theta_v));
+  Float sin_gamma_t = dr::clip(-wi_h.y() * inv_eta_p, -1.0f, 1.0f);
+  Float cos_gamma_t = warp::circ(sin_gamma_t);
+
+  Float f = std::get<0>(fresnel(dr::clip(wi_h.z(), 0.0f, 1.0f), ior));
+  UnpolSpec tr = dr::exp(-sigma_a * (2.0f * cos_gamma_t * ior * inv_eta_p));
+  UnpolSpec a1 = dr::square(1.0f - f) * tr;
+  UnpolSpec tr_f = tr * f;
+
+  ChiangHairParams<Float, UnpolSpec> hp;
+  hp.ap[0] = tint_r * f;
+  hp.ap[1] = tint_tt * a1;
+  hp.ap[2] = tint_trt * (a1 * tr_f);
+  hp.ap[3] = hp.ap[2] * tr_f / dr::maximum(1.0f - tr_f, 1e-5f);
+
+  Float w[4] = {selection_weight<Spectrum>(hp.ap[0]),
+                selection_weight<Spectrum>(hp.ap[1]),
+                selection_weight<Spectrum>(hp.ap[2]),
+                selection_weight<Spectrum>(hp.ap[3])};
+  Float w_sum = w[0] + w[1] + w[2] + w[3];
+  auto ok = w_sum > 0.0f;
+  Float inv_w = dr::rcp(dr::select(ok, w_sum, 1.0f));
+  for (int p = 0; p < 4; ++p) {
+    hp.ap_pdf[p] = dr::detach(dr::select(ok, w[p] * inv_w, 0.25f));
+  }
+
+  auto [sa, ca] = dr::sincos((cuticle_angle - 0.5f) * dr::Pi<Float>);
+  Float s2a = 2.0f * sa * ca, c2a = dr::square(ca) - dr::square(sa);
+  Float s4a = 2.0f * s2a * c2a, c4a = dr::square(c2a) - dr::square(s2a);
+  hp.sin_vp[0] = sin_theta_v * c2a + cos_theta_v * s2a;
+  hp.cos_vp[0] = dr::abs(cos_theta_v * c2a - sin_theta_v * s2a);
+  hp.sin_vp[1] = sin_theta_v * ca - cos_theta_v * sa;
+  hp.cos_vp[1] = dr::abs(cos_theta_v * ca + sin_theta_v * sa);
+  hp.sin_vp[2] = sin_theta_v * c4a - cos_theta_v * s4a;
+  hp.cos_vp[2] = dr::abs(cos_theta_v * c4a + sin_theta_v * s4a);
+  hp.sin_vp[3] = sin_theta_v;
+  hp.cos_vp[3] = cos_theta_v;
+
+  hp.v[0] = r_r.x();
+  hp.v[1] = r_tt.x();
+  hp.v[2] = hp.v[3] = r_trt.x();
+  constexpr Scalar kSqrtPiOver8 = Scalar(0.25) * dr::SqrtTwoPi<Scalar>;
+  hp.s_az[0] = r_r.y() * kSqrtPiOver8;
+  hp.s_az[1] = r_tt.y() * kSqrtPiOver8;
+  hp.s_az[2] = r_trt.y() * kSqrtPiOver8;
+  hp.gamma_t = dr::safe_asin(sin_gamma_t);
+  hp.phi_i = mx_safe_atan2(wi_h.z(), wi_h.y());
+  return hp;
+}
+
+template <typename Float, typename UnpolSpec>
+std::tuple<Vector<Float, 3>, dr::uint32_array_t<Float>, dr::mask_t<Float>>
+chiang_hair_sample(const ChiangHairParams<Float, UnpolSpec>& hp,
+                   const Vector<Float, 3>& wi_l, bool refl_on, bool trans_on,
+                   const Float& sample1, const Point<Float, 2>& sample2) {
+  using Mask = dr::mask_t<Float>;
+  using UInt32 = dr::uint32_array_t<Float>;
+  using Vector3f = Vector<Float, 3>;
+  Float u0 = dr::clip(sample1, 0.0f, dr::OneMinusEpsilon<Float>);
+  Float u_rem = u0, p_pdf = hp.ap_pdf[0];
+  Mask rem[3] = {(hp.ap_pdf[1] + hp.ap_pdf[2] + hp.ap_pdf[3]) > 0.0f,
+                 (hp.ap_pdf[2] + hp.ap_pdf[3]) > 0.0f, hp.ap_pdf[3] > 0.0f};
+  UInt32 p(0);
+  Float v_p = hp.v[0], sin_vp = hp.sin_vp[0], cos_vp = hp.cos_vp[0],
+        s_p = hp.s_az[0];
+  for (uint32_t j = 0; j < 3; ++j) {
+    Mask next = (u0 >= hp.ap_pdf[j]) && rem[j];
+    u0 -= hp.ap_pdf[j];
+    p = dr::select(next, UInt32(j + 1), p);
+    u_rem = dr::select(next, u0, u_rem);
+    p_pdf = dr::select(next, hp.ap_pdf[j + 1], p_pdf);
+    v_p = dr::select(next, hp.v[j + 1], v_p);
+    sin_vp = dr::select(next, hp.sin_vp[j + 1], sin_vp);
+    cos_vp = dr::select(next, hp.cos_vp[j + 1], cos_vp);
+    if (j < 2) s_p = dr::select(next, hp.s_az[j + 1], s_p);
+  }
+  Float u_az = dr::clip(u_rem / dr::select(p_pdf > 0.0f, p_pdf, 1.0f), 1e-6f,
+                        1.0f - 1e-6f);
+
+  Vector3f vmf = warp::square_to_von_mises_fisher(sample2, dr::rcp(v_p));
+  Float sin_theta_o =
+      dr::clip(vmf.x() * cos_vp - vmf.z() * sin_vp, -1.0f, 1.0f);
+  Float cos_theta_o = warp::circ(sin_theta_o);
+
+  Float delta_phi = dr::select(
+      p < 3u, hair_phi(Float(p), hp) + hair_trimmed_logistic_sample(u_az, s_p),
+      dr::TwoPi<Float> * u_az);
+  auto [sin_phi_o, cos_phi_o] = dr::sincos(hp.phi_i + delta_phi);
+  Vector3f wo_h(sin_theta_o, cos_theta_o * cos_phi_o, cos_theta_o * sin_phi_o);
+  Vector3f wo_l = to_hair_local(wo_h, Frame<Float>::cos_theta(wi_l));
+  Mask is_refl = wo_h.z() > 0.0f;
+  UInt32 sampled_type =
+      dr::select(is_refl, UInt32(+BSDFFlags::GlossyReflection),
+                 UInt32(+BSDFFlags::GlossyTransmission));
+  Mask dir_ok = dr::select(is_refl, Mask(refl_on), Mask(trans_on));
+  return {wo_l, sampled_type,
+          dir_ok && (wi_l.z() != 0.0f) && (wo_h.z() != 0.0f)};
+}
+
+template <typename Float, typename UnpolSpec>
+std::pair<UnpolSpec, Float> chiang_hair_eval_pdf(
+    const ChiangHairParams<Float, UnpolSpec>& hp, const Vector<Float, 3>& wi_l,
+    const Vector<Float, 3>& wo_l, bool refl_on, bool trans_on) {
+  using Mask = dr::mask_t<Float>;
+  Vector<Float, 3> wo_h = to_hair_local(wo_l, Frame<Float>::cos_theta(wi_l));
+  Mask dir_ok = dr::select(wo_h.z() > 0.0f, Mask(refl_on), Mask(trans_on));
+  Mask valid = (wi_l.z() != 0.0f) && (wo_h.z() != 0.0f) && dir_ok;
+
+  Float sin_theta_o = dr::clip(wo_h.x(), -1.0f, 1.0f);
+  Float cos_theta_o = warp::circ(sin_theta_o);
+  Float phi = mx_safe_atan2(wo_h.z(), wo_h.y()) - hp.phi_i;
+
+  UnpolSpec val(0.0f);
+  Float pdf(0.0f);
+  for (int p = 0; p < 3; ++p) {
+    Float mp =
+        hair_mp(hp.sin_vp[p], hp.cos_vp[p], sin_theta_o, cos_theta_o, hp.v[p]);
+    Float dphi = phi - hair_phi(Float(p), hp);
+    dphi -= dr::TwoPi<Float> * dr::round(dphi * dr::InvTwoPi<Float>);
+    Float lobe = mp * hair_trimmed_logistic(dphi, hp.s_az[p]);
+    val = dr::fmadd(hp.ap[p], lobe, val);
+    pdf = dr::fmadd(hp.ap_pdf[p], lobe, pdf);
+  }
+  Float mp3 =
+      hair_mp(hp.sin_vp[3], hp.cos_vp[3], sin_theta_o, cos_theta_o, hp.v[3]) *
+      dr::InvTwoPi<Float>;
+  val = dr::fmadd(hp.ap[3], mp3, val);
+  pdf = dr::fmadd(hp.ap_pdf[3], mp3, pdf);
+  Mask ok = valid && dr::isfinite(pdf);
+  return {dr::select(ok, val, 0.0f), dr::select(ok, pdf, 0.0f)};
 }
 
 }  // namespace mtlx::detail
