@@ -325,7 +325,8 @@ std::string ActiveVariant() {
 std::vector<SubMeshOutput> ProcessMesh(
     const MeshExtractionData& mesh_data, int refine_level,
     const GfMatrix4d& transform,
-    const std::vector<std::tuple<nb::object, bool, bool>>& displacements,
+    const std::vector<std::tuple<nb::object, bool, bool,
+                                 MeshAttributeRequests>>& displacements,
     const std::set<std::string>& requested_attributes) {
   const auto points_it = mesh_data.primvars.find(HdTokens->points);
   const std::optional<size_t> num_referenced_points =
@@ -360,7 +361,8 @@ std::vector<SubMeshOutput> ProcessMesh(
 
   std::vector<MaterialDisplacement> material_displacements;
   material_displacements.reserve(displacements.size());
-  for (const auto& [texture, requires_uv, is_vector] : displacements) {
+  for (const auto& [texture, requires_uv, is_vector, attributes] :
+       displacements) {
     MaterialDisplacement& displacement = material_displacements.emplace_back();
     if (!texture.is_none()) {
       displacement.texture = reinterpret_cast<mitsuba::Object*>(
@@ -368,6 +370,7 @@ std::vector<SubMeshOutput> ProcessMesh(
     }
     displacement.requires_uv = requires_uv;
     displacement.is_vector = is_vector;
+    displacement.attributes = attributes;
   }
   const absl::flat_hash_set<std::string> requested(requested_attributes.begin(),
                                                    requested_attributes.end());
@@ -438,7 +441,8 @@ nb::object TranslateMaterialX(const UsdPrim& prim, UsdTimeCode time,
       std::move(mat.mesh_attributes),
       has_disp ? nb::object(nb::make_tuple(
                      CastMitsubaObject(mat.displacement.texture.get()),
-                     mat.displacement.requires_uv, mat.displacement.is_vector))
+                     mat.displacement.requires_uv, mat.displacement.is_vector,
+                     std::move(mat.displacement.attributes)))
                : nb::none());
 }
 
@@ -478,9 +482,11 @@ NB_MODULE(geometry_ext, m) {
         nb::arg("requested_attributes"),
         "Subdivides, displaces, transforms to world space, triangulates and "
         "splits `mesh_data` into one sub-mesh per material.\n\n"
-        "`displacements` holds one `(texture, requires_uv, is_vector)` "
+        "`displacements` holds one "
+        "`(texture, requires_uv, is_vector, attributes)` "
         "tuple per entry of `mesh_data.material_ids`, where `texture` is a "
-        "Mitsuba texture of the active variant or None. "
+        "Mitsuba texture of the active variant or None, and `attributes` are "
+        "the `(primvar name, channel count)` pairs it reads. "
         "`requested_attributes` are the primvar names read by the materials, "
         "which may include the intrinsic `__p_object`, `__n_object`, "
         "`__n_disp_object` and `__n_disp_world` primvars.");
@@ -511,7 +517,8 @@ NB_MODULE(geometry_ext, m) {
         nb::arg("time"), nb::arg("double_sided") = false,
         "Translates a MaterialX UsdShadeMaterial prim into a "
         "`(bsdf, emitter, mesh_attributes, displacement)` tuple (where "
-        "`displacement` is `(texture, requires_uv, is_vector)` or None), or "
+        "`displacement` is `(texture, requires_uv, is_vector, attributes)` "
+        "or None, with the mesh `attributes` read by `texture`), or "
         "None if MaterialX support is disabled or the material has no active "
         "MaterialX surface or displacement shader.");
 }
