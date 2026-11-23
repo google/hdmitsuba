@@ -164,6 +164,125 @@ Spectrum fresnel_hoffman_schlick(const Float& cos_theta, const Spectrum& f0,
       1.0f);
 }
 
+// Extracts Belcour-Barla `(r_p, r_s, phi_p, phi_s)` from Mitsuba's polarized
+// Fresnel reflection amplitudes `(a_s, a_p)` (`<mitsuba/render/fresnel.h>`).
+template <typename Val>
+std::tuple<Val, Val, Val, Val> polarized_fresnel_r_phi(
+    const dr::Complex<Val>& a_s, const dr::Complex<Val>& a_p) {
+  return {dr::squared_norm(a_p), dr::squared_norm(a_s),
+          mx_safe_atan2(-dr::imag(a_p), dr::real(a_p)),
+          mx_safe_atan2(dr::imag(a_s), -dr::real(a_s))};
+}
+
+// Belcour & Barla (2017) cosine/sine sensitivity basis in CIE-RGB (or
+// monochromatic CIE-Y) for thin-film interference (`mx_eval_sensitivity`),
+// decoupled from per-channel phase shifts so `XYZ_TO_RGB` never mixes R/G/B
+// phases.
+template <typename Float, typename Spectrum>
+std::pair<unpolarized_spectrum_t<Spectrum>, unpolarized_spectrum_t<Spectrum>>
+eval_sensitivity_cs(const Float& opd) {
+  using Scalar = dr::scalar_t<Float>;
+  using UnpolSpec = unpolarized_spectrum_t<Spectrum>;
+  constexpr Scalar kNorm = Scalar(1.0 / 1.0685e-7);
+  Float phase = dr::TwoPi<Float> * opd, phase2 = dr::square(phase);
+  if constexpr (is_rgb_v<Spectrum>) {
+    using Color3f = Color<Float, 3>;
+    using ScalarColor3 = Color<Scalar, 3>;
+    ScalarColor3 kVar(Scalar(4.3278e+09), Scalar(9.3046e+09),
+                      Scalar(6.6121e+09));
+    ScalarColor3 kAmp = ScalarColor3(Scalar(5.4856e-13), Scalar(4.4201e-13),
+                                     Scalar(5.2481e-13)) *
+                        dr::sqrt(dr::TwoPi<Scalar> * kVar) * kNorm;
+    ScalarColor3 kPos(Scalar(1.6810e+06), Scalar(1.7953e+06),
+                      Scalar(2.2084e+06));
+    constexpr Scalar kVarX2 = Scalar(4.5282e+09);
+    Scalar kAmpX2 =
+        Scalar(9.7470e-14) * dr::sqrt(dr::TwoPi<Scalar> * kVarX2) * kNorm;
+    constexpr Scalar kPosX2 = Scalar(2.2399e+06);
+    dr::Matrix<Scalar, 3> kXyzToRgb(
+        Scalar(2.3706743), Scalar(-0.9000405), Scalar(-0.4706338),
+        Scalar(-0.5138850), Scalar(1.4253036), Scalar(0.0885814),
+        Scalar(0.0052982), Scalar(-0.0146949), Scalar(1.0093968));
+
+    Color3f env = Color3f(kAmp) * dr::exp(Color3f(-kVar) * phase2);
+    auto [s_xyz, c_xyz] = dr::sincos(Color3f(kPos) * phase);
+    Color3f xyz_c = env * c_xyz, xyz_s = env * s_xyz;
+    Float env_x2 = kAmpX2 * dr::exp(-kVarX2 * phase2);
+    auto [s_x2, c_x2] = dr::sincos(kPosX2 * phase);
+    xyz_c.x() += env_x2 * c_x2;
+    xyz_s.x() += env_x2 * s_x2;
+    return {kXyzToRgb * xyz_c, kXyzToRgb * xyz_s};
+  } else {
+    constexpr Scalar kVarY = Scalar(9.3046e+09);
+    Scalar kAmpY =
+        Scalar(4.4201e-13) * dr::sqrt(dr::TwoPi<Scalar> * kVarY) * kNorm;
+    constexpr Scalar kPosY = Scalar(1.7953e+06);
+    Float env = kAmpY * dr::exp(-kVarY * phase2);
+    auto [sy, cy] = dr::sincos(kPosY * phase);
+    return {UnpolSpec(env * cy), UnpolSpec(env * sy)};
+  }
+}
+
+// Belcour & Barla (2017) Airy thin-film reflectance given air-to-film polarized
+// amplitudes `(a12_s, a12_p)`, optical path difference `opd` in nanometers
+// (`2 * eta2 * ct2 * thickness_nm`), and substrate polarized
+// reflectances/phases.
+template <typename Float, typename Spectrum>
+unpolarized_spectrum_t<Spectrum> airy_thinfilm_reflectance(
+    const dr::Complex<Float>& a12_s, const dr::Complex<Float>& a12_p,
+    const Float& opd, const unpolarized_spectrum_t<Spectrum>& r23_p,
+    const unpolarized_spectrum_t<Spectrum>& r23_s,
+    const unpolarized_spectrum_t<Spectrum>& phi23_p,
+    const unpolarized_spectrum_t<Spectrum>& phi23_s,
+    const wavelength_t<Spectrum>& wavelengths) {
+  using Scalar = dr::scalar_t<Float>;
+  using UnpolSpec = unpolarized_spectrum_t<Spectrum>;
+  Float r12_s = dr::squared_norm(a12_s), r12_p = dr::squared_norm(a12_p);
+  Float phi21_p =
+      dr::select(dr::real(a12_p) < 0.0f, Float(0.0f), Float(dr::Pi<Float>));
+
+  if constexpr (is_spectral_v<Spectrum>) {
+    UnpolSpec phase =
+        dr::TwoPi<Float> * opd /
+        dr::select(wavelengths > 0.0f, wavelengths, UnpolSpec(550.0f));
+    auto eval_pol = [&](const Float& r12, const UnpolSpec& r23,
+                        const Float& phi21, const UnpolSpec& phi23) {
+      UnpolSpec r123 = dr::safe_sqrt(r12 * r23);
+      UnpolSpec s = dr::sin(0.5f * (phase + phi23 + phi21));
+      UnpolSpec denom = dr::square(1.0f - r123) + 4.0f * r123 * dr::square(s);
+      return 1.0f - mx_safe_div((1.0f - r12) * (1.0f - r23), denom);
+    };
+    return dr::clip(
+        0.5f * (eval_pol(r12_p, r23_p, phi21_p, phi23_p) +
+                eval_pol(r12_s, r23_s, Float(dr::Pi<Float>), phi23_s)),
+        0.0f, 1.0f);
+  } else {
+    std::pair<UnpolSpec, UnpolSpec> sens[3];
+    for (int m = 1; m <= 3; ++m) {
+      sens[m - 1] =
+          eval_sensitivity_cs<Float, Spectrum>(Scalar(m * 1e-9) * opd);
+    }
+    auto eval_pol = [&](const Float& r12, const UnpolSpec& r23,
+                        const Float& phi21, const UnpolSpec& phi23) {
+      UnpolSpec r123 = dr::safe_sqrt(r12 * r23), shift = phi23 + phi21;
+      Float t121 = 1.0f - r12;
+      UnpolSpec rs = (dr::square(t121) * r23) /
+                     dr::maximum(1.0f - r12 * r23, dr::Epsilon<Float>);
+      UnpolSpec out = r12 + rs, cm = 2.0f * (rs - t121);
+      for (int m = 1; m <= 3; ++m) {
+        cm *= r123;
+        auto [ss, cs] = dr::sincos(Float(m) * shift);
+        out += cm * (sens[m - 1].first * cs - sens[m - 1].second * ss);
+      }
+      return out;
+    };
+    return dr::clip(
+        0.5f * (eval_pol(r12_p, r23_p, phi21_p, phi23_p) +
+                eval_pol(r12_s, r23_s, Float(dr::Pi<Float>), phi23_s)),
+        0.0f, 1.0f);
+  }
+}
+
 // Height-correlated Smith masking-shadowing ratio `G2 / G1(wi)`.
 template <typename Float>
 Float ggx_g2_over_g1(const Float& g1_i, const Float& g1_o) {

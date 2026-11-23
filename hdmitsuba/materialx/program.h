@@ -413,16 +413,16 @@ struct ClosureNode {
   // `Sheen` (`mode = kSheen*`).
   struct Diffuse {
     int weight, color, roughness, mode, normal;
-    int _pad[4] = {};
+    int _pad[6] = {};
   };
   struct Translucent {
     int weight, color, normal;
-    int _pad[6] = {};
+    int _pad[8] = {};
   };
   // Shared by `Dielectric` (`p = {tint, ior}`), `Conductor` (`p = {ior, ext}`),
   // and `GeneralizedSchlick` (`p = {color0, color82, color90, exponent}`).
   struct Microfacet {
-    int weight, roughness, mode, normal, tangent;
+    int weight, roughness, mode, normal, tangent, tf_thickness, tf_ior;
     int p[4];
   };
   // Combinator args: `first`/`second` index `MtlxProgram::closures` — Layer
@@ -430,12 +430,12 @@ struct ClosureNode {
   // the VM temporary slot of the Mix weight or Multiply factor (-1 otherwise).
   struct Comb {
     int first, second, weight;
-    int _pad[6] = {};
+    int _pad[8] = {};
   };
 
   ClosureOp op = ClosureOp::Null;
   union {
-    int raw[9] = {};
+    int raw[11] = {};
     Diffuse diffuse;
     Translucent translucent;
     Microfacet microfacet;
@@ -474,10 +474,12 @@ struct ClosureNode {
   }
 
   static ClosureNode MakeMicrofacet(ClosureOp op, int weight, int roughness,
-                                    int mode, int normal, int tangent, int p0,
+                                    int mode, int normal, int tangent,
+                                    int tf_thickness, int tf_ior, int p0,
                                     int p1, int p2 = -1, int p3 = -1) {
     ClosureNode n(op);
-    n.microfacet = {weight, roughness, mode, normal, tangent, {p0, p1, p2, p3}};
+    n.microfacet = {weight,  roughness,    mode,   normal,
+                    tangent, tf_thickness, tf_ior, {p0, p1, p2, p3}};
     return n;
   }
 
@@ -508,7 +510,7 @@ struct ClosureNode {
  private:
   explicit ClosureNode(ClosureOp op) : op(op) {}
 };
-static_assert(sizeof(ClosureNode) == 40);
+static_assert(sizeof(ClosureNode) == 48);
 static_assert(std::has_unique_object_representations_v<ClosureNode>);
 
 // Variant-independent compiled MaterialX program passed via `Properties`.
