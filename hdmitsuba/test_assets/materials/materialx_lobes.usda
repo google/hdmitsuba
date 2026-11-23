@@ -1,0 +1,215 @@
+#usda 1.0
+(
+    defaultPrim = "root"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "root"
+{
+    def Xform "Camera"
+    {
+        float3 xformOp:rotateXYZ = (75, 0, 0)
+        double3 xformOp:translate = (0, -4.0, 1.1)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+
+        def Camera "Camera"
+        {
+            float2 clippingRange = (0.1, 100)
+            float focalLength = 0.035
+            float horizontalAperture = 0.036
+            token projection = "perspective"
+            float verticalAperture = 0.024
+        }
+    }
+
+    def DomeLight "Sky"
+    {
+        float inputs:intensity = 0.6
+    }
+
+    def DistantLight "Sun"
+    {
+        float inputs:angle = 5.0
+        float inputs:intensity = 2.0
+        float3 xformOp:rotateXYZ = (45, 0, -35)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def Scope "_materials"
+    {
+        def Material "open_pbr"
+        {
+            token outputs:mtlx:surface.connect = </root/_materials/open_pbr/Surface.outputs:out>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+                color3f inputs:base_color = (0.6, 0.3, 0.2)
+                float inputs:base_metalness = 0.4
+                float inputs:coat_weight = 0.5
+                float inputs:fuzz_roughness = 0.5
+                float inputs:fuzz_weight = 0.4
+                float inputs:specular_roughness = 0.25
+                float inputs:thin_film_thickness = 0.4
+                float inputs:thin_film_weight = 0.6
+                token outputs:out
+            }
+        }
+
+        def Material "disney_principled"
+        {
+            token outputs:mtlx:surface.connect = </root/_materials/disney_principled/Surface.outputs:out>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_disney_principled"
+                color3f inputs:baseColor = (0.7, 0.4, 0.2)
+                float inputs:clearcoat = 0.4
+                float inputs:metallic = 0.3
+                float inputs:roughness = 0.35
+                float inputs:sheen = 0.5
+                token outputs:out
+            }
+        }
+
+        def Material "gltf_pbr"
+        {
+            token outputs:mtlx:surface.connect = </root/_materials/gltf_pbr/Surface.outputs:out>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_gltf_pbr_surfaceshader"
+                color3f inputs:base_color = (0.3, 0.6, 0.8)
+                float inputs:iridescence = 0.7
+                float inputs:iridescence_thickness = 380.0
+                float inputs:metallic = 0.5
+                float inputs:roughness = 0.3
+                color3f inputs:sheen_color = (0.8, 0.7, 0.9)
+                float inputs:sheen_roughness = 0.4
+                token outputs:out
+            }
+        }
+
+        def Material "retro_schlick"
+        {
+            token outputs:mtlx:surface.connect = </root/_materials/retro_schlick/Surface.outputs:out>
+
+            def Shader "Bsdf"
+            {
+                uniform token info:id = "ND_generalized_schlick_bsdf"
+                color3f inputs:color0 = (0.8, 0.5, 0.15)
+                color3f inputs:color90 = (1.0, 0.9, 0.8)
+                bool inputs:retroreflective = 1
+                float2 inputs:roughness = (0.2, 0.2)
+                token outputs:out
+            }
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_surface"
+                token inputs:bsdf.connect = </root/_materials/retro_schlick/Bsdf.outputs:out>
+                token outputs:out
+            }
+        }
+
+        def Material "chiang_hair"
+        {
+            token outputs:mtlx:surface.connect = </root/_materials/chiang_hair/Surface.outputs:out>
+
+            def Shader "Roughness"
+            {
+                uniform token info:id = "ND_chiang_hair_roughness"
+                float inputs:azimuthal = 0.3
+                float inputs:longitudinal = 0.2
+                float2 outputs:roughness_R
+                float2 outputs:roughness_TRT
+                float2 outputs:roughness_TT
+            }
+
+            def Shader "Absorption"
+            {
+                uniform token info:id = "ND_deon_hair_absorption_from_melanin"
+                float inputs:melanin_concentration = 0.3
+                float inputs:melanin_redness = 0.4
+                float3 outputs:out
+            }
+
+            def Shader "HairBsdf"
+            {
+                uniform token info:id = "ND_chiang_hair_bsdf"
+                float3 inputs:absorption_coefficient.connect = </root/_materials/chiang_hair/Absorption.outputs:out>
+                float inputs:cuticle_angle = 0.52
+                float2 inputs:roughness_R.connect = </root/_materials/chiang_hair/Roughness.outputs:roughness_R>
+                float2 inputs:roughness_TRT.connect = </root/_materials/chiang_hair/Roughness.outputs:roughness_TRT>
+                float2 inputs:roughness_TT.connect = </root/_materials/chiang_hair/Roughness.outputs:roughness_TT>
+                token outputs:out
+            }
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_surface"
+                token inputs:bsdf.connect = </root/_materials/chiang_hair/HairBsdf.outputs:out>
+                token outputs:out
+            }
+        }
+    }
+
+    def Sphere "OpenPBRSphere" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </root/_materials/open_pbr>
+        double radius = 0.45
+        double3 xformOp:translate = (-1.1, 0, 0.55)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "DisneySphere" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </root/_materials/disney_principled>
+        double radius = 0.45
+        double3 xformOp:translate = (0, 0, 0.55)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "GltfSphere" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </root/_materials/gltf_pbr>
+        double radius = 0.45
+        double3 xformOp:translate = (1.1, 0, 0.55)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "RetroSphere" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </root/_materials/retro_schlick>
+        double radius = 0.45
+        double3 xformOp:translate = (-0.6, 0, -0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def BasisCurves "HairCurves" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] curveVertexCounts = [3, 3, 3]
+        rel material:binding = </root/_materials/chiang_hair>
+        point3f[] points = [
+            (0.25, 0, -0.95), (0.35, -0.1, -0.5), (0.25, 0, -0.05),
+            (0.6, 0, -0.95), (0.7, -0.1, -0.5), (0.6, 0, -0.05),
+            (0.95, 0, -0.95), (1.05, -0.1, -0.5), (0.95, 0, -0.05)
+        ]
+        uniform token type = "linear"
+        float[] widths = [0.14, 0.14, 0.14, 0.14, 0.14, 0.14, 0.14, 0.14, 0.14] (
+            interpolation = "vertex"
+        )
+        uniform token wrap = "nonperiodic"
+    }
+}

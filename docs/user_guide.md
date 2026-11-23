@@ -20,21 +20,23 @@ This document provides an overview of the USD features supported by `hdMitsuba`,
     surface, emissive, and pattern shading networks (via `outputs:mtlx:surface`
     or standard surface terminals; `outputs:mitsuba:surface` still takes
     precedence). Set the environment variable `HDMITSUBA_ENABLE_MATERIALX=1` to
-    enable it (disabled by default while remaining BSDF closures and
-    displacement support are in progress):
+    enable it (disabled by default while volume and displacement support are in
+    progress):
     *   Surface BSDF closures, emission, and stochastic cutout opacity via
-        `surface`, `surface_unlit`, `standard_surface`, `mix`
-        (`surfaceshader`), and (for emission, cutout opacity, and supported
-        BSDF lobes) `open_pbr_surface` and `gltf_pbr`:
+        `surface`, `surface_unlit`, `standard_surface`, `open_pbr_surface`,
+        `gltf_pbr`, `disney_principled`, and `mix` (`surfaceshader`):
         *   BSDF lobes: `oren_nayar_diffuse_bsdf` (standard and energy-
-            compensated), `translucent_bsdf`, `subsurface_bsdf` (diffuse
+            compensated), `burley_diffuse_bsdf`, `sheen_bsdf` (Conty-Kulla and
+            Zeltner LTC), `translucent_bsdf`, `subsurface_bsdf` (diffuse
             approximation), `dielectric_bsdf` (`R`, `T`, `RT`, solid and
-            `thin_walled`), `conductor_bsdf`, and combinators `layer`, `mix`,
-            `add`, and `multiply` (with per-lobe `normal`/`tangent` shading
-            frames). `burley_diffuse_bsdf`, `generalized_schlick_bsdf`,
-            `sheen_bsdf`, `chiang_hair_bsdf`, thin-film interference,
-            retroreflective specular, and VDF closures (volume
-            absorption/scattering) are not supported yet.
+            `thin_walled`), `conductor_bsdf`, `generalized_schlick_bsdf` (`R`,
+            `T`, `RT`, solid and `thin_walled`), `chiang_hair_bsdf`,
+            Belcour-Barla Airy thin-film iridescence
+            (`thinfilm_thickness`/`thinfilm_ior`, RGB and spectral),
+            `retroreflective` specular reflection, and combinators `layer`,
+            `mix`, `add`, and `multiply` (with per-lobe `normal`/`tangent`
+            shading frames). VDF closures (volume absorption/scattering) are not
+            supported yet.
         *   EDF closures: `uniform_edf`, `generalized_schlick_edf`,
             `conical_edf`, `measured_edf`, and EDF combinators `add`,
             `multiply`, `mix` (directional EDFs are approximated as diffuse
