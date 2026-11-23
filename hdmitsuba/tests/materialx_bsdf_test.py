@@ -1712,3 +1712,77 @@ def test_chiang_hair_helpers() -> None:
       (0.1784825, 0.3105311, 0.6507917),
       rtol=1e-4,
   )
+
+
+@pytest.mark.parametrize(
+    'shader_id, kwargs, exp_diffuse, exp_spec',
+    [
+        pytest.param(
+            'ND_open_pbr_surface_surfaceshader',
+            {
+                'base_color': (0.6, 0.3, 0.2),
+                'base_metalness': 0.4,
+                'specular_roughness': 0.25,
+                'coat_weight': 0.5,
+                'fuzz_weight': 0.4,
+                'fuzz_roughness': 0.5,
+                'thin_film_weight': 0.6,
+                'thin_film_thickness': 0.4,
+            },
+            (0.281, 0.134, 0.090),
+            (0.235, 0.136, 0.084),
+            id='open_pbr_full',
+        ),
+        pytest.param(
+            'ND_gltf_pbr_surfaceshader',
+            {
+                'base_color': (0.3, 0.6, 0.8),
+                'metallic': 0.5,
+                'roughness': 0.3,
+                'sheen_color': (0.8, 0.7, 0.9),
+                'sheen_roughness': 0.4,
+                'iridescence': 0.7,
+                'iridescence_thickness': 380.0,
+            },
+            (0.162, 0.290, 0.387),
+            (0.122, 0.338, 0.430),
+            id='gltf_pbr_full',
+        ),
+        pytest.param(
+            'ND_disney_principled',
+            {
+                'baseColor': (0.7, 0.4, 0.2),
+                'metallic': 0.3,
+                'roughness': 0.35,
+                'sheen': 0.5,
+                'clearcoat': 0.4,
+            },
+            (0.330, 0.192, 0.100),
+            (0.250, 0.161, 0.103),
+            id='disney_principled',
+        ),
+    ],
+)
+def test_uber_surface_shaders(
+    shader_id: str,
+    kwargs: dict[str, Any],
+    exp_diffuse: tuple[float, float, float],
+    exp_spec: tuple[float, float, float],
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+  """Tests OpenPBR, glTF PBR, and Disney Principled uber-shader compilation.
+
+  Args:
+    shader_id: MaterialX surface shader NodeDef identifier.
+    kwargs: Input parameters passed to the surface shader.
+    exp_diffuse: Expected normal-incidence diffuse albedo feature.
+    exp_spec: Expected normal-incidence specular reflectance feature.
+    capfd: Pytest file-descriptor capture fixture for checking compiler logs.
+  """
+  bsdf, _ = mtlx.compile_mtlx_material(shader_id, **kwargs)
+  assert bsdf is not None
+  assert 'Unsupported MaterialX' not in capfd.readouterr().err
+  feat = bsdf.eval_features(mtlx.make_test_si(wi=(0.0, 0.0, 1.0)))
+  assert dr.allclose(feat.diffuse_albedo, exp_diffuse, atol=1e-3)
+  assert dr.allclose(feat.specular_reflectance, exp_spec, atol=1e-3)
+  _check_bsdf_sampling(bsdf)
