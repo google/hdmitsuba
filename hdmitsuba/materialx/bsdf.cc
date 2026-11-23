@@ -107,7 +107,11 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
         switch (c.op) {
           case ClosureOp::OrenNayarDiffuse:
           case ClosureOp::BurleyDiffuse:
+          case ClosureOp::Sheen:
             leaf.primary_spec = add_spec(c.diffuse.color);
+            if (c.op == ClosureOp::Sheen && c.diffuse.mode == kSheenZeltner) {
+              surf_flags |= +BSDFFlags::NonSymmetric;
+            }
             break;
           case ClosureOp::Translucent:
             leaf.primary_spec = add_spec(c.translucent.color);
@@ -342,11 +346,11 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
     absl::InlinedVector<Frame3f, 4> frames;
     absl::InlinedVector<Vector3f, 4> wi_local;
     // Deduplicated upsampled spectra (`m_spec_slots`), per-leaf combined linear
-    // weights (combinators * leaf weight), optional cached dielectric coat
+    // weights (combinators * leaf weight), optional cached transmissive layer
     // directional albedos (when layered), and detached sampling probabilities.
     SpecVec spectra;
     SpecVec leaf_weight;
-    absl::InlinedVector<Float, 8> diel_refl_albedo;
+    absl::InlinedVector<Float, 8> layer_albedo;
     absl::InlinedVector<Float, 8> leaf_prob;
     Vector3f n_geom;
     Float opacity;
@@ -377,6 +381,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
     switch (c.op) {
       case ClosureOp::OrenNayarDiffuse:
       case ClosureOp::BurleyDiffuse:
+      case ClosureOp::Sheen:
         return {c.diffuse.normal, -1};
       case ClosureOp::Translucent:
         return {c.translucent.normal, -1};
@@ -393,6 +398,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
     switch (c.op) {
       case ClosureOp::OrenNayarDiffuse:
       case ClosureOp::BurleyDiffuse:
+      case ClosureOp::Sheen:
         return c.diffuse.weight;
       case ClosureOp::Translucent:
         return c.translucent.weight;
@@ -443,6 +449,13 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
         dielectric_ior(c, tmps), is_two_sided(c));
   }
 
+  static Float sheen_dir_albedo(const ClosureNode& c, const Vector3f& wi_l,
+                                const Val* tmps) {
+    return detail::sheen_dir_albedo(dr::abs(Frame3f::cos_theta(wi_l)),
+                                    tmps[c.diffuse.roughness].x(),
+                                    c.diffuse.mode == kSheenZeltner);
+  }
+
   UnpolarizedSpectrum leaf_albedo(size_t k, const State& s) const {
     const Leaf& leaf = m_leaves[k];
     const ClosureNode& c = prog().closures[leaf.node];
@@ -450,11 +463,18 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
       case ClosureOp::Dielectric: {
         const UnpolarizedSpectrum& tint = s.spectra[leaf.primary_spec];
         if (scatter_mode(c) != kScatterR) return tint;
-        Float r = !s.diel_refl_albedo.empty()
-                      ? s.diel_refl_albedo[k]
+        Float r = !s.layer_albedo.empty()
+                      ? s.layer_albedo[k]
                       : dielectric_refl_albedo(c, s.wi_local[leaf.frame],
                                                s.tmps.data());
         return tint * r;
+      }
+      case ClosureOp::Sheen: {
+        Float a =
+            !s.layer_albedo.empty()
+                ? s.layer_albedo[k]
+                : sheen_dir_albedo(c, s.wi_local[leaf.frame], s.tmps.data());
+        return s.spectra[leaf.primary_spec] * a;
       }
       case ClosureOp::Conductor:
         return detail::ggx_conductor_albedo(
@@ -481,7 +501,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
 
   // Flattens the closure DAG into per-leaf effective linear weights
   // (combinators * leaf weight), computing layer throughputs and caching
-  // reflection-only dielectric albedos when layered.
+  // transmissive layer albedos when layered.
   void flatten_closures(State& s) const {
     const std::vector<ClosureNode>& closures = prog().closures;
     size_t n = closures.size();
@@ -490,7 +510,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
     absl::InlinedVector<UnpolarizedSpectrum, 16> tp;
     if (m_has_layers) {
       tp.resize(n - 1);
-      s.diel_refl_albedo.resize(m_leaves.size(), 0.0f);
+      s.layer_albedo.resize(m_leaves.size(), 0.0f);
       size_t leaf_k = 0;
       for (size_t i = 0; i + 1 < n; ++i) {
         const ClosureNode& c = closures[i];
@@ -498,11 +518,15 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
           tp[i] = 1.0f;
         } else if (is_leaf(c.op)) {
           size_t k = leaf_k++;
-          if (c.op == ClosureOp::Dielectric && scatter_mode(c) == kScatterR) {
+          if ((c.op == ClosureOp::Dielectric && scatter_mode(c) == kScatterR) ||
+              c.op == ClosureOp::Sheen) {
             Float albedo =
-                dielectric_refl_albedo(c, s.wi_local[m_leaves[k].frame], tmps);
-            s.diel_refl_albedo[k] = albedo;
-            Float w_leaf = dr::maximum(tmps[c.dielectric.weight].x(), 0.0f);
+                c.op == ClosureOp::Sheen
+                    ? sheen_dir_albedo(c, s.wi_local[m_leaves[k].frame], tmps)
+                    : dielectric_refl_albedo(c, s.wi_local[m_leaves[k].frame],
+                                             tmps);
+            s.layer_albedo[k] = albedo;
+            Float w_leaf = dr::maximum(tmps[leaf_weight_slot(c)].x(), 0.0f);
             tp[i] = dr::maximum(0.0f, 1.0f - w_leaf * albedo);
           } else {
             tp[i] = 0.0f;
@@ -605,10 +629,15 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
     }
     Float w_sum(0.0f);
     for (size_t k = 0; k < num_leaves; ++k) {
-      if (!leaf_enabled(ctx, prog().closures[m_leaves[k].node])) {
+      const ClosureNode& c = prog().closures[m_leaves[k].node];
+      if (!leaf_enabled(ctx, c)) {
         s.leaf_prob[k] = 0.0f;
       } else {
-        Float sw = selection_weight(s.leaf_weight[k] * leaf_albedo(k, s));
+        UnpolarizedSpectrum alb = leaf_albedo(k, s);
+        if (c.op == ClosureOp::Sheen && c.diffuse.mode != kSheenZeltner) {
+          alb = dr::maximum(alb, s.spectra[m_leaves[k].primary_spec] * 1e-3f);
+        }
+        Float sw = selection_weight(s.leaf_weight[k] * alb);
         s.leaf_prob[k] = sw;
         w_sum += sw;
       }
@@ -772,6 +801,11 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
         std::tie(wo_l, valid) = detail::ggx_conductor_sample(
             wi_l, get_ggx_alpha(c, s.tmps.data()), sample2);
         break;
+      case ClosureOp::Sheen:
+        std::tie(wo_l, valid) =
+            detail::sheen_sample(wi_l, s.tmps[c.diffuse.roughness].x(),
+                                 c.diffuse.mode == kSheenZeltner, sample2);
+        break;
       case ClosureOp::Translucent:
         std::tie(wo_l, valid) = detail::translucent_sample(wi_l, sample2);
         break;
@@ -818,6 +852,11 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
         std::tie(f, pdf) = detail::translucent_eval_pdf(
             wi_l, wo_l, s.spectra[leaf.primary_spec]);
         break;
+      case ClosureOp::Sheen:
+        std::tie(f, pdf) = detail::sheen_eval_pdf(
+            wi_l, wo_l, s.spectra[leaf.primary_spec],
+            s.tmps[c.diffuse.roughness].x(), c.diffuse.mode == kSheenZeltner);
+        break;
       case ClosureOp::BurleyDiffuse:
         std::tie(f, pdf) = detail::burley_diffuse_eval_pdf(
             wi_l, wo_l, s.spectra[leaf.primary_spec],
@@ -827,7 +866,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
         std::tie(f, pdf) = detail::oren_nayar_eval_pdf(
             wi_l, wo_l, s.spectra[leaf.primary_spec],
             dr::clip(s.tmps[c.diffuse.roughness].x(), 0.0f, 1.0f),
-            c.diffuse.energy_comp != 0);
+            c.diffuse.mode != 0);
         break;
     }
     return {dr::select(same_side, f, 0.0f), dr::select(same_side, pdf, 0.0f)};

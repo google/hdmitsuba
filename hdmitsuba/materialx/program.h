@@ -384,10 +384,13 @@ inline constexpr int kScatterR = 0, kScatterT = 1, kScatterRT = 2;
 inline constexpr int kScatterModeMask = 3, kScatterThinWalled = 4,
                      kScatterTwoSided = 8;
 
+inline constexpr int kSheenContyKulla = 0, kSheenZeltner = 1;
+
 enum class ClosureOp : int32_t {
   Null,
   OrenNayarDiffuse,
   BurleyDiffuse,
+  Sheen,
   Translucent,
   Dielectric,
   Conductor,
@@ -405,8 +408,10 @@ constexpr bool is_combinator(ClosureOp op) { return op >= ClosureOp::Layer; }
 // Tagged POD closure node stored in `MtlxProgram::closures`. Unless noted as a
 // literal or closure index, each field is a VM temporary slot (-1 if absent).
 struct ClosureNode {
+  // Shared by `OrenNayarDiffuse` (`mode = energy_comp`), `BurleyDiffuse`, and
+  // `Sheen` (`mode = kSheen*`).
   struct Diffuse {
-    int weight, color, roughness, energy_comp, normal;
+    int weight, color, roughness, mode, normal;
     int _pad[2] = {};
   };
   struct Translucent {
@@ -453,6 +458,13 @@ struct ClosureNode {
                                        int normal) {
     ClosureNode n(ClosureOp::BurleyDiffuse);
     n.diffuse = {weight, color, roughness, 0, normal};
+    return n;
+  }
+
+  static ClosureNode MakeSheen(int weight, int color, int roughness, int mode,
+                               int normal) {
+    ClosureNode n(ClosureOp::Sheen);
+    n.diffuse = {weight, color, roughness, mode, normal};
     return n;
   }
 

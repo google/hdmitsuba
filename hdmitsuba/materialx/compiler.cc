@@ -1685,7 +1685,7 @@ void MtlxExprCompiler::WarnUnsupportedMicrofacetInputs(const mx::NodePtr& node,
 int MtlxExprCompiler::CompileDiffuseClosure(const mx::NodePtr& node,
                                             const std::string& cat) {
   Expr w_expr = CompileInputExpr(node, "weight", Expr::one());
-  if (w_expr.is_zero()) return EmitOpaqueBlocker();
+  if (w_expr.is_zero()) return cat == "sheen_bsdf" ? -1 : EmitOpaqueBlocker();
   int w_slot = EmitTmp(w_expr);
   int color_slot = EmitTmp(CompileInputExpr(node, "color", Expr::one()));
   int rough_slot = EmitTmp(CompileInputExpr(node, "roughness"));
@@ -1693,6 +1693,13 @@ int MtlxExprCompiler::CompileDiffuseClosure(const mx::NodePtr& node,
   if (cat == "burley_diffuse_bsdf") {
     return EmitClosure(mtlx::ClosureNode::MakeBurleyDiffuse(
         w_slot, color_slot, rough_slot, n_slot));
+  }
+  if (cat == "sheen_bsdf") {
+    int mode = GetNodeInputString(node, "mode") == "zeltner"
+                   ? mtlx::kSheenZeltner
+                   : mtlx::kSheenContyKulla;
+    return EmitClosure(mtlx::ClosureNode::MakeSheen(w_slot, color_slot,
+                                                    rough_slot, mode, n_slot));
   }
   int energy_comp = cat == "oren_nayar_diffuse_bsdf" &&
                     !CompileInputExpr(node, "energy_compensation").is_zero();
@@ -1774,7 +1781,7 @@ int MtlxExprCompiler::CompileBsdfClosure(const mx::NodePtr& raw_node) {
 
   int idx = -1;
   if (cat == "oren_nayar_diffuse_bsdf" || cat == "subsurface_bsdf" ||
-      cat == "burley_diffuse_bsdf") {
+      cat == "burley_diffuse_bsdf" || cat == "sheen_bsdf") {
     idx = CompileDiffuseClosure(node, cat);
   } else if (cat == "translucent_bsdf") {
     idx = CompileTranslucentClosure(node);

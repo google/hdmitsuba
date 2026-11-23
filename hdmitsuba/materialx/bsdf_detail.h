@@ -446,6 +446,118 @@ std::pair<Spectrum, Float> burley_diffuse_eval_pdf(const Vector<Float, 3>& wi_l,
           dr::select(valid, pdf_val, 0.0f)};
 }
 
+// Sheen directional albedo: Zeltner et al. (2022) LTC
+// (`mx_zeltner_sheen_dir_albedo`) or Imageworks / Conty-Kulla rational
+// quadratic fit
+// (`mx_imageworks_sheen_dir_albedo_analytic`).
+template <typename Float>
+Float sheen_dir_albedo(const Float& n_dot_v, const Float& roughness,
+                       bool zeltner) {
+  Float x = dr::clip(n_dot_v, 0.0f, 1.0f);
+  if (zeltner) {
+    Float y = dr::clip(roughness, 0.01f, 1.0f);
+    Float s = y * dr::horner(y, 0.0206607f, 1.58491f) /
+              dr::horner(y, 0.0379424f, 1.32227f, 1.0f);
+    Float m = y *
+              dr::horner(y, -0.193854f, -1.14885f, 1.7932f, 0.0f, -0.95943f) /
+              (0.046391f + y);
+    Float o = y * dr::horner(y, 0.000654023f, -0.0207818f, 0.119681f) /
+              dr::horner(y, 1.26264f, -1.92021f, 1.0f);
+    return dr::clip(
+        dr::exp(-0.5f * dr::square((x - m) / s)) * dr::InvSqrtTwoPi<Float> / s +
+            o,
+        0.0f, 1.0f);
+  }
+  Float y = dr::clip(roughness, 0.0f, 1.0f);
+  Float x2 = dr::square(x), y2 = dr::square(y), xy = x * y;
+  Float rx = 13.673f - 68.78018f * x + 799.08825f * y - 905.00061f * xy +
+             60.28956f * x2 + 1086.96473f * y2;
+  Float ry = 1.0f + 61.57746f * x + 442.78211f * y + 2597.49308f * xy +
+             121.81241f * x2 + 3045.55075f * y2;
+  return dr::clip(rx / ry, 0.0f, 1.0f);
+}
+
+// Returns `(a_inv, b_inv, tx, ty)` for Zeltner LTC sheen oriented by `wi_pos`
+// (local frame with `wi_pos.z() >= 0`).
+template <typename Float>
+std::tuple<Float, Float, Float, Float> zeltner_sheen_ltc(
+    const Vector<Float, 3>& wi_pos, const Float& roughness) {
+  const Float& x = wi_pos.z();
+  Float y = dr::clip(roughness, 0.01f, 1.0f);
+  Float a_inv = (2.58126f * x + 0.813703f * y) * y /
+                (1.0f + 0.310327f * dr::square(x) + 2.60994f * x * y);
+  Float b_inv = dr::safe_sqrt(1.0f - x) * (y - 1.0f) * y * dr::square(y) /
+                (0.0000254053f + 1.71228f * x - 1.71506f * x * y +
+                 1.34174f * dr::square(y));
+  auto t = safe_normalize(dr::head<2>(wi_pos), dr::Array<Float, 2>(1.0f, 0.0f),
+                          kMinLen2<dr::scalar_t<Float>>);
+  return {a_inv, b_inv, t.x(), t.y()};
+}
+
+template <typename Float>
+std::pair<Vector<Float, 3>, dr::mask_t<Float>> sheen_sample(
+    const Vector<Float, 3>& wi_l, const Float& roughness, bool zeltner,
+    const Point<Float, 2>& u2) {
+  if (!zeltner) return oren_nayar_sample(wi_l, u2);
+  using Vector3f = Vector<Float, 3>;
+  Float cos_i = Frame<Float>::cos_theta(wi_l), n_dot_v = dr::abs(cos_i);
+  auto [a_inv, b_inv, tx, ty] =
+      zeltner_sheen_ltc(Vector3f(wi_l.x(), wi_l.y(), n_dot_v), roughness);
+  Vector3f wo = warp::square_to_cosine_hemisphere(u2);
+  Vector3f w =
+      dr::normalize(Vector3f(wo.x() - b_inv * wo.z(), wo.y(), a_inv * wo.z()));
+  Vector3f wo_l(tx * w.x() - ty * w.y(), ty * w.x() + tx * w.y(),
+                dr::mulsign(w.z(), cos_i));
+  return {wo_l, (n_dot_v > 0.0f) && (w.z() > 0.0f)};
+}
+
+template <typename Float, typename Spectrum>
+std::pair<Spectrum, Float> sheen_eval_pdf(const Vector<Float, 3>& wi_l,
+                                          const Vector<Float, 3>& wo_l,
+                                          const Spectrum& color,
+                                          const Float& roughness,
+                                          bool zeltner) {
+  using ScalarFloat = dr::scalar_t<Float>;
+  using Vector3f = Vector<Float, 3>;
+  Float cos_i = Frame<Float>::cos_theta(wi_l),
+        cos_o = Frame<Float>::cos_theta(wo_l);
+  Float n_dot_v = dr::abs(cos_i), n_dot_l = dr::mulsign(cos_o, cos_i);
+  auto valid = (n_dot_v > 0.0f) && (n_dot_l > 0.0f);
+  Vector3f wi_pos(wi_l.x(), wi_l.y(), n_dot_v),
+      wo_pos(wo_l.x(), wo_l.y(), n_dot_l);
+  if (zeltner) {
+    auto [a_inv, b_inv, tx, ty] = zeltner_sheen_ltc(wi_pos, roughness);
+    Float x = tx * wo_pos.x() + ty * wo_pos.y(),
+          y = tx * wo_pos.y() - ty * wo_pos.x();
+    Vector3f w(a_inv * x + b_inv * n_dot_l, a_inv * y, n_dot_l);
+    Float density = dr::select(
+        valid,
+        n_dot_l * dr::InvPi<Float> *
+            dr::square(a_inv / dr::select(valid, dr::squared_norm(w), 1.0f)),
+        0.0f);
+    return {color * (sheen_dir_albedo(n_dot_v, roughness, /*zeltner=*/true) *
+                     density),
+            density};
+  }
+  Float pdf_val = n_dot_l * dr::InvPi<Float>;
+  Float inv_r = dr::rcp(dr::clip(roughness, 0.005f, 1.0f));
+  Vector3f h = safe_normalize(wi_pos + wo_pos, Vector3f(0.0f, 0.0f, 1.0f),
+                              kMinLen2<ScalarFloat>);
+  Float sin2 = Frame<Float>::sin_theta_2(h);
+  auto pos_sin = sin2 > 0.0f;
+  Float d_pi = dr::select(
+      pos_sin,
+      (2.0f + inv_r) * dr::pow(dr::select(pos_sin, sin2, 1.0f), 0.5f * inv_r) *
+          0.5f,
+      0.0f);
+  Float denom = 4.0f * (n_dot_l + n_dot_v - n_dot_l * n_dot_v);
+  return {dr::select(
+              valid,
+              color * (pdf_val * d_pi / dr::maximum(denom, dr::Epsilon<Float>)),
+              0.0f),
+          dr::select(valid, pdf_val, 0.0f)};
+}
+
 template <typename Float>
 std::pair<Vector<Float, 3>, dr::mask_t<Float>> translucent_sample(
     const Vector<Float, 3>& wi_l, const Point<Float, 2>& u2) {

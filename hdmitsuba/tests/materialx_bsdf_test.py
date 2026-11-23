@@ -110,6 +110,12 @@ _LOBE_CASES = [
         id='subsurface',
     ),
     pytest.param(
+        'ND_sheen_bsdf',
+        {'color': (0.8, 0.7, 0.9), 'roughness': 0.35, 'mode': 'zeltner'},
+        {},
+        id='sheen_zeltner',
+    ),
+    pytest.param(
         'ND_conductor_bsdf',
         {
             **_CONDUCTOR_KW,
@@ -702,6 +708,11 @@ def test_bsdf_ad_gradients() -> None:
       1.5,
       lambda _, w: w,
   )
+  _check_fd_grad(
+      _compile_bsdf('ND_sheen_bsdf', roughness=0.5, mode='zeltner'),
+      0.5,
+      lambda bs, w: w * bs.wo.z,
+  )
 
   bsdf_op = _compile_bsdf(
       'ND_oren_nayar_diffuse_bsdf', opacity=0.6, color=(0.4, 0.4, 0.4)
@@ -1056,3 +1067,90 @@ def test_burley_diffuse_bsdf() -> None:
       base=('ND_oren_nayar_diffuse_bsdf', {'color': (1.0, 1.0, 1.0)}),
   )
   assert dr.allclose(bsdf_blocked.eval(ctx, si, si_rev.wi), 0.0)
+
+
+def test_sheen_bsdf() -> None:
+  """Tests Conty-Kulla and Zeltner LTC `sheen_bsdf` eval, reciprocity, and layering."""
+  ctx = mi.BSDFContext()
+  color = (0.8, 0.6, 0.4)
+  si = mtlx.make_test_si(wi=(0.6, 0.0, 0.8))
+  si_rev = mtlx.make_test_si(wi=(-0.5, 0.3, math.sqrt(1.0 - 0.25 - 0.09)))
+
+  # Conty-Kulla: analytical value, exact mirror zero, reciprocity, and flags.
+  bsdf_ck = _compile_bsdf(
+      'ND_sheen_bsdf', color=color, roughness=0.4, mode='conty_kulla'
+  )
+  assert mi.has_flag(bsdf_ck.flags(), mi.BSDFFlags.DiffuseReflection)
+  assert not mi.has_flag(bsdf_ck.flags(), mi.BSDFFlags.NonSymmetric)
+  val_ck, pdf_ck = bsdf_ck.eval_pdf(ctx, si, si_rev.wi)
+  assert dr.allclose(val_ck, mi.Color3f(*color) * 0.0024557, rtol=1e-4)
+  assert dr.allclose(pdf_ck, si_rev.wi.z * dr.inv_pi, rtol=1e-5)
+  val_ck_rev = bsdf_ck.eval(ctx, si_rev, si.wi)
+  assert dr.allclose(val_ck / si_rev.wi.z, val_ck_rev / si.wi.z, rtol=1e-5)
+  assert dr.allclose(
+      bsdf_ck.eval(
+          ctx, mtlx.make_test_si(wi=(0.0, 0.0, 1.0)), mi.Vector3f(0.0, 0.0, 1.0)
+      ),
+      0.0,
+  )
+  _check_bsdf_sampling(bsdf_ck)
+
+  # Zeltner LTC: NonSymmetric flag and exact-density zero-variance sampling.
+  bsdf_z = _compile_bsdf(
+      'ND_sheen_bsdf', color=color, roughness=0.35, mode='zeltner'
+  )
+  assert mi.has_flag(bsdf_z.flags(), mi.BSDFFlags.NonSymmetric)
+  u1, u2 = _sample_inputs(2048)
+  bs_z, w_z = bsdf_z.sample(ctx, si, u1, u2)
+  assert dr.all(bs_z.pdf > 0.0)
+  feat_z = bsdf_z.eval_features(si)
+  assert dr.allclose(
+      feat_z.diffuse_albedo, mi.Color3f(*color) * 0.0062649, rtol=1e-4
+  )
+  assert dr.allclose(w_z, feat_z.diffuse_albedo, rtol=1e-4, atol=1e-4)
+
+  # Layering white sheen over a white translucent base conserves energy and
+  # attenuates the base by `1 - dir_albedo`.
+  si_g = mtlx.make_test_si(wi=(0.95, 0.0, 0.31225))
+  for mode, exp_tp in (('conty_kulla', 0.6303415), ('zeltner', 0.8400126)):
+    layered = _compile_bsdf(
+        'ND_layer_bsdf',
+        top=(
+            'ND_sheen_bsdf',
+            {'color': (1.0, 1.0, 1.0), 'roughness': 0.35, 'mode': mode},
+        ),
+        base=('ND_translucent_bsdf', {'color': (1.0, 1.0, 1.0)}),
+    )
+    assert dr.allclose(
+        layered.eval(ctx, si_g, mi.Vector3f(0.0, 0.0, -1.0)),
+        exp_tp * dr.inv_pi,
+        rtol=1e-4,
+    )
+    _check_bsdf_sampling(layered, si_g)
+
+  # Low-roughness Conty-Kulla keeps non-zero sampling PDF even where the
+  # analytic albedo fit clips to 0 (e.g. n_dot_v = 0.5, roughness = 0.01).
+  layered_low_r = _compile_bsdf(
+      'ND_layer_bsdf',
+      top=('ND_sheen_bsdf', {'roughness': 0.01}),
+      base=('ND_translucent_bsdf', {}),
+  )
+  val_lr, pdf_lr = layered_low_r.eval_pdf(
+      ctx,
+      mtlx.make_test_si(wi=(math.sqrt(0.75), 0.0, 0.5)),
+      mi.Vector3f(0.0, 0.0, 1.0),
+  )
+  assert dr.all(val_lr > 0.0)
+  assert dr.allclose(pdf_lr, (1e-3 / 1.001) * dr.inv_pi, rtol=1e-4)
+
+  # Zero-weight sheen passes the base through unattenuated.
+  passthru = _compile_bsdf(
+      'ND_layer_bsdf',
+      top=('ND_sheen_bsdf', {'weight': 0.0, 'color': color}),
+      base=('ND_oren_nayar_diffuse_bsdf', {'color': (0.6, 0.4, 0.2)}),
+  )
+  assert dr.allclose(
+      passthru.eval(ctx, si, si_rev.wi),
+      mi.Color3f(0.6, 0.4, 0.2) * (si_rev.wi.z * dr.inv_pi),
+      rtol=1e-4,
+  )
