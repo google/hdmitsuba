@@ -266,11 +266,12 @@ MeshExtractionData ExtractMeshData(UsdStagePtr stage, const SdfPath& path,
         UsdInterpolationToHdInterpolation(primvar.GetInterpolation());
     VtValue value;
     if (primvar.ComputeFlattened(&value, time) && !value.IsEmpty()) {
-      data.primvars[name] = {std::move(value), interpolation};
-      if (interpolation == HdInterpolationFaceVarying) {
+      if (interpolation == HdInterpolationFaceVarying &&
+          SubdivisionEvaluator::CanRefine(value)) {
         primvar.Get(&data.unflattened_fvar_values[name], time);
         primvar.GetIndices(&data.fvar_indices[name], time);
       }
+      data.primvars[name] = {std::move(value), interpolation};
     }
   }
 
@@ -348,13 +349,19 @@ std::vector<SubMeshOutput> ProcessMesh(
   if (subdiv.IsSubdivided()) {
     // Normals will be recomputed after subdivision, skip refining them here.
     geometry.primvars.erase(HdTokens->normals);
-    for (auto& [token, state] : geometry.primvars) {
+    for (auto it = geometry.primvars.begin(); it != geometry.primvars.end();) {
+      auto& [token, state] = *it;
       // FaceVarying primvars are refined on their unflattened values.
       if (subdiv.HasFVarChannel(token)) {
         state.value = mesh_data.unflattened_fvar_values.at(token);
       }
       state.value =
           subdiv.RefinePrimvar(state.value, state.interpolation, token);
+      if (state.value.IsEmpty()) {
+        it = geometry.primvars.erase(it);
+      } else {
+        ++it;
+      }
     }
     subdiv.RefineTopology(geometry);
   }

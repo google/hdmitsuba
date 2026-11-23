@@ -70,7 +70,12 @@ class SubdivisionEvaluator {
   // Returns the face-varying primvar index maps used to initialize the refiner.
   const FVarIndicesMap& FVarIndices() const { return fvar_indices_; }
 
-  // Refines a primvar using the evaluated subdivision stencils.
+  // Returns true if `value` holds an array type that can be refined.
+  static bool CanRefine(const VtValue& value);
+
+  // Refines a primvar using the evaluated subdivision stencils. Returns an
+  // empty value for non-constant primvars of types that cannot be refined
+  // (e.g., strings), which are dropped from subdivided meshes.
   VtValue RefinePrimvar(const VtValue& value, HdInterpolation interpolation,
                         const TfToken& token) const;
 
