@@ -131,6 +131,14 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
             leaf.spec[2] = add_spec(c.microfacet.p[2]);
             surf_flags |= BSDFFlags::Anisotropic | BSDFFlags::NonSymmetric;
             break;
+          case ClosureOp::ChiangHair:
+            leaf.spec[0] = add_spec(c.hair.tint_r);
+            leaf.spec[1] = add_spec(c.hair.tint_tt);
+            leaf.spec[2] = add_spec(c.hair.tint_trt);
+            leaf.spec[3] = add_spec(c.hair.absorption, /*unbounded=*/true);
+            leaf.hair_idx = m_num_hair++;
+            surf_flags |= BSDFFlags::Anisotropic | BSDFFlags::NonSymmetric;
+            break;
           default:
             break;
         }
@@ -292,6 +300,24 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
           spec_roughness =
               dr::select(sw > best_spec_w, dr::max(alpha), spec_roughness);
           best_spec_w = dr::maximum(best_spec_w, sw);
+        } else if (c.op == ClosureOp::ChiangHair) {
+          const auto& hp = s.hair[leaf.hair_idx];
+          specular_reflectance +=
+              s.leaf_weight[k] * (hp.ap[0] + hp.ap[2] + 0.5f * hp.ap[3]);
+          UnpolarizedSpectrum trans =
+              s.leaf_weight[k] * (hp.ap[1] + 0.5f * hp.ap[3]);
+          surf_transmittance += trans;
+          Float tw = selection_weight(trans);
+          Mask pick_wt = s.surf_active && (tw > best_wt_w);
+          wt = dr::select(pick_wt, -si.to_world(si.wi), wt);
+          best_wt_w = dr::select(pick_wt, tw, best_wt_w);
+          Float sw = selection_weight(contrib);
+          spec_roughness = dr::select(
+              sw > best_spec_w,
+              dr::clip(dr::max(dr::head<2>(s.tmps[c.hair.roughness_r])), 1e-3f,
+                       1.0f),
+              spec_roughness);
+          best_spec_w = dr::maximum(best_spec_w, sw);
         } else {
           diffuse_albedo += contrib;
         }
@@ -349,6 +375,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
   struct Leaf {
     size_t node, frame;
     int spec[4] = {-1, -1, -1, -1};
+    int hair_idx = -1;
   };
 
   using SpecVec = absl::InlinedVector<UnpolarizedSpectrum, 8>;
@@ -366,6 +393,8 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
     SpecVec spectra;
     SpecVec leaf_weight;
     SpecVec layer_albedo;
+    absl::InlinedVector<detail::ChiangHairParams<Float, UnpolarizedSpectrum>, 1>
+        hair;
     absl::InlinedVector<Float, 8> leaf_prob;
     Vector3f n_geom;
     Wavelength wavelengths;
@@ -396,6 +425,8 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
     return (c.microfacet.mode & kScatterRetroreflective) != 0;
   }
 
+  static constexpr int kDefaultCurveDir = -2;
+
   static std::pair<int, int> leaf_frame_slots(const ClosureNode& c) {
     switch (c.op) {
       case ClosureOp::OrenNayarDiffuse:
@@ -408,6 +439,10 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
       case ClosureOp::Conductor:
       case ClosureOp::GeneralizedSchlick:
         return {c.microfacet.normal, c.microfacet.tangent};
+      case ClosureOp::ChiangHair:
+        return {c.hair.normal, c.hair.curve_direction >= 0
+                                   ? c.hair.curve_direction
+                                   : kDefaultCurveDir};
       default:
         return {-1, -1};
     }
@@ -441,6 +476,8 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
         return (sm != kScatterT ? +BSDFFlags::GlossyReflection : 0u) |
                (sm != kScatterR ? +BSDFFlags::GlossyTransmission : 0u);
       }
+      case ClosureOp::ChiangHair:
+        return +BSDFFlags::GlossyReflection | +BSDFFlags::GlossyTransmission;
       default:
         return +BSDFFlags::DiffuseReflection;
     }
@@ -632,6 +669,10 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
                           c, s.wi_local[leaf.frame], s.tmps.data())));
       case ClosureOp::Conductor:
         return specular_refl_albedo(c, leaf, s);
+      case ClosureOp::ChiangHair: {
+        const auto& hp = s.hair[leaf.hair_idx];
+        return hp.ap[0] + hp.ap[1] + hp.ap[2] + hp.ap[3];
+      }
       default:
         return s.spectra[leaf.spec[0]];
     }
@@ -722,8 +763,10 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
     s.leaf_weight.resize(m_leaves.size());
     for (size_t k = 0; k < m_leaves.size(); ++k) {
       const ClosureNode& c = closures[m_leaves[k].node];
-      s.leaf_weight[k] = w[m_leaves[k].node] *
-                         dr::maximum(tmps[leaf_weight_slot(c)].x(), 0.0f);
+      int w_slot = leaf_weight_slot(c);
+      s.leaf_weight[k] = w_slot >= 0 ? w[m_leaves[k].node] *
+                                           dr::maximum(tmps[w_slot].x(), 0.0f)
+                                     : w[m_leaves[k].node];
     }
   }
 
@@ -759,7 +802,9 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
           tangent_slot >= 0
               ? detail::safe_normalize(xyz(s.tmps[tangent_slot]), si.sh_frame.s,
                                        detail::kMinLen2<ScalarFloat>)
-              : detail::geom_tangent_world(si);
+              : (tangent_slot == kDefaultCurveDir
+                     ? detail::geom_curve_tangent_world(si)
+                     : detail::geom_tangent_world(si));
       s.frames[f] = detail::build_shading_frame(si, s.n_geom, nl, t_world);
       s.wi_local[f] = s.frames[f].to_local(si.wi);
     }
@@ -768,6 +813,24 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
     for (size_t j = 0; j < m_spec_slots.size(); ++j) {
       s.spectra[j] = eval_color(m_spec_slots[j].tmp_slot, si, s.tmps.data(),
                                 m_spec_slots[j].unbounded);
+    }
+    if (m_num_hair > 0 &&
+        (ctx.type_mask & (+BSDFFlags::GlossyReflection |
+                          +BSDFFlags::GlossyTransmission)) != 0u) {
+      s.hair.reserve(m_num_hair);
+      auto hair_r = [&](int slot) {
+        return dr::maximum(dr::head<2>(s.tmps[slot]), 1e-3f);
+      };
+      for (const Leaf& leaf : m_leaves) {
+        if (leaf.hair_idx < 0) continue;
+        const ClosureNode& c = prog().closures[leaf.node];
+        s.hair.push_back(detail::build_chiang_hair_params<Float, Spectrum>(
+            s.wi_local[leaf.frame], s.spectra[leaf.spec[0]],
+            s.spectra[leaf.spec[1]], s.spectra[leaf.spec[2]],
+            hair_r(c.hair.roughness_r), hair_r(c.hair.roughness_tt),
+            hair_r(c.hair.roughness_trt), s.tmps[c.hair.ior].x(),
+            s.spectra[leaf.spec[3]], s.tmps[c.hair.cuticle_angle].x()));
+      }
     }
     flatten_closures(s);
     return s;
@@ -805,11 +868,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
   }
 
   static Float selection_weight(const UnpolarizedSpectrum& c) {
-    if constexpr (is_rgb_v<Spectrum>) {
-      return luminance(c);
-    } else {
-      return dr::mean(c);
-    }
+    return detail::selection_weight<Spectrum>(c);
   }
 
   bool has_cutout(const BSDFContext& ctx) const {
@@ -955,6 +1014,12 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
         valid = ds.valid;
         break;
       }
+      case ClosureOp::ChiangHair:
+        std::tie(wo_l, sampled_type, valid) = detail::chiang_hair_sample(
+            s.hair[leaf.hair_idx], wi_l,
+            ctx.is_enabled(BSDFFlags::GlossyReflection),
+            ctx.is_enabled(BSDFFlags::GlossyTransmission), sample1, sample2);
+        break;
       case ClosureOp::Sheen:
         std::tie(wo_l, valid) =
             detail::sheen_sample(wi_l, s.tmps[c.diffuse.roughness].x(),
@@ -1002,6 +1067,12 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
         if (c.op == ClosureOp::Dielectric) f *= s.spectra[leaf.spec[0]];
         break;
       }
+      case ClosureOp::ChiangHair:
+        std::tie(f, pdf) = detail::chiang_hair_eval_pdf(
+            s.hair[leaf.hair_idx], wi_l, wo_l,
+            ctx.is_enabled(BSDFFlags::GlossyReflection),
+            ctx.is_enabled(BSDFFlags::GlossyTransmission));
+        break;
       case ClosureOp::Translucent:
         std::tie(f, pdf) =
             detail::translucent_eval_pdf(wi_l, wo_l, s.spectra[leaf.spec[0]]);
@@ -1041,6 +1112,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
 
   MtlxEvaluator<Float, Spectrum> m_eval;
   bool m_has_layers = false;
+  int m_num_hair = 0;
   uint32_t m_surface_types = 0u;
   uint32_t m_null_component = uint32_t(-1);
   // Deduplicated spectral slots evaluated once per query.

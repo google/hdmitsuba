@@ -159,9 +159,19 @@ def render_center(
 def _is_shader_spec(val: Any) -> bool:
   return (
       isinstance(val, tuple)
-      and len(val) == 2
+      and len(val) in (2, 3)
       and isinstance(val[0], str)
       and isinstance(val[1], dict)
+      and (len(val) == 2 or isinstance(val[2], str))
+  )
+
+
+def _resolve_shader_spec(
+    stage: Usd.Stage, path: str, val: Any
+) -> UsdShade.Output:
+  """Defines a shader from a `(id, inputs[, output])` tuple and returns its output."""
+  return define_shader(stage, path, val[0], **val[1]).CreateOutput(
+      val[2] if len(val) == 3 else 'out', Sdf.ValueTypeNames.Token
   )
 
 
@@ -179,7 +189,7 @@ def define_shader(
     shader_id: MaterialX NodeDef identifier (e.g.
       `ND_standard_surface_surfaceshader`).
     **inputs: Input parameter values, connected `UsdShade.Shader`/`Output`
-      objects, or nested `(node_id, input_dict)` tuples.
+      objects, or nested `(node_id, input_dict[, output_name])` tuples.
 
   Returns:
     The newly defined `UsdShade.Shader` prim.
@@ -192,7 +202,7 @@ def define_shader(
   for name, val in inputs.items():
     name = name.removesuffix('_')
     if _is_shader_spec(val):
-      val = define_shader(stage, f'{full_path}/{name}', val[0], **val[1])
+      val = _resolve_shader_spec(stage, f'{full_path}/{name}', val)
     if isinstance(val, UsdShade.Shader):
       val = val.CreateOutput('out', Sdf.ValueTypeNames.Token)
     if isinstance(val, UsdShade.Output):
@@ -281,8 +291,9 @@ def eval_emission_expr(
   """Evaluates a MaterialX expression plugged into an area light's emission.
 
   Args:
-    emission_color: Value, `UsdShade.Shader`/`Output`, or `(node_id, kwargs)`
-      tuple to plug into `ND_surface_unlit.emission_color`.
+    emission_color: Value, `UsdShade.Shader`/`Output`, or
+      `(node_id, input_dict[, output_name])` tuple to plug into
+      `ND_surface_unlit.emission_color`.
     stage: Optional USD stage to reuse.
     si: Optional `mi.SurfaceInteraction3f` (1-point or `N`-lane batch).
     channels: Number of output channels to return (`1`..`4`).
@@ -293,9 +304,7 @@ def eval_emission_expr(
   """
   stage = stage or Usd.Stage.CreateInMemory()
   if _is_shader_spec(emission_color):
-    emission_color = define_shader(
-        stage, 'ExprNode', emission_color[0], **emission_color[1]
-    )
+    emission_color = _resolve_shader_spec(stage, 'ExprNode', emission_color)
   if si is None:
     si = make_test_si(wi=(0.0, 0.0, 1.0))
 
