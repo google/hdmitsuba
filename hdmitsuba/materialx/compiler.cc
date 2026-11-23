@@ -259,10 +259,6 @@ std::string NodeCategory(const mx::NodePtr& node) {
 // bytecode, opaque parameters, or texture loads into `MtlxProgram`.
 bool IsNonZeroInput(const mx::NodePtr& node, const std::string& name) {
   if (mx::InputPtr in = GetValueInput(node, name)) {
-    if (in->getType() == "boolean") {
-      const std::string& s = in->getValueString();
-      return s == "true" || s == "1";
-    }
     mx::ValuePtr v = in->getValue();
     if (!v) return false;
     if (v->isA<float>()) return v->asA<float>() != 0.0f;
@@ -393,8 +389,7 @@ class MtlxExprCompiler {
                                        const std::string& cat);
   int CompileDiffuseClosure(const mx::NodePtr& node, const std::string& cat);
   int CompileTranslucentClosure(const mx::NodePtr& node);
-  int CompileDielectricClosure(const mx::NodePtr& node);
-  int CompileConductorClosure(const mx::NodePtr& node);
+  int CompileMicrofacetClosure(const mx::NodePtr& node, const std::string& cat);
   void CompileVdfWarning(const mx::NodePtr& node, const std::string& cat);
   void MarkTwoSidedDielectrics(size_t start);
   int EmitClosure(mtlx::ClosureNode node);
@@ -1640,14 +1635,16 @@ Expr MtlxExprCompiler::CompileOpacity(const mx::NodePtr& shader_node) {
 void MtlxExprCompiler::MarkTwoSidedDielectrics(size_t start) {
   for (size_t i = start; i < prog_.closures.size(); ++i) {
     const mtlx::ClosureNode& c = prog_.closures[i];
-    if (c.op == mtlx::ClosureOp::Dielectric &&
-        (c.dielectric.mode & mtlx::kScatterModeMask) != mtlx::kScatterR) {
+    if ((c.op == mtlx::ClosureOp::Dielectric ||
+         c.op == mtlx::ClosureOp::GeneralizedSchlick) &&
+        (c.microfacet.mode & mtlx::kScatterModeMask) != mtlx::kScatterR) {
       return;
     }
   }
   for (size_t i = start; i < prog_.closures.size(); ++i) {
-    if (prog_.closures[i].op == mtlx::ClosureOp::Dielectric) {
-      prog_.closures[i].dielectric.mode |= mtlx::kScatterTwoSided;
+    mtlx::ClosureNode& c = prog_.closures[i];
+    if (c.op == mtlx::ClosureOp::Dielectric) {
+      c.microfacet.mode |= mtlx::kScatterTwoSided;
     }
   }
 }
@@ -1675,10 +1672,6 @@ void MtlxExprCompiler::WarnUnsupportedMicrofacetInputs(const mx::NodePtr& node,
   if (IsNonZeroInput(node, "thinfilm_thickness")) {
     WarnUnsupported("Unsupported MaterialX '" + cat +
                     "' thinfilm_thickness; ignoring thin film.");
-  }
-  if (IsNonZeroInput(node, "retroreflective")) {
-    WarnUnsupported("Unsupported MaterialX '" + cat +
-                    "' retroreflective; using standard reflection.");
   }
 }
 
@@ -1717,38 +1710,51 @@ int MtlxExprCompiler::CompileTranslucentClosure(const mx::NodePtr& node) {
       mtlx::ClosureNode::MakeTranslucent(w_slot, color_slot, n_slot));
 }
 
-int MtlxExprCompiler::CompileDielectricClosure(const mx::NodePtr& node) {
+int MtlxExprCompiler::CompileMicrofacetClosure(const mx::NodePtr& node,
+                                               const std::string& cat) {
   Expr w_expr = CompileInputExpr(node, "weight", Expr::one());
-  std::string sm_str = GetNodeInputString(node, "scatter_mode");
-  int sm = sm_str == "T"    ? mtlx::kScatterT
-           : sm_str == "RT" ? mtlx::kScatterRT
-                            : mtlx::kScatterR;
-  if (w_expr.is_zero()) {
-    return sm == mtlx::kScatterR ? -1 : EmitOpaqueBlocker();
+  bool is_cond = cat == "conductor_bsdf";
+  int sm = mtlx::kScatterR;
+  if (!is_cond) {
+    std::string sm_str = GetNodeInputString(node, "scatter_mode");
+    sm = sm_str == "T"    ? mtlx::kScatterT
+         : sm_str == "RT" ? mtlx::kScatterRT
+                          : mtlx::kScatterR;
   }
-  WarnUnsupportedMicrofacetInputs(node, "dielectric_bsdf");
+  if (w_expr.is_zero()) {
+    return (!is_cond && sm == mtlx::kScatterR) ? -1 : EmitOpaqueBlocker();
+  }
+  WarnUnsupportedMicrofacetInputs(node, cat);
+  int mode =
+      sm |
+      (!CompileInputExpr(node, "retroreflective").is_zero()
+           ? mtlx::kScatterRetroreflective
+           : 0) |
+      ((is_cond || (cat == "generalized_schlick_bsdf" && sm == mtlx::kScatterR))
+           ? mtlx::kScatterTwoSided
+           : 0);
   int w_slot = EmitTmp(w_expr);
-  int tint_slot = EmitTmp(CompileInputExpr(node, "tint", Expr::one()));
   int rough_slot = EmitTmp(CompileInputExpr(node, "roughness"));
-  int ior_slot = EmitTmp(CompileInputExpr(node, "ior", Expr::one()));
   int n_slot = FrameSlot(node, "normal", Expr::n_world());
   int t_slot = FrameSlot(node, "tangent", Expr::t_world());
-  return EmitClosure(mtlx::ClosureNode::MakeDielectric(
-      w_slot, tint_slot, rough_slot, sm, ior_slot, n_slot, t_slot));
-}
-
-int MtlxExprCompiler::CompileConductorClosure(const mx::NodePtr& node) {
-  Expr w_expr = CompileInputExpr(node, "weight", Expr::one());
-  if (w_expr.is_zero()) return EmitOpaqueBlocker();
-  WarnUnsupportedMicrofacetInputs(node, "conductor_bsdf");
-  int w_slot = EmitTmp(w_expr);
-  int ior_slot = EmitTmp(CompileInputExpr(node, "ior", Expr::one()));
-  int rough_slot = EmitTmp(CompileInputExpr(node, "roughness"));
-  int ext_slot = EmitTmp(CompileInputExpr(node, "extinction"));
-  int n_slot = FrameSlot(node, "normal", Expr::n_world());
-  int t_slot = FrameSlot(node, "tangent", Expr::t_world());
-  return EmitClosure(mtlx::ClosureNode::MakeConductor(
-      w_slot, ior_slot, rough_slot, ext_slot, n_slot, t_slot));
+  if (cat == "dielectric_bsdf") {
+    return EmitClosure(mtlx::ClosureNode::MakeMicrofacet(
+        mtlx::ClosureOp::Dielectric, w_slot, rough_slot, mode, n_slot, t_slot,
+        EmitTmp(CompileInputExpr(node, "tint", Expr::one())),
+        EmitTmp(CompileInputExpr(node, "ior", Expr::one()))));
+  }
+  if (is_cond) {
+    return EmitClosure(mtlx::ClosureNode::MakeMicrofacet(
+        mtlx::ClosureOp::Conductor, w_slot, rough_slot, mode, n_slot, t_slot,
+        EmitTmp(CompileInputExpr(node, "ior", Expr::one())),
+        EmitTmp(CompileInputExpr(node, "extinction"))));
+  }
+  return EmitClosure(mtlx::ClosureNode::MakeMicrofacet(
+      mtlx::ClosureOp::GeneralizedSchlick, w_slot, rough_slot, mode, n_slot,
+      t_slot, EmitTmp(CompileInputExpr(node, "color0", Expr::one())),
+      EmitTmp(CompileInputExpr(node, "color82", Expr::one())),
+      EmitTmp(CompileInputExpr(node, "color90", Expr::one())),
+      EmitTmp(CompileInputExpr(node, "exponent", Const(5.0)))));
 }
 
 void MtlxExprCompiler::CompileVdfWarning(const mx::NodePtr& node,
@@ -1785,10 +1791,9 @@ int MtlxExprCompiler::CompileBsdfClosure(const mx::NodePtr& raw_node) {
     idx = CompileDiffuseClosure(node, cat);
   } else if (cat == "translucent_bsdf") {
     idx = CompileTranslucentClosure(node);
-  } else if (cat == "dielectric_bsdf") {
-    idx = CompileDielectricClosure(node);
-  } else if (cat == "conductor_bsdf") {
-    idx = CompileConductorClosure(node);
+  } else if (cat == "dielectric_bsdf" || cat == "conductor_bsdf" ||
+             cat == "generalized_schlick_bsdf") {
+    idx = CompileMicrofacetClosure(node, cat);
   } else if (node->getType() == mx::VDF_TYPE_STRING) {
     CompileVdfWarning(node, cat);
   } else if (cat == "layer" || cat == "add") {
@@ -1862,8 +1867,9 @@ void MtlxExprCompiler::CompileBsdf(const mx::NodePtr& shader_node) {
     prog_.closures = {mtlx::ClosureNode::MakeNull()};
   } else if (thin_walled_) {
     for (mtlx::ClosureNode& c : prog_.closures) {
-      if (c.op == mtlx::ClosureOp::Dielectric) {
-        c.dielectric.mode |= mtlx::kScatterThinWalled | mtlx::kScatterTwoSided;
+      if (c.op == mtlx::ClosureOp::Dielectric ||
+          c.op == mtlx::ClosureOp::GeneralizedSchlick) {
+        c.microfacet.mode |= mtlx::kScatterThinWalled | mtlx::kScatterTwoSided;
       }
     }
   } else if (node->getType() != mx::SURFACE_SHADER_TYPE_STRING) {

@@ -39,9 +39,6 @@ template <typename ScalarFloat>
 inline constexpr ScalarFloat kMinLen2 =
     dr::Epsilon<ScalarFloat> * dr::Epsilon<ScalarFloat>;
 
-template <typename ScalarFloat>
-inline constexpr ScalarFloat kMinCos = ScalarFloat(1e-6f);
-
 template <typename Float>
 Float pow5(const Float& x) {
   return dr::square(dr::square(x)) * x;
@@ -130,13 +127,41 @@ Spectrum ggx_energy_compensation(const Float& ess, const Spectrum& fss) {
   return dr::fmadd(fss, (1.0f - ess_c) / ess_c, 1.0f);
 }
 
-// Energy-compensated GGX directional albedo from `(F0, F(n_dot_v))`.
+// Energy-compensated GGX directional albedo from `(F0, F(n_dot_v), F90)`.
 template <typename Float, typename Spectrum>
 Spectrum ggx_refl_albedo(const Float& n_dot_v, const Float& alpha,
-                         const Spectrum& f0, const Spectrum& f_nv) {
+                         const Spectrum& f0, const Spectrum& f_nv,
+                         const Spectrum& f90) {
   auto [a, b] = ggx_dir_albedo_ab(n_dot_v, alpha);
-  return dr::minimum(ggx_energy_compensation(a + b, f_nv) * dr::fmadd(f0, a, b),
-                     1.0f);
+  return dr::minimum(
+      ggx_energy_compensation(a + b, f_nv) * dr::fmadd(f0, a, f90 * b), 1.0f);
+}
+
+template <typename Float>
+Float f0_to_ior(const Float& f0) {
+  Float s = dr::sqrt(dr::clip(f0, 0.01f, 0.99f));
+  return (1.0f + s) / (1.0f - s);
+}
+
+// Hoffman-Schlick generalized Fresnel (MaterialX `mx_fresnel_hoffman_schlick`).
+template <typename Float, typename Spectrum>
+Spectrum fresnel_hoffman_schlick(const Float& cos_theta, const Spectrum& f0,
+                                 const Spectrum& f82, const Spectrum& f90,
+                                 const Float& exponent) {
+  using Scalar = dr::scalar_t<Float>;
+  // `1 / ((1/7) * (6/7)^6) = 7^7 / 6^6`
+  constexpr Scalar kFactor = Scalar(823543.0 / 46656.0);
+  Float x = dr::clip(cos_theta, 0.0f, 1.0f);
+  Float exp_c = dr::maximum(exponent, 0.0f);
+  Float omx = 1.0f - x;
+  auto pos = omx > 0.0f;
+  Float t = dr::select(pos, dr::pow(dr::select(pos, omx, 1.0f), exp_c),
+                       dr::select(exp_c > 0.0f, 0.0f, 1.0f));
+  Spectrum a = dr::lerp(f0, f90, dr::pow(Float(Scalar(6.0 / 7.0)), exp_c)) *
+               (1.0f - f82) * kFactor;
+  return dr::clip(
+      dr::lerp(f0, f90, t) - a * (x * dr::square(omx * dr::square(omx))), 0.0f,
+      1.0f);
 }
 
 // Height-correlated Smith masking-shadowing ratio `G2 / G1(wi)`.
@@ -206,8 +231,13 @@ Frame<Float> build_shading_frame(const SurfaceInteraction<Float, Spectrum>& si,
   return Frame<Float>(s_loc, dr::cross(n_loc, s_loc), n_loc);
 }
 
+struct MicrofacetOpts {
+  bool refl_on, trans_on, thin_walled, two_sided, retroreflective, trans_only,
+      need_ior_fresnel;
+};
+
 template <typename Float>
-struct DielectricSample {
+struct MicrofacetSample {
   Vector<Float, 3> wo_l;
   dr::mask_t<Float> is_refl;
   Float eta;
@@ -215,14 +245,13 @@ struct DielectricSample {
 };
 
 // Follows `roughdielectric`: sample visible normals for `wi` flipped into the
-// upper hemisphere, then reflect/refract the unflipped `wi`.
-template <typename Float>
-DielectricSample<Float> ggx_dielectric_sample(const Vector<Float, 3>& wi_l,
-                                              const Vector<Float, 2>& alpha,
-                                              const Float& ior, bool refl_on,
-                                              bool trans_on, bool thin_walled,
-                                              bool two_sided, const Float& u1,
-                                              const Point<Float, 2>& u2) {
+// upper hemisphere, then reflect/refract the unflipped `wi`. Handles
+// `Dielectric`, `Conductor`, and `GeneralizedSchlick`.
+template <typename Float, typename ProbFn>
+MicrofacetSample<Float> ggx_microfacet_sample(
+    const Vector<Float, 3>& wi_l, const Vector<Float, 2>& alpha,
+    const Float& ior, const MicrofacetOpts& opts, const Float& u1,
+    const Point<Float, 2>& u2, ProbFn&& refl_prob_fn) {
   using Mask = dr::mask_t<Float>;
   using Vector3f = Vector<Float, 3>;
   using Normal3f = Normal<Float, 3>;
@@ -231,19 +260,28 @@ DielectricSample<Float> ggx_dielectric_sample(const Vector<Float, 3>& wi_l,
   MicrofacetDistribution<Float, Color<Float, 3>> distr(MicrofacetType::GGX,
                                                        alpha.x(), alpha.y());
   Normal3f m = distr.sample(dr::mulsign(wi_l, cos_i), u2).first;
-  Vector3f wo_l = reflect(wi_l, m);
-  Mask do_reflect(refl_on);
+  Vector3f wo_refl = reflect(wi_l, m);
+  Vector3f wo_l = opts.retroreflective ? reflect(wo_refl) : wo_refl;
+  Mask do_reflect(opts.refl_on);
   Mask trans_ok(false);
   Float out_eta(1.0f);
-  if (trans_on) {
-    auto [fres, cos_theta_t, eta_it, eta_ti] =
-        exact_fresnel(dr::dot(wi_l, m), ior, two_sided);
-    trans_ok = fres < 1.0f;
-    if (refl_on) do_reflect = !trans_ok || (u1 < fres);
-    Vector3f wo_trans = thin_walled ? Vector3f(wo_l.x(), wo_l.y(), -wo_l.z())
-                                    : refract(wi_l, m, cos_theta_t, eta_ti);
+  if (opts.trans_on) {
+    Float cos_im = dr::dot(wi_l, m);
+    Float fres(0.0f), cos_theta_t(0.0f), eta_it(1.0f), eta_ti(1.0f);
+    if (opts.need_ior_fresnel) {
+      std::tie(fres, cos_theta_t, eta_it, eta_ti) =
+          exact_fresnel(cos_im, ior, opts.two_sided);
+    }
+    trans_ok = opts.thin_walled ? Mask(true) : (fres < 1.0f);
+    if (opts.refl_on) {
+      do_reflect = !trans_ok || (u1 < refl_prob_fn(cos_im, fres, cos_theta_t));
+    }
+    Vector3f wo_trans = opts.thin_walled
+                            ? Vector3f(wo_refl.x(), wo_refl.y(), -wo_refl.z())
+                            : refract(wi_l, m, cos_theta_t, eta_ti);
     wo_l = dr::select(do_reflect, wo_l, wo_trans);
-    if (!thin_walled) out_eta = dr::select(do_reflect, Float(1.0f), eta_it);
+    if (!opts.thin_walled)
+      out_eta = dr::select(do_reflect, Float(1.0f), eta_it);
   }
   Float cos_o = Frame3f::cos_theta(wo_l);
   Mask valid = dr::select(do_reflect, cos_i * cos_o > 0.0f,
@@ -252,27 +290,34 @@ DielectricSample<Float> ggx_dielectric_sample(const Vector<Float, 3>& wi_l,
 }
 
 // Follows `roughdielectric::eval()` / `pdf()`, using height-correlated Smith G2
-// for reflection to match MaterialX `pbrlib`.
-template <typename Float>
-std::pair<Float, Float> ggx_dielectric_eval_pdf(
+// for reflection to match MaterialX `pbrlib`. Handles `Dielectric`,
+// `Conductor`, and `GeneralizedSchlick`.
+template <typename Float, typename Spectrum, typename FresnelFn,
+          typename ProbFn>
+std::pair<Spectrum, Float> ggx_microfacet_eval_pdf(
     const Vector<Float, 3>& wi_l, const Vector<Float, 3>& wo_l,
-    const Vector<Float, 2>& alpha, const Float& ior, bool trans_only,
-    bool refl_on, bool trans_on, bool thin_walled, bool two_sided,
-    TransportMode transport_mode) {
+    const Vector<Float, 2>& alpha, const Float& ior, const MicrofacetOpts& opts,
+    TransportMode transport_mode, FresnelFn&& fresnel_fn,
+    ProbFn&& refl_prob_fn) {
   using ScalarFloat = dr::scalar_t<Float>;
   using Mask = dr::mask_t<Float>;
   using Vector3f = Vector<Float, 3>;
   using Frame3f = Frame<Float>;
-  bool solid_trans = trans_on && !thin_walled;
   Float cos_i = Frame3f::cos_theta(wi_l), cos_o = Frame3f::cos_theta(wo_l);
+  Mask is_refl = cos_i * cos_o > 0.0f;
+  if (opts.refl_on != opts.trans_on &&
+      dr::none_or<false>(opts.refl_on ? is_refl : !is_refl)) {
+    return {0.0f, 0.0f};
+  }
+  bool solid_trans = opts.trans_on && !opts.thin_walled;
   Float n_dot_v = dr::abs(cos_i);
   MicrofacetDistribution<Float, Color<Float, 3>> distr(MicrofacetType::GGX,
                                                        alpha.x(), alpha.y());
-  Mask is_refl = cos_i * cos_o > 0.0f;
   Vector3f wo_m =
-      (trans_on && thin_walled)
+      (opts.trans_on && opts.thin_walled)
           ? Vector3f(wo_l.x(), wo_l.y(), dr::mulsign(dr::abs(cos_o), cos_i))
           : wo_l;
+  if (opts.retroreflective) wo_m = dr::select(is_refl, reflect(wo_m), wo_m);
   Float eta =
       solid_trans ? dr::select(cos_i > 0.0f, ior, dr::rcp(ior)) : Float(1.0f);
   Vector3f m = safe_normalize(
@@ -284,24 +329,35 @@ std::pair<Float, Float> ggx_dielectric_eval_pdf(
   Mask valid =
       (cos_im * cos_i > 0.0f) && (cos_om * Frame3f::cos_theta(wo_m) > 0.0f);
 
-  Float f_d = std::get<0>(exact_fresnel(cos_im, ior, two_sided));
+  Float f_d(0.0f), cos_theta_t(0.0f);
+  if (opts.need_ior_fresnel) {
+    std::tie(f_d, cos_theta_t, std::ignore, std::ignore) =
+        exact_fresnel(cos_im, ior, opts.two_sided);
+  }
+  Spectrum f_c =
+      opts.trans_only ? Spectrum(0.0f) : fresnel_fn(cos_im, f_d, cos_theta_t);
+  Mask trans_ok = opts.thin_walled ? Mask(true) : (f_d < 1.0f);
+  Float p_r = (opts.refl_on && opts.trans_on)
+                  ? dr::select(trans_ok, refl_prob_fn(f_d, f_c), 1.0f)
+                  : Float(opts.refl_on ? 1.0f : 0.0f);
   Float g1_i = distr.smith_g1(wi_l, m), g1_o = distr.smith_g1(wo_m, m);
   Float d_g1_over_cos = distr.eval(m) * g1_i / dr::select(valid, n_dot_v, 1.0f);
   Float refl_pdf = 0.25f * d_g1_over_cos;
-  Float val(0.0f), pdf(0.0f);
-  if (refl_on) {
+  Spectrum val(0.0f);
+  Float pdf(0.0f);
+  if (opts.refl_on) {
     Mask use_refl = valid && is_refl;
     if (dr::any_or<true>(use_refl)) {
       auto [a, b] = ggx_dir_albedo_ab(n_dot_v, dr::sqrt(dr::prod(alpha)));
       val = dr::select(use_refl,
-                       f_d * ggx_energy_compensation(a + b, f_d) *
+                       f_c * ggx_energy_compensation(a + b, f_c) *
                            (refl_pdf * ggx_g2_over_g1(g1_i, g1_o)),
                        val);
-      pdf = dr::select(use_refl, trans_on ? f_d * refl_pdf : refl_pdf, pdf);
+      pdf = dr::select(use_refl, p_r * refl_pdf, pdf);
     }
   }
-  if (trans_on) {
-    Mask use_trans = valid && !is_refl && (f_d < 1.0f);
+  if (opts.trans_on) {
+    Mask use_trans = valid && !is_refl && trans_ok;
     if (dr::any_or<true>(use_trans)) {
       Float trans_val, trans_pdf;
       if (solid_trans) {
@@ -317,85 +373,14 @@ std::pair<Float, Float> ggx_dielectric_eval_pdf(
         trans_val = refl_pdf * g1_o;
         trans_pdf = refl_pdf;
       }
-      val = dr::select(use_trans,
-                       trans_only ? trans_val : (1.0f - f_d) * trans_val, val);
-      pdf = dr::select(use_trans,
-                       refl_on ? (1.0f - f_d) * trans_pdf : trans_pdf, pdf);
+      val = dr::select(
+          use_trans,
+          opts.trans_only ? Spectrum(trans_val) : (1.0f - f_c) * trans_val,
+          val);
+      pdf = dr::select(use_trans, (1.0f - p_r) * trans_pdf, pdf);
     }
   }
   return {val, pdf};
-}
-
-template <typename Float>
-Float ggx_dielectric_refl_albedo(const Float& cos_i,
-                                 const Vector<Float, 2>& alpha,
-                                 const Float& ior, bool two_sided) {
-  Float n_dot_v = dr::abs(cos_i);
-  auto [f_smooth, cos_t, eta_it, eta_ti] = exact_fresnel(cos_i, ior, two_sided);
-  Float f0 = dr::select(eta_it < 1.0f, f_smooth,
-                        dr::square((ior - 1.0f) / (ior + 1.0f)));
-  return dr::select(
-      ior == 1.0f, Float(0.0f),
-      ggx_refl_albedo(n_dot_v, dr::sqrt(dr::prod(alpha)), f0, f_smooth));
-}
-
-template <typename Float>
-std::pair<Vector<Float, 3>, dr::mask_t<Float>> ggx_conductor_sample(
-    const Vector<Float, 3>& wi_l, const Vector<Float, 2>& alpha,
-    const Point<Float, 2>& u2) {
-  using ScalarFloat = dr::scalar_t<Float>;
-  using Vector3f = Vector<Float, 3>;
-  using Frame3f = Frame<Float>;
-  Float cos_i = Frame3f::cos_theta(wi_l);
-  Float n_dot_v = dr::abs(cos_i);
-  Vector3f wi_pos(wi_l.x(), wi_l.y(), n_dot_v);
-  MicrofacetDistribution<Float, Color<Float, 3>> distr(MicrofacetType::GGX,
-                                                       alpha.x(), alpha.y());
-  Vector3f wo_l = reflect(wi_pos, distr.sample(wi_pos, u2).first);
-  auto valid = (n_dot_v > kMinCos<ScalarFloat>) &&
-               (Frame3f::cos_theta(wo_l) > kMinCos<ScalarFloat>);
-  wo_l.z() = dr::mulsign(wo_l.z(), cos_i);
-  return {wo_l, valid};
-}
-
-template <typename Float, typename Spectrum>
-std::pair<Spectrum, Float> ggx_conductor_eval_pdf(
-    const Vector<Float, 3>& wi_l, const Vector<Float, 3>& wo_l,
-    const Vector<Float, 2>& alpha, const dr::Complex<Spectrum>& eta) {
-  using ScalarFloat = dr::scalar_t<Float>;
-  using Vector3f = Vector<Float, 3>;
-  using Frame3f = Frame<Float>;
-  Float cos_i = Frame3f::cos_theta(wi_l), cos_o = Frame3f::cos_theta(wo_l);
-  Float n_dot_v = dr::abs(cos_i), n_dot_l = dr::mulsign(cos_o, cos_i);
-  Vector3f wi_pos(wi_l.x(), wi_l.y(), n_dot_v),
-      wo_pos(wo_l.x(), wo_l.y(), n_dot_l);
-  auto valid =
-      (n_dot_v > kMinCos<ScalarFloat>) && (n_dot_l > kMinCos<ScalarFloat>);
-  MicrofacetDistribution<Float, Color<Float, 3>> distr(MicrofacetType::GGX,
-                                                       alpha.x(), alpha.y());
-  Vector3f h = safe_normalize(wi_pos + wo_pos, Vector3f(0.0f, 0.0f, 1.0f),
-                              kMinLen2<ScalarFloat>);
-  Float g1_i = distr.smith_g1(wi_pos, h), g1_o = distr.smith_g1(wo_pos, h);
-  Float d_g1_over_4cos =
-      distr.eval(h) * g1_i / (4.0f * dr::select(valid, n_dot_v, 1.0f));
-  Spectrum fres = fresnel_conductor(
-      Spectrum(dr::maximum(dr::dot(wi_pos, h), kMinCos<ScalarFloat>)), eta);
-  auto [a, b] = ggx_dir_albedo_ab(n_dot_v, dr::sqrt(dr::prod(alpha)));
-  return {dr::select(valid,
-                     fres * ggx_energy_compensation(a + b, fres) *
-                         (d_g1_over_4cos * ggx_g2_over_g1(g1_i, g1_o)),
-                     0.0f),
-          dr::select(valid, d_g1_over_4cos, 0.0f)};
-}
-
-template <typename Float, typename Spectrum>
-Spectrum ggx_conductor_albedo(const Float& n_dot_v,
-                              const Vector<Float, 2>& alpha,
-                              const dr::Complex<Spectrum>& eta) {
-  Float ndv = dr::maximum(n_dot_v, dr::Epsilon<Float>);
-  return ggx_refl_albedo(ndv, dr::sqrt(dr::prod(alpha)),
-                         fresnel_conductor(Spectrum(1.0f), eta),
-                         fresnel_conductor(Spectrum(ndv), eta));
 }
 
 template <typename Float>

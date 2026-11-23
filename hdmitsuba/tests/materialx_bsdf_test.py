@@ -126,6 +126,25 @@ _LOBE_CASES = [
         id='conductor_frame',
     ),
     pytest.param(
+        'ND_conductor_bsdf',
+        {**_CONDUCTOR_KW, 'retroreflective': True},
+        {},
+        id='conductor_retroreflective',
+    ),
+    pytest.param(
+        'ND_generalized_schlick_bsdf',
+        {
+            'color0': (0.04, 0.08, 0.2),
+            'color82': (0.7, 0.5, 0.9),
+            'color90': (1.0, 0.9, 0.8),
+            'exponent': 4.0,
+            'roughness': (0.35, 0.45),
+            'scatter_mode': 'RT',
+        },
+        {'wi': (0.6, -0.4, 0.6928203)},
+        id='generalized_schlick_RT',
+    ),
+    pytest.param(
         'ND_dielectric_bsdf',
         _diel_kw('RT', 0.25),
         {'wi': (0.8, 0.0, -0.6)},
@@ -739,6 +758,24 @@ def test_bsdf_ad_gradients() -> None:
   dr.backward(dr.mean(w_mix, axis=None))
   assert dr.allclose(dr.grad(params_mix[mix_key]), 0.6, atol=0.02)
 
+  # Grazing/inactive conductor lane with ior=1, k=0 must not NaN AD gradients.
+  bsdf_c0 = _compile_bsdf(
+      'ND_conductor_bsdf',
+      ior=(1.0, 1.0, 1.0),
+      extinction=(0.0, 0.0, 0.0),
+      roughness=(0.2, 0.2),
+  )
+  params_c0 = mi.traverse(bsdf_c0)
+  for k in params_c0.keys():
+    dr.enable_grad(params_c0[k])
+  params_c0.update()
+  si_g = mtlx.make_test_si()
+  si_g.wi = mi.Vector3f([0.6, 1.0], [0.0, 0.0], [0.8, 0.0])
+  wo_g = mi.Vector3f([-0.6, -1.0], [0.0, 0.0], [0.8, 0.0])
+  dr.backward(dr.sum(bsdf_c0.eval(ctx, si_g, wo_g)))
+  for k in params_c0.keys():
+    assert dr.allclose(dr.grad(params_c0[k]), 0.0, atol=1e-6)
+
 
 def test_eval_features() -> None:
   """Tests denoiser features for BSDF lobes and cutout opacity."""
@@ -1154,3 +1191,147 @@ def test_sheen_bsdf() -> None:
       mi.Color3f(0.6, 0.4, 0.2) * (si_rev.wi.z * dr.inv_pi),
       rtol=1e-4,
   )
+
+
+def test_generalized_schlick_bsdf() -> None:
+  """Tests `generalized_schlick_bsdf` Fresnel, IOR, layering, and two-sidedness."""
+  ctx = mi.BSDFContext()
+  c0, c82, c90 = (0.8, 0.4, 0.1), (0.6, 0.8, 0.5), (0.95, 0.9, 0.85)
+  bsdf = _compile_bsdf(
+      'ND_generalized_schlick_bsdf',
+      color0=c0,
+      color82=c82,
+      color90=c90,
+      exponent=5.0,
+      roughness=(0.05, 0.05),
+      scatter_mode='R',
+  )
+  assert mi.has_flag(bsdf.flags(), mi.BSDFFlags.GlossyReflection)
+  assert not mi.has_flag(bsdf.flags(), mi.BSDFFlags.GlossyTransmission)
+
+  # At normal incidence (cos=1) Hoffman-Schlick equals `color0`; at cos=1/7
+  # (~82 deg) the F82 dip scales `lerp(c0, c90, (6/7)^5)` by `color82`.
+  ref_white = _compile_bsdf(
+      'ND_generalized_schlick_bsdf', roughness=(0.05, 0.05)
+  )
+  si_norm = mtlx.make_test_si(wi=(0.0, 0.0, 1.0))
+  wo_norm = mi.Vector3f(0.0, 0.0, 1.0)
+  ref_norm = ref_white.eval(ctx, si_norm, wo_norm)
+  assert dr.allclose(
+      bsdf.eval(ctx, si_norm, wo_norm) / ref_norm, mi.Color3f(*c0), rtol=1e-4
+  )
+
+  # Small exponent (`< 1`) still evaluates exactly to `color0` at normal incidence.
+  low_exp = _compile_bsdf(
+      'ND_generalized_schlick_bsdf',
+      color0=(0.04, 0.04, 0.04),
+      exponent=0.1,
+      roughness=(0.05, 0.05),
+  )
+  assert dr.allclose(
+      low_exp.eval(ctx, si_norm, wo_norm) / ref_norm, 0.04, rtol=1e-4
+  )
+
+  cos_82 = 1.0 / 7.0
+  sin_82 = math.sqrt(1.0 - cos_82 * cos_82)
+  si_82 = mtlx.make_test_si(wi=(sin_82, 0.0, cos_82))
+  wo_82 = mi.Vector3f(-sin_82, 0.0, cos_82)
+  f_at_82 = dr.lerp(
+      mi.Color3f(*c0), mi.Color3f(*c90), (6.0 / 7.0) ** 5
+  ) * mi.Color3f(*c82)
+  assert dr.allclose(
+      bsdf.eval(ctx, si_82, wo_82) / ref_white.eval(ctx, si_82, wo_82),
+      f_at_82,
+      rtol=4e-2,
+  )
+
+  # Effective IOR for solid `RT` uses MaterialX's `dot(color0, 1/3)` mean.
+  blue_rt = _compile_bsdf(
+      'ND_generalized_schlick_bsdf',
+      color0=(0.0, 0.0, 0.5),
+      roughness=(0.1, 0.1),
+      scatter_mode='RT',
+  )
+  bs_blue, _ = blue_rt.sample(
+      ctx, si_norm, mi.Float(0.01, 0.99), mi.Point2f(0.5, 0.5)
+  )
+  assert list(bs_blue.wo.z < 0.0) == [False, True]
+  assert dr.allclose(bs_blue.eta, [1.0, 2.379796], rtol=1e-4)
+
+  # Layering R-only generalized Schlick over diffuse attenuates the base.
+  layered = _compile_bsdf(
+      'ND_layer_bsdf',
+      top=(
+          'ND_generalized_schlick_bsdf',
+          {'color0': (0.5, 0.2, 0.1), 'roughness': (0.2, 0.2)},
+      ),
+      base=('ND_oren_nayar_diffuse_bsdf', {'color': (1.0, 1.0, 1.0)}),
+  )
+  feat = layered.eval_features(si_norm)
+  assert dr.allclose(feat.specular_reflectance, (0.5, 0.2, 0.1), atol=2e-2)
+  assert dr.allclose(feat.diffuse_albedo, (0.5, 0.8, 0.9), atol=2e-2)
+  _check_bsdf_sampling(layered)
+
+  # Reflection-only generalized Schlick stays two-sided (no bogus back-face TIR)
+  # even when mixed with a transmissive lobe on the same surface.
+  mixed_trans = _compile_bsdf(
+      'ND_mix_bsdf',
+      fg=(
+          'ND_generalized_schlick_bsdf',
+          {'color0': c0, 'roughness': (0.1, 0.1), 'scatter_mode': 'R'},
+      ),
+      bg=('ND_dielectric_bsdf', _diel_kw('T', 0.1)),
+      mix=0.5,
+  )
+  si_back = mtlx.make_test_si(wi=(0.6, 0.0, -0.8))
+  wo_back = mi.Vector3f(-0.6, 0.0, -0.8)
+  solo_r = _compile_bsdf(
+      'ND_generalized_schlick_bsdf', color0=c0, roughness=(0.1, 0.1)
+  )
+  assert dr.allclose(
+      mixed_trans.eval(ctx, si_back, wo_back),
+      0.5 * solo_r.eval(ctx, si_back, wo_back),
+      rtol=1e-4,
+  )
+
+
+def test_retroreflective_microfacet() -> None:
+  """Tests `retroreflective=True` reflection reversal across microfacet lobes."""
+  ctx = mi.BSDFContext()
+  si = mtlx.make_test_si(wi=(0.6, 0.0, 0.8))
+  wo_mirror = mi.Vector3f(-0.6, 0.0, 0.8)
+  wo_retro = mi.Vector3f(0.6, 0.0, 0.8)
+
+  for node_id, kw in (
+      ('ND_dielectric_bsdf', _diel_kw('R', 0.15)),
+      ('ND_conductor_bsdf', _CONDUCTOR_KW),
+      (
+          'ND_generalized_schlick_bsdf',
+          {'color0': (0.4, 0.6, 0.8), 'roughness': (0.15, 0.15)},
+      ),
+  ):
+    std = _compile_bsdf(node_id, **kw)
+    retro = _compile_bsdf(node_id, retroreflective=True, **kw)
+    f_retro = retro.eval(ctx, si, wo_retro)
+    f_mirror = retro.eval(ctx, si, wo_mirror)
+    assert dr.allclose(f_retro, std.eval(ctx, si, wo_mirror), rtol=1e-5)
+    assert dr.allclose(f_mirror, std.eval(ctx, si, wo_retro), rtol=1e-5)
+    assert dr.all(f_retro > 10.0 * f_mirror)
+
+  # Thin-walled RT retroreflective keeps transmission along the forward ray.
+  retro_rt = _compile_bsdf(
+      'ND_dielectric_bsdf',
+      thin_walled=True,
+      retroreflective=True,
+      **_diel_kw('RT', 0.15),
+  )
+  std_rt = _compile_bsdf(
+      'ND_dielectric_bsdf', thin_walled=True, **_diel_kw('RT', 0.15)
+  )
+  wo_trans = mi.Vector3f(-0.6, 0.0, -0.8)
+  assert dr.allclose(
+      retro_rt.eval(ctx, si, wo_trans),
+      std_rt.eval(ctx, si, wo_trans),
+      rtol=1e-5,
+  )
+  _check_bsdf_sampling(retro_rt, si)
