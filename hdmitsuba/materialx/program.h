@@ -117,6 +117,7 @@ enum class Op : uint8_t {
   Cross,
   Rotate3D,
   NormalMap,
+  HeightToNormal,
   RgbToHsv,
   HsvToRgb,
   Blackbody,
@@ -214,6 +215,7 @@ constexpr int elementwise_arity(Op op) {
     case Op::Cross:
     case Op::Rotate3D:
     case Op::NormalMap:
+    case Op::HeightToNormal:
     case Op::RgbToHsv:
     case Op::HsvToRgb:
     case Op::Blackbody:
@@ -295,6 +297,7 @@ constexpr uint8_t result_channels(Op op, uint16_t imm = 0) {
     case Op::Cross:
     case Op::Rotate3D:
     case Op::NormalMap:
+    case Op::HeightToNormal:
     case Op::RgbToHsv:
     case Op::HsvToRgb:
     case Op::Blackbody:
@@ -318,6 +321,7 @@ constexpr bool is_spatially_varying_op(Op op) {
     case Op::GeomTangentWorld:
     case Op::GeomBitangentWorld:
     case Op::GeomIncidentDir:
+    case Op::HeightToNormal:
       return true;
     case Op::Const:
     case Op::Opaque:
@@ -531,12 +535,28 @@ struct ClosureNode {
 static_assert(sizeof(ClosureNode) == 48);
 static_assert(std::has_unique_object_representations_v<ClosureNode>);
 
+// Self-contained bytecode slice evaluated at perturbed surface interactions by
+// `Op::HeightToNormal`. Uses the enclosing program's `consts`, `opaques`,
+// `attr_names`, and texture inputs with its own temporaries `0..tmp_count - 1`.
+// Evaluates to `h` when `has_texcoord == 0`, or `(h, tc.x, tc.y)` otherwise.
+struct SubProgram {
+  uint32_t code_begin = 0;
+  uint32_t code_end = 0;
+  uint32_t tmp_count = 0;
+  uint32_t stack_size = 1;
+  uint32_t has_texcoord = 0;
+};
+static_assert(sizeof(SubProgram) == 20);
+static_assert(std::has_unique_object_representations_v<SubProgram>);
+
 // Variant-independent compiled MaterialX program passed via `Properties`.
 //
 // A program has at most `kMaxImm` constants, opaque values and temporaries
 // each, and `stack_size` bounds the evaluation stack depth.
 struct MtlxProgram {
   std::vector<Inst> code;
+  std::vector<Inst> sub_code;
+  std::vector<SubProgram> sub_programs;
   std::vector<double> consts = {0.0, 1.0};
   std::vector<double> opaques;
   std::vector<std::string> attr_names;
@@ -561,6 +581,8 @@ struct MtlxProgram {
       }
     };
     put_span(code, "code");
+    put_span(sub_code, "sub_code");
+    put_span(sub_programs, "sub_programs");
     put_span(consts, "consts");
     size_t n_attrs = attr_names.size();
     DR_TRAVERSE_STATE(n_attrs)

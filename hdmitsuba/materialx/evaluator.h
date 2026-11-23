@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include <absl/types/span.h>
 #include <mitsuba/core/object.h>
 #include <mitsuba/core/properties.h>
 #include <mitsuba/core/spectrum.h>
@@ -84,6 +85,11 @@ class MtlxEvaluator {
   void traverse_cb(void* payload, const drjit::TraverseVisitor& cb);
 
  private:
+  Val eval_code(absl::Span<const Inst> code, size_t tmp_count,
+                uint32_t stack_size, const SurfaceInteraction3f& si,
+                Mask active, Val* out_tmps = nullptr,
+                int stop_after_tmp = -1) const;
+
   MtlxProgram m_prog;
   std::vector<ref<Texture>> m_inputs;
   // Opaque scalars (`dr::opaque`), passed as kernel inputs rather than

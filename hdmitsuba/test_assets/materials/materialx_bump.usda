@@ -1,0 +1,175 @@
+#usda 1.0
+(
+    defaultPrim = "root"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "root"
+{
+    def Xform "Camera"
+    {
+        float3 xformOp:rotateXYZ = (55, 0, 0)
+        double3 xformOp:translate = (0, -3.2, 2.4)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+
+        def Camera "Camera"
+        {
+            float2 clippingRange = (0.1, 100)
+            float focalLength = 0.035
+            float horizontalAperture = 0.036
+            token projection = "perspective"
+            float verticalAperture = 0.024
+        }
+    }
+
+    def DomeLight "Sky"
+    {
+        float inputs:intensity = 0.35
+    }
+
+    def DistantLight "Sun"
+    {
+        float inputs:angle = 5.0
+        float inputs:intensity = 3.0
+        float3 xformOp:rotateXYZ = (55, 0, -45)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def Scope "_materials"
+    {
+        # 2D image with scaled texcoords -> heighttonormal -> normalmap.
+        def Material "image_h2n"
+        {
+            token outputs:mtlx:surface.connect = </root/_materials/image_h2n/Surface.outputs:out>
+
+            def Shader "UV"
+            {
+                uniform token info:id = "ND_texcoord_vector2"
+                float2 outputs:out
+            }
+
+            def Shader "ScaledUV"
+            {
+                uniform token info:id = "ND_multiply_vector2FA"
+                float2 inputs:in1.connect = </root/_materials/image_h2n/UV.outputs:out>
+                float inputs:in2 = 2.0
+                float2 outputs:out
+            }
+
+            def Shader "HeightImg"
+            {
+                uniform token info:id = "ND_image_float"
+                asset inputs:file = @./textures/albedo.png@
+                float2 inputs:texcoord.connect = </root/_materials/image_h2n/ScaledUV.outputs:out>
+                float outputs:out
+            }
+
+            def Shader "H2N"
+            {
+                uniform token info:id = "ND_heighttonormal_vector3"
+                float inputs:in.connect = </root/_materials/image_h2n/HeightImg.outputs:out>
+                float inputs:scale = 12.0
+                float2 inputs:texcoord.connect = </root/_materials/image_h2n/ScaledUV.outputs:out>
+                float3 outputs:out
+            }
+
+            def Shader "NormalMap"
+            {
+                uniform token info:id = "ND_normalmap_float"
+                float3 inputs:in.connect = </root/_materials/image_h2n/H2N.outputs:out>
+                float3 outputs:out
+            }
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_standard_surface_surfaceshader"
+                color3f inputs:base_color = (0.7, 0.55, 0.35)
+                float inputs:coat = 0.5
+                float3 inputs:normal.connect = </root/_materials/image_h2n/NormalMap.outputs:out>
+                float inputs:specular_roughness = 0.25
+                token outputs:out
+            }
+        }
+
+        # 3D object-space fractal noise -> bump -> open_pbr geometry_normal.
+        def Material "procedural_bump"
+        {
+            token outputs:mtlx:surface.connect = </root/_materials/procedural_bump/Surface.outputs:out>
+
+            def Shader "Pos"
+            {
+                uniform token info:id = "ND_position_vector3"
+                string inputs:space = "object"
+                float3 outputs:out
+            }
+
+            def Shader "ScaledPos"
+            {
+                uniform token info:id = "ND_multiply_vector3FA"
+                float3 inputs:in1.connect = </root/_materials/procedural_bump/Pos.outputs:out>
+                float inputs:in2 = 6.0
+                float3 outputs:out
+            }
+
+            def Shader "Fractal"
+            {
+                uniform token info:id = "ND_fractal3d_float"
+                float inputs:amplitude = 4.0
+                int inputs:octaves = 3
+                float3 inputs:position.connect = </root/_materials/procedural_bump/ScaledPos.outputs:out>
+                float outputs:out
+            }
+
+            def Shader "Bump"
+            {
+                uniform token info:id = "ND_bump_vector3"
+                float inputs:height.connect = </root/_materials/procedural_bump/Fractal.outputs:out>
+                float inputs:scale = 1.5
+                float3 outputs:out
+            }
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+                color3f inputs:base_color = (0.3, 0.55, 0.75)
+                float3 inputs:geometry_normal.connect = </root/_materials/procedural_bump/Bump.outputs:out>
+                float inputs:specular_roughness = 0.25
+                token outputs:out
+            }
+        }
+    }
+
+    def Mesh "ImageQuad" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        rel material:binding = </root/_materials/image_h2n>
+        point3f[] points = [(-0.55, -0.55, 0), (0.55, -0.55, 0), (0.55, 0.55, 0), (-0.55, 0.55, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "vertex"
+        )
+        uniform token subdivisionScheme = "none"
+        double3 xformOp:translate = (-0.7, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "BumpQuad" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        rel material:binding = </root/_materials/procedural_bump>
+        point3f[] points = [(-0.55, -0.55, 0), (0.55, -0.55, 0), (0.55, 0.55, 0), (-0.55, 0.55, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "vertex"
+        )
+        uniform token subdivisionScheme = "none"
+        float3 xformOp:rotateXYZ = (0, 0, 35)
+        double3 xformOp:translate = (0.7, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}
