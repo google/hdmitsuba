@@ -163,6 +163,12 @@ _LOBE_CASES = [
         id='dielectric_thin',
     ),
     pytest.param(
+        'ND_dielectric_bsdf',
+        _diel_kw('RT', thinfilm_thickness=400.0, thinfilm_ior=1.3),
+        {},
+        id='dielectric_RT_thinfilm',
+    ),
+    pytest.param(
         'ND_layer_bsdf',
         {
             'top': (
@@ -476,12 +482,11 @@ def test_conductor_bsdf() -> None:
       bsdf_ty.eval(ctx, si_n, wo_x), bsdf_ref.eval(ctx, si_n, wo_x), rtol=1e-2
   )
 
-  # Ignored `thinfilm_thickness` (literal or connected) emits no dead opaques.
-  for tf in (500.0, ('ND_add_float', {'in1': 200.0, 'in2': 300.0})):
-    bsdf_tf = _compile_bsdf(
-        'ND_conductor_bsdf', thinfilm_thickness=tf, **_CONDUCTOR_KW
-    )
-    assert len(mi.traverse(bsdf_tf)) == len(mi.traverse(bsdf_ref))
+  # Zero `thinfilm_thickness` emits no dead opaques.
+  bsdf_tf0 = _compile_bsdf(
+      'ND_conductor_bsdf', thinfilm_thickness=0.0, **_CONDUCTOR_KW
+  )
+  assert len(mi.traverse(bsdf_tf0)) == len(mi.traverse(bsdf_ref))
 
 
 def test_bsdf_combinator_context_masking() -> None:
@@ -695,7 +700,14 @@ def test_bsdf_ad_gradients() -> None:
     params.update()
     return params, key
 
-  def _check_fd_grad(bsdf: mi.BSDF, val0: float, objective: Any) -> None:
+  def _check_fd_grad(
+      bsdf: mi.BSDF,
+      val0: float,
+      objective: Any,
+      *,
+      eps: float = 2e-3,
+      atol: float = 0.02,
+  ) -> None:
     params, key = _enable_param(bsdf, val0)
     val_p, pdf_p = bsdf.eval_pdf(ctx, si, mi.Vector3f(0.0, 0.0, 1.0))
     assert dr.grad_enabled(val_p) and not dr.grad_enabled(pdf_p)
@@ -704,7 +716,6 @@ def test_bsdf_ad_gradients() -> None:
     dr.backward(dr.mean(objective(bs_p, w_p), axis=None))
     ad_grad = dr.grad(params[key])
 
-    eps = 2e-3
     vals = []
     for delta in (-eps, eps):
       params[key] = mi.Float(val0 + delta)
@@ -712,7 +723,7 @@ def test_bsdf_ad_gradients() -> None:
       bs_fd, w_fd = bsdf.sample(ctx, si, u1, u2)
       vals.append(dr.mean(objective(bs_fd, w_fd), axis=None))
     assert dr.allclose(
-        ad_grad, (vals[1] - vals[0]) / (2.0 * eps), rtol=0.15, atol=0.02
+        ad_grad, (vals[1] - vals[0]) / (2.0 * eps), rtol=0.15, atol=atol
     )
 
   # Detached `wo` and `pdf` yield unbiased roughness and `ior` gradients.
@@ -731,6 +742,16 @@ def test_bsdf_ad_gradients() -> None:
       _compile_bsdf('ND_sheen_bsdf', roughness=0.5, mode='zeltner'),
       0.5,
       lambda bs, w: w * bs.wo.z,
+  )
+  _check_fd_grad(
+      _compile_bsdf(
+          'ND_dielectric_bsdf',
+          **_diel_kw('R', 0.2, thinfilm_thickness=420.0, thinfilm_ior=1.3),
+      ),
+      420.0,
+      lambda _, w: w.x - w.z,
+      eps=1.0,
+      atol=1e-4,
   )
 
   bsdf_op = _compile_bsdf(
@@ -1335,3 +1356,164 @@ def test_retroreflective_microfacet() -> None:
       rtol=1e-5,
   )
   _check_bsdf_sampling(retro_rt, si)
+
+
+def test_thin_film_interference() -> None:
+  """Tests Belcour-Barla Airy thin-film interference in RGB mode."""
+  ctx = mi.BSDFContext()
+  si = mtlx.make_test_si(wi=(0.0, 0.0, 1.0))
+  wo = mi.Vector3f(0.0, 0.0, 1.0)
+
+  # Belcour-Barla RGB interference ratios and thickness -> 0+ continuity across
+  # dielectric, conductor, and generalized Schlick BSDFs at normal incidence.
+  for node_id, kw, tf_kw, exp_ratio, rtol in (
+      (
+          'ND_dielectric_bsdf',
+          _diel_kw('R', 0.1),
+          {'thinfilm_thickness': 420.0, 'thinfilm_ior': 1.3},
+          (0.68340, 0.87306, 0.25791),
+          1e-3,
+      ),
+      (
+          'ND_dielectric_bsdf',
+          _diel_kw('R', 0.1),
+          {'thinfilm_thickness': 1e-4, 'thinfilm_ior': 1.3},
+          (1.0, 1.0, 1.0),
+          2e-2,
+      ),
+      (
+          'ND_conductor_bsdf',
+          _CONDUCTOR_KW,
+          {'thinfilm_thickness': 400.0, 'thinfilm_ior': 1.4},
+          (1.01394, 0.94954, 0.64012),
+          1e-3,
+      ),
+      (
+          'ND_generalized_schlick_bsdf',
+          {'color0': (0.5, 0.5, 0.5), 'roughness': (0.15, 0.15)},
+          {'thinfilm_thickness': 400.0, 'thinfilm_ior': 1.4},
+          (1.17344, 1.15874, 0.83705),
+          1e-3,
+      ),
+  ):
+    bare_val = _compile_bsdf(node_id, **kw).eval(ctx, si, wo)
+    tf_val = _compile_bsdf(node_id, **kw, **tf_kw).eval(ctx, si, wo)
+    assert dr.allclose(tf_val / bare_val, mi.Color3f(*exp_ratio), rtol=rtol)
+
+  # Zero cross-channel phase mixing on colored `generalized_schlick_bsdf` with
+  # mixed phase signs.
+  gs_kw = {
+      'roughness': (0.1, 0.1),
+      'thinfilm_thickness': 1e-4,
+      'thinfilm_ior': 1.5,
+  }
+  v_sc = _compile_bsdf(
+      'ND_generalized_schlick_bsdf', color0=(0.8, 0.8, 0.01), **gs_kw
+  ).eval(ctx, si, wo)
+  v_sg = _compile_bsdf(
+      'ND_generalized_schlick_bsdf', color0=(0.8, 0.8, 0.8), **gs_kw
+  ).eval(ctx, si, wo)
+  assert dr.allclose(v_sc.x, v_sg.x, rtol=1e-3)
+  assert dr.allclose(v_sc.y, v_sg.y, rtol=1e-3)
+
+  # Back-side Snell reciprocity on solid RT dielectric with thin film: ratio
+  # against the bare dielectric cancels GGX geometry and matches at Snell angles.
+  diel_rt_bare = _compile_bsdf('ND_dielectric_bsdf', **_diel_kw('RT', 0.05))
+  diel_rt_tf = _compile_bsdf(
+      'ND_dielectric_bsdf',
+      **_diel_kw('RT', 0.05, thinfilm_thickness=350.0, thinfilm_ior=1.3),
+  )
+  cos_t = math.sqrt(1.0 - 0.16)
+  si_ext, wo_ext = mtlx.make_test_si(wi=(0.6, 0.0, 0.8)), mi.Vector3f(
+      -0.6, 0.0, 0.8
+  )
+  si_int, wo_int = mtlx.make_test_si(wi=(0.4, 0.0, -cos_t)), mi.Vector3f(
+      -0.4, 0.0, -cos_t
+  )
+  ratio_ext = diel_rt_tf.eval(ctx, si_ext, wo_ext) / diel_rt_bare.eval(
+      ctx, si_ext, wo_ext
+  )
+  ratio_int = diel_rt_tf.eval(ctx, si_int, wo_int) / diel_rt_bare.eval(
+      ctx, si_int, wo_int
+  )
+  assert dr.allclose(ratio_ext, ratio_int, rtol=1e-2)
+
+  # Thin-film coat layered over white diffuse conserves energy at low roughness,
+  # unit thin-film IOR matches bare albedo, and thin-film `generalized_schlick`
+  # overrides grazing `f90` to 1.
+  layered_tf = _compile_bsdf(
+      'ND_layer_bsdf',
+      top=(
+          'ND_dielectric_bsdf',
+          _diel_kw('R', 0.02, thinfilm_thickness=400.0, thinfilm_ior=1.8),
+      ),
+      base=('ND_oren_nayar_diffuse_bsdf', {'color': (1.0, 1.0, 1.0)}),
+  )
+  _check_bsdf_sampling(layered_tf)
+  feat_bare = _compile_bsdf(
+      'ND_dielectric_bsdf', **_diel_kw('R', 0.05)
+  ).eval_features(si_ext)
+  feat_tf1 = _compile_bsdf(
+      'ND_dielectric_bsdf',
+      **_diel_kw('R', 0.05, thinfilm_thickness=400.0, thinfilm_ior=1.0),
+  ).eval_features(si_ext)
+  assert dr.allclose(
+      feat_tf1.specular_reflectance, feat_bare.specular_reflectance, rtol=1e-5
+  )
+  layered_gs_tf = _compile_bsdf(
+      'ND_layer_bsdf',
+      top=(
+          'ND_generalized_schlick_bsdf',
+          {
+              'color0': (0.0, 0.0, 0.0),
+              'color90': (0.0, 0.0, 0.0),
+              'roughness': (0.8, 0.8),
+              'thinfilm_thickness': 400.0,
+              'thinfilm_ior': 1.5,
+          },
+      ),
+      base=('ND_oren_nayar_diffuse_bsdf', {'color': (1.0, 1.0, 1.0)}),
+  )
+  feat_gs = layered_gs_tf.eval_features(
+      mtlx.make_test_si(wi=(math.sqrt(1.0 - 0.01), 0.0, 0.1))
+  )
+  assert dr.allclose(feat_gs.specular_reflectance, 0.12481, rtol=1e-3)
+  assert dr.allclose(feat_gs.diffuse_albedo, 0.87519, rtol=1e-3)
+
+
+def test_thin_film_spectral() -> None:
+  """Tests exact monochromatic spectral Airy interference."""
+  mtlx.set_variant_or_skip('cuda_ad_spectral', 'llvm_ad_spectral')
+  ctx = mi.BSDFContext()
+  ior_sub = 1.5
+  eta2 = math.sqrt(ior_sub)
+  wl_nm = 550.0
+  d_qw = wl_nm / (4.0 * eta2)
+  si_spec = mtlx.make_test_si(wi=(0.0, 0.0, 1.0))
+  si_spec.wavelengths = mi.UnpolarizedSpectrum(wl_nm)
+  wo_spec = mi.Vector3f(0.0, 0.0, 1.0)
+  spec_bare = _compile_bsdf(
+      'ND_dielectric_bsdf', **_diel_kw('R', 0.1, ior=ior_sub)
+  )
+  spec_qw = _compile_bsdf(
+      'ND_dielectric_bsdf',
+      **_diel_kw(
+          'R', 0.1, ior=ior_sub, thinfilm_thickness=d_qw, thinfilm_ior=eta2
+      ),
+  )
+  spec_hw = _compile_bsdf(
+      'ND_dielectric_bsdf',
+      **_diel_kw(
+          'R',
+          0.1,
+          ior=ior_sub,
+          thinfilm_thickness=2.0 * d_qw,
+          thinfilm_ior=eta2,
+      ),
+  )
+  assert dr.allclose(spec_qw.eval(ctx, si_spec, wo_spec), 0.0, atol=1e-4)
+  assert dr.allclose(
+      spec_hw.eval(ctx, si_spec, wo_spec),
+      spec_bare.eval(ctx, si_spec, wo_spec),
+      rtol=1e-3,
+  )

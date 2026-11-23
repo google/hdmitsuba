@@ -385,8 +385,6 @@ class MtlxExprCompiler {
   int EmitOpaqueBlocker();
   int FrameSlot(const mx::NodePtr& node, const std::string& name,
                 const Expr& def);
-  void WarnUnsupportedMicrofacetInputs(const mx::NodePtr& node,
-                                       const std::string& cat);
   int CompileDiffuseClosure(const mx::NodePtr& node, const std::string& cat);
   int CompileTranslucentClosure(const mx::NodePtr& node);
   int CompileMicrofacetClosure(const mx::NodePtr& node, const std::string& cat);
@@ -1667,14 +1665,6 @@ int MtlxExprCompiler::FrameSlot(const mx::NodePtr& node,
   return e == def ? -1 : EmitTmp(e);
 }
 
-void MtlxExprCompiler::WarnUnsupportedMicrofacetInputs(const mx::NodePtr& node,
-                                                       const std::string& cat) {
-  if (IsNonZeroInput(node, "thinfilm_thickness")) {
-    WarnUnsupported("Unsupported MaterialX '" + cat +
-                    "' thinfilm_thickness; ignoring thin film.");
-  }
-}
-
 int MtlxExprCompiler::CompileDiffuseClosure(const mx::NodePtr& node,
                                             const std::string& cat) {
   Expr w_expr = CompileInputExpr(node, "weight", Expr::one());
@@ -1724,7 +1714,14 @@ int MtlxExprCompiler::CompileMicrofacetClosure(const mx::NodePtr& node,
   if (w_expr.is_zero()) {
     return (!is_cond && sm == mtlx::kScatterR) ? -1 : EmitOpaqueBlocker();
   }
-  WarnUnsupportedMicrofacetInputs(node, cat);
+  int tf_t = -1, tf_ior = -1;
+  if (sm != mtlx::kScatterT) {
+    if (Expr thickness = CompileInputExpr(node, "thinfilm_thickness");
+        !thickness.is_zero()) {
+      tf_t = EmitTmp(thickness);
+      tf_ior = EmitTmp(CompileInputExpr(node, "thinfilm_ior", Const(1.5)));
+    }
+  }
   int mode =
       sm |
       (!CompileInputExpr(node, "retroreflective").is_zero()
@@ -1740,18 +1737,19 @@ int MtlxExprCompiler::CompileMicrofacetClosure(const mx::NodePtr& node,
   if (cat == "dielectric_bsdf") {
     return EmitClosure(mtlx::ClosureNode::MakeMicrofacet(
         mtlx::ClosureOp::Dielectric, w_slot, rough_slot, mode, n_slot, t_slot,
-        EmitTmp(CompileInputExpr(node, "tint", Expr::one())),
+        tf_t, tf_ior, EmitTmp(CompileInputExpr(node, "tint", Expr::one())),
         EmitTmp(CompileInputExpr(node, "ior", Expr::one()))));
   }
   if (is_cond) {
     return EmitClosure(mtlx::ClosureNode::MakeMicrofacet(
         mtlx::ClosureOp::Conductor, w_slot, rough_slot, mode, n_slot, t_slot,
-        EmitTmp(CompileInputExpr(node, "ior", Expr::one())),
+        tf_t, tf_ior, EmitTmp(CompileInputExpr(node, "ior", Expr::one())),
         EmitTmp(CompileInputExpr(node, "extinction"))));
   }
   return EmitClosure(mtlx::ClosureNode::MakeMicrofacet(
       mtlx::ClosureOp::GeneralizedSchlick, w_slot, rough_slot, mode, n_slot,
-      t_slot, EmitTmp(CompileInputExpr(node, "color0", Expr::one())),
+      t_slot, tf_t, tf_ior,
+      EmitTmp(CompileInputExpr(node, "color0", Expr::one())),
       EmitTmp(CompileInputExpr(node, "color82", Expr::one())),
       EmitTmp(CompileInputExpr(node, "color90", Expr::one())),
       EmitTmp(CompileInputExpr(node, "exponent", Const(5.0)))));

@@ -63,10 +63,10 @@ Float mx_safe_log(const Float& x) {
   return dr::select(pos, dr::log(dr::select(pos, x, 1.0f)), 0.0f);
 }
 
-template <typename Float>
-Float mx_safe_div(const Float& a, const Float& b) {
+template <typename T>
+T mx_safe_div(const T& a, const T& b) {
   auto nz = b != 0.0f;
-  return dr::select(nz, a / dr::select(nz, b, 1.0f), 0.0f);
+  return dr::select(nz, a / dr::select(nz, b, T(1.0f)), T(0.0f));
 }
 
 // Like OSL's `safe_pow()`, raises negative bases to integer powers only, and
@@ -82,10 +82,10 @@ Float mx_safe_pow(const Float& x, const Float& y) {
       dr::select(x == 0.0f, 0.0f, dr::select(x > 0.0f, mag, neg)));
 }
 
-template <typename Float>
-Float mx_safe_atan2(const Float& y, const Float& x) {
-  auto nz = (y != 0.0f) || (x != 0.0f);
-  return dr::select(nz, dr::atan2(y, dr::select(nz, x, 1.0f)), 0.0f);
+template <typename T>
+T mx_safe_atan2(const T& y, const T& x) {
+  auto nz = (y != 0.0f) | (x != 0.0f);
+  return dr::select(nz, dr::atan2(y, dr::select(nz, x, T(1.0f))), T(0.0f));
 }
 
 // Like division, the inverse of a singular matrix is zero.

@@ -368,6 +368,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
     SpecVec layer_albedo;
     absl::InlinedVector<Float, 8> leaf_prob;
     Vector3f n_geom;
+    Wavelength wavelengths;
     Float opacity;
     Mask surf_active;
     bool has_surface = false;
@@ -482,31 +483,78 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
             : dr::mean(dr::clip(xyz(s.tmps[slot]), 0.0f, 1.0f)));
   }
 
-  static UnpolarizedSpectrum specular_fresnel(
-      const ClosureNode& c, const Leaf& leaf, const Float& cos_im,
-      const Float& f_d, const Float& cos_theta_t, const State& s) {
-    if (c.op == ClosureOp::Dielectric) return UnpolarizedSpectrum(f_d);
-    if (c.op == ClosureOp::Conductor) {
-      return fresnel_conductor(
-          UnpolarizedSpectrum(dr::maximum(dr::abs(cos_im), dr::Epsilon<Float>)),
-          detail::safe_conductor_eta<Float>(s.spectra[leaf.spec[0]],
-                                            s.spectra[leaf.spec[1]]));
+  UnpolarizedSpectrum eval_thinfilm_fresnel(const UnpolarizedSpectrum& f_base,
+                                            const Float& cos_theta,
+                                            const ClosureNode& c,
+                                            const Leaf& leaf,
+                                            const State& s) const {
+    if (c.microfacet.tf_thickness < 0) return f_base;
+    Float thickness_nm = s.tmps[c.microfacet.tf_thickness].x();
+    Float eta2 = dr::maximum(s.tmps[c.microfacet.tf_ior].x(), 1.0f);
+    auto [a12_s, a12_p, cos_t2, _e1, _e2] =
+        fresnel_polarized(dr::clip(cos_theta, 0.0f, 1.0f), eta2);
+    Float ct2 = dr::abs(cos_t2);
+    UnpolarizedSpectrum r23_p, r23_s, phi23_p, phi23_s;
+    if (c.op == ClosureOp::GeneralizedSchlick) {
+      r23_p = r23_s = detail::fresnel_hoffman_schlick(
+          ct2, s.spectra[leaf.spec[0]], s.spectra[leaf.spec[1]],
+          s.spectra[leaf.spec[2]], s.tmps[c.microfacet.p[3]].x());
+      phi23_p = phi23_s = dr::select(
+          s.spectra[leaf.spec[0]] < dr::square((eta2 - 1.0f) / (eta2 + 1.0f)),
+          UnpolarizedSpectrum(dr::Pi<Float>), UnpolarizedSpectrum(0.0f));
+    } else if (c.op == ClosureOp::Dielectric) {
+      auto [a23_s, a23_p, _c, _e3, _e4] =
+          fresnel_polarized(ct2, specular_ior(c, s) / eta2);
+      std::tie(r23_p, r23_s, phi23_p, phi23_s) =
+          detail::polarized_fresnel_r_phi(a23_s, a23_p);
+    } else {
+      auto [a23_s, a23_p, _c, _e3, _e4] = fresnel_polarized(
+          UnpolarizedSpectrum(ct2),
+          detail::safe_conductor_eta<Float>(s.spectra[leaf.spec[0]] / eta2,
+                                            s.spectra[leaf.spec[1]] / eta2));
+      std::tie(r23_p, r23_s, phi23_p, phi23_s) =
+          detail::polarized_fresnel_r_phi(a23_s, a23_p);
+    }
+    return dr::select(thickness_nm > 0.0f,
+                      detail::airy_thinfilm_reflectance<Float, Spectrum>(
+                          a12_s, a12_p, 2.0f * eta2 * ct2 * thickness_nm, r23_p,
+                          r23_s, phi23_p, phi23_s, s.wavelengths),
+                      f_base);
+  }
+
+  UnpolarizedSpectrum specular_fresnel(const ClosureNode& c, const Leaf& leaf,
+                                       const Float& cos_im, const Float& f_d,
+                                       const Float& cos_theta_t,
+                                       const State& s) const {
+    if (c.op == ClosureOp::Dielectric && c.microfacet.tf_thickness < 0) {
+      return UnpolarizedSpectrum(f_d);
     }
     bool two_sided = is_two_sided(c);
     Float cos_tf =
         two_sided ? dr::abs(cos_im)
                   : dr::select(cos_im < 0.0f, dr::abs(cos_theta_t), cos_im);
-    UnpolarizedSpectrum f_schlick = detail::fresnel_hoffman_schlick(
-        cos_tf, s.spectra[leaf.spec[0]], s.spectra[leaf.spec[1]],
-        s.spectra[leaf.spec[2]], s.tmps[c.microfacet.p[3]].x());
-    if (two_sided) return f_schlick;
-    Mask is_tir = (cos_im < 0.0f) && (cos_theta_t == 0.0f);
-    return dr::select(is_tir, UnpolarizedSpectrum(1.0f), f_schlick);
+    UnpolarizedSpectrum f_base =
+        c.op == ClosureOp::Dielectric ? UnpolarizedSpectrum(f_d)
+        : c.op == ClosureOp::Conductor
+            ? fresnel_conductor(
+                  UnpolarizedSpectrum(dr::maximum(cos_tf, dr::Epsilon<Float>)),
+                  detail::safe_conductor_eta<Float>(s.spectra[leaf.spec[0]],
+                                                    s.spectra[leaf.spec[1]]))
+            : detail::fresnel_hoffman_schlick(
+                  cos_tf, s.spectra[leaf.spec[0]], s.spectra[leaf.spec[1]],
+                  s.spectra[leaf.spec[2]], s.tmps[c.microfacet.p[3]].x());
+    UnpolarizedSpectrum f_tf =
+        eval_thinfilm_fresnel(f_base, cos_tf, c, leaf, s);
+    return two_sided ? f_tf
+                     : dr::select((cos_im < 0.0f) && (cos_theta_t == 0.0f),
+                                  UnpolarizedSpectrum(1.0f), f_tf);
   }
 
   static Float specular_refl_prob(const ClosureNode& c, const Float& f_d,
                                   const UnpolarizedSpectrum& f_c) {
-    return c.op == ClosureOp::Dielectric ? f_d : selection_weight(f_c);
+    return (c.op == ClosureOp::Dielectric && c.microfacet.tf_thickness < 0)
+               ? f_d
+               : selection_weight(f_c);
   }
 
   UnpolarizedSpectrum specular_refl_albedo(const ClosureNode& c,
@@ -515,6 +563,10 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
     Float cos_i = Frame3f::cos_theta(s.wi_local[leaf.frame]);
     Float ndv = dr::abs(cos_i);
     Float alpha_eff = dr::sqrt(dr::prod(get_ggx_alpha(c, s.tmps.data())));
+    bool has_tf = c.microfacet.tf_thickness >= 0;
+    Mask tf_active = has_tf ? ((s.tmps[c.microfacet.tf_thickness].x() > 0.0f) &&
+                               (s.tmps[c.microfacet.tf_ior].x() > 1.0f))
+                            : Mask(false);
     UnpolarizedSpectrum f_nv, f0, f90(1.0f);
     Mask index_matched(false);
     if (c.op == ClosureOp::Conductor) {
@@ -522,8 +574,11 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
       f0 = specular_fresnel(c, leaf, Float(1.0f), Float(0.0f), Float(0.0f), s);
     } else if (c.op == ClosureOp::GeneralizedSchlick) {
       f_nv = specular_fresnel(c, leaf, ndv, Float(0.0f), Float(0.0f), s);
-      f0 = s.spectra[leaf.spec[0]];
-      f90 = s.spectra[leaf.spec[2]];
+      f0 = eval_thinfilm_fresnel(s.spectra[leaf.spec[0]], Float(1.0f), c, leaf,
+                                 s);
+      f90 = has_tf ? dr::select(tf_active, UnpolarizedSpectrum(1.0f),
+                                s.spectra[leaf.spec[2]])
+                   : s.spectra[leaf.spec[2]];
     } else {
       Float ior = specular_ior(c, s);
       auto [f_d, cos_t, eta_it, eta_ti] =
@@ -531,11 +586,18 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
       f_nv = specular_fresnel(c, leaf, cos_i, f_d, cos_t, s);
       f0 = dr::select(
           eta_it < 1.0f, f_nv,
-          UnpolarizedSpectrum(dr::square((ior - 1.0f) / (ior + 1.0f))));
+          eval_thinfilm_fresnel(
+              UnpolarizedSpectrum(dr::square((ior - 1.0f) / (ior + 1.0f))),
+              Float(1.0f), c, leaf, s));
       index_matched = ior == 1.0f;
+      if (has_tf) index_matched = index_matched && !tf_active;
     }
     UnpolarizedSpectrum res =
         detail::ggx_refl_albedo(ndv, alpha_eff, f0, f_nv, f90);
+    if (has_tf) {
+      res =
+          dr::select(tf_active, dr::lerp(f_nv, res, dr::sqrt(alpha_eff)), res);
+    }
     return c.op == ClosureOp::Dielectric ? dr::select(index_matched, 0.0f, res)
                                          : res;
   }
@@ -682,6 +744,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
     s.n_geom =
         detail::safe_normalize(si.to_local(si.n), Vector3f(0.0f, 0.0f, 1.0f),
                                detail::kMinLen2<ScalarFloat>);
+    s.wavelengths = si.wavelengths;
 
     s.frames.resize(m_unique_frames.size());
     s.wi_local.resize(m_unique_frames.size());
