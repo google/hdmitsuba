@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <cstdint>
+#include <optional>
 #include <set>
 #include <string>
 #include <tuple>
@@ -422,17 +423,23 @@ nb::object CastMitsubaObject(mitsuba::Object* obj) {
 
 nb::object TranslateMaterialX(const UsdPrim& prim, UsdTimeCode time,
                               bool double_sided) {
+  if (!IsMaterialXEnabled()) return nb::none();
   std::string variant = ActiveVariant();
   auto trans = TranslateUsdMaterialX(prim, time, variant);
   if (!trans) return nb::none();
+  auto& [mat, has_disp] = *trans;
   mitsuba::ref<mitsuba::Object> emitter;
-  if (trans->shape_emitter_props) {
-    emitter = CreateMaterialEmitter(std::move(*trans->shape_emitter_props),
+  if (mat.shape_emitter_props) {
+    emitter = CreateMaterialEmitter(std::move(*mat.shape_emitter_props),
                                     double_sided, variant);
   }
-  return nb::make_tuple(CastMitsubaObject(trans->bsdf.get()),
-                        CastMitsubaObject(emitter.get()),
-                        std::move(trans->mesh_attributes));
+  return nb::make_tuple(
+      CastMitsubaObject(mat.bsdf.get()), CastMitsubaObject(emitter.get()),
+      std::move(mat.mesh_attributes),
+      has_disp ? nb::object(nb::make_tuple(
+                     CastMitsubaObject(mat.displacement.texture.get()),
+                     mat.displacement.requires_uv, mat.displacement.is_vector))
+               : nb::none());
 }
 
 }  // namespace
@@ -503,7 +510,8 @@ NB_MODULE(geometry_ext, m) {
   m.def("translate_materialx", &TranslateMaterialX, nb::arg("prim"),
         nb::arg("time"), nb::arg("double_sided") = false,
         "Translates a MaterialX UsdShadeMaterial prim into a "
-        "`(bsdf, emitter, mesh_attributes)` tuple, or None if MaterialX "
-        "support is disabled or the material has no active MaterialX surface "
-        "shader.");
+        "`(bsdf, emitter, mesh_attributes, displacement)` tuple (where "
+        "`displacement` is `(texture, requires_uv, is_vector)` or None), or "
+        "None if MaterialX support is disabled or the material has no active "
+        "MaterialX surface or displacement shader.");
 }

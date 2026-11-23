@@ -35,19 +35,20 @@
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-// Returns the connection of the `mitsuba:<terminal>` terminal, falling back to
-// `<terminal>`, or nullptr if neither is connected. A displacement terminal
-// driven by a `UsdPreviewSurface` resolves to that shader's
-// `inputs:displacement` connection (nullptr if unconnected).
-const HdMaterialConnection2* FindTerminalConnection(
+// Returns `{connection, priority}` (higher = higher priority across
+// `GetMaterialRenderContexts()`) of the highest-priority connected terminal,
+// or `{nullptr, 0}` if none is connected. A displacement terminal driven by a
+// `UsdPreviewSurface` resolves to that shader's `inputs:displacement`
+// connection (`{nullptr, 0}` if unconnected).
+std::pair<const HdMaterialConnection2*, int> FindTerminalConnection(
     const HdMaterialNetwork2& network, const TfToken& terminal);
 
 struct PreparedMaterialX;
 
 // Invokes `callback` with the key of every texture the material parsers will
 // look up for `network`, so the TextureCache can be preloaded beforehand. If
-// `network` has an active MaterialX surface shader, returns its prepared
-// network, which must be passed to `BuildMaterial`.
+// `network` has an active MaterialX surface or displacement shader, returns its
+// prepared network, which must be passed to `BuildMaterial`.
 std::shared_ptr<const PreparedMaterialX> DiscoverTextures(
     const SdfPath& id, const HdMaterialNetwork2& network,
     const std::function<void(const TextureKey& tex_key)>& callback);

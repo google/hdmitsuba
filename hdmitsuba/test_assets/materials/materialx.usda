@@ -177,8 +177,8 @@ def Xform "root"
             }
         }
 
-        # Horizontal ramp on a transformed quad. The unsupported
-        # mtlx:displacement takes precedence over the universal one.
+        # Horizontal ramp on a transformed quad. `mtlx:displacement` takes
+        # precedence over the universal one.
         def Material "mtlx_ramp_lr" (prepend apiSchemas = ["ColorSpaceAPI"])
         {
             uniform token colorSpace:name = "srgb_rec709_scene"

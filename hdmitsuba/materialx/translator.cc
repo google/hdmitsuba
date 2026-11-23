@@ -171,13 +171,10 @@ bool IsMaterialXNode(const HdMaterialNode2& node) {
               node.nodeTypeId, TfToken("mtlx")) != nullptr);
 }
 
-const HdMaterialConnection2* FindMaterialXSurfaceTerminal(
-    const HdMaterialNetwork2& network) {
-  const auto* conn =
-      FindTerminalConnection(network, HdMaterialTerminalTokens->surface);
+bool IsMaterialXTerminal(const HdMaterialNetwork2& network,
+                         const HdMaterialConnection2* conn) {
   auto it = conn ? network.nodes.find(conn->upstreamNode) : network.nodes.end();
-  return (it != network.nodes.end() && IsMaterialXNode(it->second)) ? conn
-                                                                    : nullptr;
+  return it != network.nodes.end() && IsMaterialXNode(it->second);
 }
 
 std::optional<std::string> ConvertToMtlxString(const VtValue& val) {
@@ -319,8 +316,8 @@ const std::string* GetMtlxVersion(const HdMaterialNetwork2& net2) {
              : nullptr;
 }
 
-// Populates a standalone `mx::Document` with the subgraph rooted at
-// `term_conn`.
+// Populates a standalone `mx::Document` with the subgraphs rooted at the
+// MaterialX terminal connections.
 class DocumentBuilder {
  public:
   using BuiltNode = std::pair<mx::NodePtr, mx::NodeDefPtr>;
@@ -337,15 +334,20 @@ class DocumentBuilder {
     doc_->setVersionString(version ? *version : "1.38");
   }
 
-  Result Build(const HdMaterialConnection2& term_conn) {
-    BuiltNode root = BuildNode(term_conn.upstreamNode);
-    if (!ConnectPort(
-            [&](const std::string& type) {
-              return doc_->addOutput("out", type);
-            },
-            root, term_conn.upstreamOutputName)) {
-      return {};
-    }
+  Result Build(const HdMaterialConnection2* surface_conn,
+               const HdMaterialConnection2* disp_conn) {
+    auto add_terminal = [&](const char* out_name,
+                            const HdMaterialConnection2* conn) {
+      return conn &&
+             ConnectPort(
+                 [&](const std::string& type) {
+                   return doc_->addOutput(out_name, type);
+                 },
+                 BuildNode(conn->upstreamNode), conn->upstreamOutputName);
+    };
+    bool ok = add_terminal("out_surface", surface_conn);
+    ok |= add_terminal("out_displacement", disp_conn);
+    if (!ok) return {};
     return {std::move(doc_), std::move(custom_libs_)};
   }
 
@@ -487,22 +489,35 @@ TranslatedMaterial TranslateWithTextureCache(
 
 struct PreparedMaterialX {
   mx::DocumentPtr doc;
-  mx::NodePtr shader_node;
+  mx::NodePtr surface_node;
+  mx::NodePtr displacement_node;
 };
+
+bool HasMaterialXSurface(const PreparedMaterialX& prepared) {
+  return prepared.surface_node != nullptr;
+}
+
+bool HasMaterialXDisplacement(const PreparedMaterialX& prepared) {
+  return prepared.displacement_node != nullptr;
+}
 
 std::shared_ptr<const PreparedMaterialX> PrepareMaterialXNetwork(
     const SdfPath& id, const HdMaterialNetwork2& network,
     const std::function<void(const TextureKey&)>& callback) {
   if (!IsMaterialXEnabled()) return nullptr;
-  const auto* term_conn = FindMaterialXSurfaceTerminal(network);
-  if (!term_conn) return nullptr;
-  auto prepared = std::make_shared<PreparedMaterialX>();
+  auto [surface_conn, surf_rank] =
+      FindTerminalConnection(network, HdMaterialTerminalTokens->surface);
+  auto [disp_conn, disp_rank] =
+      FindTerminalConnection(network, HdMaterialTerminalTokens->displacement);
+  if (!IsMaterialXTerminal(network, surface_conn)) surface_conn = nullptr;
+  if (!IsMaterialXTerminal(network, disp_conn)) disp_conn = nullptr;
+  if (!surface_conn && !disp_conn) return nullptr;
   try {
     const mx::ConstDocumentPtr& std_libs = GetMaterialXStdLibraries();
     const std::string* version = GetMtlxVersion(network);
-    auto [doc, custom_libs] =
-        DocumentBuilder(network, std_libs, version).Build(*term_conn);
-    if (!doc) return prepared;
+    auto [doc, custom_libs] = DocumentBuilder(network, std_libs, version)
+                                  .Build(surface_conn, disp_conn);
+    if (!doc) return nullptr;
 
     // Upgrade the small standalone user graph BEFORE attaching `std_libs`.
     UpgradeMaterialXDocument(doc, version != nullptr);
@@ -518,19 +533,33 @@ std::shared_ptr<const PreparedMaterialX> PrepareMaterialXNetwork(
       doc->setDataLibrary(overlay);
     }
     doc->flattenSubgraphs();
-    mx::OutputPtr out = doc->getOutput("out");
-    mx::NodePtr shader_node = out ? out->getConnectedNode() : nullptr;
-    if (!shader_node) return prepared;
-    if (!doc->getNodes("image").empty()) {
-      DiscoverSurfaceShaderTextures(shader_node, callback);
+    mx::OutputPtr surf_out = doc->getOutput("out_surface");
+    mx::NodePtr surface_node =
+        surf_out ? surf_out->getConnectedNode() : nullptr;
+    mx::OutputPtr disp_out = doc->getOutput("out_displacement");
+    mx::NodePtr displacement_node =
+        disp_out ? disp_out->getConnectedNode() : nullptr;
+    if (surface_node && surface_node->getCategory() == "surfacematerial" &&
+        disp_rank < surf_rank) {
+      if (mx::NodePtr mat_disp =
+              surface_node->getConnectedNode("displacementshader")) {
+        displacement_node = std::move(mat_disp);
+      }
     }
-    prepared->doc = std::move(doc);
-    prepared->shader_node = std::move(shader_node);
+    if (!surface_node && !displacement_node) return nullptr;
+    if (!doc->getNodes("image").empty()) {
+      if (surface_node) DiscoverSurfaceShaderTextures(surface_node, callback);
+      if (displacement_node) {
+        DiscoverDisplacementShaderTextures(displacement_node, callback);
+      }
+    }
+    return std::make_shared<PreparedMaterialX>(PreparedMaterialX{
+        std::move(doc), std::move(surface_node), std::move(displacement_node)});
   } catch (const std::exception& e) {
     TF_WARN("Failed to translate MaterialX network '%s': %s", id.GetText(),
             e.what());
+    return nullptr;
   }
-  return prepared;
 }
 
 TranslatedMaterial TranslateMaterialXNetwork(
@@ -538,38 +567,41 @@ TranslatedMaterial TranslateMaterialXNetwork(
     const std::function<const CachedTexture*(const TextureKey&)>&
         lookup_texture,
     std::string_view variant) {
-  if (!prepared.shader_node) return {};
+  TranslatedMaterial res;
   try {
-    TranslatedMaterial res;
-    CompiledSurfaceShader compiled =
-        CompileSurfaceShader(prepared.shader_node, variant, lookup_texture);
-    res.mesh_attributes = std::move(compiled.mesh_attributes);
-    if (compiled.radiance_texture) {
-      mitsuba::ref<mitsuba::Object> radiance = compiled.radiance_texture;
-      if (absl::StrContains(variant, "spectral")) {
-        // Linear sRGB colors are relative to the D65 white point. As for
-        // Mitsuba's own RGB emitter colors, multiply the upsampled color by
-        // the D65 spectrum.
-        mitsuba::Properties d65_props("d65");
-        d65_props.set("nested", radiance);
-        radiance = CreateExpandedObject(d65_props, variant,
-                                        mitsuba::ObjectType::Texture);
+    if (prepared.surface_node) {
+      CompiledSurfaceShader compiled =
+          CompileSurfaceShader(prepared.surface_node, variant, lookup_texture);
+      res.mesh_attributes = std::move(compiled.mesh_attributes);
+      if (compiled.radiance_texture) {
+        mitsuba::ref<mitsuba::Object> radiance = compiled.radiance_texture;
+        if (absl::StrContains(variant, "spectral")) {
+          // Linear sRGB colors are relative to the D65 white point. As for
+          // Mitsuba's own RGB emitter colors, multiply the upsampled color by
+          // the D65 spectrum.
+          mitsuba::Properties d65_props("d65");
+          d65_props.set("nested", radiance);
+          radiance = CreateExpandedObject(d65_props, variant,
+                                          mitsuba::ObjectType::Texture);
+        }
+        mitsuba::Properties emitter_props("area");
+        emitter_props.set("radiance", radiance);
+        res.shape_emitter_props = std::move(emitter_props);
       }
-      mitsuba::Properties emitter_props("area");
-      emitter_props.set("radiance", radiance);
-      res.shape_emitter_props = std::move(emitter_props);
+      res.bsdf = std::move(compiled.bsdf);
     }
-
-    res.bsdf = std::move(compiled.bsdf);
-    return res;
+    if (prepared.displacement_node) {
+      res.displacement = CompileDisplacementShader(prepared.displacement_node,
+                                                   variant, lookup_texture);
+    }
   } catch (const std::exception& e) {
     TF_WARN("Failed to translate MaterialX network '%s': %s", id.GetText(),
             e.what());
-    return {};
   }
+  return res;
 }
 
-std::optional<TranslatedMaterial> TranslateUsdMaterialX(
+std::optional<std::pair<TranslatedMaterial, bool>> TranslateUsdMaterialX(
     const UsdPrim& prim, UsdTimeCode time, std::string_view variant) {
   if (!IsMaterialXEnabled() || !prim) return std::nullopt;
   ArResolverContextBinder binder(prim.GetStage()->GetPathResolverContext());
@@ -590,14 +622,13 @@ std::optional<TranslatedMaterial> TranslateUsdMaterialX(
   auto prepared = PrepareMaterialXNetwork(
       prim.GetPath(), net, [&](const TextureKey& k) { keys.insert(k); });
   if (!prepared) return std::nullopt;
-  TranslatedMaterial trans;
-  if (prepared->shader_node) {
-    using namespace mitsuba;
-    trans = MI_INVOKE_VARIANT(variant, TranslateWithTextureCache,
-                              prim.GetPath(), *prepared, keys, variant);
-    if (trans.bsdf) trans.bsdf->set_id(prim.GetPath().GetAsString());
-  }
-  return trans;
+  using namespace mitsuba;
+  TranslatedMaterial trans =
+      MI_INVOKE_VARIANT(variant, TranslateWithTextureCache, prim.GetPath(),
+                        *prepared, keys, variant);
+  if (trans.bsdf) trans.bsdf->set_id(prim.GetPath().GetAsString());
+  return std::make_pair(std::move(trans),
+                        prepared->displacement_node != nullptr);
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

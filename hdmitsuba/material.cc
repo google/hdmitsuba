@@ -45,6 +45,7 @@ namespace {
 // In a later step, we will modify the prim_translator to directly work
 // using the schema.
 void ConvertMaterialNetwork(const HdMaterialNetworkSchema& network_schema,
+                            const TfToken& context,
                             HdMaterialNetwork2& network) {
   if (auto config_schema = network_schema.GetConfig()) {
     for (const TfToken& key : config_schema.GetNames()) {
@@ -131,7 +132,9 @@ void ConvertMaterialNetwork(const HdMaterialNetworkSchema& network_schema,
       conn.upstreamOutputName = GetParam<TfToken>(
           conn_schema.GetContainer(),
           HdMaterialConnectionSchemaTokens->upstreamNodeOutputName);
-      network.terminals[terminal_name] = conn;
+      network
+          .terminals[TfToken(SdfPath::JoinIdentifier(context, terminal_name))] =
+          std::move(conn);
     }
   }
 }
@@ -154,7 +157,7 @@ HdMaterialNetwork2 ConvertMaterialSchema(const HdMaterialSchema& schema) {
     // priority order so partial context overrides retain base terminals.
     const TfTokenVector contexts = GetMaterialRenderContexts();
     for (auto it = contexts.rbegin(); it != contexts.rend(); ++it) {
-      ConvertMaterialNetwork(schema.GetMaterialNetwork(*it), network2);
+      ConvertMaterialNetwork(schema.GetMaterialNetwork(*it), *it, network2);
     }
   }
   return network2;

@@ -1,0 +1,247 @@
+#usda 1.0
+(
+    defaultPrim = "root"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "root"
+{
+    def Xform "Camera"
+    {
+        float3 xformOp:rotateXYZ = (55, 0, 0)
+        double3 xformOp:translate = (0, -3.5, 2.6)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+
+        def Camera "Camera"
+        {
+            float2 clippingRange = (0.1, 100)
+            float focalLength = 0.035
+            float horizontalAperture = 0.036
+            token projection = "perspective"
+            float verticalAperture = 0.024
+        }
+    }
+
+    def DomeLight "Sky"
+    {
+        float inputs:intensity = 0.5
+    }
+
+    def DistantLight "Sun"
+    {
+        float inputs:angle = 5.0
+        float inputs:intensity = 2.5
+        float3 xformOp:rotateXYZ = (45, 0, -35)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def Scope "_materials"
+    {
+        def Material "noise_disp"
+        {
+            token outputs:mtlx:displacement.connect = </root/_materials/noise_disp/Disp.outputs:out>
+            token outputs:mtlx:surface.connect = </root/_materials/noise_disp/Surface.outputs:out>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+                color3f inputs:base_color = (0.3, 0.55, 0.75)
+                float inputs:specular_roughness = 0.35
+                token outputs:out
+            }
+
+            def Shader "Noise"
+            {
+                uniform token info:id = "ND_noise3d_float"
+                float inputs:amplitude = 0.3
+                float3 inputs:position.connect = </root/_materials/noise_disp/ScalePos.outputs:out>
+                float outputs:out
+            }
+
+            def Shader "ScalePos"
+            {
+                uniform token info:id = "ND_multiply_vector3FA"
+                float3 inputs:in1.connect = </root/_materials/noise_disp/Pos.outputs:out>
+                float inputs:in2 = 3.0
+                float3 outputs:out
+            }
+
+            def Shader "Pos"
+            {
+                uniform token info:id = "ND_position_vector3"
+                string inputs:space = "world"
+                float3 outputs:out
+            }
+
+            def Shader "Disp"
+            {
+                uniform token info:id = "ND_displacement_float"
+                float inputs:displacement.connect = </root/_materials/noise_disp/Noise.outputs:out>
+                token outputs:out
+            }
+        }
+
+        def Material "image_disp"
+        {
+            token outputs:mtlx:surface.connect = </root/_materials/image_disp/Mat.outputs:out>
+
+            def Shader "Mat"
+            {
+                uniform token info:id = "ND_surfacematerial"
+                token inputs:displacementshader.connect = </root/_materials/image_disp/Disp.outputs:out>
+                token inputs:surfaceshader.connect = </root/_materials/image_disp/Surface.outputs:out>
+                token outputs:out
+            }
+
+            def Shader "Bsdf"
+            {
+                uniform token info:id = "ND_oren_nayar_diffuse_bsdf"
+                color3f inputs:color = (0.75, 0.45, 0.25)
+                token outputs:out
+            }
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_surface"
+                token inputs:bsdf.connect = </root/_materials/image_disp/Bsdf.outputs:out>
+                token outputs:out
+            }
+
+            def Shader "Height"
+            {
+                uniform token info:id = "ND_image_float"
+                asset inputs:file = @./textures/uv_quadrants.png@
+                float outputs:out
+            }
+
+            def Shader "Disp"
+            {
+                uniform token info:id = "ND_displacement_float"
+                float inputs:displacement.connect = </root/_materials/image_disp/Height.outputs:out>
+                float inputs:scale = 0.35
+                token outputs:out
+            }
+        }
+
+        def Material "vector_mix_disp"
+        {
+            token outputs:mtlx:displacement.connect = </root/_materials/vector_mix_disp/MixDisp.outputs:out>
+            token outputs:surface.connect = </root/_materials/vector_mix_disp/Preview.outputs:surface>
+
+            def Shader "Preview"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.35, 0.7, 0.4)
+                float inputs:roughness = 0.4
+                token outputs:surface
+            }
+
+            def Shader "VecDisp"
+            {
+                uniform token info:id = "ND_displacement_vector3"
+                float3 inputs:displacement = (0.3, -0.2, 0.5)
+                float inputs:scale = 0.8
+                token outputs:out
+            }
+
+            def Shader "ScalarDisp"
+            {
+                uniform token info:id = "ND_displacement_float"
+                float inputs:displacement = 0.2
+                token outputs:out
+            }
+
+            def Shader "MixRamp"
+            {
+                uniform token info:id = "ND_ramplr_float"
+                float inputs:valuel = 0.0
+                float inputs:valuer = 1.0
+                float outputs:out
+            }
+
+            def Shader "MixDisp"
+            {
+                uniform token info:id = "ND_mix_displacementshader"
+                token inputs:bg.connect = </root/_materials/vector_mix_disp/ScalarDisp.outputs:out>
+                token inputs:fg.connect = </root/_materials/vector_mix_disp/VecDisp.outputs:out>
+                float inputs:mix.connect = </root/_materials/vector_mix_disp/MixRamp.outputs:out>
+                token outputs:out
+            }
+        }
+
+        def Material "disp_only"
+        {
+            token outputs:mtlx:displacement.connect = </root/_materials/disp_only/Disp.outputs:out>
+
+            def Shader "Disp"
+            {
+                uniform token info:id = "ND_displacement_float"
+                float inputs:displacement = 0.25
+                token outputs:out
+            }
+        }
+    }
+
+    def Mesh "NoiseQuad" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        rel material:binding = </root/_materials/noise_disp>
+        point3f[] points = [(-0.45, -0.45, 0), (0.45, -0.45, 0), (0.45, 0.45, 0), (-0.45, 0.45, 0)]
+        int primvars:mitsuba:subdivision_level = 3
+        uniform token subdivisionScheme = "catmullClark"
+        double3 xformOp:translate = (-0.6, 0.6, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "ImageQuad" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        rel material:binding = </root/_materials/image_disp>
+        point3f[] points = [(-0.45, -0.45, 0), (0.45, -0.45, 0), (0.45, 0.45, 0), (-0.45, 0.45, 0)]
+        int primvars:mitsuba:subdivision_level = 3
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "vertex"
+        )
+        uniform token subdivisionScheme = "catmullClark"
+        double3 xformOp:translate = (0.6, 0.6, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "VectorMixQuad" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        rel material:binding = </root/_materials/vector_mix_disp>
+        point3f[] points = [(-0.45, -0.45, 0), (0.45, -0.45, 0), (0.45, 0.45, 0), (-0.45, 0.45, 0)]
+        int primvars:mitsuba:subdivision_level = 2
+        texCoord2f[] primvars:st = [(0, 1), (0, 0), (1, 0), (1, 1)] (
+            interpolation = "vertex"
+        )
+        uniform token subdivisionScheme = "catmullClark"
+        double3 xformOp:translate = (-0.6, -0.6, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "DispOnlyQuad" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        rel material:binding = </root/_materials/disp_only>
+        point3f[] points = [(-0.45, -0.45, 0), (0.45, -0.45, 0), (0.45, 0.45, 0), (-0.45, 0.45, 0)]
+        color3f[] primvars:displayColor = [(0.8, 0.25, 0.35)]
+        uniform token subdivisionScheme = "none"
+        double3 xformOp:translate = (0.6, -0.6, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}

@@ -699,6 +699,7 @@ def convert_mesh_material(
   """
 
   bsdf, emitter, displacement, interior_medium = None, None, None, None
+  is_vector, requires_uv = False, True
   mesh_attributes = set()
   # Like hdMitsuba, resolve the "full" purpose (falling back to allPurpose).
   if prim.IsA(UsdShade.Material):
@@ -707,34 +708,35 @@ def convert_mesh_material(
     material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial(
         UsdShade.Tokens.full
     )
-  if material and (
-      conn := _find_terminal_connection(material.GetSurfaceOutput)
-  ):
-    shader_id = _shader_id(conn[0])
-    if shader_id == 'UsdPreviewSurface':
-      bsdf_dict, emitter_dict = usd_preview_surface_to_mitsuba(
-          conn[0], mesh_attributes, time
-      )
-      if bsdf_dict:
-        bsdf = mi.load_dict(bsdf_dict)
-      if emitter_dict:
-        # Like hdMitsuba, double-sided geometry emits from both sides.
-        emitter = mi.load_dict(emitter_dict | {'twosided': double_sided})
-    elif shader_id.startswith(_MI_PREFIX):
-      if bsdf_dict := usd_mitsuba_material_to_dict(
-          conn[0], mesh_attributes=mesh_attributes, time=time
-      ):
-        loaded = mi.load_dict(bsdf_dict)
-        if isinstance(loaded, mi.BSDF):
-          bsdf = loaded
-    elif mtlx := geom_lib.translate_materialx(
-        material.GetPrim(), time, double_sided
-    ):
-      # Like hdMitsuba, a MaterialX surface that fails to translate does not
-      # fall back to the surface shader of another render context.
-      bsdf, emitter, mesh_attributes = mtlx
-
   if material:
+    mtlx_disp, mtlx_checked = None, False
+    if surf_conn := _find_terminal_connection(material.GetSurfaceOutput):
+      surf_id = _shader_id(surf_conn[0])
+      if surf_id == 'UsdPreviewSurface':
+        bsdf_dict, emitter_dict = usd_preview_surface_to_mitsuba(
+            surf_conn[0], mesh_attributes, time
+        )
+        if bsdf_dict:
+          bsdf = mi.load_dict(bsdf_dict)
+        if emitter_dict:
+          # Like hdMitsuba, double-sided geometry emits from both sides.
+          emitter = mi.load_dict(emitter_dict | {'twosided': double_sided})
+      elif surf_id.startswith(_MI_PREFIX):
+        if bsdf_dict := usd_mitsuba_material_to_dict(
+            surf_conn[0], mesh_attributes=mesh_attributes, time=time
+        ):
+          loaded = mi.load_dict(bsdf_dict)
+          if isinstance(loaded, mi.BSDF):
+            bsdf = loaded
+      else:
+        mtlx_checked = True
+        if mtlx := geom_lib.translate_materialx(
+            material.GetPrim(), time, double_sided
+        ):
+          # Like hdMitsuba, a MaterialX surface that fails to translate does not
+          # fall back to the surface shader of another render context.
+          bsdf, emitter, mesh_attributes, mtlx_disp = mtlx
+
     if shader := _get_volume_shader(material):
       medium_dict = usd_mitsuba_material_to_dict(shader, 'volume', time=time)
       medium = mi.load_dict(medium_dict)
@@ -747,16 +749,31 @@ def convert_mesh_material(
       if bsdf is None:
         bsdf = mi.load_dict({'type': 'null'})
 
-    if conn := _find_displacement_connection(material):
-      if disp_dict := usd_mitsuba_material_to_dict(
-          conn[0], 'displacement', conn[1], time=time
+    if mtlx_disp is None and (
+        disp_conn := _find_displacement_connection(material)
+    ):
+      disp_id = _shader_id(disp_conn[0])
+      if disp_id == 'UsdUVTexture' or disp_id.startswith(
+          (_MI_PREFIX, _PRIMVAR_READER_PREFIX)
       ):
-        displacement = mi.load_dict(disp_dict)
-        if not isinstance(displacement, mi.Texture):
-          raise ValueError(
-              'Displacement texture is not a Mitsuba texture. Please use a'
-              ' Mitsuba texture.'
+        if disp_dict := usd_mitsuba_material_to_dict(
+            disp_conn[0], 'displacement', disp_conn[1], time=time
+        ):
+          displacement = mi.load_dict(disp_dict)
+          if not isinstance(displacement, mi.Texture):
+            raise ValueError(
+                'Displacement texture is not a Mitsuba texture. Please use a'
+                ' Mitsuba texture.'
+            )
+      elif not mtlx_checked and (
+          mtlx := geom_lib.translate_materialx(
+              material.GetPrim(), time, double_sided
           )
+      ):
+        mtlx_disp = mtlx[3]
+    if mtlx_disp is not None:
+      # MaterialX displacement (even if zero/unsupported) suppresses fallback.
+      displacement, requires_uv, is_vector = mtlx_disp
 
   if (
       bsdf is None
@@ -781,6 +798,8 @@ def convert_mesh_material(
       emitter=emitter,
       displacement=displacement,
       interior_medium=interior_medium,
+      is_vector=is_vector,
+      requires_uv=requires_uv,
       mesh_attributes=tuple(sorted(mesh_attributes)),
   )
 
@@ -815,16 +834,8 @@ def _find_displacement_connection(
   """Returns the `(shader, output)` driving `material`'s displacement."""
   conn = _find_terminal_connection(material.GetDisplacementOutput)
   if conn is not None and _shader_id(conn[0]) == 'UsdPreviewSurface':
-    conn = _find_shader_output(conn[0].GetInput('displacement'))
-  # Like hdMitsuba, ignore displacement from unsupported shaders.
-  if conn is None:
-    return None
-  shader_id = _shader_id(conn[0])
-  if shader_id == 'UsdUVTexture' or shader_id.startswith(
-      (_MI_PREFIX, _PRIMVAR_READER_PREFIX)
-  ):
-    return conn
-  return None
+    return _find_shader_output(conn[0].GetInput('displacement'))
+  return conn
 
 
 def _apply_uv_texture_scale_bias(
