@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 import os
 from typing import Any
 
@@ -231,6 +232,7 @@ def render_aovs(
     backend: str,
     camera_path: str,
     engine: usd_render.RenderEngine | None = None,
+    purposes: Collection[str] | None = None,
 ) -> dict[str, np.ndarray]:
   """Renders the AOVs of the render settings of `stage`.
 
@@ -243,6 +245,8 @@ def render_aovs(
       the scene translated by `usd_mitsuba`.
     camera_path: The path of the camera to render.
     engine: Optional configured Hydra `RenderEngine` to reuse across stage edits.
+    purposes: Optional USD purposes of the geometry to render, defaulting to
+      "default" and "render". Ignored if `engine` is given.
 
   Returns:
     The AOV images, as (height, width, channels) arrays keyed by AOV name.
@@ -251,7 +255,9 @@ def render_aovs(
     if engine is None:
       engine = usd_render.RenderEngine(stage)
       engine.configure(
-          hydra_delegate_id='HdMitsubaRendererPlugin', camera_path=camera_path
+          hydra_delegate_id='HdMitsubaRendererPlugin',
+          camera_path=camera_path,
+          purposes=purposes,
       )
     return {
         name: np.atleast_3d(np.array(image, dtype=np.float32))
@@ -259,7 +265,7 @@ def render_aovs(
     }
 
   assert backend == 'offline', backend
-  scene = mi.load_dict(usd_mitsuba.convert_to_mitsuba(stage))
+  scene = mi.load_dict(usd_mitsuba.convert_to_mitsuba(stage, purposes=purposes))
   mi.render(scene)
   # Skips the '<root>' bitmap holding the color channels, like Hydra.
   return {

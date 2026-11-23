@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 import tempfile
 from typing import Any
 
@@ -443,6 +443,7 @@ def convert_to_mitsuba(
     time: Usd.TimeCode = Usd.TimeCode.Default(),
     render_product_path: str | None = None,
     variant_name: str | None = None,
+    purposes: Collection[str] | None = None,
 ) -> dict[str, Any]:
   """Converts a USD stage to a Mitsuba scene for rendering.
 
@@ -455,10 +456,15 @@ def convert_to_mitsuba(
     time: The time code to evaluate the scene at.
     render_product_path: Optional path to the render product to use.
     variant_name: The Mitsuba variant to resolve and set.
+    purposes: Optional USD purposes of the geometry to convert (a subset of
+      "default", "render", "proxy" and "guide"). Defaults to "default" and
+      "render", matching the Hydra render engine and usdrecord.
 
   Returns:
     A Mitsuba scene dictionary.
   """
+  if purposes is None:
+    purposes = (UsdGeom.Tokens.default_, UsdGeom.Tokens.render)
   render_settings = render_settings_lib.get_render_settings(stage)
   mi_scene_dict: dict[str, Any] = {'type': 'scene'}
   mi_scene_dict['integrator'] = _convert_render_settings(
@@ -488,6 +494,11 @@ def convert_to_mitsuba(
         == UsdGeom.Tokens.invisible
     ):
       continue
+    if (
+        prim.IsA(UsdGeom.Gprim)
+        and UsdGeom.Imageable(prim).ComputePurpose() not in purposes
+    ):
+      continue
     mi_id = util.get_mitsuba_id(prim)
     if prim.IsA(UsdGeom.PointInstancer):
       instancing.convert_point_instancer(
@@ -497,6 +508,7 @@ def convert_to_mitsuba(
           mi_scene_dict,
           sensor_bindings,
           motion_interval,
+          purposes=purposes,
       )
     elif prim.IsA(UsdGeom.Mesh):
       mi_scene_dict.update(

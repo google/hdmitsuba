@@ -465,6 +465,88 @@ def test_hole_indices(subdivision_level: int):
   _assert_close(_render_aovs(stage)['depth'], 0.0)
 
 
+@pytest.mark.parametrize(
+    'purposes',
+    [None, (UsdGeom.Tokens.default_, UsdGeom.Tokens.proxy)],
+)
+@pytest.mark.parametrize(
+    'purpose',
+    [
+        UsdGeom.Tokens.default_,
+        UsdGeom.Tokens.render,
+        UsdGeom.Tokens.proxy,
+        UsdGeom.Tokens.guide,
+    ],
+)
+def test_purpose(purpose: str, purposes: tuple[str, ...] | None):
+  """Only geometry with the requested purposes is rendered.
+
+  By default, these are the "default" and "render" purposes.
+  """
+  stage = _create_stage()
+  _create_grid(stage).CreatePurposeAttr(purpose)
+  hydra = test_helpers.render_aovs(stage, 'hydra', '/Camera', purposes=purposes)
+  offline = test_helpers.render_aovs(
+      stage, 'offline', '/Camera', purposes=purposes
+  )
+  _assert_all_aovs_close(hydra, offline, atol=1e-5)
+  expected = purposes or (UsdGeom.Tokens.default_, UsdGeom.Tokens.render)
+  assert (hydra['depth'][_HALF, _HALF] > 0.0) == (purpose in expected)
+
+
+@pytest.mark.parametrize(
+    'purposes',
+    [None, (UsdGeom.Tokens.default_, UsdGeom.Tokens.proxy)],
+)
+@pytest.mark.parametrize(
+    'instancer_purpose',
+    [None, UsdGeom.Tokens.proxy],
+)
+def test_point_instancer_purpose(
+    instancer_purpose: str | None, purposes: tuple[str, ...] | None
+):
+  """PointInstancer prototype prims inherit and override purpose like Hydra."""
+  stage = _create_stage()
+  instancer = UsdGeom.PointInstancer.Define(stage, '/Instancer')
+  if instancer_purpose is not None:
+    instancer.CreatePurposeAttr(instancer_purpose)
+  UsdGeom.Xform.Define(stage, '/Instancer/Protos/Proto')
+
+  strips = (
+      ('Inherited', 0.0, 0.3, None, 4),
+      ('Render', 0.35, 0.65, UsdGeom.Tokens.render, _HALF),
+      ('Proxy', 0.7, 1.0, UsdGeom.Tokens.proxy, _IMAGE_SIZE - 5),
+  )
+  for name, x0, x1, mesh_purpose, _ in strips:
+    mesh = UsdGeom.Mesh.Define(stage, f'/Instancer/Protos/Proto/{name}')
+    mesh.CreatePointsAttr(
+        [(x0, 0.0, 0.0), (x1, 0.0, 0.0), (x1, 1.0, 0.0), (x0, 1.0, 0.0)]
+    )
+    mesh.CreateFaceVertexCountsAttr([4])
+    mesh.CreateFaceVertexIndicesAttr([0, 1, 2, 3])
+    _set_subdivision_level(mesh, 0)
+    if mesh_purpose is not None:
+      mesh.CreatePurposeAttr(mesh_purpose)
+
+  instancer.CreatePrototypesRel().SetTargets(
+      [Sdf.Path('/Instancer/Protos/Proto')]
+  )
+  instancer.CreateProtoIndicesAttr([0])
+  instancer.CreatePositionsAttr([Gf.Vec3f(0.0, 0.0, 0.0)])
+
+  hydra = test_helpers.render_aovs(stage, 'hydra', '/Camera', purposes=purposes)
+  offline = test_helpers.render_aovs(
+      stage, 'offline', '/Camera', purposes=purposes
+  )
+  _assert_all_aovs_close(hydra, offline, atol=1e-5)
+
+  expected = purposes or (UsdGeom.Tokens.default_, UsdGeom.Tokens.render)
+  inherited_purpose = instancer_purpose or UsdGeom.Tokens.default_
+  for _, _, _, mesh_purpose, col in strips:
+    resolved = mesh_purpose or inherited_purpose
+    assert (hydra['depth'][_HALF, col] > 0.0) == (resolved in expected)
+
+
 @pytest.mark.parametrize('subdivision_level', [0, 2])
 def test_invalid_topology(subdivision_level: int):
   """Meshes with inconsistent topologies are skipped, and shown once fixed."""

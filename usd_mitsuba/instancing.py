@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from typing import Any
 
 from pxr import Sdf
@@ -61,6 +61,10 @@ def convert_point_instancer(
     mi_scene_dict: dict[str, Any],
     sensor_bindings: Mapping[Sdf.Path, Usd.Prim],
     motion_interval: tuple[float, float] = (0.0, 0.0),
+    purposes: Collection[str] = (
+        UsdGeom.Tokens.default_,
+        UsdGeom.Tokens.render,
+    ),
 ) -> None:
   """Converts a PointInstancer prim to Mitsuba ShapeGroups and Instances.
 
@@ -71,6 +75,7 @@ def convert_point_instancer(
     mi_scene_dict: The top-level Mitsuba scene dictionary to populate.
     sensor_bindings: Precomputed shape path -> sensor prim map.
     motion_interval: Frame-relative shutter interval `(open, close)`.
+    purposes: The USD purposes of the prototype geometry to convert.
   """
   instancer = UsdGeom.PointInstancer(instancer_prim)
   instancer_id = util.get_mitsuba_id(instancer_prim)
@@ -114,6 +119,11 @@ def convert_point_instancer(
           == UsdGeom.Tokens.invisible
       ):
         prim_range.PruneChildren()
+        continue
+      if (
+          child_prim.IsA(UsdGeom.Gprim)
+          and UsdGeom.Imageable(child_prim).ComputePurpose() not in purposes
+      ):
         continue
       if child_prim.IsA(UsdGeom.Mesh):
         child_xform = UsdGeom.Xformable(child_prim)
