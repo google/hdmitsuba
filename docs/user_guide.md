@@ -52,12 +52,15 @@ This document provides an overview of the USD features supported by `hdMitsuba`,
         noises evaluate at most 16 octaves), `randomfloat`, `randomcolor`,
         image textures (`image`, `tiledimage`, `triplanarprojection`), and
         geometric intrinsics
-        (`geompropvalue` primvars, `geomcolor`, object/world positions,
-        object/world/tangent normals, world/tangent tangents and bitangents,
-        world view direction, and primary UVs; `color4`/`vector4` primvars read
-        3 channels from the mesh and take their 4th channel from `default`, and
-        object-space positions/normals and primvars fall back to world space /
-        default values on non-mesh shapes). Color value inputs and
+        (`geompropvalue` primvars and built-in `Pobject`/`Pworld`,
+        `Nobject`/`Nworld`, `Tobject`/`Tworld`, `Bobject`/`Bworld`, `UV0`
+        aliases, `geomcolor`, object/world positions, object/world/tangent
+        normals, world/tangent tangents and bitangents, world view direction,
+        and primary UVs; `Tobject`/`Bobject` warn and evaluate in world space,
+        `color4`/`vector4` primvars read 3 channels from the mesh and take
+        their 4th channel from `default`, and object-space positions/normals
+        and primvars fall back to world space / default values on non-mesh
+        shapes). Color value inputs and
         `color3`/`color4` images with a USD/MaterialX color space are converted
         to linear Rec.709 (images without an authored color space are treated as
         linear).

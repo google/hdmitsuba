@@ -504,13 +504,15 @@ def test_object_vs_world_space_position_and_normal() -> None:
   quad.GetNormalsAttr().Set([(0.6, 0.0, 0.8)] * 4)
 
   engine = mtlx.create_engine(stage)
-  for shader_id, space, expected in [
-      ('ND_position_vector3', 'world', (0.5, 0.5, 0.7)),
-      ('ND_normal_vector3', 'world', (0.1, 0.5, 0.8)),
-      ('ND_tangent_vector3', 'world', (0.2, 0.5, 0.1)),
-      ('ND_bitangent_vector3', 'world', (0.5, 0.0, 0.5)),
-      ('ND_position_vector3', 'object', (0.7, 0.6, 0.5)),
-      ('ND_normal_vector3', 'object', (0.8, 0.5, 0.9)),
+  for node_spec, expected in [
+      (('ND_position_vector3', {'space': 'world'}), (0.5, 0.5, 0.7)),
+      (('ND_normal_vector3', {'space': 'world'}), (0.1, 0.5, 0.8)),
+      (('ND_tangent_vector3', {'space': 'world'}), (0.2, 0.5, 0.1)),
+      (('ND_bitangent_vector3', {'space': 'world'}), (0.5, 0.0, 0.5)),
+      (('ND_position_vector3', {'space': 'object'}), (0.7, 0.6, 0.5)),
+      (('ND_normal_vector3', {'space': 'object'}), (0.8, 0.5, 0.9)),
+      (('ND_geompropvalue_vector3', {'geomprop': 'Pobject'}), (0.7, 0.6, 0.5)),
+      (('ND_geompropvalue_vector3', {'geomprop': 'Nobject'}), (0.8, 0.5, 0.9)),
   ]:
     mtlx.bind_mtlx_shader(
         stage,
@@ -525,7 +527,7 @@ def test_object_vs_world_space_position_and_normal() -> None:
                         'in1': (
                             'ND_multiply_vector3FA',
                             {
-                                'in1': (shader_id, {'space': space}),
+                                'in1': node_spec,
                                 'in2': 0.5,
                             },
                         ),
@@ -545,4 +547,75 @@ def test_object_vs_world_space_position_and_normal() -> None:
       engine=engine,
       spp=4,
       subdivision_level=0,
+  )
+
+
+def test_geomprop_alias_nodes(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+  """Tests built-in geometric `geompropvalue` aliases and channel coercion.
+
+  Args:
+    capfd: Pytest file-descriptor capture fixture for verifying warnings.
+  """
+  stage = Usd.Stage.CreateInMemory()
+  si = mtlx.make_test_si()
+  si.p = mi.Point3f(0.2, 0.4, 0.6)
+  si.dp_dv = mi.Vector3f(0.0, -1.0, 0.0)
+  si.uv = mi.Point2f(0.25, 0.75)
+
+  for node_id, prop, channels, expected, warn in (
+      ('ND_geompropvalue_vector3', 'Pworld', 3, (0.2, 0.4, 0.6), None),
+      ('ND_geompropvalue_vector3', 'Nworld', 3, (0.0, 0.0, 1.0), None),
+      ('ND_geompropvalue_vector3', 'Tworld', 3, (1.0, 0.0, 0.0), None),
+      ('ND_geompropvalue_vector3', 'Bworld', 3, (0.0, 1.0, 0.0), None),
+      (
+          'ND_geompropvalue_vector3',
+          'Tobject',
+          3,
+          (1.0, 0.0, 0.0),
+          'Unsupported MaterialX tangent space',
+      ),
+      ('ND_geompropvalue_vector2', 'UV0', 2, (0.25, 0.25), None),
+  ):
+    np.testing.assert_allclose(
+        mtlx.eval_emission_expr(
+            (node_id, {'geomprop': prop}), stage=stage, si=si, channels=channels
+        ),
+        expected,
+        atol=1e-5,
+    )
+    err = capfd.readouterr().err
+    assert (warn in err) if warn else (not err)
+
+  # Mismatched channel counts preserve scalar splatting and upper-lane ops.
+  np.testing.assert_allclose(
+      mtlx.eval_emission_expr(
+          (
+              'ND_add_vector3FA',
+              {
+                  'in1': ('ND_geompropvalue_vector3', {'geomprop': 'UV0'}),
+                  'in2': 0.5,
+              },
+          ),
+          stage=stage,
+          si=si,
+      ),
+      (0.75, 0.75, 0.5),
+      atol=1e-5,
+  )
+  np.testing.assert_allclose(
+      mtlx.eval_emission_expr(
+          (
+              'ND_add_vector3FA',
+              {
+                  'in1': (0.1, 0.2, 0.3),
+                  'in2': ('ND_geompropvalue_float', {'geomprop': 'Pworld'}),
+              },
+          ),
+          stage=stage,
+          si=si,
+      ),
+      (0.3, 0.4, 0.5),
+      atol=1e-5,
   )
