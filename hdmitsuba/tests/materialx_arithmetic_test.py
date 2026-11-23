@@ -361,6 +361,30 @@ def test_conditionals_logic_and_switch() -> None:
       ),
   )
   assert folded_and is None
+  # Equal branches fold in `select()` and `mix()`, so coated non-emissive
+  # `standard_surface` (`blended_coat_emission_edf = mix(0, 0, coat)`) elides
+  # its emitter.
+  _, folded_select = mtlx.compile_mtlx_material(
+      'ND_surface_unlit',
+      stage=stage,
+      emission_color=(
+          'ND_ifgreater_color3',
+          {
+              'value1': px,
+              'value2': 0.5,
+              'in1': (0.0, 0.0, 0.0),
+              'in2': (0.0, 0.0, 0.0),
+          },
+      ),
+  )
+  assert folded_select is None
+  _, coated_non_emissive = mtlx.compile_mtlx_material(
+      'ND_standard_surface_surfaceshader',
+      stage=stage,
+      coat=0.5,
+      emission=0.0,
+  )
+  assert coated_non_emissive is None
 
   # Dynamic `ND_switch_float` across `< 1`, `1..9`, and `>= 10` (`-> 0.0`).
   sw_vals = np.array([float(i * 10) for i in range(1, 11)])

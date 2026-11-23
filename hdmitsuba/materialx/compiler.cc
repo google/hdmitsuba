@@ -189,9 +189,9 @@ Expr vec4(const Expr& xyz, const Expr& w) {
   return (xyz.uniform() && xyz == w) ? xyz : call(mtlx::Op::Vec4, xyz, w);
 }
 Expr select(const Expr& cond, const Expr& t, const Expr& f) {
-  return cond.is_zero()  ? f
-         : cond.is_one() ? t
-                         : call(mtlx::Op::Select, cond, t, f);
+  return (cond.is_zero() || t == f) ? f
+         : cond.is_one()            ? t
+                                    : call(mtlx::Op::Select, cond, t, f);
 }
 Expr saturate(const Expr& e) {
   return (e.is_zero() || e.is_one())
@@ -199,7 +199,9 @@ Expr saturate(const Expr& e) {
              : call(mtlx::Op::Clip, e, Expr::zero(), Expr::one());
 }
 Expr mix(const Expr& fg, const Expr& bg, const Expr& m) {
-  return m.is_zero() ? bg : m.is_one() ? fg : call(mtlx::Op::Mix, fg, bg, m);
+  return (m.is_zero() || fg == bg) ? bg
+         : m.is_one()              ? fg
+                                   : call(mtlx::Op::Mix, fg, bg, m);
 }
 template <typename FgFn, typename BgFn>
 Expr CompileMix(const Expr& m, FgFn&& fg_fn, BgFn&& bg_fn) {
