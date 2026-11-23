@@ -417,11 +417,22 @@ typename MtlxEvaluator<Float, Spectrum>::Val
 MtlxEvaluator<Float, Spectrum>::eval(const SurfaceInteraction3f& si,
                                      Mask active, Val* out_tmps,
                                      int stop_after_tmp) const {
+  return eval_code(m_prog.code, m_prog.tmp_channels.size(), m_prog.stack_size,
+                   si, active, out_tmps, stop_after_tmp);
+}
+
+template <typename Float, typename Spectrum>
+typename MtlxEvaluator<Float, Spectrum>::Val
+MtlxEvaluator<Float, Spectrum>::eval_code(absl::Span<const Inst> code,
+                                          size_t tmp_count, uint32_t stack_size,
+                                          const SurfaceInteraction3f& si,
+                                          Mask active, Val* out_tmps,
+                                          int stop_after_tmp) const {
   size_t local_tmps =
       out_tmps ? 0
                : (stop_after_tmp >= 0 ? static_cast<size_t>(stop_after_tmp) + 1
-                                      : m_prog.tmp_channels.size());
-  absl::InlinedVector<Val, 64> mem(local_tmps + m_prog.stack_size);
+                                      : tmp_count);
+  absl::InlinedVector<Val, 64> mem(local_tmps + stack_size);
   Val* tmps = out_tmps ? out_tmps : mem.data();
   Val* stack_base = mem.data() + local_tmps;
   Val* sp = stack_base;
@@ -443,7 +454,7 @@ MtlxEvaluator<Float, Spectrum>::eval(const SurfaceInteraction3f& si,
                 : val3(m_inputs[k]->eval_3(si_q, active));
   };
 
-  for (Inst inst : m_prog.code) {
+  for (Inst inst : code) {
     uint16_t imm = inst.imm;
     if (int n = elementwise_arity(inst.op)) {
       Val* a = pop(n);
@@ -567,6 +578,63 @@ MtlxEvaluator<Float, Spectrum>::eval(const SurfaceInteraction3f& si,
         *sp++ = val3(detail::mx_normal_map(xyz(a[0]), xy(a[1]), xyz(a[2]),
                                            xyz(a[3]), xyz(a[4]),
                                            Vector3f(si.sh_frame.n)));
+        break;
+      }
+      case Op::HeightToNormal: {
+        Float scale = pop(1)[0].x();
+        const SubProgram& sub = m_prog.sub_programs[imm];
+        absl::Span<const Inst> sub_code(m_prog.sub_code.data() + sub.code_begin,
+                                        sub.code_end - sub.code_begin);
+        auto eval_at = [&](ScalarFloat du, ScalarFloat dv) {
+          SurfaceInteraction3f s = si;
+          s.uv += Point2f(du, dv);
+          s.p += du * si.dp_du + dv * si.dp_dv;
+          return eval_code(sub_code, sub.tmp_count, sub.stack_size, s, active);
+        };
+        // Matches MaterialX 1.39 `mx_heighttonormal_vector3` (`1 / 16` Sobel
+        // scale factor and cross-product Jacobian over `(u_mtlx, v_mtlx)`).
+        ScalarVector2i max_res(1);
+        for (Inst sub_inst : sub_code) {
+          if (sub_inst.op == Op::SampleInput ||
+              sub_inst.op == Op::SampleInputUV) {
+            max_res =
+                dr::maximum(max_res, m_inputs[sub_inst.imm]->resolution());
+          }
+        }
+        // Use an exact multiple of 1/256 texel (`0.125 / res`) when sampling
+        // bitmaps so CUDA's 8-bit fixed-point `tex2D` sub-texel interpolation
+        // introduces zero quantization error in central differences.
+        ScalarPoint2f eps =
+            dr::select(max_res > 1,
+                       dr::maximum(ScalarFloat(0.125f) / ScalarPoint2f(max_res),
+                                   ScalarFloat(1e-5f)),
+                       ScalarPoint2f(1e-4f));
+        ScalarFloat inv_2eps_u = 0.5f / eps.x();
+        ScalarFloat inv_2eps_v = 0.5f / eps.y();
+        constexpr ScalarFloat kSobelScale = 1.0f / 16.0f;
+        Val v_up = eval_at(eps.x(), 0.0f);
+        Val v_um = eval_at(-eps.x(), 0.0f);
+        // MaterialX's v is `1 - si.uv.y`, so `+v` steps along `-si.uv.y`.
+        Val v_vp = eval_at(0.0f, -eps.y());
+        Val v_vm = eval_at(0.0f, eps.y());
+        Float dh_du =
+            (v_up.x() - v_um.x()) * (inv_2eps_u * kSobelScale) * scale;
+        Float dh_dv =
+            (v_vp.x() - v_vm.x()) * (inv_2eps_v * kSobelScale) * scale;
+        Vector3f n;
+        if (sub.has_texcoord) {
+          Vector3f tangent((v_up.y() - v_um.y()) * inv_2eps_u,
+                           (v_up.z() - v_um.z()) * inv_2eps_u, dh_du);
+          Vector3f bitangent((v_vp.y() - v_vm.y()) * inv_2eps_v,
+                             (v_vp.z() - v_vm.z()) * inv_2eps_v, dh_dv);
+          n = dr::cross(tangent, bitangent);
+          n = detail::safe_normalize(
+              dr::select(n.z() < 0.0f, -n, n), Vector3f(0.0f, 0.0f, 1.0f),
+              static_cast<ScalarFloat>(kMtlxFloatEps * kMtlxFloatEps));
+        } else {
+          n = dr::normalize(Vector3f(-dh_du, -dh_dv, 1.0f));
+        }
+        *sp++ = val3(n * 0.5f + 0.5f);
         break;
       }
       // The color conversions keep a fourth (alpha) channel.

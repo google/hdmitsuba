@@ -50,6 +50,7 @@ def _set_mitsuba_variant():
         'uv_texture_scale_bias',
         'volumes',
         'materialx',
+        'materialx_bump',
         'materialx_displacement',
         'materialx_lobes',
     ],

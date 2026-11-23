@@ -55,7 +55,11 @@ This document provides an overview of the USD features supported by `hdMitsuba`,
         (`info:implementationSource = "sourceAsset"`) are also supported if
         OpenUSD is built with MaterialX support.
     *   Procedural pattern graphs,
-        math/vector/matrix/color/channel/compositing/logic nodes, 2D/3D
+        math/vector/matrix/color/channel/compositing/logic nodes,
+        `heighttonormal` and `bump` normal perturbation (following MaterialX
+        1.39's `texcoord`-gradient `heighttonormal` specification; in
+        displacement shaders, heights read from object-space intrinsics or
+        primvars are constant and yield the unperturbed normal), 2D/3D
         procedural noises (`cellnoise2d`/`3d`, `noise2d`/`3d`,
         `worleynoise2d`/`3d`, `fractal2d`/`3d`, `unifiednoise2d`/`3d`; fractal
         noises evaluate at most 16 octaves), `randomfloat`, `randomcolor`,

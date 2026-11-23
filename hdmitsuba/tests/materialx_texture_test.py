@@ -32,6 +32,7 @@ from hdmitsuba import geometry_ext as geom_lib
 from hdmitsuba.tests import materialx_test_helpers as mtlx
 from hdmitsuba.tests import test_helpers
 from usd_mitsuba import material as material_lib
+from usd_mitsuba import translator as usd_mitsuba
 
 
 @pytest.fixture(autouse=True)
@@ -1100,3 +1101,224 @@ def test_materialx_displacement_object_space_and_primvars(
   actual = np.unique(np.round(sub.primvars['points'], 6), axis=0)
   expected = np.unique(np.round(expected_world, 6), axis=0)
   np.testing.assert_allclose(actual, expected, atol=1e-5)
+
+
+def _h2n_expected(gx: float, gy: float) -> np.ndarray:
+  n = np.array([-gx, -gy, 1.0])
+  return (n / np.linalg.norm(n)) * 0.5 + 0.5
+
+
+def _uv_linear_expr(a: float, b: float) -> tuple[str, dict[str, object]]:
+  """Builds MaterialX expression `a * UV0.x + b * UV0.y`."""
+  return (
+      'ND_dotproduct_vector2',
+      {'in1': ('ND_texcoord_vector2', {}), 'in2': (a, b)},
+  )
+
+
+@pytest.mark.parametrize(
+    ('node_id', 'inputs', 'expected'),
+    [
+        pytest.param(
+            'ND_heighttonormal_vector3',
+            {'in_': _uv_linear_expr(16.0, 32.0)},
+            _h2n_expected(1.0, 2.0),
+            id='diagonal_default_scale',
+        ),
+        pytest.param(
+            'ND_heighttonormal_vector3',
+            {'in_': _uv_linear_expr(8.0, 16.0), 'scale': -2.0},
+            _h2n_expected(-1.0, -2.0),
+            id='diagonal_negative_scale',
+        ),
+        pytest.param(
+            'ND_heighttonormal_vector3',
+            {'in_': _uv_linear_expr(16.0, 0.0), 'scale': 0.0},
+            (0.5, 0.5, 1.0),
+            id='zero_scale',
+        ),
+        pytest.param(
+            'ND_heighttonormal_vector3',
+            {'in_': 0.75, 'scale': 5.0},
+            (0.5, 0.5, 1.0),
+            id='constant_height',
+        ),
+        # Scaling both `in` and `texcoord` by 4 cancels out in `dH/d(texcoord)`.
+        pytest.param(
+            'ND_heighttonormal_vector3',
+            {
+                'in_': _uv_linear_expr(64.0, 0.0),
+                'texcoord': (
+                    'ND_multiply_vector2FA',
+                    {'in1': ('ND_texcoord_vector2', {}), 'in2': 4.0},
+                ),
+            },
+            _h2n_expected(1.0, 0.0),
+            id='scaled_texcoord',
+        ),
+        # `rotate2d(UV0, 90) = (v, -u)`, so `16 * u = -16 * tc.y`.
+        pytest.param(
+            'ND_heighttonormal_vector3',
+            {
+                'in_': _uv_linear_expr(16.0, 0.0),
+                'texcoord': (
+                    'ND_rotate2d_vector2',
+                    {'in_': ('ND_texcoord_vector2', {}), 'amount': 90.0},
+                ),
+            },
+            _h2n_expected(0.0, -1.0),
+            id='rotated_texcoord',
+        ),
+        # Mirrored texcoord `(-u, v)` flips `dH/d(tc.x)` while keeping `n.z > 0`.
+        pytest.param(
+            'ND_heighttonormal_vector3',
+            {
+                'in_': _uv_linear_expr(16.0, 0.0),
+                'texcoord': (
+                    'ND_multiply_vector2',
+                    {'in1': ('ND_texcoord_vector2', {}), 'in2': (-1.0, 1.0)},
+                ),
+            },
+            _h2n_expected(-1.0, 0.0),
+            id='mirrored_texcoord',
+        ),
+        pytest.param(
+            'ND_heighttonormal_vector3',
+            {'in_': _uv_linear_expr(16.0, 0.0), 'texcoord': (0.5, 0.5)},
+            (0.5, 0.5, 1.0),
+            id='degenerate_texcoord',
+        ),
+        # `ND_bump_vector3` flattens to `heighttonormal` + `normalmap`.
+        pytest.param(
+            'ND_bump_vector3',
+            {'height': _uv_linear_expr(16.0, 32.0), 'scale': 0.5},
+            np.array([-0.5, -1.0, 1.0]) / np.linalg.norm([-0.5, -1.0, 1.0]),
+            id='bump_world_normal',
+        ),
+    ],
+)
+def test_heighttonormal_and_bump(
+    node_id: str,
+    inputs: dict[str, object],
+    expected: tuple[float, float, float] | np.ndarray,
+) -> None:
+  """Tests MaterialX 1.39 `heighttonormal` and `bump` normal perturbation.
+
+  Args:
+    node_id: MaterialX NodeDef identifier (`ND_heighttonormal_vector3` or
+      `ND_bump_vector3`).
+    inputs: Node inputs passed to `define_shader`.
+    expected: Expected 3-channel tangent-space or world-space normal.
+  """
+  si = mtlx.make_test_si(wi=(0.0, 0.0, 1.0))
+  si.uv = mi.Point2f(0.4, 0.6)
+  # Match a standard USD XY quad where MaterialX +V points along +Y (`-dp_dv`).
+  si.dp_dv = mi.Vector3f(0.0, -1.0, 0.0)
+  np.testing.assert_allclose(
+      mtlx.eval_emission_expr((node_id, inputs), si=si),
+      expected,
+      atol=1e-3,
+  )
+
+
+@pytest.mark.parametrize(
+    ('node_id', 'inputs'),
+    [
+        pytest.param(
+            'ND_bump_vector3',
+            {
+                'height': ('ND_image_float', {'file': _UV_QUADRANTS}),
+                'scale': 0.0,
+            },
+            id='zero_scale_bump',
+        ),
+        pytest.param(
+            'ND_heighttonormal_vector3', {'in_': 0.75}, id='constant_height'
+        ),
+    ],
+)
+def test_heighttonormal_unused_height_inputs(
+    node_id: str, inputs: dict[str, object]
+) -> None:
+  """Tests that heights which do not affect the normal add no parameters.
+
+  Args:
+    node_id: MaterialX NodeDef identifier.
+    inputs: Node inputs passed to `define_shader`.
+  """
+  _, emitter = mtlx.compile_mtlx_material(
+      'ND_surface_unlit', emission_color=(node_id, inputs)
+  )
+  assert not [
+      k
+      for k in mi.traverse(emitter).keys()
+      if k.startswith(('radiance.in', 'radiance.param'))
+  ]
+
+
+def test_heighttonormal_image_and_object_space(
+    tmp_path: pathlib.Path,
+) -> None:
+  """Tests `heighttonormal` on a 2D image and a transformed mesh's object position.
+
+  Args:
+    tmp_path: Temporary directory fixture for writing a linear height ramp EXR.
+  """
+  # Linear horizontal ramp image: texel centers span `[0, 16]` across U.
+  ramp = ((np.arange(64) + 0.5) * (16.0 / 64))[None, :]
+  img_path = _write_bitmap(tmp_path / 'ramp.exr', ramp)
+  si = mtlx.make_test_si(wi=(0.0, 0.0, 1.0))
+  si.uv = mi.Point2f(0.5, 0.5)
+  np.testing.assert_allclose(
+      mtlx.eval_emission_expr(
+          (
+              'ND_heighttonormal_vector3',
+              {'in_': ('ND_image_float', {'file': img_path})},
+          ),
+          si=si,
+      ),
+      _h2n_expected(1.0, 0.0),
+      atol=1e-3,
+  )
+
+  # 3D object-space position height on a rotated mesh: object X maps to world Y,
+  # while quad U spans `[-0.8, 0.8]` (`dx_obj/du = 1.6`). With `h = 10 * P_obj.x`,
+  # `dh/du = 16`, so `bump(scale=1)` tilts the world normal along `-T = (0, -1, 0)`.
+  stage = Usd.Stage.CreateInMemory()
+  quad = mtlx.define_quad(stage, '/Quad')
+  quad.AddRotateZOp().Set(90.0)
+  mtlx.bind_mtlx_shader(
+      stage,
+      quad,
+      'ND_surface_unlit',
+      emission_color=(
+          'ND_bump_vector3',
+          {
+              'height': (
+                  'ND_multiply_float',
+                  {
+                      'in1': (
+                          'ND_extract_vector3',
+                          {
+                              'in_': (
+                                  'ND_position_vector3',
+                                  {'space': 'object'},
+                              ),
+                              'index': 0,
+                          },
+                      ),
+                      'in2': 10.0,
+                  },
+              ),
+          },
+      ),
+  )
+  mi_scene = mi.load_dict(usd_mitsuba.convert_to_mitsuba(stage))
+  hit = mi_scene.ray_intersect(
+      mi.Ray3f(mi.Point3f(0.0, 0.0, 1.0), mi.Vector3f(0.0, 0.0, -1.0))
+  )
+  np.testing.assert_allclose(
+      hit.emitter(mi_scene).eval(hit),
+      dr.normalize(mi.Color3f(0.0, -1.0, 1.0)),
+      atol=1e-3,
+  )

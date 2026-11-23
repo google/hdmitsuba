@@ -21,6 +21,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -32,6 +33,7 @@
 #include <absl/container/flat_hash_set.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/strip.h>
+#include <absl/types/span.h>
 #include <mitsuba/core/plugin.h>
 #include <mitsuba/core/properties.h>
 #include <pxr/base/gf/color.h>
@@ -318,6 +320,34 @@ mx::NodePtr UnwrapShaderNode(mx::NodePtr node,
   return node;
 }
 
+// Returns true if `pred` holds for an instruction of `root` or a live
+// instruction of `body`, which stores the `tmp_count` temporaries read by
+// `root`. `body` may also end with root instructions after its last
+// `StoreTmp`.
+template <typename Pred>
+bool AnyLiveInst(absl::Span<const mtlx::Inst> body,
+                 absl::Span<const mtlx::Inst> root, size_t tmp_count,
+                 const Pred& pred) {
+  std::vector<bool> live(tmp_count);
+  bool active = true;
+  auto visit = [&](const mtlx::Inst& inst) {
+    if (inst.op == mtlx::Op::StoreTmp) {
+      active = live[inst.imm];
+    } else if (inst.op == mtlx::Op::MatTranspose ||
+               inst.op == mtlx::Op::MatInverse || inst.op == mtlx::Op::MatMul) {
+      active = std::any_of(live.begin() + inst.imm,
+                           live.begin() + inst.imm + inst.channels,
+                           [](bool b) { return b; });
+    } else if (active) {
+      if (pred(inst)) return true;
+      if (inst.op == mtlx::Op::LoadTmp) live[inst.imm] = true;
+    }
+    return false;
+  };
+  return std::any_of(root.rbegin(), root.rend(), visit) ||
+         std::any_of(body.rbegin(), body.rend(), visit);
+}
+
 // Compiles a flattened MaterialX DAG of pattern/math/procedural/image nodes
 // into a `mitsuba::mtlx::MtlxProgram` and a list of Mitsuba Texture child
 // inputs (`in0`, `in1`, ...).
@@ -450,6 +480,7 @@ class MtlxExprCompiler {
   // Emits `MatTranspose`, `MatInverse` or `MatMul` (of `a` and `b`).
   MatExpr MatrixOp(mtlx::Op op, const MatExpr& a, const MatExpr* b = nullptr);
   Expr MeshAttr(std::string_view name, int dim, const Expr& def);
+  Expr CompileHeightToNormal(const mx::NodePtr& node);
   Expr SampleImage(const mx::NodePtr& node);
   Expr CompileValueElement(const mx::ValueElementPtr& elem,
                            const Expr& default_expr);
@@ -1143,12 +1174,76 @@ std::optional<Expr> MtlxExprCompiler::CompileVectorNode(
       WarnUnsupported("Unsupported MaterialX normalmap space '" + space +
                       "'; evaluating in tangent space.");
     }
-    Expr in_e = in("in"), scale = in("scale", Expr::one());
+    Expr scale = in("scale", Expr::one());
+    // A zero `scale` keeps only the sign of the z component of `in`, which is
+    // positive for `heighttonormal` (e.g. in `NG_bump_vector3`), so skip
+    // evaluating its subgraph.
+    mx::NodePtr up = node->getConnectedNode("in");
+    while (up && up->getCategory() == "dot") up = up->getConnectedNode("in");
+    Expr in_e = scale.is_zero() && up && NodeCategory(up) == "heighttonormal"
+                    ? ConstRgb(0.5, 0.5, 1.0)
+                    : in("in");
     Expr n = in("normal", Expr::n_world()), t = in("tangent", Expr::t_world()),
          b = in("bitangent", Expr::b_world());
     return call(mtlx::Op::NormalMap, in_e, scale, n, t, b);
   }
+  if (cat == "heighttonormal") return CompileHeightToNormal(node);
   return std::nullopt;
+}
+
+Expr MtlxExprCompiler::CompileHeightToNormal(const mx::NodePtr& node) {
+  Expr scale = CompileInputExpr(node, "scale", Expr::one());
+  if (scale.is_zero()) return ConstRgb(0.5, 0.5, 1.0);
+
+  // Compile `in` (and `texcoord` if non-default) into an isolated temporary
+  // scope so `Op::HeightToNormal` can re-evaluate the subgraph at perturbed
+  // surface interactions without referencing outer temporaries.
+  auto scope = [&] {
+    return std::tie(prog_.code, prog_.tmp_channels, prog_.stack_size,
+                    node_output_expr_, value_input_expr_, node_matrix_expr_,
+                    expr_to_slot_);
+  };
+  auto outer = std::apply(
+      [](auto&... state) { return std::tuple(std::exchange(state, {})...); },
+      scope());
+  prog_.stack_size = 1;
+  size_t outer_opaques = prog_.opaques.size();
+
+  std::optional<uint16_t> sub_idx;
+  Expr h = CompileInputExpr(node, "in");
+  auto op_varies = [](const mtlx::Inst& i) {
+    return mtlx::is_spatially_varying_op(i.op) || i.op == mtlx::Op::SampleInput;
+  };
+  if (AnyLiveInst(prog_.code, h.code, prog_.tmp_channels.size(), op_varies)) {
+    Expr tc = CompileInputExpr(node, "texcoord", DefaultTexcoord());
+    if (discover_texture_) {
+      sub_idx = discover_input_idx_++;
+    } else {
+      bool has_tc = tc != DefaultTexcoord();
+      if (has_tc) tc = EmitTmpExpr(tc);
+      Expr out = has_tc ? rgb(h.x(), tc.x(), tc.y()) : h.x();
+      if (prog_.sub_programs.size() >= mtlx::kMaxImm) {
+        throw std::runtime_error(
+            "materialx_expr: too many heighttonormal nodes");
+      }
+      uint32_t begin = static_cast<uint32_t>(prog_.sub_code.size());
+      prog_.sub_code.insert(prog_.sub_code.end(), prog_.code.begin(),
+                            prog_.code.end());
+      prog_.sub_code.insert(prog_.sub_code.end(), out.code.begin(),
+                            out.code.end());
+      prog_.sub_programs.push_back(
+          {begin, static_cast<uint32_t>(prog_.sub_code.size()),
+           static_cast<uint32_t>(prog_.tmp_channels.size()),
+           std::max(prog_.stack_size, out.max_depth), has_tc ? 1u : 0u});
+      sub_idx = static_cast<uint16_t>(prog_.sub_programs.size() - 1);
+    }
+  }
+
+  // Drop the opaque values of a constant height, which nothing references.
+  if (!sub_idx) prog_.opaques.resize(outer_opaques);
+  scope() = std::move(outer);
+  return sub_idx ? call(mtlx::Op::HeightToNormal, *sub_idx, scale)
+                 : ConstRgb(0.5, 0.5, 1.0);
 }
 
 std::optional<Expr> MtlxExprCompiler::CompileGeomNode(const mx::NodePtr& node,
@@ -1612,12 +1707,6 @@ Expr MtlxExprCompiler::CompileNodeOutputExpr(const mx::NodePtr& node,
   if (auto e = CompileColorPbrNode(node, cat, type, output_name)) return *e;
   if (auto e = CompileNoiseNode(node, cat, type)) return *e;
 
-  if (cat == "bump") {
-    WarnUnsupported(
-        "Unsupported MaterialX node category 'bump'; passing through "
-        "'normal'.");
-    return CompileInputExpr(node, "normal", Expr::n_world());
-  }
   WarnUnsupported("Unsupported MaterialX node category '" + cat +
                   "'; passing through its 'in' input.");
   return CompileInputExpr(node, "in");
@@ -2030,30 +2119,22 @@ MtlxExprCompiler::DisplacementExpr MtlxExprCompiler::CompileDisplacement(
 }
 
 bool MtlxExprCompiler::ProgramUsesUv(const Expr& expr) const {
-  std::vector<bool> live(prog_.tmp_channels.size());
-  for (mtlx::Inst inst : expr.code) {
+  auto inst_uses_uv = [&](auto& self, const mtlx::Inst& inst) -> bool {
     if (inst.op == mtlx::Op::GeomUV || inst.op == mtlx::Op::SampleInput) {
       return true;
     }
-    if (inst.op == mtlx::Op::LoadTmp) live[inst.imm] = true;
-  }
-  bool active = false;
-  for (auto it = prog_.code.rbegin(); it != prog_.code.rend(); ++it) {
-    if (it->op == mtlx::Op::StoreTmp) {
-      active = live[it->imm];
-    } else if (it->op == mtlx::Op::MatTranspose ||
-               it->op == mtlx::Op::MatInverse || it->op == mtlx::Op::MatMul) {
-      active = std::any_of(live.begin() + it->imm,
-                           live.begin() + it->imm + it->channels,
-                           [](bool b) { return b; });
-    } else if (active) {
-      if (it->op == mtlx::Op::GeomUV || it->op == mtlx::Op::SampleInput) {
-        return true;
-      }
-      if (it->op == mtlx::Op::LoadTmp) live[it->imm] = true;
-    }
-  }
-  return false;
+    if (inst.op != mtlx::Op::HeightToNormal) return false;
+    const mtlx::SubProgram& sub = prog_.sub_programs[inst.imm];
+    return !sub.has_texcoord ||
+           AnyLiveInst(
+               absl::MakeConstSpan(prog_.sub_code)
+                   .subspan(sub.code_begin, sub.code_end - sub.code_begin),
+               {}, sub.tmp_count,
+               [&](const mtlx::Inst& i) { return self(self, i); });
+  };
+  return AnyLiveInst(
+      prog_.code, expr.code, prog_.tmp_channels.size(),
+      [&](const mtlx::Inst& i) { return inst_uses_uv(inst_uses_uv, i); });
 }
 
 ref<Object> MtlxExprCompiler::CreatePlugin(std::string_view name,
