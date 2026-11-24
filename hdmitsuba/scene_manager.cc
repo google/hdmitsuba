@@ -435,28 +435,21 @@ class SceneModel final : public SceneManager {
 
   void RemoveShape(const SdfPath& id) override {
     TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("RemoveShape: %s\n", id.GetText());
-    std::string id_str = id.GetAsString();
     absl::MutexLock lock(state_mutex_);
     bool erased = mesh_specs_.erase(id) > 0 || curve_specs_.erase(id) > 0 ||
                   particle_field_specs_.erase(id) > 0;
-    if (shapes_.erase(id_str) > 0) {
-      erased = true;
-    }
-
-    // Erase split sub-meshes
-    if (EraseShapesWithPrefix(absl::StrCat(id_str, "#"))) {
-      erased = true;
-    }
-
-    if (CleanUpInstancing(id)) {
+    const bool was_excluded = excluded_rprims_.erase(id) > 0;
+    if (EraseShapeObjects(id)) {
       erased = true;
     }
     if (!erased) {
-      TF_RUNTIME_ERROR("Could not remove shape: %s", id_str.c_str());
+      TF_RUNTIME_ERROR("Could not remove shape: %s", id.GetText());
     }
-    scene_dirty_ = true;
-    has_pending_commits_ = true;
-    reset_progressive_ = true;
+    if (!was_excluded) {
+      scene_dirty_ = true;
+      has_pending_commits_ = true;
+      reset_progressive_ = true;
+    }
   }
 
   void RemoveLight(const SdfPath& id) override {
@@ -534,9 +527,9 @@ class SceneModel final : public SceneManager {
     pass_aov_states_[render_pass] = std::move(pass_state);
   }
 
-  void Render(
-      const HdRenderPass* render_pass, const HdCamera* camera,
-      const std::optional<GfRect2i>& crop_window = std::nullopt) override {
+  void Render(const HdRenderPass* render_pass, const HdCamera* camera,
+              const std::optional<GfRect2i>& crop_window,
+              const TfTokenVector& render_tags) override {
     absl::MutexLock state_lock(state_mutex_);
     absl::MutexLock aov_lock(aov_states_mutex_);
     const bool denoise_dirty = std::exchange(denoise_dirty_, false);
@@ -557,6 +550,10 @@ class SceneModel final : public SceneManager {
     if (!primary_buffer) {
       TF_WARN("No valid primary buffer found.");
       return;
+    }
+    UpdateExcludedRprims(*render_pass->GetRenderIndex(), render_tags);
+    if (scene_dirty_ || !scene_) {
+      RebuildScene();
     }
     const unsigned int buffer_width = primary_buffer->GetWidth();
     const unsigned int buffer_height = primary_buffer->GetHeight();
@@ -979,6 +976,11 @@ class SceneModel final : public SceneManager {
       }
     };
     for (auto& [id, spec] : specs_map) {
+      if constexpr (std::is_same_v<SpecType, MeshSpec> ||
+                    std::is_same_v<SpecType, CurveSpec> ||
+                    std::is_same_v<SpecType, ParticleFieldSpec>) {
+        if (excluded_rprims_.contains(id)) continue;
+      }
       bool needs_bsdf_update = false;
       if constexpr (std::is_same_v<SpecType, MeshSpec>) {
         for (const auto& mat_id : spec.geometry.material_ids) {
@@ -1560,9 +1562,7 @@ class SceneModel final : public SceneManager {
       if (spec->needs_rebuild) {
         std::string id_str = spec->id.GetAsString();
         // Clean up old shapes
-        CleanUpInstancing(spec->id);
-        shapes_.erase(id_str);
-        EraseShapesWithPrefix(absl::StrCat(id_str, "#"));
+        EraseShapeObjects(spec->id);
         if (!spec->instance_transforms.empty()) {
           rebuild |= MergeInstancedMesh(results[i], id_str);
         } else {
@@ -1699,7 +1699,7 @@ class SceneModel final : public SceneManager {
       python_variant_synced_ = true;
     }
     absl::MutexLock lock(state_mutex_);
-    if (!scene_dirty_ && !has_pending_commits_) {
+    if (!has_pending_commits_) {
       return;
     }
     NewJitScope<Float>();
@@ -1718,57 +1718,21 @@ class SceneModel final : public SceneManager {
       rebuild_scene = true;
     }
 
-    if (rebuild_scene || materials_changed) {
+    if (materials_changed && !rebuild_scene) {
       // In-place material updates swap BSDF/Texture objects whose JIT class
       // pointers may be baked into a frozen kernel, so it must be invalidated
       // even when the Scene itself is not rebuilt.
-      if constexpr (dr::is_jit_v<Float>) {
-        if (frozen_render_) {
-          frozen_render_->Clear();
-        }
-      }
+      if (frozen_render_) frozen_render_->Clear();
       reset_progressive_ = true;
     }
 
     if (rebuild_scene) {
-      TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("Instantiating new scene\n");
-      Properties props;
-      for (auto& [id, shape] : shapes_) {
-        bool is_proto_mesh = absl::StartsWith(id, kProtoPrefix) &&
-                             !absl::StartsWith(id, kProtoGroupPrefix);
-        if (is_proto_mesh) {
-          continue;
-        }
-        if (shape->is_shape_group()) {
-          // The ray tracing backends only (re)build the acceleration structure
-          // of a shape group while it is dirty. A group carried over from the
-          // previous scene has its flag cleared, so re-mark it for the new one.
-          shape->mark_dirty();
-        }
-        props.set(id, shape.get());
-      }
-      for (auto& [id, sensor] : sensors_) {
-        props.set(id.GetAsString(), sensor.get());
-      }
-      // Mitsuba supports at most one environment emitter per scene. Of multiple
-      // DomeLights (e.g., an illumination dome and a camera background dome
-      // whose `lightLink` excludes the scene geometry), select the first one in
-      // SdfPath order whose `lightLink` is unrestricted, or else the first one.
-      const LightSpec* dome = nullptr;
-      for (auto& [id, emitter] : emitters_) {
-        const LightSpec& spec = light_specs_.at(id);
-        if (spec.prim_type != HdPrimTypeTokens->domeLight) {
-          props.set(id.GetAsString(), emitter.get());
-        } else if (!dome || (spec.light_link_everything &&
-                             !dome->light_link_everything)) {
-          dome = &spec;
-        }
-      }
-      if (dome) {
-        props.set(dome->id.GetAsString(), emitters_.at(dome->id).get());
-      }
-      scene_ = new Scene(props);
-      scene_dirty_ = false;
+      // Release the old scene before texture garbage collection and defer
+      // instantiating the new one until Render() (when the pass's renderTags
+      // are known) or GetScene().
+      scene_ = nullptr;
+      scene_dirty_ = true;
+      excluded_rprims_dirty_ = true;
     } else if (scene_) {
       scene_->parameters_changed();
     }
@@ -1782,7 +1746,14 @@ class SceneModel final : public SceneManager {
     has_pending_commits_ = false;
   }
 
-  mitsuba::Object* GetScene() override { return scene_.get(); }
+  mitsuba::Object* GetScene() override {
+    absl::MutexLock lock(state_mutex_);
+    if (scene_dirty_ || !scene_) {
+      NewJitScope<Float>();
+      RebuildScene();
+    }
+    return scene_.get();
+  }
 
  private:
   struct RenderPassState {
@@ -1810,6 +1781,10 @@ class SceneModel final : public SceneManager {
   TensorXf accum_buffer_;
   bool reset_progressive_ = true;
   const Sensor* last_sensor_ = nullptr;  // identity-only comparison
+  TfTokenVector last_render_tags_;
+  unsigned last_render_tag_version_ = 0;
+  bool excluded_rprims_dirty_ = true;
+  absl::flat_hash_set<SdfPath, SdfPath::Hash> excluded_rprims_;
 
   absl::Mutex state_mutex_;
   absl::Mutex aov_states_mutex_;
@@ -1844,6 +1819,108 @@ class SceneModel final : public SceneManager {
   bool denoise_ = false;
   bool denoise_dirty_ = false;
   Denoiser<Float, Spectrum> denoiser_;
+
+  void UpdateExcludedRprims(const HdRenderIndex& render_index,
+                            const TfTokenVector& render_tags) {
+    const unsigned tag_version =
+        render_index.GetChangeTracker().GetRenderTagVersion();
+    if (!excluded_rprims_dirty_ && render_tags == last_render_tags_ &&
+        tag_version == last_render_tag_version_) {
+      return;
+    }
+    excluded_rprims_dirty_ = false;
+    last_render_tags_ = render_tags;
+    last_render_tag_version_ = tag_version;
+
+    absl::flat_hash_set<SdfPath, SdfPath::Hash> new_excluded;
+    if (!render_tags.empty()) {
+      auto collect = [&](const auto& specs_map) {
+        for (const auto& [id, _] : specs_map) {
+          if (std::find(render_tags.begin(), render_tags.end(),
+                        render_index.GetRenderTag(id)) == render_tags.end()) {
+            new_excluded.insert(id);
+          }
+        }
+      };
+      collect(mesh_specs_);
+      collect(curve_specs_);
+      collect(particle_field_specs_);
+    }
+    if (new_excluded == excluded_rprims_) {
+      return;
+    }
+
+    // Release the old scene first so erasing excluded shapes drops their last
+    // references and frees their buffers immediately.
+    scene_ = nullptr;
+    for (const SdfPath& id : new_excluded) {
+      if (!excluded_rprims_.contains(id)) {
+        EraseShapeObjects(id);
+      }
+    }
+    auto old_excluded =
+        std::exchange(excluded_rprims_, std::move(new_excluded));
+    auto reenable = [&](auto& specs_map, auto commit) {
+      bool any = false;
+      for (const SdfPath& id : old_excluded) {
+        if (!excluded_rprims_.contains(id)) {
+          if (auto it = specs_map.find(id); it != specs_map.end()) {
+            it->second.needs_rebuild = true;
+            any = true;
+          }
+        }
+      }
+      if (any) commit();
+    };
+    reenable(mesh_specs_, [&] { CommitMeshes(); });
+    reenable(curve_specs_, [&] { CommitCurves(); });
+    reenable(particle_field_specs_, [&] { CommitParticleFields(); });
+    scene_dirty_ = true;
+  }
+
+  void RebuildScene() {
+    TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("Instantiating new scene\n");
+    scene_ = nullptr;
+    if (frozen_render_) frozen_render_->Clear();
+    reset_progressive_ = true;
+    Properties props;
+    for (auto& [id, shape] : shapes_) {
+      bool is_proto_mesh = absl::StartsWith(id, kProtoPrefix) &&
+                           !absl::StartsWith(id, kProtoGroupPrefix);
+      if (is_proto_mesh) {
+        continue;
+      }
+      if (shape->is_shape_group()) {
+        // The ray tracing backends only (re)build the acceleration structure
+        // of a shape group while it is dirty. A group carried over from the
+        // previous scene has its flag cleared, so re-mark it for the new one.
+        shape->mark_dirty();
+      }
+      props.set(id, shape.get());
+    }
+    for (auto& [id, sensor] : sensors_) {
+      props.set(id.GetAsString(), sensor.get());
+    }
+    // Mitsuba supports at most one environment emitter per scene. Of multiple
+    // DomeLights (e.g., an illumination dome and a camera background dome
+    // whose `lightLink` excludes the scene geometry), select the first one in
+    // SdfPath order whose `lightLink` is unrestricted, or else the first one.
+    const LightSpec* dome = nullptr;
+    for (auto& [id, emitter] : emitters_) {
+      const LightSpec& spec = light_specs_.at(id);
+      if (spec.prim_type != HdPrimTypeTokens->domeLight) {
+        props.set(id.GetAsString(), emitter.get());
+      } else if (!dome ||
+                 (spec.light_link_everything && !dome->light_link_everything)) {
+        dome = &spec;
+      }
+    }
+    if (dome) {
+      props.set(dome->id.GetAsString(), emitters_.at(dome->id).get());
+    }
+    scene_ = new Scene(props);
+    scene_dirty_ = false;
+  }
 
   void MarkSensorsForRebuild() {
     for (auto& [_, camera_spec] : camera_specs_) {
@@ -1893,29 +1970,23 @@ class SceneModel final : public SceneManager {
     return false;
   }
 
-  bool EraseShapesWithPrefix(std::string_view prefix) {
+  bool EraseShapesWithPrefix(const std::string& prefix) {
     bool erased = false;
-    for (auto it = shapes_.begin(); it != shapes_.end();) {
-      if (absl::StartsWith(it->first, prefix)) {
-        it = shapes_.erase(it);
-        erased = true;
-      } else {
-        ++it;
-      }
+    for (auto it = shapes_.lower_bound(prefix);
+         it != shapes_.end() && absl::StartsWith(it->first, prefix);) {
+      it = shapes_.erase(it);
+      erased = true;
     }
     return erased;
   }
 
-  bool CleanUpInstancing(const SdfPath& id) {
-    std::string id_str = id.GetAsString();
-    bool erased = false;
-    if (shapes_.erase(absl::StrCat(kProtoPrefix, id_str)) > 0) erased = true;
-    // Erase prototype sub-meshes
-    if (EraseShapesWithPrefix(absl::StrCat(kProtoPrefix, id_str, "#"))) {
-      erased = true;
-    }
-    if (shapes_.erase(absl::StrCat(kProtoGroupPrefix, id_str)) > 0)
-      erased = true;
+  bool EraseShapeObjects(const SdfPath& id) {
+    const std::string& id_str = id.GetString();
+    bool erased = shapes_.erase(id_str) > 0;
+    erased |= EraseShapesWithPrefix(absl::StrCat(id_str, "#"));
+    erased |= shapes_.erase(absl::StrCat(kProtoPrefix, id_str)) > 0;
+    erased |= EraseShapesWithPrefix(absl::StrCat(kProtoPrefix, id_str, "#"));
+    erased |= shapes_.erase(absl::StrCat(kProtoGroupPrefix, id_str)) > 0;
     for (size_t i = 0;; ++i) {
       if (shapes_.erase(absl::StrCat(kInstancePrefix, id_str, "_", i)) == 0) {
         break;
