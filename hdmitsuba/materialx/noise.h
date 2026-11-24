@@ -157,51 +157,45 @@ Out mx_cell_noise(const Vector<Float, 3>& p) {
 template <int Dim, typename Out, typename Float>
 Out mx_perlin_noise(const Vector<Float, 3>& p) {
   using Int32 = dr::int32_array_t<Float>;
-  Int32 X, Y, Z(0);
-  Float fx = mx_floorfrac(p.x(), X), fy = mx_floorfrac(p.y(), Y), fz(0.0f);
-  if constexpr (Dim == 3) fz = mx_floorfrac(p.z(), Z);
-  Float u = mx_fade(fx), v = mx_fade(fy);
-  // Bilinearly interpolated gradients of the cell layer `z` (unused in 2D).
-  auto layer = [&](const Int32& z, const Float& gz) {
-    auto g = [&](int dx, int dy) {
-      Int32 x = dx ? X + 1 : X, y = dy ? Y + 1 : Y;
-      dr::uint32_array_t<Float> h;
-      if constexpr (Dim == 3) {
-        h = mx_hash_int(x, y, z);
-      } else {
-        h = mx_hash_int(x, y);
-      }
-      Float gx = dx ? fx - 1.0f : fx, gy = dy ? fy - 1.0f : fy;
-      if constexpr (std::is_same_v<Out, Float>) {
-        return mx_gradient_float<Dim>(h, gx, gy, gz);
-      } else {
-        return Out(mx_gradient_float<Dim>(h, gx, gy, gz),
-                   mx_gradient_float<Dim>(h >> 8, gx, gy, gz),
-                   mx_gradient_float<Dim>(h >> 16, gx, gy, gz));
-      }
-    };
-    return dr::lerp(dr::lerp(g(0, 0), g(1, 0), u),
-                    dr::lerp(g(0, 1), g(1, 1), u), v);
-  };
-  if constexpr (Dim == 2) {
-    return 0.6616f * layer(Z, fz);
-  } else {
-    return 0.9820f *
-           dr::lerp(layer(Z, fz), layer(Z + 1, fz - 1.0f), mx_fade(fz));
-  }
-}
-
-template <int Dim, typename Out, typename Float>
-Out mx_fractal_noise(Vector<Float, 3> p, int octaves, const Float& lacunarity,
-                     const Float& diminish) {
-  Out result(0.0f);
-  Float amplitude(1.0f);
-  for (int i = 0; i < octaves; ++i) {
-    result += amplitude * mx_perlin_noise<Dim, Out>(p);
-    amplitude *= diminish;
-    p *= lacunarity;
-  }
-  return result;
+  using Vec = Vector<Float, 3>;
+  Vector<Int32, 3> cell(0);
+  Vec frac(mx_floorfrac(p.x(), cell.x()), mx_floorfrac(p.y(), cell.y()), 0.0f);
+  if constexpr (Dim == 3) frac.z() = mx_floorfrac(p.z(), cell.z());
+  Vec fade = mx_fade(frac);
+  size_t w = dr::width(p);
+  Out sum = std::get<1>(dr::while_loop(
+      std::make_tuple(dr::zeros<Int32>(w), dr::zeros<Out>(w), frac, fade),
+      [](const Int32& k, const Out&, const Vec&, const Vec&) {
+        return k < (1 << Dim);
+      },
+      [cell](Int32& k, Out& acc, Vec& f, Vec& fd) {
+        auto bx = (k & 1) != 0, by = (k & 2) != 0;
+        dr::uint32_array_t<Float> h;
+        Float gx = dr::select(bx, f.x() - 1.0f, f.x());
+        Float gy = dr::select(by, f.y() - 1.0f, f.y());
+        Float gz(0.0f);
+        Float wt = dr::select(bx, fd.x(), 1.0f - fd.x()) *
+                   dr::select(by, fd.y(), 1.0f - fd.y());
+        if constexpr (Dim == 3) {
+          auto bz = (k & 4) != 0;
+          h = mx_hash_int(cell.x() + (k & 1), cell.y() + ((k >> 1) & 1),
+                          cell.z() + (k >> 2));
+          gz = dr::select(bz, f.z() - 1.0f, f.z());
+          wt *= dr::select(bz, fd.z(), 1.0f - fd.z());
+        } else {
+          h = mx_hash_int(cell.x() + (k & 1), cell.y() + ((k >> 1) & 1));
+        }
+        if constexpr (std::is_same_v<Out, Float>) {
+          acc += wt * mx_gradient_float<Dim>(h, gx, gy, gz);
+        } else {
+          acc += wt * Out(mx_gradient_float<Dim>(h, gx, gy, gz),
+                          mx_gradient_float<Dim>(h >> 8, gx, gy, gz),
+                          mx_gradient_float<Dim>(h >> 16, gx, gy, gz));
+        }
+        k += 1;
+      },
+      "MaterialX Perlin noise", 1 << Dim));
+  return (Dim == 3 ? 0.9820f : 0.6616f) * sum;
 }
 
 // Fractal noise with an octave count that varies per sample.
@@ -238,6 +232,15 @@ Out mx_fractal_noise(const Vector<Float, 3>& p, const Float& octaves,
       "MaterialX fractal noise", max_octaves));
 }
 
+template <int Dim, typename Out, typename Float>
+Out mx_fractal_noise(const Vector<Float, 3>& p, int octaves,
+                     const Float& lacunarity, const Float& diminish) {
+  if (octaves <= 0) return Out(0.0f);
+  if (octaves == 1) return mx_perlin_noise<Dim, Out>(p);
+  return mx_fractal_noise<Dim, Out>(p, Float(octaves), lacunarity, diminish,
+                                    octaves);
+}
+
 // Returns the cell noise of the cell containing the nearest jittered feature
 // point where `cell` is set (a scalar for `Out = Float`), and the distances
 // to the three nearest feature points elsewhere, matching
@@ -246,45 +249,54 @@ template <int Dim, typename Out, typename Float>
 Out mx_worley_noise(const Vector<Float, 3>& p, const Float& jitter,
                     const dr::mask_t<Float>& cell) {
   using Int32 = dr::int32_array_t<Float>;
+  using Mask = dr::mask_t<Float>;
   using VecD = Vector<Float, Dim>;
-  Int32 X, Y, Z(0);
-  VecD local_pos, min_off(0.0f);
-  local_pos.x() = mx_floorfrac(p.x(), X);
-  local_pos.y() = mx_floorfrac(p.y(), Y);
-  if constexpr (Dim == 3) local_pos.z() = mx_floorfrac(p.z(), Z);
-  Float f1(1e6f);
-  [[maybe_unused]] Float f2(1e6f), f3(1e6f);
-  constexpr int dz_max = (Dim == 3) ? 1 : 0;
-  for (int dx = -1; dx <= 1; ++dx) {
-    for (int dy = -1; dy <= 1; ++dy) {
-      for (int dz = -dz_max; dz <= dz_max; ++dz) {
-        VecD rnd = mx_cell_noise<Dim, VecD, Float>(X + dx, Y + dy, Z + dz);
-        VecD cell_off = (rnd - 0.5f) * jitter;
-        cell_off.x() += dx + 0.5f;
-        cell_off.y() += dy + 0.5f;
-        if constexpr (Dim == 3) cell_off.z() += dz + 0.5f;
-        Float d2 = dr::squared_norm(cell_off - local_pos);
-        min_off = dr::select(d2 < f1, cell_off, min_off);
-        if constexpr (!std::is_same_v<Out, Float>) {
-          f3 = dr::minimum(f3, dr::maximum(d2, f2));
-          f2 = dr::minimum(f2, dr::maximum(d2, f1));
+  Vector<Int32, 3> base(0);
+  VecD local_pos;
+  local_pos.x() = mx_floorfrac(p.x(), base.x());
+  local_pos.y() = mx_floorfrac(p.y(), base.y());
+  if constexpr (Dim == 3) local_pos.z() = mx_floorfrac(p.z(), base.z());
+
+  size_t w = dr::width(p, jitter);
+  Float jit = jitter;
+  if constexpr (dr::is_diff_v<Float>) jit = jit.copy();
+  Vector<Int32, 3> d0(dr::full<Int32>(-1, w), dr::full<Int32>(-1, w),
+                      dr::full<Int32>(Dim == 3 ? -1 : 0, w));
+  auto [_, f, min_off, _lp, _jit] = dr::while_loop(
+      std::make_tuple(d0, Out(dr::full<Float>(1e6f, w)), dr::zeros<VecD>(w),
+                      local_pos, jit),
+      [](const Vector<Int32, 3>& d, const auto&...) { return d.x() <= 1; },
+      [base](Vector<Int32, 3>& d, Out& f_acc, VecD& min_off_acc, VecD& lp,
+             Float& jit_in) {
+        VecD rnd = mx_cell_noise<Dim, VecD, Float>(
+            base.x() + d.x(), base.y() + d.y(), base.z() + d.z());
+        VecD cell_off = (rnd - 0.5f) * jit_in + VecD(dr::head<Dim>(d)) + 0.5f;
+        Float d2 = dr::squared_norm(cell_off - lp);
+        if constexpr (std::is_same_v<Out, Float>) {
+          min_off_acc = dr::select(d2 < f_acc, cell_off, min_off_acc);
+          f_acc = dr::minimum(f_acc, d2);
+        } else {
+          min_off_acc = dr::select(d2 < f_acc.x(), cell_off, min_off_acc);
+          f_acc = Out(dr::minimum(f_acc.x(), d2),
+                      dr::minimum(f_acc.y(), dr::maximum(d2, f_acc.x())),
+                      dr::minimum(f_acc.z(), dr::maximum(d2, f_acc.y())));
         }
-        f1 = dr::minimum(f1, d2);
-      }
-    }
-  }
-  Int32 cx = X + Int32(dr::floor(min_off.x()));
-  Int32 cy = Y + Int32(dr::floor(min_off.y()));
+        Mask z_wrap = (Dim == 3) ? (d.z() == 1) : Mask(true);
+        Mask y_wrap = z_wrap & (d.y() == 1);
+        if constexpr (Dim == 3)
+          d.z() = dr::select(z_wrap, Int32(-1), d.z() + 1);
+        d.y() =
+            dr::select(y_wrap, Int32(-1), dr::select(z_wrap, d.y() + 1, d.y()));
+        d.x() = dr::select(y_wrap, d.x() + 1, d.x());
+      },
+      "MaterialX Worley noise", (Dim == 3) ? 27 : 9);
+
+  Int32 cx = base.x() + Int32(dr::floor(min_off.x()));
+  Int32 cy = base.y() + Int32(dr::floor(min_off.y()));
   Int32 cz(0);
-  if constexpr (Dim == 3) cz = Z + Int32(dr::floor(min_off.z()));
-  Out cell_out = mx_cell_noise<Dim, Out, Float>(cx, cy, cz);
-  Out dist;
-  if constexpr (std::is_same_v<Out, Float>) {
-    dist = dr::safe_sqrt(f1);
-  } else {
-    dist = dr::safe_sqrt(Out(f1, f2, f3));
-  }
-  return dr::select(cell, cell_out, dist);
+  if constexpr (Dim == 3) cz = base.z() + Int32(dr::floor(min_off.z()));
+  return dr::select(cell, mx_cell_noise<Dim, Out, Float>(cx, cy, cz),
+                    dr::safe_sqrt(f));
 }
 
 }  // namespace mtlx::detail
