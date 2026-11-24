@@ -306,3 +306,49 @@ def test_interactive_denoise_preserves_raw_accumulation():
   assert not denoised_engine.is_converged()
   denoised_engine.render()
   assert denoised_engine.is_converged()
+
+
+def test_purpose_change_resets_progressive_rendering():
+  stage = _create_stage()
+  UsdGeom.Imageable.Get(stage, '/World/Quad').CreatePurposeAttr(
+      UsdGeom.Tokens.proxy
+  )
+  engine = usd_render.RenderEngine(stage)
+  overrides = {
+      'enableInteractive': True,
+      'mitsuba:sampler:sample_count': 4,
+      'mitsuba:interactive_samples_per_pass': 2,
+      'mitsuba:use_kernel_freezing': True,
+  }
+
+  def configure(purposes: list[str]) -> None:
+    engine.configure(
+        hydra_delegate_id='HdMitsubaRendererPlugin',
+        render_settings_path='/Render/PrimarySettings',
+        width=64,
+        overrides=overrides,
+        purposes=purposes,
+    )
+
+  configure(['default', 'proxy'])
+  engine.render()
+  img = engine.render()['color']
+  assert engine.is_converged()
+  assert img[img.shape[0] // 2, img.shape[1] // 2].mean() < 0.7
+
+  # Disabling proxy after convergence must reset accumulation and clear the
+  # quad so the white dome light shows through.
+  configure(['default'])
+  img = engine.render()['color']
+  assert engine.get_render_stats()['numCompletedSamples'] == 2
+  assert not engine.is_converged()
+  assert img[img.shape[0] // 2, img.shape[1] // 2].mean() > 0.9
+
+  # Finish converging, then remove the already-excluded quad: progressive
+  # accumulation must stay intact.
+  engine.render()
+  assert engine.is_converged()
+  stage.RemovePrim('/World/Quad')
+  engine.render()
+  assert engine.is_converged()
+  assert engine.get_render_stats()['numCompletedSamples'] == 4

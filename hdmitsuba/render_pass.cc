@@ -38,7 +38,7 @@ HdMitsubaRenderPass::HdMitsubaRenderPass(HdRenderIndex* index,
 
 void HdMitsubaRenderPass::_Execute(
     const HdRenderPassStateSharedPtr& renderPassState,
-    const TfTokenVector& /*renderTags*/) {
+    const TfTokenVector& renderTags) {
   if (!TF_VERIFY(renderPassState != nullptr)) {
     return;
   }
@@ -59,7 +59,8 @@ void HdMitsubaRenderPass::_Execute(
   if (renderPassState->GetFraming().IsValid()) {
     crop_window = renderPassState->GetFraming().dataWindow;
   }
-  scene_manager->Render(this, renderPassState->GetCamera(), crop_window);
+  scene_manager->Render(this, renderPassState->GetCamera(), crop_window,
+                        renderTags);
 }
 
 bool HdMitsubaRenderPass::IsConverged() const {

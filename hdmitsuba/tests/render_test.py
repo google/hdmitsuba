@@ -172,3 +172,64 @@ def test_alpha_channel():
   )
   rgb_image = engine.render()['color']
   np.testing.assert_allclose(rgb_image, image[..., :3], atol=1e-6)
+
+
+def test_purposes_update_dynamically():
+  stage = Usd.Stage.CreateInMemory()
+  stage.GetRootLayer().subLayerPaths.append(
+      f'{test_helpers.TEST_ASSETS_PATH}/shapes/implicit_surfaces.usda'
+  )
+  test_helpers.create_render_settings(stage, resolution=(64, 64), spp=4)
+  UsdGeom.Imageable.Get(stage, '/root/Sphere').CreatePurposeAttr(
+      UsdGeom.Tokens.render
+  )
+  for path in ('/root/CylinderZ', '/root/Instancer'):
+    UsdGeom.Imageable.Get(stage, path).CreatePurposeAttr(UsdGeom.Tokens.proxy)
+
+  engine = usd_render.RenderEngine(stage)
+
+  def render(purposes: list[str] | None = None) -> np.ndarray:
+    if purposes is not None:
+      engine.configure(
+          hydra_delegate_id='HdMitsubaRendererPlugin', purposes=purposes
+      )
+    return engine.render()['color']
+
+  def fresh_render(purposes: list[str]) -> np.ndarray:
+    ref = usd_render.RenderEngine(stage)
+    ref.configure(
+        hydra_delegate_id='HdMitsubaRendererPlugin', purposes=purposes
+    )
+    return ref.render()['color']
+
+  # Sync proxy shapes (`#` sub-shapes and PointInstancer), then disable them.
+  with_proxy = render(['default', 'proxy'])
+  with_render = render(['default', 'render'])
+  assert np.max(np.abs(with_render - with_proxy)) > 0.3
+  np.testing.assert_allclose(
+      with_render, fresh_render(['default', 'render']), atol=1e-5
+  )
+
+  # Live USD purpose edit + material edit while excluded + re-enable.
+  sphere_purpose = UsdGeom.Imageable.Get(stage, '/root/Sphere').GetPurposeAttr()
+  sphere_purpose.Set(UsdGeom.Tokens.proxy)
+  default_only = render()
+  assert np.max(np.abs(default_only - with_render)) > 0.3
+  np.testing.assert_allclose(default_only, fresh_render(['default']), atol=1e-5)
+
+  UsdShade.Shader.Get(stage, '/root/_materials/Red/Principled_BSDF').GetInput(
+      'diffuseColor'
+  ).Set((0.05, 0.9, 0.05))
+  np.testing.assert_allclose(render(), default_only, atol=1e-5)
+
+  sphere_purpose.Set(UsdGeom.Tokens.render)
+  reenabled = render()
+  assert np.max(np.abs(reenabled - with_render)) > 0.3
+  np.testing.assert_allclose(
+      reenabled, fresh_render(['default', 'render']), atol=1e-5
+  )
+
+  # Empty purposes renders everything.
+  all_purposes = render([])
+  assert np.max(np.abs(all_purposes - reenabled)) > 0.3
+  np.testing.assert_allclose(all_purposes, fresh_render([]), atol=1e-5)

@@ -61,9 +61,9 @@ class SceneManager {
       const HdRenderPass* render_pass,
       const HdRenderPassAovBindingVector& aov_bindings) = 0;
 
-  virtual void Render(
-      const HdRenderPass* render_pass, const HdCamera* camera,
-      const std::optional<GfRect2i>& crop_window = std::nullopt) = 0;
+  virtual void Render(const HdRenderPass* render_pass, const HdCamera* camera,
+                      const std::optional<GfRect2i>& crop_window = std::nullopt,
+                      const TfTokenVector& render_tags = {}) = 0;
 
   virtual bool IsConverged() const = 0;
 

@@ -470,12 +470,14 @@ void RenderEngine::Configure(
   ResolveResolution(stage_, render_settings, resolved_camera_path, width,
                     delegate_overrides);
 
+  static const TfToken kHdMitsubaRendererPlugin("HdMitsubaRendererPlugin");
   const bool rebuild_delegate =
       !render_delegate_ || !stage_scene_index_ ||
       (hydra_delegate_id != hydra_delegate_id_) ||
-      // Render delegates keep rprims that were synced before a render tag got
-      // disabled, so a change of render tags requires a fresh render index.
-      (render_tags != render_tags_);
+      // Some delegates (e.g. hdEmbree) ignore renderTags in _Execute and keep
+      // previously synced rprims, so they require a fresh render index.
+      (render_tags != render_tags_ &&
+       hydra_delegate_id != kHdMitsubaRendererPlugin);
 
   if (rebuild_delegate) {
     // Clean up any previous state in reverse order.
@@ -549,6 +551,13 @@ void RenderEngine::Configure(
       render_delegate_->SetRenderSetting(key, value);
     }
     settings_map_ = std::move(delegate_overrides);
+    if (render_tags != render_tags_) {
+      params_delegate_->SetParameter(render_task_id_, HdTokens->renderTags,
+                                     render_tags);
+      render_index_->GetChangeTracker().MarkTaskDirty(
+          render_task_id_, HdChangeTracker::DirtyRenderTags);
+      render_tags_ = std::move(render_tags);
+    }
   }
 
   configured_width_ = width;
