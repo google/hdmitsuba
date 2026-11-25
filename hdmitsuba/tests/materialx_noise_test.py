@@ -26,8 +26,8 @@ from hdmitsuba.tests import materialx_test_helpers as mtlx
 
 
 @pytest.fixture(autouse=True)
-def _enable_materialx_and_variant(monkeypatch: pytest.MonkeyPatch) -> None:
-  mtlx.enable_materialx_and_default_variant(monkeypatch)
+def _set_default_variant() -> None:
+  mtlx.set_default_variant()
 
 
 def test_worley_solid_large_jitter() -> None:

@@ -55,11 +55,7 @@ def _set_mitsuba_variant():
         'materialx_lobes',
     ],
 )
-def test_render(scene_name: str, monkeypatch: pytest.MonkeyPatch):
-  # TODO(vicini): Remove `HDMITSUBA_ENABLE_MATERIALX` once MaterialX support is
-  # complete.
-  if scene_name.startswith('materialx'):
-    monkeypatch.setenv('HDMITSUBA_ENABLE_MATERIALX', '1')
+def test_render(scene_name: str):
   stage = Usd.Stage.Open(
       f'{test_helpers.TEST_ASSETS_PATH}/materials/{scene_name}.usda'
   )
@@ -79,14 +75,7 @@ def test_render(scene_name: str, monkeypatch: pytest.MonkeyPatch):
         ('materialx', ['albedo.png', 'normalmap.png']),
     ],
 )
-def test_render_usdz(
-    tmp_path,
-    scene_name: str,
-    textures: list[str],
-    monkeypatch: pytest.MonkeyPatch,
-):
-  if scene_name == 'materialx':
-    monkeypatch.setenv('HDMITSUBA_ENABLE_MATERIALX', '1')
+def test_render_usdz(tmp_path, scene_name: str, textures: list[str]):
   stage = Usd.Stage.Open(
       f'{test_helpers.TEST_ASSETS_PATH}/materials/{scene_name}.usda'
   )

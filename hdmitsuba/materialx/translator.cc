@@ -68,7 +68,6 @@
 #include <pxr/usdImaging/usdImaging/dataSourceMaterial.h>
 #include <pxr/usdImaging/usdImaging/dataSourceStageGlobals.h>
 
-#include "hdmitsuba/config.h"
 #include "hdmitsuba/material.h"
 #include "hdmitsuba/materialx/compiler.h"
 #include "hdmitsuba/prim_translator.h"
@@ -504,7 +503,6 @@ bool HasMaterialXDisplacement(const PreparedMaterialX& prepared) {
 std::shared_ptr<const PreparedMaterialX> PrepareMaterialXNetwork(
     const SdfPath& id, const HdMaterialNetwork2& network,
     const std::function<void(const TextureKey&)>& callback) {
-  if (!IsMaterialXEnabled()) return nullptr;
   auto [surface_conn, surf_rank] =
       FindTerminalConnection(network, HdMaterialTerminalTokens->surface);
   auto [disp_conn, disp_rank] =
@@ -603,7 +601,7 @@ TranslatedMaterial TranslateMaterialXNetwork(
 
 std::optional<std::pair<TranslatedMaterial, bool>> TranslateUsdMaterialX(
     const UsdPrim& prim, UsdTimeCode time, std::string_view variant) {
-  if (!IsMaterialXEnabled() || !prim) return std::nullopt;
+  if (!prim) return std::nullopt;
   ArResolverContextBinder binder(prim.GetStage()->GetPathResolverContext());
   ArResolverScopedCache resolver_cache;
 

@@ -421,12 +421,8 @@ def test_time_sampled_and_material_prim_conversion() -> None:
   )
 
 
-def test_materialx_translation(monkeypatch: pytest.MonkeyPatch) -> None:
-  """Tests MaterialX feature-flag gating, emissive translation, and time-sampled inputs.
-
-  Args:
-    monkeypatch: Pytest monkeypatch fixture.
-  """
+def test_materialx_translation() -> None:
+  """Tests MaterialX BSDF, emissive translation, and time-sampled inputs."""
   stage = Usd.Stage.CreateInMemory()
   mesh = stage.DefinePrim('/Mesh', 'Mesh')
   mat = UsdShade.Material.Define(stage, '/Material')
@@ -441,12 +437,6 @@ def test_materialx_translation(monkeypatch: pytest.MonkeyPatch) -> None:
   )
   UsdShade.MaterialBindingAPI.Apply(mesh).Bind(mat)
 
-  # TODO(vicini): Remove `HDMITSUBA_ENABLE_MATERIALX` once MaterialX support is
-  # complete.
-  monkeypatch.delenv('HDMITSUBA_ENABLE_MATERIALX', raising=False)
-  assert material.convert_material(mesh) == (None, None, None, None)
-
-  monkeypatch.setenv('HDMITSUBA_ENABLE_MATERIALX', '1')
   bsdf, emitter, displacement, medium = material.convert_material(
       mesh, time=Usd.TimeCode(0.0)
   )

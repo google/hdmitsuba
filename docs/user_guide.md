@@ -16,12 +16,10 @@ This document provides an overview of the USD features supported by `hdMitsuba`,
 *   **Displacement Mapping**: Fully supports displacement mapping. The delegate evaluates displacement textures connected to `mitsuba:displacement` or standard USD displacement terminals, either directly or through a `UsdPreviewSurface`'s `inputs:displacement`. Scalar displacement values are used as-is as offsets along the vertex normal (there is no implicit 0.5 mid-level); remap them with `UsdUVTexture` `inputs:scale` and `inputs:bias`.
 
 ### Shading & Materials
-*   **MaterialX Shading Networks (Experimental)**: Opt-in support for MaterialX
-    surface, emissive, displacement, and pattern shading networks (via
-    `outputs:mtlx:surface`, `outputs:mtlx:displacement`, or standard terminals;
-    `outputs:mitsuba:*` still takes precedence). Set the environment variable
-    `HDMITSUBA_ENABLE_MATERIALX=1` to enable it (disabled by default while
-    volume support is in progress):
+*   **MaterialX Shading Networks**: Support for MaterialX surface, emissive,
+    displacement, and pattern shading networks (via `outputs:mtlx:surface`,
+    `outputs:mtlx:displacement`, or standard terminals; `outputs:mitsuba:*`
+    still takes precedence):
     *   Surface BSDF closures, emission, and stochastic cutout opacity via
         `surface`, `surface_unlit`, `standard_surface`, `open_pbr_surface`,
         `gltf_pbr`, `disney_principled`, and `mix` (`surfaceshader`):
@@ -78,11 +76,10 @@ This document provides an overview of the USD features supported by `hdMitsuba`,
         to linear Rec.709 (images without an authored color space are treated as
         linear).
     *   Unsupported pattern nodes emit a warning and evaluate to their `in`
-        input (or `0` if none). When `HDMITSUBA_ENABLE_MATERIALX=1`, `mtlx`
-        material outputs (`mtlx:surface`, `mtlx:displacement`, `mtlx:volume`)
-        take precedence over universal outputs even if the MaterialX shader
-        cannot be translated (volume shaders are not supported yet and are
-        ignored).
+        input (or `0` if none). MaterialX `mtlx` material outputs
+        (`mtlx:surface`, `mtlx:displacement`, `mtlx:volume`) take precedence
+        over universal outputs even if the MaterialX shader cannot be
+        translated (volume shaders are not supported yet and are ignored).
 *   **UsdPreviewSurface**: Various USD preview surface parameters are mapped to Mitsuba's `principled` BSDF:
     *   `diffuseColor` (Base color)
     *   `roughness` (Specular roughness)

@@ -131,13 +131,8 @@ def _find_terminal_connection(
 ) -> tuple[UsdShade.Shader, str] | None:
   """Returns the `(shader, output)` on the highest-priority render context."""
   # Like hdMitsuba, the `mtlx` render context takes precedence over the
-  # universal one when MaterialX translation is enabled.
-  contexts = (
-      ('mitsuba', 'mtlx', '', 'glslfx')
-      if geom_lib.is_materialx_enabled()
-      else ('mitsuba', '', 'glslfx')
-  )
-  for ctx in contexts:
+  # universal one.
+  for ctx in ('mitsuba', 'mtlx', '', 'glslfx'):
     if conn := _find_shader_output(get_output(ctx)):
       return conn
   return None
@@ -684,9 +679,9 @@ def convert_mesh_material(
 ) -> MeshMaterial:
   """Parses a USD geometry or material prim and returns Mitsuba material properties.
 
-  Resolves the highest-priority surface shader across the `mitsuba`, `mtlx`
-  (when MaterialX is enabled), universal, and `glslfx` render contexts, falling
-  back to `displayColor` when no supported BSDF is bound.
+  Resolves the highest-priority surface shader across the `mitsuba`, `mtlx`,
+  universal, and `glslfx` render contexts, falling back to `displayColor` when
+  no supported BSDF is bound.
 
   If the material is emissive, a Mitsuba `area` emitter will also be returned.
 

@@ -361,17 +361,8 @@ def make_test_si(
   return si
 
 
-def enable_materialx_and_default_variant(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-  """Enables MaterialX translation and sets the default variant.
-
-  Args:
-    monkeypatch: Pytest monkeypatch fixture.
-  """
-  # TODO(vicini): Remove `HDMITSUBA_ENABLE_MATERIALX` once MaterialX support is
-  # complete.
-  monkeypatch.setenv('HDMITSUBA_ENABLE_MATERIALX', '1')
+def set_default_variant() -> None:
+  """Sets the default Mitsuba variant for MaterialX tests."""
   mi.set_variant('cuda_ad_rgb', 'llvm_ad_rgb')
 
 

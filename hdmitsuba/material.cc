@@ -31,7 +31,6 @@
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
 
-#include "hdmitsuba/config.h"
 #include "hdmitsuba/debug_codes.h"
 #include "hdmitsuba/render_param.h"
 #include "hdmitsuba/scene_manager.h"
@@ -142,12 +141,8 @@ void ConvertMaterialNetwork(const HdMaterialNetworkSchema& network_schema,
 }  // namespace
 
 TfTokenVector GetMaterialRenderContexts() {
-  if (IsMaterialXEnabled()) {
-    return {TfToken("mitsuba"), TfToken("mtlx"),
-            HdMaterialSchemaTokens->universalRenderContext, TfToken("glslfx")};
-  }
-  return {TfToken("mitsuba"), HdMaterialSchemaTokens->universalRenderContext,
-          TfToken("glslfx")};
+  return {TfToken("mitsuba"), TfToken("mtlx"),
+          HdMaterialSchemaTokens->universalRenderContext, TfToken("glslfx")};
 }
 
 HdMaterialNetwork2 ConvertMaterialSchema(const HdMaterialSchema& schema) {

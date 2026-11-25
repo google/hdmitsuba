@@ -24,7 +24,6 @@
 #include <mitsuba/core/config.h>
 #include <pxr/base/tf/diagnostic.h>
 #include <pxr/base/tf/envSetting.h>
-#include <pxr/base/tf/getenv.h>
 #include <pxr/base/tf/instantiateSingleton.h>
 #include <pxr/base/tf/singleton.h>
 #include <pxr/pxr.h>
@@ -109,23 +108,13 @@ HdMitsubaConfig::HdMitsubaConfig() {
     TF_STATUS(
         "HdMitsuba Configuration:\n  variant                      = %s\n"
         "  use_kernel_freezing          = %d\n"
-        "  tessellate_implicit_surfaces = %d\n"
-        "  enable_materialx             = %d",
-        variant.c_str(), use_kernel_freezing, tessellate_implicit_surfaces,
-        IsMaterialXEnabled());
+        "  tessellate_implicit_surfaces = %d",
+        variant.c_str(), use_kernel_freezing, tessellate_implicit_surfaces);
   }
 }
 
 const HdMitsubaConfig& HdMitsubaConfig::GetInstance() {
   return TfSingleton<HdMitsubaConfig>::GetInstance();
-}
-
-bool IsMaterialXEnabled() {
-  // TODO(vicini): Remove `HDMITSUBA_ENABLE_MATERIALX` once MaterialX support is
-  // complete.
-  // Read dynamically via `TfGetenvBool` rather than `TF_DEFINE_ENV_SETTING`
-  // (which caches on first read) so tests and hosts can toggle it in-process.
-  return TfGetenvBool("HDMITSUBA_ENABLE_MATERIALX", false);
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

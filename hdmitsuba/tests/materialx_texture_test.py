@@ -36,10 +36,8 @@ from usd_mitsuba import translator as usd_mitsuba
 
 
 @pytest.fixture(autouse=True)
-def _enable_materialx_and_default_variant(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-  mtlx.enable_materialx_and_default_variant(monkeypatch)
+def _set_default_variant() -> None:
+  mtlx.set_default_variant()
 
 
 _UV_QUADRANTS = Sdf.AssetPath(
