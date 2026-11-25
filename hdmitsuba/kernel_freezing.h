@@ -17,8 +17,9 @@
 #if defined(MI_ENABLE_JIT)
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <string>
 #include <type_traits>
@@ -36,7 +37,9 @@
 #include <mitsuba/core/properties.h>
 #include <mitsuba/core/spectrum.h>
 #include <mitsuba/core/util.h>
+#include <mitsuba/render/film.h>
 #include <mitsuba/render/fwd.h>
+#include <mitsuba/render/imageblock.h>
 #include <mitsuba/render/integrator.h>
 #include <mitsuba/render/scene.h>
 #include <mitsuba/render/sensor.h>
@@ -151,6 +154,14 @@ JITInputs<Float, Spectrum> GatherAllJitInputs(
         state->inputs->Append(Tag::kNullObject);
         return;
       }
+      // Film::m_storage is transient output scratch wiped inside
+      // integrator->render() via film->prepare(); skip it so stale scratch
+      // buffers do not cause layout mismatches or redundant jit_eval() calls.
+      if (dynamic_cast<const mitsuba::ImageBlock<Float, Spectrum>*>(obj) !=
+          nullptr) {
+        state->inputs->Append(Tag::kNullObject);
+        return;
+      }
       auto [it, inserted] = state->visited_objects.try_emplace(
           obj, static_cast<uint32_t>(state->visited_objects.size()));
       if (!inserted) {
@@ -228,144 +239,122 @@ JITInputs<Float, Spectrum> GatherAllJitInputs(
   return inputs;
 }
 
-// State manager for JIT recording state.
+// State manager for cached Dr.Jit frozen kernel recordings.
 template <typename Float, typename Spectrum>
 class FrozenRender {
  public:
   using TensorXf = dr::Tensor<mitsuba::DynamicBuffer<Float>>;
 
-  FrozenRender(JitBackend backend) : backend_(backend), render_count_(0) {}
-  ~FrozenRender() { Clear(); }
-
-  bool HasRecording() const { return recording_ != nullptr; }
+  explicit FrozenRender(JitBackend backend) : backend_(backend) {}
 
   void Clear() {
     TF_DEBUG(HDMITSUBA_LIFECYCLE)
-        .Msg("Clear(): destroying recording %p\n", (void*)recording_);
-    if (recording_) {
-      jit_freeze_destroy(recording_);
-      recording_ = nullptr;
-    }
-    output_indices_.clear();
-    output_shape_.clear();
-    recorded_layout_.clear();
-    render_count_ = 0;  // Reset the recording warm-up count!
-    TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("Clear(): done\n");
-  }
-
-  bool CanReplay(const JITInputs<Float, Spectrum>& new_inputs) {
-    if (!recording_) return false;
-    if (new_inputs.layout != recorded_layout_) {
-      TF_DEBUG(HDMITSUBA_LIFECYCLE)
-          .Msg("CanReplay failed: input layout changed\n");
-      return false;
-    }
-    return jit_freeze_dry_run(recording_, new_inputs.flat_indices.data()) != 0;
-  }
-
-  TensorXf Record(const JITInputs<Float, Spectrum>& inputs,
-                  const std::function<TensorXf()>& render_fn) {
-    if constexpr (dr::is_jit_v<Float>) {
-      Clear();
-      TF_DEBUG(HDMITSUBA_LIFECYCLE)
-          .Msg("Record: flat_indices size = %zu\n", inputs.flat_indices.size());
-      recorded_layout_ = inputs.layout;
-      jit_freeze_start(backend_, inputs.flat_indices.data(),
-                       inputs.flat_indices.size());
-      TensorXf result = render_fn();
-      dr::eval(result.array());
-      dr::sync_thread();
-      output_shape_ = result.shape();
-      output_indices_ = {result.array().index()};
-      recording_ = jit_freeze_stop(backend_, output_indices_.data(),
-                                   output_indices_.size());
-      return result;
-    } else {
-      return render_fn();
-    }
-  }
-
-  TensorXf Replay(const JITInputs<Float, Spectrum>& inputs) {
-    if constexpr (dr::is_jit_v<Float>) {
-      TF_DEBUG(HDMITSUBA_LIFECYCLE)
-          .Msg("Replay: flat_indices size = %zu\n", inputs.flat_indices.size());
-      std::vector<uint32_t> new_outputs(output_indices_.size(), 0);
-      jit_freeze_replay(recording_, inputs.flat_indices.data(),
-                        new_outputs.data());
-      return TensorXf(std::move(Float::steal(new_outputs[0])), output_shape_);
-    } else {
-      throw std::runtime_error(
-          "FrozenRender::Replay() called on non-JIT variant");
-    }
+        .Msg("Clear(): destroying %zu cached recordings\n", recordings_.size());
+    recordings_.clear();
+    warmed_up_ = false;
   }
 
   TensorXf Render(mitsuba::Scene<Float, Spectrum>* scene,
                   mitsuba::Sensor<Float, Spectrum>* sensor,
                   mitsuba::Integrator<Float, Spectrum>* integrator,
                   uint32_t sample_index, uint32_t samples_to_render) {
-    if constexpr (dr::is_jit_v<Float>) {
-      if (recorded_samples_to_render_ != 0 &&
-          recorded_samples_to_render_ != samples_to_render) {
-        TF_DEBUG(HDMITSUBA_LIFECYCLE)
-            .Msg(
-                "FrozenRender: samples_to_render changed (%u -> %u), "
-                "clearing recording\n",
-                recorded_samples_to_render_, samples_to_render);
-        Clear();
-      }
-      recorded_samples_to_render_ = samples_to_render;
-
-      if (render_count_ == 0) {
+    if constexpr (!dr::is_jit_v<Float>) {
+      return integrator->render(scene, sensor, sample_index, samples_to_render,
+                                true, true);
+    } else {
+      if (!warmed_up_) {
         TF_DEBUG(HDMITSUBA_LIFECYCLE)
             .Msg("FrozenRender: Warm-up pass (Frame 1)\n");
         TensorXf result = integrator->render(scene, sensor, sample_index,
                                              samples_to_render, true, true);
-        render_count_ = 1;
+        dr::eval(result.array());
+        dr::sync_thread();
+        warmed_up_ = true;
         return result;
       }
+
+      const auto* film = sensor->film();
+      CacheKey key = {film->size().x(), film->size().y(), film->crop_size().x(),
+                      film->crop_size().y(), samples_to_render};
 
       using UInt32 = dr::uint32_array_t<Float>;
       UInt32 seed_var = dr::opaque<UInt32>(sample_index);
       auto inputs = GatherAllJitInputs(scene, sensor, integrator);
       inputs.flat_indices.push_back(seed_var.index());
-      auto render_fn = [&]() {
-        return integrator->render(scene, sensor, seed_var, samples_to_render,
-                                  true, true);
-      };
 
-      if (render_count_ == 1) {
-        TF_DEBUG(HDMITSUBA_LIFECYCLE)
-            .Msg("FrozenRender: Recording kernel (Frame 2)\n");
-        TensorXf result = Record(inputs, render_fn);
-        render_count_ = 2;
-        return result;
-      } else {
-        if (CanReplay(inputs)) {
+      auto it = std::find_if(recordings_.begin(), recordings_.end(),
+                             [&](const CachedRecording& slot) {
+                               return slot.key == key &&
+                                      slot.recorded_layout == inputs.layout;
+                             });
+      if (it != recordings_.end()) {
+        if (jit_freeze_dry_run(it->recording.get(),
+                               inputs.flat_indices.data()) != 0) {
+          std::rotate(recordings_.begin(), it, it + 1);
           TF_DEBUG(HDMITSUBA_LIFECYCLE)
-              .Msg("FrozenRender: Replaying frozen kernel (Frame 3+)\n");
-          return Replay(inputs);
-        } else {
-          TF_DEBUG(HDMITSUBA_LIFECYCLE)
-              .Msg("FrozenRender: Replay dry-run failed, re-recording...\n");
-          TensorXf result = Record(inputs, render_fn);
-          render_count_ = 2;
-          return result;
+              .Msg("FrozenRender: Replaying frozen kernel\n");
+          uint32_t new_output = 0;
+          jit_freeze_replay(recordings_.front().recording.get(),
+                            inputs.flat_indices.data(), &new_output);
+          return TensorXf(Float::steal(new_output),
+                          recordings_.front().output_shape);
         }
+        recordings_.erase(it);
       }
-    } else {
-      return integrator->render(scene, sensor, sample_index, samples_to_render,
-                                true, true);
+
+      TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("FrozenRender: Recording kernel\n");
+      jit_freeze_start(backend_, inputs.flat_indices.data(),
+                       inputs.flat_indices.size());
+      struct FreezeAbortGuard {
+        JitBackend backend;
+        bool active = true;
+        ~FreezeAbortGuard() {
+          if (active) jit_freeze_abort(backend);
+        }
+      } guard{backend_};
+
+      TensorXf result = integrator->render(scene, sensor, seed_var,
+                                           samples_to_render, true, true);
+      dr::eval(result.array());
+      dr::sync_thread();
+      uint32_t output_index = result.array().index();
+      std::unique_ptr<Recording, Deleter> recorded(
+          jit_freeze_stop(backend_, &output_index, 1));
+      guard.active = false;
+
+      if (recordings_.size() >= kMaxCachedRecordings) {
+        recordings_.pop_back();
+      }
+      recordings_.insert(recordings_.begin(),
+                         CachedRecording{std::move(recorded), result.shape(),
+                                         key, std::move(inputs.layout)});
+      return result;
     }
   }
 
  private:
+  // TODO: Revisit caching multiple recordings once Dr.Jit recordings support
+  // symbolic launch/allocation sizes (avoiding baked W*H*spp and W*H*C sizes)
+  // and Mitsuba avoids baking host scalar film weights (`m_pixel_weight`) and
+  // `spp_per_pass >= 4` coalescing branches into separate graphs.
+  static constexpr size_t kMaxCachedRecordings = 16;
+
+  using CacheKey = std::array<uint32_t, 5>;
+
+  struct Deleter {
+    void operator()(Recording* handle) const { jit_freeze_destroy(handle); }
+  };
+
+  struct CachedRecording {
+    std::unique_ptr<Recording, Deleter> recording;
+    dr::vector<size_t> output_shape;
+    CacheKey key;
+    std::vector<uint8_t> recorded_layout;
+  };
+
   JitBackend backend_;
-  Recording* recording_ = nullptr;
-  std::vector<uint32_t> output_indices_;
-  dr::vector<size_t> output_shape_;
-  std::vector<uint8_t> recorded_layout_;
-  uint32_t recorded_samples_to_render_ = 0;
-  int render_count_ = 0;
+  std::vector<CachedRecording> recordings_;
+  bool warmed_up_ = false;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

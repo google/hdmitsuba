@@ -314,3 +314,114 @@ def test_kernel_freezing_area_light_updates(kind: str) -> None:
     assert not np.allclose(prev, curr, atol=1e-3)
   for frozen, ref in zip(frozen_frames, ref_frames):
     np.testing.assert_allclose(frozen, ref, atol=1e-4, rtol=1e-4)
+
+
+def _render_outputs(
+    engine: usd_render.RenderEngine, expect_replay: bool
+) -> dict[str, np.ndarray]:
+  if not expect_replay:
+    return engine.render()
+  with dr.kernel_history() as kh:
+    outputs = engine.render()
+  modes = {entry.recording_mode for entry in kh}
+  assert dr.KernelRecordingMode.Replayed in modes
+  assert dr.KernelRecordingMode.Recorded not in modes
+  return outputs
+
+
+def test_kernel_freezing_progressive_pass_ramping() -> None:
+  def run_sequence(freeze_enabled: bool) -> list[np.ndarray]:
+    stage, engine = _create_engine(freeze_enabled=freeze_enabled)
+    translate_op = UsdGeom.Camera.Get(stage, '/camera').GetOrderedXformOps()[0]
+
+    def configure(step_spp: int) -> None:
+      engine.configure(
+          hydra_delegate_id='HdMitsubaRendererPlugin',
+          camera_path='/camera',
+          width=32,
+          overrides={
+              'mitsuba:sampler:sample_count': 8,
+              'mitsuba:interactive_samples_per_pass': step_spp,
+              'enableInteractive': True,
+          },
+      )
+
+    # Warm up once so the initial literal camera transform does not record
+    # throwaway entries before the pose loop.
+    configure(1)
+    engine.render()
+
+    outputs = []
+    for pose_index, x_offset in enumerate((0.5, 1.0)):
+      translate_op.Set((x_offset, 2.0, 5.0))
+      for step_spp, completed in ((1, 1), (1, 2), (2, 4), (4, 8)):
+        configure(step_spp)
+        outputs.append(
+            _render_outputs(
+                engine, expect_replay=freeze_enabled and pose_index == 1
+            )['color']
+        )
+        assert engine.get_render_stats()['numCompletedSamples'] == completed
+      assert engine.is_converged()
+    return outputs
+
+  frozen_outputs = run_sequence(True)
+  ref_outputs = run_sequence(False)
+  assert not np.allclose(frozen_outputs[3], frozen_outputs[7], atol=1e-3)
+  np.testing.assert_allclose(frozen_outputs, ref_outputs, atol=1e-4, rtol=1e-4)
+
+
+def test_kernel_freezing_dynamic_resolution_switching() -> None:
+  def run_sequence(freeze_enabled: bool) -> list[dict[str, np.ndarray]]:
+    stage, engine = _create_engine(freeze_enabled=freeze_enabled)
+    # Attach a depth AOV to verify per-pass aov_integrator preservation across
+    # dynamic resolution switches.
+    render_settings = UsdRender.Settings.Get(stage, '/Render/PrimarySettings')
+    product = UsdRender.Product.Define(stage, '/Render/Product')
+    color_var = UsdRender.Var.Define(stage, '/Render/Vars/color')
+    color_var.CreateDataTypeAttr('color3f')
+    color_var.CreateSourceNameAttr('color')
+    depth_var = UsdRender.Var.Define(stage, '/Render/Vars/depth')
+    depth_var.CreateDataTypeAttr('float')
+    depth_var.CreateSourceNameAttr('depth')
+    product.CreateOrderedVarsRel().SetTargets(
+        [color_var.GetPath(), depth_var.GetPath()]
+    )
+    render_settings.CreateProductsRel().SetTargets([product.GetPath()])
+
+    translate_op = UsdGeom.Camera.Get(stage, '/camera').GetOrderedXformOps()[0]
+    outputs = []
+    for step_index, width in enumerate((32, 16, 32, 24, 32, 16, 24)):
+      translate_op.Set((0.15 * step_index, 2.0, 5.0))
+      engine.configure(
+          hydra_delegate_id='HdMitsubaRendererPlugin',
+          camera_path='/camera',
+          width=width,
+          overrides={
+              'mitsuba:sampler:sample_count': 4,
+              'enableInteractive': True,
+          },
+      )
+      frame = _render_outputs(
+          engine, expect_replay=freeze_enabled and step_index >= 4
+      )
+      assert frame['color'].shape[1] == width
+      assert frame['depth'].shape[1] == width
+      outputs.append(frame)
+    return outputs
+
+  frozen_outputs = run_sequence(True)
+  ref_outputs = run_sequence(False)
+  for prev_index, curr_index in ((2, 4), (1, 5), (3, 6)):
+    assert not np.allclose(
+        frozen_outputs[prev_index]['color'],
+        frozen_outputs[curr_index]['color'],
+        atol=1e-3,
+    )
+  for frozen, reference in zip(frozen_outputs, ref_outputs):
+    np.testing.assert_allclose(
+        frozen['color'], reference['color'], atol=1e-4, rtol=1e-4
+    )
+    np.testing.assert_allclose(
+        frozen['depth'], reference['depth'], atol=1e-4, rtol=1e-4
+    )

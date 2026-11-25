@@ -106,7 +106,7 @@ def test_interactive_samples_per_pass_updates_dynamically(
           'mitsuba:use_kernel_freezing': use_kernel_freezing,
       },
   )
-  engine.render()
+  pass_1 = engine.render()['color']
   assert engine.get_render_stats()['numCompletedSamples'] == 1
   assert not engine.is_converged()
 
@@ -121,15 +121,19 @@ def test_interactive_samples_per_pass_updates_dynamically(
           'mitsuba:use_kernel_freezing': use_kernel_freezing,
       },
   )
-  engine.render()
-  assert engine.get_render_stats()['numCompletedSamples'] == 4
+  pass_2 = engine.render()['color']
+  assert engine.get_render_stats()['numCompletedSamples'] == 5
   assert not engine.is_converged()
 
-  engine.render()
+  pass_3 = engine.render()['color']
   stats = engine.get_render_stats()
   assert stats['numCompletedSamples'] == 8
   assert stats['totalSamples'] == 8
   assert engine.is_converged()
+
+  # Column 0 lies outside the [-1, 1] quad and only sees the unit dome light.
+  for pass_image in (pass_1, pass_2, pass_3):
+    np.testing.assert_allclose(pass_image[:, 0], 1.0, rtol=1e-5, atol=1e-5)
 
   engine.configure(
       hydra_delegate_id='HdMitsubaRendererPlugin',
