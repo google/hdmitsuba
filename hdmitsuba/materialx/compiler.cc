@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <deque>
 #include <initializer_list>
 #include <optional>
 #include <stdexcept>
@@ -26,6 +27,7 @@
 #include <vector>
 
 #include <MaterialXCore/Definition.h>
+#include <MaterialXCore/Document.h>
 #include <MaterialXCore/Types.h>
 #include <MaterialXCore/Value.h>
 #include <absl/base/no_destructor.h>
@@ -218,90 +220,23 @@ Expr DefaultTexcoord(uint8_t channels = 2) {
   return Expr({mtlx::Op::GeomUV, 0, 0}, channels);
 }
 
-mx::InputPtr GetValueInput(mx::NodePtr node, std::string name) {
-  while (mx::NodePtr up = node->getConnectedNode(name)) {
-    const std::string& cat = up->getCategory();
-    if (cat != "dot" && cat != "constant") return nullptr;
-    node = std::move(up);
-    name = cat == "constant" ? "value" : "in";
+mx::OutputPtr ResolveNodeGraphOutput(const mx::NodeGraphPtr& ng,
+                                     const std::string& output_name) {
+  if (!output_name.empty()) {
+    if (mx::OutputPtr out = ng->getActiveOutput(output_name)) return out;
   }
-  if (mx::InputPtr in = node->getInput(name); in && in->hasValueString()) {
-    return in;
-  }
-  if (mx::NodeDefPtr nd = node->getNodeDef()) {
-    if (mx::InputPtr in = nd->getActiveInput(name);
-        in && in->hasValueString()) {
-      return in;
-    }
-  }
-  return nullptr;
-}
-
-std::string GetNodeInputString(const mx::NodePtr& node, const std::string& name,
-                               std::string_view def = {}) {
-  mx::InputPtr in = GetValueInput(node, name);
-  return in ? in->getValueString() : std::string(def);
-}
-
-std::string ConnectedOutputName(const mx::InputPtr& input) {
-  if (!input->hasNodeGraphString()) return input->getOutputString();
-  mx::OutputPtr out = input->getConnectedOutput();
-  return out ? out->getOutputString() : std::string();
-}
-
-// Returns the category of `node`, which is determined by its explicit node
-// definition, if any. For example, `NG_ramp_gradient` has an `ifgreater` node
-// with the node definition `ND_ifgreatereq_color4I`.
-std::string NodeCategory(const mx::NodePtr& node) {
-  if (node->hasNodeDefString()) {
-    if (mx::NodeDefPtr nd = node->getNodeDef()) return nd->getNodeString();
-  }
-  return node->getCategory();
-}
-
-// Returns true if input `name` of `node` may be non-zero, without emitting VM
-// bytecode, opaque parameters, or texture loads into `MtlxProgram`.
-bool IsNonZeroInput(const mx::NodePtr& node, const std::string& name) {
-  if (mx::InputPtr in = GetValueInput(node, name)) {
-    mx::ValuePtr v = in->getValue();
-    if (!v) return false;
-    if (v->isA<float>()) return v->asA<float>() != 0.0f;
-    if (v->isA<mx::Vector3>()) {
-      return v->asA<mx::Vector3>() != mx::Vector3(0.0f);
-    }
-    return false;
-  }
-  mx::NodePtr up = node->getConnectedNode(name);
-  while (up && up->getCategory() == "dot") up = up->getConnectedNode("in");
-  if (!up) return false;
-  std::string cat = NodeCategory(up);
-  if (cat == "ifgreater") {
-    mx::InputPtr i1 = GetValueInput(up, "value1"),
-                 i2 = GetValueInput(up, "value2");
-    mx::ValuePtr v1 = i1 ? i1->getValue() : nullptr,
-                 v2 = i2 ? i2->getValue() : nullptr;
-    if (v1 && v2 && v1->isA<float>() && v2->isA<float>()) {
-      return IsNonZeroInput(
-          up, v1->asA<float>() > v2->asA<float>() ? "in1" : "in2");
-    }
-  } else if (cat == "multiply") {
-    return IsNonZeroInput(up, "in1") && IsNonZeroInput(up, "in2");
-  }
-  return true;
-}
-
-// Returns the type of the input `name` of `node`, which may only be declared
-// by its node definition, or an empty view if there is no such input.
-std::string_view InputType(const mx::NodePtr& node, const std::string& name) {
-  if (mx::InputPtr in = node->getInput(name)) return in->getType();
-  if (mx::NodeDefPtr nd = node->getNodeDef()) {
-    if (mx::InputPtr in = nd->getActiveInput(name)) return in->getType();
-  }
-  return {};
+  std::vector<mx::OutputPtr> outs = ng->getActiveOutputs();
+  return outs.empty() ? nullptr : outs[0];
 }
 
 bool IsFourChannelType(std::string_view type) {
   return type == "color4" || type == "vector4";
+}
+
+bool IsGeomIntrinsic(std::string_view kind) {
+  return kind == "texcoord" || kind == "position" || kind == "normal" ||
+         kind == "tangent" || kind == "bitangent" || kind == "viewdirection" ||
+         kind == "geomcolor";
 }
 
 uint8_t TypeChannels(std::string_view type) {
@@ -310,15 +245,19 @@ uint8_t TypeChannels(std::string_view type) {
   return IsFourChannelType(type) ? 4 : 3;
 }
 
-mx::NodePtr UnwrapShaderNode(mx::NodePtr node,
-                             const char* mat_input = "surfaceshader") {
-  while (node) {
-    std::string cat = NodeCategory(node);
-    if (cat != "dot" && cat != "surfacematerial") break;
-    node = node->getConnectedNode(cat == "surfacematerial" ? mat_input : "in");
-  }
-  return node;
-}
+struct Frame;
+
+struct ScopedNode {
+  mx::NodePtr node;
+  const Frame* frame = nullptr;
+
+  explicit operator bool() const { return node != nullptr; }
+};
+
+// Active `NodeGraph` implementation call frame during lazy compilation.
+struct Frame {
+  ScopedNode call;
+};
 
 // Returns true if `pred` holds for an instruction of `root` or a live
 // instruction of `body`, which stores the `tmp_count` temporaries read by
@@ -348,10 +287,58 @@ bool AnyLiveInst(absl::Span<const mtlx::Inst> body,
          std::any_of(body.rbegin(), body.rend(), visit);
 }
 
-// Compiles a flattened MaterialX DAG of pattern/math/procedural/image nodes
-// into a `mitsuba::mtlx::MtlxProgram` and a list of Mitsuba Texture child
-// inputs (`in0`, `in1`, ...).
-class MtlxExprCompiler {
+// Resolves MaterialX ports, inputs, and lazy `NodeGraph` call frames without
+// allocating a `MtlxProgram`.
+class MtlxGraphResolver {
+ public:
+  using NodeKey = std::pair<const Frame*, const mx::Node*>;
+
+  struct ResolvedInput {
+    enum Kind { None, Connected, Value, GeomProp } kind = None;
+    ScopedNode upstream;
+    std::string output_name;
+    mx::ValueElementPtr elem;
+  };
+
+  struct NodeInfo {
+    mx::NodeDefPtr nodedef;
+    mx::NodeGraphPtr graph_impl;
+  };
+
+  const NodeInfo& GetNodeInfo(const mx::NodePtr& node);
+  // Returns the category of `node`, which is determined by its explicit node
+  // definition, if any. For example, `NG_ramp_gradient` has an `ifgreater` node
+  // with the node definition `ND_ifgreatereq_color4I`.
+  const std::string& NodeCategory(const mx::NodePtr& node);
+  // Returns the type of the input `name` of `node`, which may only be declared
+  // by its node definition, or an empty view if there is no such input.
+  std::string_view InputType(const mx::NodePtr& node, const std::string& name);
+  ResolvedInput ResolvePort(mx::PortElementPtr port, const Frame* frame);
+  ResolvedInput ResolveOutput(const ScopedNode& call, const mx::OutputPtr& out);
+  ResolvedInput ResolveInput(const ScopedNode& s, const std::string& name);
+  ResolvedInput ResolveTerminalInput(const ScopedNode& s,
+                                     const std::string& name);
+  ScopedNode ResolveConnected(const ScopedNode& s, const std::string& name,
+                              const char* mat_input = "surfaceshader");
+  mx::ValueElementPtr GetValueInput(const ScopedNode& s,
+                                    const std::string& name);
+  std::string GetNodeInputString(const ScopedNode& s, const std::string& name,
+                                 std::string_view def = {});
+  bool IsNonZeroInput(const ScopedNode& s, const std::string& name);
+  ScopedNode UnwrapShaderNode(ScopedNode s, std::string output_name,
+                              const char* mat_input = "surfaceshader");
+
+ private:
+  std::deque<Frame> frames_;
+  absl::flat_hash_map<NodeKey, const Frame*> child_frames_;
+  absl::flat_hash_map<const mx::Node*, NodeInfo> node_info_;
+};
+
+// Compiles a MaterialX DAG (lazily traversing `NodeGraph` implementations
+// without flattening them into the document) into a
+// `mitsuba::mtlx::MtlxProgram` and a list of Mitsuba Texture child inputs
+// (`in0`, `in1`, ...).
+class MtlxExprCompiler : private MtlxGraphResolver {
  public:
   using LookupTextureFn =
       std::function<const CachedTexture*(const TextureKey&)>;
@@ -362,24 +349,35 @@ class MtlxExprCompiler {
     bool is_vector = false;
   };
 
-  MtlxExprCompiler(const LookupTextureFn& lookup_texture,
+  MtlxExprCompiler(mx::DocumentPtr doc, const LookupTextureFn& lookup_texture,
                    absl::flat_hash_set<std::string>& warned)
-      : lookup_texture_(&lookup_texture), warned_(&warned) {}
-  explicit MtlxExprCompiler(const DiscoverTextureFn& discover_texture)
-      : discover_texture_(&discover_texture) {}
+      : doc_(std::move(doc)),
+        lookup_texture_(&lookup_texture),
+        warned_(&warned) {}
+  MtlxExprCompiler(mx::DocumentPtr doc,
+                   const DiscoverTextureFn& discover_texture)
+      : doc_(std::move(doc)), discover_texture_(&discover_texture) {}
 
   // Compiles a MaterialX EDF or surface emission DAG (`surface`,
   // `surface_unlit`, `uniform_edf`, `generalized_schlick_edf`, `multiply`,
   // `add`, `mix`) into a radiance `Expr`, or `Expr::zero()` if none.
-  Expr CompileEdf(const mx::NodePtr& edf_node);
+  Expr CompileEdf(const mx::NodePtr& edf_node, std::string_view output_name) {
+    return CompileEdf(
+        UnwrapShaderNode({edf_node, nullptr}, std::string(output_name)));
+  }
 
   // Compiles a MaterialX displacement shader DAG (`displacement`, `mix`,
   // `dot`, `surfacematerial`) into a scalar or 3D tangent-space `Expr`.
-  DisplacementExpr CompileDisplacement(const mx::NodePtr& disp_node);
+  DisplacementExpr CompileDisplacement(const mx::NodePtr& disp_node,
+                                       std::string_view output_name) {
+    return CompileDisplacement(UnwrapShaderNode(
+        {disp_node, nullptr}, std::string(output_name), "displacementshader"));
+  }
 
   // Compiles a MaterialX surface shader or BSDF closure DAG into
   // `prog_.closures` and `prog_.opacity_slot`.
-  void CompileBsdf(const mx::NodePtr& shader_node);
+  void CompileBsdf(const mx::NodePtr& shader_node,
+                   std::string_view output_name);
 
   bool ProgramUsesUv(const Expr& expr) const;
 
@@ -393,6 +391,8 @@ class MtlxExprCompiler {
   ref<Object> CreateBsdf(std::string_view variant);
 
  private:
+  using NodeOutKey = std::tuple<const Frame*, const mx::Node*, std::string>;
+
   // A 3x3 or 4x4 matrix as the expressions of its `n` rows.
   struct MatExpr {
     Expr rows[4];
@@ -425,16 +425,18 @@ class MtlxExprCompiler {
     return Expr({mtlx::Op::LoadTmp, 0, static_cast<uint16_t>(slot)},
                 prog_.tmp_channels[slot]);
   }
-  Expr CompileOpacity(const mx::NodePtr& shader_node);
-  int CompileBsdfClosure(const mx::NodePtr& node);
+  Expr CompileEdf(const ScopedNode& node);
+  DisplacementExpr CompileDisplacement(const ScopedNode& node);
+  Expr CompileOpacity(const ScopedNode& node);
+  int CompileBsdfClosure(const ScopedNode& node);
   int EmitOpaqueBlocker();
-  int FrameSlot(const mx::NodePtr& node, const std::string& name,
+  int FrameSlot(const ScopedNode& node, const std::string& name,
                 const Expr& def);
-  int CompileDiffuseClosure(const mx::NodePtr& node, const std::string& cat);
-  int CompileTranslucentClosure(const mx::NodePtr& node);
-  int CompileMicrofacetClosure(const mx::NodePtr& node, const std::string& cat);
-  int CompileChiangHairClosure(const mx::NodePtr& node);
-  void CompileVdfWarning(const mx::NodePtr& node, const std::string& cat);
+  int CompileDiffuseClosure(const ScopedNode& node, const std::string& cat);
+  int CompileTranslucentClosure(const ScopedNode& node);
+  int CompileMicrofacetClosure(const ScopedNode& node, const std::string& cat);
+  int CompileChiangHairClosure(const ScopedNode& node);
+  void CompileVdfWarning(const ScopedNode& node, const std::string& cat);
   void MarkTwoSidedDielectrics(size_t start);
   int EmitClosure(mtlx::ClosureNode node);
   ref<Object> CreatePlugin(std::string_view name, ObjectType type,
@@ -442,46 +444,53 @@ class MtlxExprCompiler {
 
   TfToken ResolveSourceColorSpace(std::string_view color_space);
   GfVec3f ToLinearRec709(GfVec3f rgb_val, std::string_view color_space);
-  Expr CompileInputExpr(const mx::NodePtr& node, const std::string& input_name,
+  Expr CompileGeomIntrinsic(std::string_view kind, std::string_view space,
+                            std::string_view type, bool non_zero_index);
+  Expr CompileGeomProp(const std::string& prop_name, std::string_view type,
+                       const std::function<Expr()>& default_fn = {});
+  Expr CompileResolvedInput(const ResolvedInput& r, const Expr& default_expr);
+  Expr CompileInputExpr(const ScopedNode& node, const std::string& input_name,
                         const Expr& default_expr = Expr::zero());
-  Expr CompileNodeOutputExpr(const mx::NodePtr& node,
+  Expr CompileNodeOutputExpr(const ScopedNode& node,
                              const std::string& output_name);
-  std::optional<Expr> CompileChannelNode(const mx::NodePtr& node,
+  std::optional<Expr> CompileChannelNode(const ScopedNode& node,
                                          const std::string& cat,
                                          const std::string& type);
-  std::optional<Expr> CompileMathNode(const mx::NodePtr& node,
+  std::optional<Expr> CompileMathNode(const ScopedNode& node,
                                       const std::string& cat);
-  std::optional<Expr> CompileLogicNode(const mx::NodePtr& node,
+  std::optional<Expr> CompileLogicNode(const ScopedNode& node,
                                        const std::string& cat,
                                        const std::string& type);
-  std::optional<Expr> CompileVectorNode(const mx::NodePtr& node,
+  std::optional<Expr> CompileVectorNode(const ScopedNode& node,
                                         const std::string& cat);
-  std::optional<Expr> CompileGeomNode(const mx::NodePtr& node,
+  std::optional<Expr> CompileGeomNode(const ScopedNode& node,
                                       const std::string& cat,
                                       const std::string& type);
-  std::optional<Expr> CompileMatrixValueNode(const mx::NodePtr& node,
+  std::optional<Expr> CompileMatrixValueNode(const ScopedNode& node,
                                              const std::string& cat,
                                              const std::string& type);
-  std::optional<Expr> CompileCompositingNode(const mx::NodePtr& node,
+  std::optional<Expr> CompileCompositingNode(const ScopedNode& node,
                                              const std::string& cat);
-  std::optional<Expr> CompileColorPbrNode(const mx::NodePtr& node,
+  std::optional<Expr> CompileColorPbrNode(const ScopedNode& node,
                                           const std::string& cat,
                                           const std::string& type,
                                           const std::string& output_name);
-  std::optional<Expr> CompileNoiseNode(const mx::NodePtr& node,
+  std::optional<Expr> CompileNoiseNode(const ScopedNode& node,
                                        const std::string& cat,
                                        const std::string& type);
-  std::optional<int> ConstIntInput(const mx::NodePtr& node,
+  std::optional<int> ConstIntInput(const ScopedNode& node,
                                    const std::string& name);
-  Expr CompileIfCondition(const mx::NodePtr& node, std::string_view cat);
-  MatExpr CompileMatrixInput(const mx::NodePtr& node,
+  Expr CompileIfCondition(const ScopedNode& node, std::string_view cat);
+  MatExpr CompileResolvedMatrix(const ResolvedInput& r, int n);
+  MatExpr CompileMatrixInput(const ScopedNode& node,
                              const std::string& input_name);
-  MatExpr CompileMatrixNode(const mx::NodePtr& node);
+  MatExpr CompileMatrixNode(const ScopedNode& node,
+                            const std::string& output_name);
   // Emits `MatTranspose`, `MatInverse` or `MatMul` (of `a` and `b`).
   MatExpr MatrixOp(mtlx::Op op, const MatExpr& a, const MatExpr* b = nullptr);
   Expr MeshAttr(std::string_view name, int dim, const Expr& def);
-  Expr CompileHeightToNormal(const mx::NodePtr& node);
-  Expr SampleImage(const mx::NodePtr& node);
+  Expr CompileHeightToNormal(const ScopedNode& node);
+  Expr SampleImage(const ScopedNode& node);
   Expr CompileValueElement(const mx::ValueElementPtr& elem,
                            const Expr& default_expr);
 
@@ -493,25 +502,225 @@ class MtlxExprCompiler {
     }
   }
 
+  mx::DocumentPtr doc_;
   const LookupTextureFn* lookup_texture_ = nullptr;
   const DiscoverTextureFn* discover_texture_ = nullptr;
   mtlx::MtlxProgram prog_;
   std::vector<std::pair<std::string, int>> attr_requests_;
-  absl::flat_hash_map<std::pair<const mx::Node*, std::string>, Expr>
-      node_output_expr_;
-  absl::flat_hash_map<const mx::Node*, Expr> edf_expr_;
-  absl::flat_hash_map<const mx::Node*, DisplacementExpr> disp_expr_;
-  absl::flat_hash_map<const mx::Node*, Expr> opacity_expr_;
-  absl::flat_hash_map<const mx::Node*, int> bsdf_closure_;
-  absl::flat_hash_map<std::pair<const mx::Node*, std::string>, Expr>
-      value_input_expr_;
-  absl::flat_hash_map<const mx::Node*, MatExpr> node_matrix_expr_;
+  absl::flat_hash_map<NodeOutKey, Expr> node_output_expr_;
+  absl::flat_hash_map<NodeKey, Expr> edf_expr_;
+  absl::flat_hash_map<NodeKey, DisplacementExpr> disp_expr_;
+  absl::flat_hash_map<NodeKey, Expr> opacity_expr_;
+  absl::flat_hash_map<NodeKey, int> bsdf_closure_;
+  absl::flat_hash_map<NodeOutKey, Expr> value_input_expr_;
+  absl::flat_hash_map<NodeOutKey, MatExpr> node_matrix_expr_;
   absl::flat_hash_map<Expr, int> expr_to_slot_;
   std::vector<ref<Object>> inputs_;
   uint16_t discover_input_idx_ = 0;
   bool thin_walled_ = false;
   absl::flat_hash_set<std::string>* warned_ = nullptr;
 };
+
+const MtlxGraphResolver::NodeInfo& MtlxGraphResolver::GetNodeInfo(
+    const mx::NodePtr& node) {
+  auto [it, inserted] = node_info_.try_emplace(node.get());
+  if (inserted) {
+    it->second.nodedef = node->getNodeDef();
+    if (it->second.nodedef) {
+      if (mx::InterfaceElementPtr impl =
+              it->second.nodedef->getImplementation()) {
+        it->second.graph_impl = impl->asA<mx::NodeGraph>();
+      }
+    }
+  }
+  return it->second;
+}
+
+const std::string& MtlxGraphResolver::NodeCategory(const mx::NodePtr& node) {
+  if (node->hasNodeDefString()) {
+    if (const mx::NodeDefPtr& nd = GetNodeInfo(node).nodedef) {
+      return nd->getNodeString();
+    }
+  }
+  return node->getCategory();
+}
+
+std::string_view MtlxGraphResolver::InputType(const mx::NodePtr& node,
+                                              const std::string& name) {
+  if (mx::InputPtr in = node->getInput(name)) return in->getType();
+  if (const mx::NodeDefPtr& nd = GetNodeInfo(node).nodedef) {
+    if (mx::InputPtr in = nd->getActiveInput(name)) return in->getType();
+  }
+  return {};
+}
+
+MtlxGraphResolver::ResolvedInput MtlxGraphResolver::ResolvePort(
+    mx::PortElementPtr port, const Frame* frame) {
+  while (port && (port->hasNodeGraphString() ||
+                  (port->hasOutputString() && !port->hasNodeName() &&
+                   !port->hasInterfaceName()))) {
+    port = port->getConnectedOutput();
+    frame = nullptr;
+  }
+  if (!port) return {};
+  if (port->hasInterfaceName()) {
+    const std::string& iface = port->getInterfaceName();
+    ResolvedInput r;
+    if (frame) {
+      r = ResolveInput(frame->call, iface);
+    } else if (mx::GraphElementPtr g =
+                   port->getAncestorOfType<mx::GraphElement>()) {
+      if (mx::InputPtr iface_in = g->getActiveInput(iface)) {
+        r = ResolvePort(std::move(iface_in), nullptr);
+      }
+    }
+    if (r.kind != ResolvedInput::None) return r;
+  }
+  if (port->hasNodeName()) {
+    bool ng_in =
+        port->isA<mx::Input>() && port->getParent()->isA<mx::NodeGraph>();
+    if (mx::NodePtr upstream =
+            ng_in ? port->getDocument()->getNode(port->getNodeName())
+                  : port->mx::PortElement::getConnectedNode()) {
+      return {ResolvedInput::Connected,
+              {std::move(upstream), ng_in ? nullptr : frame},
+              port->getOutputString(),
+              nullptr};
+    }
+  }
+  if (auto in = port->asA<mx::Input>(); in && in->hasDefaultGeomPropString()) {
+    return {ResolvedInput::GeomProp, {}, {}, std::move(in)};
+  }
+  if (port->hasValueString()) {
+    return {ResolvedInput::Value, {}, {}, std::move(port)};
+  }
+  return {};
+}
+
+MtlxGraphResolver::ResolvedInput MtlxGraphResolver::ResolveOutput(
+    const ScopedNode& call, const mx::OutputPtr& out) {
+  if (!out) return {};
+  const Frame*& slot = child_frames_[{call.frame, call.node.get()}];
+  if (!slot) {
+    frames_.push_back({call});
+    slot = &frames_.back();
+  }
+  return ResolvePort(out, slot);
+}
+
+MtlxGraphResolver::ResolvedInput MtlxGraphResolver::ResolveInput(
+    const ScopedNode& s, const std::string& name) {
+  if (mx::InputPtr input = s.node->getInput(name)) {
+    if (ResolvedInput r = ResolvePort(std::move(input), s.frame);
+        r.kind != ResolvedInput::None) {
+      return r;
+    }
+  }
+  const mx::NodeDefPtr& nd = GetNodeInfo(s.node).nodedef;
+  mx::InputPtr def = nd ? nd->getActiveInput(name) : nullptr;
+  if (!def) return {};
+  if (def->hasDefaultGeomPropString()) {
+    return {ResolvedInput::GeomProp, {}, {}, std::move(def)};
+  }
+  if (def->hasValueString()) {
+    return {ResolvedInput::Value, {}, {}, std::move(def)};
+  }
+  return {};
+}
+
+MtlxGraphResolver::ResolvedInput MtlxGraphResolver::ResolveTerminalInput(
+    const ScopedNode& s, const std::string& name) {
+  ResolvedInput r = ResolveInput(s, name);
+  while (r.kind == ResolvedInput::Connected) {
+    if (mx::NodeGraphPtr ng = GetNodeInfo(r.upstream.node).graph_impl) {
+      r = ResolveOutput(r.upstream, ResolveNodeGraphOutput(ng, r.output_name));
+      continue;
+    }
+    const std::string& cat = NodeCategory(r.upstream.node);
+    if (cat != "dot" && cat != "constant") break;
+    r = ResolveInput(r.upstream, cat == "constant" ? "value" : "in");
+  }
+  return r;
+}
+
+ScopedNode MtlxGraphResolver::ResolveConnected(const ScopedNode& s,
+                                               const std::string& name,
+                                               const char* mat_input) {
+  ResolvedInput r = ResolveInput(s, name);
+  return r.kind == ResolvedInput::Connected
+             ? UnwrapShaderNode(std::move(r.upstream), std::move(r.output_name),
+                                mat_input)
+             : ScopedNode{};
+}
+
+mx::ValueElementPtr MtlxGraphResolver::GetValueInput(const ScopedNode& s,
+                                                     const std::string& name) {
+  ResolvedInput r = ResolveTerminalInput(s, name);
+  return r.kind == ResolvedInput::Value ? r.elem : nullptr;
+}
+
+std::string MtlxGraphResolver::GetNodeInputString(const ScopedNode& s,
+                                                  const std::string& name,
+                                                  std::string_view def) {
+  mx::ValueElementPtr in = GetValueInput(s, name);
+  return in ? in->getValueString() : std::string(def);
+}
+
+// Returns true if input `name` of `s` may be non-zero, without emitting VM
+// bytecode, opaque parameters, or texture loads into `MtlxProgram`.
+bool MtlxGraphResolver::IsNonZeroInput(const ScopedNode& s,
+                                       const std::string& name) {
+  ResolvedInput r = ResolveTerminalInput(s, name);
+  if (r.kind == ResolvedInput::None) return false;
+  if (r.kind == ResolvedInput::GeomProp) return true;
+  if (r.kind == ResolvedInput::Value) {
+    mx::ValuePtr v = r.elem->getValue();
+    if (!v) return false;
+    if (v->isA<float>()) return v->asA<float>() != 0.0f;
+    if (v->isA<mx::Vector3>()) {
+      return v->asA<mx::Vector3>() != mx::Vector3(0.0f);
+    }
+    if (v->isA<mx::Color3>()) {
+      return v->asA<mx::Color3>() != mx::Color3(0.0f);
+    }
+    return false;
+  }
+  const ScopedNode& up = r.upstream;
+  const std::string& cat = NodeCategory(up.node);
+  if (cat == "ifgreater") {
+    mx::ValueElementPtr i1 = GetValueInput(up, "value1"),
+                        i2 = GetValueInput(up, "value2");
+    mx::ValuePtr v1 = i1 ? i1->getValue() : nullptr,
+                 v2 = i2 ? i2->getValue() : nullptr;
+    if (v1 && v2 && v1->isA<float>() && v2->isA<float>()) {
+      return IsNonZeroInput(
+          up, v1->asA<float>() > v2->asA<float>() ? "in1" : "in2");
+    }
+  } else if (cat == "multiply") {
+    return IsNonZeroInput(up, "in1") && IsNonZeroInput(up, "in2");
+  }
+  return true;
+}
+
+ScopedNode MtlxGraphResolver::UnwrapShaderNode(ScopedNode s,
+                                               std::string output_name,
+                                               const char* mat_input) {
+  while (s.node) {
+    ResolvedInput r;
+    const std::string& cat = NodeCategory(s.node);
+    if (cat == "surfacematerial" || cat == "dot") {
+      r = ResolveInput(s, cat == "dot" ? "in" : mat_input);
+    } else if (mx::NodeGraphPtr ng = GetNodeInfo(s.node).graph_impl) {
+      r = ResolveOutput(s, ResolveNodeGraphOutput(ng, output_name));
+    } else {
+      break;
+    }
+    if (r.kind != ResolvedInput::Connected) return {};
+    s = std::move(r.upstream);
+    output_name = std::move(r.output_name);
+  }
+  return s;
+}
 
 Expr MtlxExprCompiler::Const(double value) {
   auto it = std::find(prog_.consts.begin(), prog_.consts.end(), value);
@@ -704,34 +913,46 @@ Expr MtlxExprCompiler::CompileValueElement(const mx::ValueElementPtr& elem,
   return default_expr;
 }
 
-Expr MtlxExprCompiler::CompileInputExpr(const mx::NodePtr& node,
+Expr MtlxExprCompiler::CompileResolvedInput(const ResolvedInput& r,
+                                            const Expr& default_expr) {
+  if (r.kind == ResolvedInput::Connected) {
+    NodeOutKey key{r.upstream.frame, r.upstream.node.get(), r.output_name};
+    auto it = node_output_expr_.find(key);
+    if (it == node_output_expr_.end()) {
+      Expr se = CompileNodeOutputExpr(r.upstream, r.output_name);
+      if (se.code.size() > 1) se = EmitTmpExpr(se);
+      it = node_output_expr_.emplace(std::move(key), std::move(se)).first;
+    }
+    return it->second;
+  }
+  if (r.kind == ResolvedInput::GeomProp) {
+    Expr ge =
+        CompileGeomProp(r.elem->asA<mx::Input>()->getDefaultGeomPropString(),
+                        r.elem->getType());
+    return ge.code.size() > 1 ? EmitTmpExpr(ge) : ge;
+  }
+  if (r.kind != ResolvedInput::Value) return default_expr;
+  return CompileValueElement(r.elem, default_expr);
+}
+
+Expr MtlxExprCompiler::CompileInputExpr(const ScopedNode& s,
                                         const std::string& input_name,
                                         const Expr& default_expr) {
-  if (mx::InputPtr input = node->getInput(input_name)) {
-    if (mx::NodePtr upstream = input->getConnectedNode()) {
-      std::string out_name = ConnectedOutputName(input);
-      std::pair<const mx::Node*, std::string> key(upstream.get(), out_name);
-      auto it = node_output_expr_.find(key);
-      if (it == node_output_expr_.end()) {
-        Expr se = CompileNodeOutputExpr(upstream, out_name);
-        if (se.code.size() > 1) se = EmitTmpExpr(se);
-        it = node_output_expr_.emplace(std::move(key), std::move(se)).first;
-      }
-      return it->second;
-    }
+  ResolvedInput r = ResolveInput(s, input_name);
+  if (r.kind != ResolvedInput::Value) {
+    return CompileResolvedInput(r, default_expr);
   }
-  mx::InputPtr val_in = GetValueInput(node, input_name);
-  if (!val_in) return default_expr;
-  auto [it, inserted] = value_input_expr_.try_emplace({node.get(), input_name});
+  auto [it, inserted] = value_input_expr_.try_emplace(
+      NodeOutKey{s.frame, s.node.get(), input_name});
   if (inserted) {
-    Expr ve = CompileValueElement(val_in, default_expr);
+    Expr ve = CompileValueElement(r.elem, default_expr);
     if (ve.code.size() > 1) ve = EmitTmpExpr(ve);
     it->second = std::move(ve);
   }
   return it->second;
 }
 
-std::optional<int> MtlxExprCompiler::ConstIntInput(const mx::NodePtr& node,
+std::optional<int> MtlxExprCompiler::ConstIntInput(const ScopedNode& node,
                                                    const std::string& name) {
   Expr e = CompileInputExpr(node, name, Expr{});
   return (e.code.size() == 1 && e.code[0].op == mtlx::Op::Const)
@@ -739,7 +960,7 @@ std::optional<int> MtlxExprCompiler::ConstIntInput(const mx::NodePtr& node,
              : std::nullopt;
 }
 
-Expr MtlxExprCompiler::CompileIfCondition(const mx::NodePtr& node,
+Expr MtlxExprCompiler::CompileIfCondition(const ScopedNode& node,
                                           std::string_view cat) {
   Expr v1 = CompileInputExpr(node, "value1");
   Expr v2 = CompileInputExpr(node, "value2");
@@ -786,25 +1007,25 @@ MtlxExprCompiler::MatExpr MtlxExprCompiler::MatrixOp(mtlx::Op op,
   return out;
 }
 
-MtlxExprCompiler::MatExpr MtlxExprCompiler::CompileMatrixInput(
-    const mx::NodePtr& node, const std::string& input_name) {
-  if (mx::NodePtr upstream = node->getConnectedNode(input_name)) {
-    return CompileMatrixNode(upstream);
+MtlxExprCompiler::MatExpr MtlxExprCompiler::CompileResolvedMatrix(
+    const ResolvedInput& r, int n) {
+  if (r.kind == ResolvedInput::Connected) {
+    return CompileMatrixNode(r.upstream, r.output_name);
   }
-  int n = InputType(node, input_name) == "matrix44" ? 4 : 3;
-  mx::InputPtr val_in = GetValueInput(node, input_name);
-  if (!val_in || !val_in->getValue()) return MatExpr::Identity(n);
-  const std::string& t = val_in->getType();
+  mx::ValuePtr val =
+      r.kind == ResolvedInput::Value ? r.elem->getValue() : nullptr;
+  if (!val) return MatExpr::Identity(n);
+  const std::string& t = r.elem->getType();
   if (t != "matrix33" && t != "matrix44") return MatExpr::Identity(n);
   MatExpr out;
   if (t == "matrix44") {
     out.n = 4;
-    mx::Matrix44 m = val_in->getValue()->asA<mx::Matrix44>();
+    mx::Matrix44 m = val->asA<mx::Matrix44>();
     for (int i = 0; i < 4; ++i) {
       out.rows[i] = EmitTuple({m[i][0], m[i][1], m[i][2], m[i][3]});
     }
   } else {
-    mx::Matrix33 m = val_in->getValue()->asA<mx::Matrix33>();
+    mx::Matrix33 m = val->asA<mx::Matrix33>();
     for (int i = 0; i < 3; ++i) {
       out.rows[i] = EmitTuple({m[i][0], m[i][1], m[i][2]});
     }
@@ -812,24 +1033,35 @@ MtlxExprCompiler::MatExpr MtlxExprCompiler::CompileMatrixInput(
   return out;
 }
 
+MtlxExprCompiler::MatExpr MtlxExprCompiler::CompileMatrixInput(
+    const ScopedNode& node, const std::string& input_name) {
+  return CompileResolvedMatrix(
+      ResolveInput(node, input_name),
+      InputType(node.node, input_name) == "matrix44" ? 4 : 3);
+}
+
 MtlxExprCompiler::MatExpr MtlxExprCompiler::CompileMatrixNode(
-    const mx::NodePtr& node) {
-  if (auto it = node_matrix_expr_.find(node.get());
-      it != node_matrix_expr_.end()) {
+    const ScopedNode& node, const std::string& output_name) {
+  NodeOutKey key{node.frame, node.node.get(), output_name};
+  if (auto it = node_matrix_expr_.find(key); it != node_matrix_expr_.end()) {
     return it->second;
   }
-  int n = node->getType() == "matrix44" ? 4 : 3;
-  std::string cat = NodeCategory(node);
-
+  int n = node.node->getType() == "matrix44" ? 4 : 3;
+  const std::string& cat = NodeCategory(node.node);
   MatExpr res = MatExpr::Identity(n);
-  if (cat == "constant") {
+  if (mx::NodeGraphPtr ng = GetNodeInfo(node.node).graph_impl) {
+    mx::OutputPtr out = ResolveNodeGraphOutput(ng, output_name);
+    res =
+        CompileResolvedMatrix(ResolveOutput(node, out),
+                              out ? (out->getType() == "matrix44" ? 4 : 3) : n);
+  } else if (cat == "constant") {
     res = CompileMatrixInput(node, "value");
   } else if (cat == "dot") {
     res = CompileMatrixInput(node, "in");
   } else if (cat == "creatematrix") {
     // The rows of a 4x4 matrix are either `vector4` or `vector3` values, which
     // are extended by the fourth column of the identity.
-    bool extend = n == 4 && InputType(node, "in1") != "vector4";
+    bool extend = n == 4 && InputType(node.node, "in1") != "vector4";
     for (int i = 0; i < n; ++i) {
       Expr row = CompileInputExpr(node, "in" + std::to_string(i + 1));
       res.rows[i] =
@@ -842,7 +1074,7 @@ MtlxExprCompiler::MatExpr MtlxExprCompiler::CompileMatrixNode(
   } else if (cat == "add" || cat == "subtract") {
     MatExpr m1 = CompileMatrixInput(node, "in1");
     bool is_add = cat == "add";
-    if (InputType(node, "in2") == "float") {
+    if (InputType(node.node, "in2") == "float") {
       Expr s = EmitTmpExpr(CompileInputExpr(node, "in2"));
       for (int i = 0; i < n; ++i) {
         res.rows[i] = is_add ? m1.rows[i] + s : m1.rows[i] - s;
@@ -876,19 +1108,19 @@ MtlxExprCompiler::MatExpr MtlxExprCompiler::CompileMatrixNode(
                     "'; using identity.");
   }
 
-  for (int i = 0; i < n; ++i) {
+  for (int i = 0; i < res.n; ++i) {
     if (res.rows[i].code.size() > 1) res.rows[i] = EmitTmpExpr(res.rows[i]);
   }
-  node_matrix_expr_[node.get()] = res;
+  node_matrix_expr_[std::move(key)] = res;
   return res;
 }
 
-Expr MtlxExprCompiler::SampleImage(const mx::NodePtr& node) {
+Expr MtlxExprCompiler::SampleImage(const ScopedNode& node) {
   auto default_val = [&] { return CompileInputExpr(node, "default"); };
-  mx::InputPtr file_in = GetValueInput(node, "file");
+  mx::ValueElementPtr file_in = GetValueInput(node, "file");
   if (!file_in || file_in->getValueString().empty()) return default_val();
 
-  const std::string& type = node->getType();
+  const std::string& type = node.node->getType();
   bool has_alpha = IsFourChannelType(type);
   std::string u_mode = GetNodeInputString(node, "uaddressmode", "periodic");
   std::string v_mode = GetNodeInputString(node, "vaddressmode", "periodic");
@@ -917,8 +1149,13 @@ Expr MtlxExprCompiler::SampleImage(const mx::NodePtr& node) {
   // time in `TextureCache`.
   key.raw = true;
   if (type == "color3" || type == "color4") {
-    key.color_space =
-        ResolveSourceColorSpace(file_in->getActiveColorSpace()).GetString();
+    std::string cs = file_in->getActiveColorSpace();
+    if (cs.empty()) {
+      mx::InputPtr img_file = node.node->getInput("file");
+      cs = img_file ? img_file->getActiveColorSpace()
+                    : node.node->getActiveColorSpace();
+    }
+    key.color_space = ResolveSourceColorSpace(cs).GetString();
   }
   if (type == "float") key.channel = 0;
   // Mitsuba's `bitmap` supports a single `wrap_mode`; mixed or out-of-bounds
@@ -1022,7 +1259,7 @@ Expr MtlxExprCompiler::SampleImage(const mx::NodePtr& node) {
 }
 
 std::optional<Expr> MtlxExprCompiler::CompileChannelNode(
-    const mx::NodePtr& node, const std::string& cat, const std::string& type) {
+    const ScopedNode& node, const std::string& cat, const std::string& type) {
   auto in = [&](const std::string& name, const Expr& def = Expr::zero()) {
     return CompileInputExpr(node, name, def);
   };
@@ -1030,7 +1267,7 @@ std::optional<Expr> MtlxExprCompiler::CompileChannelNode(
   if (cat == "dot" || cat == "convert") return in("in");
   if (cat == "extract") {
     int idx = ConstIntInput(node, "index").value_or(0);
-    std::string_view in_type = InputType(node, "in");
+    std::string_view in_type = InputType(node.node, "in");
     if (in_type == "matrix33" || in_type == "matrix44") {
       MatExpr mat = CompileMatrixInput(node, "in");
       return mat.rows[std::clamp(idx, 0, mat.n - 1)];
@@ -1040,7 +1277,7 @@ std::optional<Expr> MtlxExprCompiler::CompileChannelNode(
   if (cat == "combine2") {
     if (IsFourChannelType(type)) {
       // A 3-channel value and a float, or two `vector2` values.
-      if (InputType(node, "in1") != "vector2") {
+      if (InputType(node.node, "in1") != "vector2") {
         Expr i1 = in("in1"), i2 = in("in2");
         return vec4(i1, i2);
       }
@@ -1061,7 +1298,7 @@ std::optional<Expr> MtlxExprCompiler::CompileChannelNode(
   return std::nullopt;
 }
 
-std::optional<Expr> MtlxExprCompiler::CompileMathNode(const mx::NodePtr& node,
+std::optional<Expr> MtlxExprCompiler::CompileMathNode(const ScopedNode& node,
                                                       const std::string& cat) {
   auto in = [&](const std::string& name, const Expr& def = Expr::zero()) {
     return CompileInputExpr(node, name, def);
@@ -1120,7 +1357,7 @@ std::optional<Expr> MtlxExprCompiler::CompileMathNode(const mx::NodePtr& node,
 }
 
 std::optional<Expr> MtlxExprCompiler::CompileLogicNode(
-    const mx::NodePtr& node, const std::string& cat, const std::string& type) {
+    const ScopedNode& node, const std::string& cat, const std::string& type) {
   auto in = [&](const std::string& name, const Expr& def = Expr::zero()) {
     return CompileInputExpr(node, name, def);
   };
@@ -1149,13 +1386,13 @@ std::optional<Expr> MtlxExprCompiler::CompileLogicNode(
 }
 
 std::optional<Expr> MtlxExprCompiler::CompileVectorNode(
-    const mx::NodePtr& node, const std::string& cat) {
+    const ScopedNode& node, const std::string& cat) {
   auto in = [&](const std::string& name, const Expr& def = Expr::zero()) {
     return CompileInputExpr(node, name, def);
   };
   if (cat == "normalize" || cat == "magnitude" || cat == "dotproduct") {
     std::string_view in_type =
-        InputType(node, cat == "dotproduct" ? "in1" : "in");
+        InputType(node.node, cat == "dotproduct" ? "in1" : "in");
     uint16_t vec_imm = in_type == "vector2" ? 2 : in_type == "vector4" ? 4 : 0;
     if (cat == "normalize") return call(mtlx::Op::Normalize, vec_imm, in("in"));
     if (cat == "magnitude") {
@@ -1180,9 +1417,9 @@ std::optional<Expr> MtlxExprCompiler::CompileVectorNode(
     // A zero `scale` keeps only the sign of the z component of `in`, which is
     // positive for `heighttonormal` (e.g. in `NG_bump_vector3`), so skip
     // evaluating its subgraph.
-    mx::NodePtr up = node->getConnectedNode("in");
-    while (up && up->getCategory() == "dot") up = up->getConnectedNode("in");
-    Expr in_e = scale.is_zero() && up && NodeCategory(up) == "heighttonormal"
+    ScopedNode up =
+        scale.is_zero() ? ResolveConnected(node, "in") : ScopedNode{};
+    Expr in_e = up && NodeCategory(up.node) == "heighttonormal"
                     ? ConstRgb(0.5, 0.5, 1.0)
                     : in("in");
     Expr n = in("normal", Expr::n_world()), t = in("tangent", Expr::t_world()),
@@ -1193,7 +1430,7 @@ std::optional<Expr> MtlxExprCompiler::CompileVectorNode(
   return std::nullopt;
 }
 
-Expr MtlxExprCompiler::CompileHeightToNormal(const mx::NodePtr& node) {
+Expr MtlxExprCompiler::CompileHeightToNormal(const ScopedNode& node) {
   Expr scale = CompileInputExpr(node, "scale", Expr::one());
   if (scale.is_zero()) return ConstRgb(0.5, 0.5, 1.0);
 
@@ -1248,70 +1485,25 @@ Expr MtlxExprCompiler::CompileHeightToNormal(const mx::NodePtr& node) {
                  : ConstRgb(0.5, 0.5, 1.0);
 }
 
-std::optional<Expr> MtlxExprCompiler::CompileGeomNode(const mx::NodePtr& node,
-                                                      const std::string& cat,
-                                                      const std::string& type) {
-  auto in = [&](const std::string& name, const Expr& def = Expr::zero()) {
-    return CompileInputExpr(node, name, def);
-  };
-  auto check_zero_index = [&] {
-    if (ConstIntInput(node, "index").value_or(0) != 0) {
-      WarnUnsupported("Unsupported MaterialX '" + cat +
-                      "' index; using index 0.");
-    }
-  };
-  auto warn_world_space = [&](std::string_view kind, std::string_view space) {
+Expr MtlxExprCompiler::CompileGeomIntrinsic(std::string_view kind,
+                                            std::string_view space,
+                                            std::string_view type,
+                                            bool non_zero_index) {
+  if (non_zero_index && (kind == "texcoord" || kind == "tangent" ||
+                         kind == "bitangent" || kind == "geomcolor")) {
+    WarnUnsupported("Unsupported MaterialX '" + std::string(kind) +
+                    "' index; using index 0.");
+  }
+  if (space.empty()) space = kind == "viewdirection" ? "world" : "object";
+  auto warn_world_space = [&] {
     if (space != "world") {
       WarnUnsupported("Unsupported MaterialX " + std::string(kind) +
                       " space '" + std::string(space) +
                       "'; evaluating in world space.");
     }
   };
-  auto compile_intrinsic = [&](std::string_view kind,
-                               std::string_view space) -> Expr {
-    if (kind == "texcoord") return DefaultTexcoord(type == "vector3" ? 3 : 2);
-    if (kind == "position") {
-      if (space == "object" || space == "model") {
-        return MeshAttr("__p_object", 3, Expr::p_world());
-      }
-      warn_world_space(kind, space);
-      return Expr::p_world();
-    }
-    if (kind == "normal") {
-      if (space == "object" || space == "model") {
-        return call(mtlx::Op::Normalize,
-                    MeshAttr("__n_object", 3, Expr::n_world()));
-      }
-      if (space == "tangent") return ConstRgb(0.0, 0.0, 1.0);
-      warn_world_space(kind, space);
-      return Expr::n_world();
-    }
-    bool bitangent = kind == "bitangent";
-    if (space == "tangent") {
-      return bitangent ? ConstRgb(0.0, 1.0, 0.0) : ConstRgb(1.0, 0.0, 0.0);
-    }
-    warn_world_space(kind, space);
-    return bitangent ? Expr::b_world() : Expr::t_world();
-  };
-
-  if (cat == "image") return SampleImage(node);
-  if (cat == "texcoord") {
-    check_zero_index();
-    return compile_intrinsic("texcoord", "");
-  }
-  if (cat == "position" || cat == "normal") {
-    return compile_intrinsic(cat, GetNodeInputString(node, "space", "object"));
-  }
-  if (cat == "tangent" || cat == "bitangent") {
-    check_zero_index();
-    return compile_intrinsic(cat, GetNodeInputString(node, "space", "object"));
-  }
-  if (cat == "viewdirection") {
-    warn_world_space(cat, GetNodeInputString(node, "space", "world"));
-    return Expr({mtlx::Op::GeomIncidentDir, 0, 0});
-  }
-  if (cat == "geomcolor") {
-    check_zero_index();
+  if (kind == "texcoord") return DefaultTexcoord(type == "vector3" ? 3 : 2);
+  if (kind == "geomcolor") {
     Expr color =
         MeshAttr("displayColor", type == "float" ? 1 : 3, Expr::zero());
     // The alpha channel of `geomcolor` is the display opacity.
@@ -1319,30 +1511,68 @@ std::optional<Expr> MtlxExprCompiler::CompileGeomNode(const mx::NodePtr& node,
                ? vec4(color, MeshAttr("displayOpacity", 1, Expr::one()))
                : color;
   }
+  if (kind == "position") {
+    if (space == "object" || space == "model") {
+      return MeshAttr("__p_object", 3, Expr::p_world());
+    }
+    warn_world_space();
+    return Expr::p_world();
+  }
+  if (kind == "normal") {
+    if (space == "object" || space == "model") {
+      return call(mtlx::Op::Normalize,
+                  MeshAttr("__n_object", 3, Expr::n_world()));
+    }
+    if (space == "tangent") return ConstRgb(0.0, 0.0, 1.0);
+    warn_world_space();
+    return Expr::n_world();
+  }
+  if (kind == "viewdirection") {
+    warn_world_space();
+    return Expr({mtlx::Op::GeomIncidentDir, 0, 0});
+  }
+  bool bitangent = kind == "bitangent";
+  if (space == "tangent") {
+    return bitangent ? ConstRgb(0.0, 1.0, 0.0) : ConstRgb(1.0, 0.0, 0.0);
+  }
+  warn_world_space();
+  return bitangent ? Expr::b_world() : Expr::t_world();
+}
+
+Expr MtlxExprCompiler::CompileGeomProp(
+    const std::string& prop_name, std::string_view type,
+    const std::function<Expr()>& default_fn) {
+  uint8_t ch = TypeChannels(type);
+  if (mx::GeomPropDefPtr gpd = doc_->getGeomPropDef(prop_name)) {
+    const std::string& gp = gpd->getGeomProp();
+    if (IsGeomIntrinsic(gp)) {
+      std::string_view idx = gpd->getIndex();
+      Expr e = CompileGeomIntrinsic(gp, gpd->getSpace(), type,
+                                    !idx.empty() && idx != "0");
+      return ch == 1 ? e.x() : e.with_channels(ch);
+    }
+  }
+  return MeshAttr(prop_name, ch == 1 ? 1 : 3,
+                  default_fn ? default_fn() : Expr::zero())
+      .with_channels(ch);
+}
+
+std::optional<Expr> MtlxExprCompiler::CompileGeomNode(const ScopedNode& node,
+                                                      const std::string& cat,
+                                                      const std::string& type) {
+  auto in = [&](const std::string& name, const Expr& def = Expr::zero()) {
+    return CompileInputExpr(node, name, def);
+  };
+
+  if (cat == "image") return SampleImage(node);
+  if (IsGeomIntrinsic(cat)) {
+    return CompileGeomIntrinsic(cat, GetNodeInputString(node, "space"), type,
+                                ConstIntInput(node, "index").value_or(0) != 0);
+  }
   if (cat == "geompropvalue") {
     std::string p = GetNodeInputString(node, "geomprop");
     if (p.empty()) return in("default");
-    uint8_t ch = TypeChannels(type);
-    static constexpr std::pair<std::string_view,
-                               std::pair<std::string_view, std::string_view>>
-        kAliases[] = {
-            {"Pobject", {"position", "object"}},
-            {"Pworld", {"position", "world"}},
-            {"Nobject", {"normal", "object"}},
-            {"Nworld", {"normal", "world"}},
-            {"Tobject", {"tangent", "object"}},
-            {"Tworld", {"tangent", "world"}},
-            {"Bobject", {"bitangent", "object"}},
-            {"Bworld", {"bitangent", "world"}},
-            {"UV0", {"texcoord", ""}},
-    };
-    for (const auto& [alias, target] : kAliases) {
-      if (p == alias) {
-        Expr e = compile_intrinsic(target.first, target.second);
-        return ch == 1 ? e.x() : e.with_channels(ch);
-      }
-    }
-    return MeshAttr(p, ch == 1 ? 1 : 3, in("default")).with_channels(ch);
+    return CompileGeomProp(p, type, [&] { return in("default"); });
   }
   if (cat == "transformpoint" || cat == "transformvector" ||
       cat == "transformnormal") {
@@ -1361,7 +1591,7 @@ std::optional<Expr> MtlxExprCompiler::CompileGeomNode(const mx::NodePtr& node,
 }
 
 std::optional<Expr> MtlxExprCompiler::CompileMatrixValueNode(
-    const mx::NodePtr& node, const std::string& cat, const std::string& type) {
+    const ScopedNode& node, const std::string& cat, const std::string& type) {
   if (cat == "transformmatrix") {
     // Row vectors are transformed as `v * M`. The last coordinate of a vector
     // with fewer coordinates than the matrix is 1.
@@ -1391,7 +1621,7 @@ std::optional<Expr> MtlxExprCompiler::CompileMatrixValueNode(
 }
 
 std::optional<Expr> MtlxExprCompiler::CompileCompositingNode(
-    const mx::NodePtr& node, const std::string& cat) {
+    const ScopedNode& node, const std::string& cat) {
   auto in = [&](const std::string& name, const Expr& def = Expr::zero()) {
     return CompileInputExpr(node, name, def);
   };
@@ -1466,7 +1696,7 @@ std::optional<Expr> MtlxExprCompiler::CompileCompositingNode(
 }
 
 std::optional<Expr> MtlxExprCompiler::CompileColorPbrNode(
-    const mx::NodePtr& node, const std::string& cat, const std::string& type,
+    const ScopedNode& node, const std::string& cat, const std::string& type,
     const std::string& output_name) {
   auto in = [&](const std::string& name, const Expr& def = Expr::zero()) {
     return CompileInputExpr(node, name, def);
@@ -1483,11 +1713,14 @@ std::optional<Expr> MtlxExprCompiler::CompileColorPbrNode(
     // The luminance of a gray value is the value itself, which keeps e.g. the
     // default `opacity` color of `standard_surface` a constant 1.
     Expr in_e = in("in");
-    bool has_coeffs = node->getInput("lumacoeffs") != nullptr;
+    ResolvedInput cr = ResolveInput(node, "lumacoeffs");
+    bool has_coeffs = cr.kind != ResolvedInput::None &&
+                      !(cr.kind == ResolvedInput::Value &&
+                        cr.elem->getParent() == GetNodeInfo(node.node).nodedef);
     if (!has_coeffs && in_e.uniform()) return in_e;
     if (type == "color4") in_e = EmitTmpExpr(in_e);
     Expr lum = call(mtlx::Op::Dot, in_e,
-                    has_coeffs ? in("lumacoeffs")
+                    has_coeffs ? CompileResolvedInput(cr, Expr::zero())
                                : ConstRgb(0.2722287, 0.6740818, 0.0536895));
     return type == "color4" ? vec4(lum, in_e.w()) : lum;
   }
@@ -1577,7 +1810,7 @@ std::optional<Expr> MtlxExprCompiler::CompileColorPbrNode(
 }
 
 std::optional<Expr> MtlxExprCompiler::CompileNoiseNode(
-    const mx::NodePtr& node, const std::string& cat, const std::string& type) {
+    const ScopedNode& node, const std::string& cat, const std::string& type) {
   std::string_view noise = cat;
   bool is_3d = absl::ConsumeSuffix(&noise, "3d");
   if ((!is_3d && !absl::ConsumeSuffix(&noise, "2d")) ||
@@ -1652,10 +1885,20 @@ std::optional<Expr> MtlxExprCompiler::CompileNoiseNode(
   return is_noise ? res + in("pivot") : res;
 }
 
-Expr MtlxExprCompiler::CompileNodeOutputExpr(const mx::NodePtr& node,
+Expr MtlxExprCompiler::CompileNodeOutputExpr(const ScopedNode& node,
                                              const std::string& output_name) {
-  std::string cat = NodeCategory(node);
-  const std::string& type = node->getType();
+  const std::string& cat = NodeCategory(node.node);
+  const std::string& type = node.node->getType();
+
+  // Handle noise before NodeGraph expansion so stdlib noise/fractal NodeGraphs
+  // emit native VM noise ops directly.
+  if (auto e = CompileNoiseNode(node, cat, type)) return *e;
+
+  if (mx::NodeGraphPtr ng = GetNodeInfo(node.node).graph_impl) {
+    return CompileResolvedInput(
+        ResolveOutput(node, ResolveNodeGraphOutput(ng, output_name)),
+        Expr::zero());
+  }
 
   // Unary and binary ops that map to a single instruction.
   static constexpr struct {
@@ -1707,24 +1950,23 @@ Expr MtlxExprCompiler::CompileNodeOutputExpr(const mx::NodePtr& node,
   if (auto e = CompileMatrixValueNode(node, cat, type)) return *e;
   if (auto e = CompileCompositingNode(node, cat)) return *e;
   if (auto e = CompileColorPbrNode(node, cat, type, output_name)) return *e;
-  if (auto e = CompileNoiseNode(node, cat, type)) return *e;
 
   WarnUnsupported("Unsupported MaterialX node category '" + cat +
                   "'; passing through its 'in' input.");
   return CompileInputExpr(node, "in");
 }
 
-Expr MtlxExprCompiler::CompileEdf(const mx::NodePtr& edf_node) {
-  mx::NodePtr node = UnwrapShaderNode(edf_node);
+Expr MtlxExprCompiler::CompileEdf(const ScopedNode& node) {
   if (!node) return Expr::zero();
-  if (auto it = edf_expr_.find(node.get()); it != edf_expr_.end()) {
+  NodeKey key{node.frame, node.node.get()};
+  if (auto it = edf_expr_.find(key); it != edf_expr_.end()) {
     return it->second;
   }
-  std::string cat = NodeCategory(node);
+  const std::string& cat = NodeCategory(node.node);
   Expr res = Expr::zero();
   if (cat == "surface" || cat == "surface_unlit") {
     if (cat == "surface") {
-      res = CompileEdf(node->getConnectedNode("edf"));
+      res = CompileEdf(ResolveConnected(node, "edf"));
     } else {
       Expr em = CompileInputExpr(node, "emission", Expr::one());
       if (!em.is_zero()) {
@@ -1740,9 +1982,7 @@ Expr MtlxExprCompiler::CompileEdf(const mx::NodePtr& edf_node) {
     }
   } else if (cat == "uniform_edf" || cat == "conical_edf" ||
              cat == "measured_edf") {
-    mx::InputPtr file_in =
-        cat == "measured_edf" ? GetValueInput(node, "file") : nullptr;
-    if (file_in && !file_in->getValueString().empty()) {
+    if (cat == "measured_edf" && !GetNodeInputString(node, "file").empty()) {
       WarnUnsupported(
           "Unsupported MaterialX 'measured_edf' IES profile; approximating as "
           "uniform_edf.");
@@ -1752,7 +1992,7 @@ Expr MtlxExprCompiler::CompileEdf(const mx::NodePtr& edf_node) {
     }
     res = CompileInputExpr(node, "color", Expr::one());
   } else if (cat == "generalized_schlick_edf") {
-    Expr base = CompileEdf(node->getConnectedNode("base"));
+    Expr base = CompileEdf(ResolveConnected(node, "base"));
     if (!base.is_zero()) {
       Expr c0 = CompileInputExpr(node, "color0", Expr::one());
       Expr c90 = CompileInputExpr(node, "color90", Expr::one());
@@ -1770,44 +2010,44 @@ Expr MtlxExprCompiler::CompileEdf(const mx::NodePtr& edf_node) {
       res = base * w;
     }
   } else if (cat == "add") {
-    res = CompileEdf(node->getConnectedNode("in1")) +
-          CompileEdf(node->getConnectedNode("in2"));
+    res = CompileEdf(ResolveConnected(node, "in1")) +
+          CompileEdf(ResolveConnected(node, "in2"));
   } else if (cat == "multiply") {
-    Expr base = CompileEdf(node->getConnectedNode("in1"));
+    Expr base = CompileEdf(ResolveConnected(node, "in1"));
     if (!base.is_zero()) {
       res = base * CompileInputExpr(node, "in2", Expr::one());
     }
   } else if (cat == "mix") {
     res = CompileMix(
         CompileInputExpr(node, "mix"),
-        [&] { return CompileEdf(node->getConnectedNode("fg")); },
-        [&] { return CompileEdf(node->getConnectedNode("bg")); });
+        [&] { return CompileEdf(ResolveConnected(node, "fg")); },
+        [&] { return CompileEdf(ResolveConnected(node, "bg")); });
   }
   if (res.code.size() > 1) res = EmitTmpExpr(res);
-  edf_expr_[node.get()] = res;
+  edf_expr_[key] = res;
   return res;
 }
 
-Expr MtlxExprCompiler::CompileOpacity(const mx::NodePtr& shader_node) {
-  mx::NodePtr node = UnwrapShaderNode(shader_node);
+Expr MtlxExprCompiler::CompileOpacity(const ScopedNode& node) {
   if (!node) return Expr::one();
-  if (auto it = opacity_expr_.find(node.get()); it != opacity_expr_.end()) {
+  NodeKey key{node.frame, node.node.get()};
+  if (auto it = opacity_expr_.find(key); it != opacity_expr_.end()) {
     return it->second;
   }
-  std::string cat = NodeCategory(node);
+  const std::string& cat = NodeCategory(node.node);
   Expr res = Expr::one();
   if (cat == "surface" || cat == "surface_unlit") {
     res = saturate(CompileInputExpr(node, "opacity", Expr::one()));
   } else if (cat == "mix" &&
-             node->getType() == mx::SURFACE_SHADER_TYPE_STRING) {
+             node.node->getType() == mx::SURFACE_SHADER_TYPE_STRING) {
     res = CompileMix(
         saturate(CompileInputExpr(node, "mix")),
-        [&] { return CompileOpacity(node->getConnectedNode("fg")); },
-        [&] { return CompileOpacity(node->getConnectedNode("bg")); });
+        [&] { return CompileOpacity(ResolveConnected(node, "fg")); },
+        [&] { return CompileOpacity(ResolveConnected(node, "bg")); });
   }
   if (!res.uniform()) res = call(mtlx::Op::Dot, res, Const(1.0 / 3.0));
   if (res.code.size() > 1) res = EmitTmpExpr(res);
-  opacity_expr_[node.get()] = res;
+  opacity_expr_[key] = res;
   return res;
 }
 
@@ -1840,13 +2080,13 @@ int MtlxExprCompiler::EmitOpaqueBlocker() {
   return EmitClosure(mtlx::ClosureNode::MakeDiffuse(z, z, z, 0, -1));
 }
 
-int MtlxExprCompiler::FrameSlot(const mx::NodePtr& node,
-                                const std::string& name, const Expr& def) {
+int MtlxExprCompiler::FrameSlot(const ScopedNode& node, const std::string& name,
+                                const Expr& def) {
   Expr e = CompileInputExpr(node, name, def);
   return e == def ? -1 : EmitTmp(e);
 }
 
-int MtlxExprCompiler::CompileDiffuseClosure(const mx::NodePtr& node,
+int MtlxExprCompiler::CompileDiffuseClosure(const ScopedNode& node,
                                             const std::string& cat) {
   Expr w_expr = CompileInputExpr(node, "weight", Expr::one());
   if (w_expr.is_zero()) return cat == "sheen_bsdf" ? -1 : EmitOpaqueBlocker();
@@ -1871,7 +2111,7 @@ int MtlxExprCompiler::CompileDiffuseClosure(const mx::NodePtr& node,
       w_slot, color_slot, rough_slot, energy_comp, n_slot));
 }
 
-int MtlxExprCompiler::CompileTranslucentClosure(const mx::NodePtr& node) {
+int MtlxExprCompiler::CompileTranslucentClosure(const ScopedNode& node) {
   Expr w_expr = CompileInputExpr(node, "weight", Expr::one());
   if (w_expr.is_zero()) return EmitOpaqueBlocker();
   int w_slot = EmitTmp(w_expr);
@@ -1881,7 +2121,7 @@ int MtlxExprCompiler::CompileTranslucentClosure(const mx::NodePtr& node) {
       mtlx::ClosureNode::MakeTranslucent(w_slot, color_slot, n_slot));
 }
 
-int MtlxExprCompiler::CompileMicrofacetClosure(const mx::NodePtr& node,
+int MtlxExprCompiler::CompileMicrofacetClosure(const ScopedNode& node,
                                                const std::string& cat) {
   Expr w_expr = CompileInputExpr(node, "weight", Expr::one());
   bool is_cond = cat == "conductor_bsdf";
@@ -1936,7 +2176,7 @@ int MtlxExprCompiler::CompileMicrofacetClosure(const mx::NodePtr& node,
       EmitTmp(CompileInputExpr(node, "exponent", Const(5.0)))));
 }
 
-int MtlxExprCompiler::CompileChiangHairClosure(const mx::NodePtr& node) {
+int MtlxExprCompiler::CompileChiangHairClosure(const ScopedNode& node) {
   auto slot = [&](const char* name, const Expr& def = Expr::zero()) {
     return EmitTmp(CompileInputExpr(node, name, def));
   };
@@ -1952,7 +2192,7 @@ int MtlxExprCompiler::CompileChiangHairClosure(const mx::NodePtr& node) {
       FrameSlot(node, "curve_direction", Expr::t_world())));
 }
 
-void MtlxExprCompiler::CompileVdfWarning(const mx::NodePtr& node,
+void MtlxExprCompiler::CompileVdfWarning(const ScopedNode& node,
                                          const std::string& cat) {
   if (cat == "anisotropic_vdf" || cat == "absorption_vdf") {
     if (IsNonZeroInput(node, "absorption") ||
@@ -1966,14 +2206,14 @@ void MtlxExprCompiler::CompileVdfWarning(const mx::NodePtr& node,
   }
 }
 
-int MtlxExprCompiler::CompileBsdfClosure(const mx::NodePtr& raw_node) {
-  mx::NodePtr node = UnwrapShaderNode(raw_node);
+int MtlxExprCompiler::CompileBsdfClosure(const ScopedNode& node) {
   if (!node) return -1;
-  if (auto it = bsdf_closure_.find(node.get()); it != bsdf_closure_.end()) {
+  NodeKey key{node.frame, node.node.get()};
+  if (auto it = bsdf_closure_.find(key); it != bsdf_closure_.end()) {
     return it->second;
   }
 
-  std::string cat = NodeCategory(node);
+  const std::string& cat = NodeCategory(node.node);
   auto scale = [&](int c, const Expr& w) {
     return (c < 0 || w.is_one())
                ? c
@@ -1991,14 +2231,14 @@ int MtlxExprCompiler::CompileBsdfClosure(const mx::NodePtr& raw_node) {
     idx = CompileMicrofacetClosure(node, cat);
   } else if (cat == "chiang_hair_bsdf") {
     idx = CompileChiangHairClosure(node);
-  } else if (node->getType() == mx::VDF_TYPE_STRING) {
+  } else if (node.node->getType() == mx::VDF_TYPE_STRING) {
     CompileVdfWarning(node, cat);
   } else if (cat == "layer" || cat == "add") {
     bool is_layer = cat == "layer";
     int c0 =
-        CompileBsdfClosure(node->getConnectedNode(is_layer ? "top" : "in1"));
+        CompileBsdfClosure(ResolveConnected(node, is_layer ? "top" : "in1"));
     int c1 =
-        CompileBsdfClosure(node->getConnectedNode(is_layer ? "base" : "in2"));
+        CompileBsdfClosure(ResolveConnected(node, is_layer ? "base" : "in2"));
     if (c0 < 0) {
       idx = c1;
     } else if (c1 < 0) {
@@ -2010,12 +2250,12 @@ int MtlxExprCompiler::CompileBsdfClosure(const mx::NodePtr& raw_node) {
   } else if (cat == "mix") {
     Expr mix_expr = CompileInputExpr(node, "mix");
     if (mix_expr.is_zero()) {
-      idx = CompileBsdfClosure(node->getConnectedNode("bg"));
+      idx = CompileBsdfClosure(ResolveConnected(node, "bg"));
     } else if (mix_expr.is_one()) {
-      idx = CompileBsdfClosure(node->getConnectedNode("fg"));
+      idx = CompileBsdfClosure(ResolveConnected(node, "fg"));
     } else {
-      int fg_idx = CompileBsdfClosure(node->getConnectedNode("fg"));
-      int bg_idx = CompileBsdfClosure(node->getConnectedNode("bg"));
+      int fg_idx = CompileBsdfClosure(ResolveConnected(node, "fg"));
+      int bg_idx = CompileBsdfClosure(ResolveConnected(node, "bg"));
       if (fg_idx == bg_idx) {
         idx = fg_idx;
       } else {
@@ -2027,7 +2267,7 @@ int MtlxExprCompiler::CompileBsdfClosure(const mx::NodePtr& raw_node) {
     }
   } else if (cat == "multiply") {
     Expr w = CompileInputExpr(node, "in2", Expr::one());
-    idx = scale(CompileBsdfClosure(node->getConnectedNode("in1")), w);
+    idx = scale(CompileBsdfClosure(ResolveConnected(node, "in1")), w);
   } else if (cat == "surface") {
     if (Expr op = CompileOpacity(node); !op.is_zero()) {
       if (!CompileInputExpr(node, "thin_walled").is_zero()) thin_walled_ = true;
@@ -2035,15 +2275,15 @@ int MtlxExprCompiler::CompileBsdfClosure(const mx::NodePtr& raw_node) {
       // cannot mutate a closure shared with another mixed surface.
       auto saved = std::exchange(bsdf_closure_, {});
       size_t start = prog_.closures.size();
-      int bsdf_idx = CompileBsdfClosure(node->getConnectedNode("bsdf"));
+      int bsdf_idx = CompileBsdfClosure(ResolveConnected(node, "bsdf"));
       MarkTwoSidedDielectrics(start);
       bsdf_closure_ = std::move(saved);
       idx = scale(bsdf_idx, op);
     }
   } else if (cat == "surface_unlit") {
     // Unlit surfaces emit radiance only and have a null BSDF.
-  } else if (node->getType() == mx::BSDF_TYPE_STRING &&
-             InputType(node, "weight") == "float" &&
+  } else if (node.node->getType() == mx::BSDF_TYPE_STRING &&
+             InputType(node.node, "weight") == "float" &&
              CompileInputExpr(node, "weight", Expr::one()).is_zero()) {
     // Skip inactive unsupported lobes (e.g. zero-weight lobes in
     // `standard_surface`) without warning.
@@ -2052,12 +2292,14 @@ int MtlxExprCompiler::CompileBsdfClosure(const mx::NodePtr& raw_node) {
                     "'; using a null BSDF.");
   }
 
-  bsdf_closure_[node.get()] = idx;
+  bsdf_closure_[key] = idx;
   return idx;
 }
 
-void MtlxExprCompiler::CompileBsdf(const mx::NodePtr& shader_node) {
-  mx::NodePtr node = UnwrapShaderNode(shader_node);
+void MtlxExprCompiler::CompileBsdf(const mx::NodePtr& shader_node,
+                                   std::string_view output_name) {
+  ScopedNode node =
+      UnwrapShaderNode({shader_node, nullptr}, std::string(output_name));
   Expr op_expr = CompileOpacity(node);
   if (!op_expr.is_one()) prog_.opacity_slot = EmitTmp(op_expr);
   if (op_expr.is_zero() || CompileBsdfClosure(node) < 0) {
@@ -2069,38 +2311,41 @@ void MtlxExprCompiler::CompileBsdf(const mx::NodePtr& shader_node) {
         c.microfacet.mode |= mtlx::kScatterThinWalled | mtlx::kScatterTwoSided;
       }
     }
-  } else if (node->getType() != mx::SURFACE_SHADER_TYPE_STRING) {
+  } else if (node.node->getType() != mx::SURFACE_SHADER_TYPE_STRING) {
     MarkTwoSidedDielectrics(0);
   }
 }
 
 MtlxExprCompiler::DisplacementExpr MtlxExprCompiler::CompileDisplacement(
-    const mx::NodePtr& disp_node) {
-  mx::NodePtr node = UnwrapShaderNode(disp_node, "displacementshader");
+    const ScopedNode& node) {
   if (!node) return {};
-  if (auto it = disp_expr_.find(node.get()); it != disp_expr_.end()) {
+  NodeKey key{node.frame, node.node.get()};
+  if (auto it = disp_expr_.find(key); it != disp_expr_.end()) {
     return it->second;
   }
-  std::string cat = NodeCategory(node);
+  const std::string& cat = NodeCategory(node.node);
   DisplacementExpr res;
   if (cat == "displacement") {
     if (IsNonZeroInput(node, "displacement")) {
       Expr scale = CompileInputExpr(node, "scale", Expr::one());
       if (!scale.is_zero()) {
-        bool is_vec = InputType(node, "displacement") == "vector3";
+        bool is_vec = InputType(node.node, "displacement") == "vector3";
         Expr disp = CompileInputExpr(node, "displacement") * scale;
         if (!disp.is_zero()) res = {is_vec ? disp : disp.x(), is_vec};
       }
     }
   } else if (cat == "mix") {
+    auto disp_in = [&](const std::string& name) {
+      return CompileDisplacement(
+          ResolveConnected(node, name, "displacementshader"));
+    };
     Expr m = CompileInputExpr(node, "mix");
     if (m.is_zero()) {
-      res = CompileDisplacement(node->getConnectedNode("bg"));
+      res = disp_in("bg");
     } else if (m.is_one()) {
-      res = CompileDisplacement(node->getConnectedNode("fg"));
+      res = disp_in("fg");
     } else {
-      DisplacementExpr fg = CompileDisplacement(node->getConnectedNode("fg"));
-      DisplacementExpr bg = CompileDisplacement(node->getConnectedNode("bg"));
+      DisplacementExpr fg = disp_in("fg"), bg = disp_in("bg");
       if (!fg.expr.is_zero() || !bg.expr.is_zero()) {
         bool is_vec = fg.is_vector || bg.is_vector;
         auto promote = [&](const DisplacementExpr& d) {
@@ -2116,7 +2361,7 @@ MtlxExprCompiler::DisplacementExpr MtlxExprCompiler::CompileDisplacement(
                     "'; ignoring displacement.");
   }
   if (res.expr.code.size() > 1) res.expr = EmitTmpExpr(res.expr);
-  disp_expr_[node.get()] = res;
+  disp_expr_[key] = res;
   return res;
 }
 
@@ -2169,21 +2414,24 @@ ref<Object> MtlxExprCompiler::CreateBsdf(std::string_view variant) {
 }  // namespace
 
 CompiledSurfaceShader CompileSurfaceShader(
-    const mx::NodePtr& shader_node, std::string_view variant,
+    const mx::NodePtr& shader_node, std::string_view output_name,
+    std::string_view variant,
     const std::function<const CachedTexture*(const TextureKey&)>&
         lookup_texture) {
   absl::flat_hash_set<std::string> warned;
   CompiledSurfaceShader out;
   {
-    MtlxExprCompiler compiler(lookup_texture, warned);
-    compiler.CompileBsdf(shader_node);
+    MtlxExprCompiler compiler(shader_node->getDocument(), lookup_texture,
+                              warned);
+    compiler.CompileBsdf(shader_node, output_name);
     out.bsdf = compiler.CreateBsdf(variant);
     out.mesh_attributes.insert(compiler.attr_requests().begin(),
                                compiler.attr_requests().end());
   }
   {
-    MtlxExprCompiler compiler(lookup_texture, warned);
-    Expr radiance = compiler.CompileEdf(shader_node);
+    MtlxExprCompiler compiler(shader_node->getDocument(), lookup_texture,
+                              warned);
+    Expr radiance = compiler.CompileEdf(shader_node, output_name);
     if (!radiance.is_zero()) {
       out.radiance_texture =
           compiler.CreateExprTexture(radiance, /*unbounded=*/true, variant);
@@ -2195,21 +2443,30 @@ CompiledSurfaceShader CompileSurfaceShader(
 }
 
 void DiscoverSurfaceShaderTextures(
-    const mx::NodePtr& shader_node,
+    const mx::NodePtr& shader_node, std::string_view output_name,
     const std::function<void(const TextureKey&)>& callback) {
-  MtlxExprCompiler compiler(callback);
-  compiler.CompileBsdf(shader_node);
-  compiler.CompileEdf(shader_node);
+  MtlxExprCompiler compiler(shader_node->getDocument(), callback);
+  compiler.CompileBsdf(shader_node, output_name);
+  compiler.CompileEdf(shader_node, output_name);
+}
+
+bool HasDisplacementShader(const mx::NodePtr& shader_node,
+                           std::string_view output_name) {
+  MtlxGraphResolver resolver;
+  ScopedNode n = resolver.UnwrapShaderNode(
+      {shader_node, nullptr}, std::string(output_name), "displacementshader");
+  return n && n.node->getType() == mx::DISPLACEMENT_SHADER_TYPE_STRING;
 }
 
 MaterialDisplacement CompileDisplacementShader(
-    const mx::NodePtr& shader_node, std::string_view variant,
+    const mx::NodePtr& shader_node, std::string_view output_name,
+    std::string_view variant,
     const std::function<const CachedTexture*(const TextureKey&)>&
         lookup_texture) {
   absl::flat_hash_set<std::string> warned;
-  MtlxExprCompiler compiler(lookup_texture, warned);
+  MtlxExprCompiler compiler(shader_node->getDocument(), lookup_texture, warned);
   MtlxExprCompiler::DisplacementExpr disp =
-      compiler.CompileDisplacement(shader_node);
+      compiler.CompileDisplacement(shader_node, output_name);
   if (disp.expr.is_zero()) return {};
   bool requires_uv = compiler.ProgramUsesUv(disp.expr);
   return {compiler.CreateExprTexture(disp.expr, /*unbounded=*/true, variant),
@@ -2219,10 +2476,10 @@ MaterialDisplacement CompileDisplacementShader(
 }
 
 void DiscoverDisplacementShaderTextures(
-    const mx::NodePtr& shader_node,
+    const mx::NodePtr& shader_node, std::string_view output_name,
     const std::function<void(const TextureKey&)>& callback) {
-  MtlxExprCompiler compiler(callback);
-  compiler.CompileDisplacement(shader_node);
+  MtlxExprCompiler compiler(shader_node->getDocument(), callback);
+  compiler.CompileDisplacement(shader_node, output_name);
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

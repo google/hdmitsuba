@@ -1,0 +1,54 @@
+<?xml version="1.0"?>
+<materialx version="1.38" fileprefix="textures/">
+  <geompropdef name="hdmitsuba_norm_default" geomprop="normal" />
+  <nodedef name="ND_hdmitsuba_fname" node="hdmitsuba_fname"><output name="out" type="filename" /></nodedef>
+  <nodegraph name="NG_hdmitsuba_fname" nodedef="ND_hdmitsuba_fname">
+    <output name="out" type="filename" value="uv_quadrants.png" />
+  </nodegraph>
+  <nodedef name="ND_hdmitsuba_mat" node="hdmitsuba_mat"><output name="out" type="matrix33" /></nodedef>
+  <nodegraph name="NG_hdmitsuba_mat" nodedef="ND_hdmitsuba_mat">
+    <output name="out" type="matrix33" value="1, 0, 0, 0, 1, 0, 0, 0, 0.5" />
+  </nodegraph>
+  <nodegraph name="NG_hdmitsuba_tex">
+    <input name="tint" type="color3" value="0.05, 0.0, 0.0" />
+    <hdmitsuba_fname name="f" type="filename" />
+    <image name="img" type="color3">
+      <input name="file" type="filename" nodename="f" colorspace="srgb_texture" />
+      <input name="texcoord" type="vector2" value="0.25, 0.25" />
+      <input name="filtertype" type="string" value="closest" />
+    </image>
+    <add name="tinted" type="color3"><input name="in1" type="color3" nodename="img" /><input name="in2" type="color3" interfacename="tint" /></add>
+    <output name="out" type="color3" nodename="tinted" />
+  </nodegraph>
+  <nodegraph name="NG_hdmitsuba_tex_fwd">
+    <output name="out" type="color3" nodegraph="NG_hdmitsuba_tex" output="out" />
+  </nodegraph>
+  <nodedef name="ND_hdmitsuba_custom_glow" node="hdmitsuba_custom_glow">
+    <input name="tint" type="color3" value="0.2, 0.5, 0.8" />
+    <input name="coeffs" type="color3" value="1, 0, 0" />
+    <input name="scale" type="float" />
+    <input name="norm" type="vector3" value="9, 9, 9" defaultgeomprop="hdmitsuba_norm_default" />
+    <output name="out_a" type="surfaceshader" />
+    <output name="out_surface" type="surfaceshader" />
+  </nodedef>
+  <nodegraph name="NG_hdmitsuba_custom_glow" nodedef="ND_hdmitsuba_custom_glow">
+    <luminance name="lum" type="color3">
+      <input name="in" type="color3" value="0.2, 0.0, 0.8" />
+      <input name="lumacoeffs" type="color3" interfacename="coeffs" />
+    </luminance>
+    <multiply name="scaled_lum" type="color3">
+      <input name="in1" type="color3" nodename="lum" />
+      <input name="in2" type="float" interfacename="scale" />
+    </multiply>
+    <hdmitsuba_mat name="m" type="matrix33" />
+    <transformmatrix name="mn" type="vector3"><input name="in" type="vector3" interfacename="norm" /><input name="mat" type="matrix33" nodename="m" /></transformmatrix>
+    <convert name="n" type="color3"><input name="in" type="vector3" nodename="mn" /></convert>
+    <add name="s1" type="color3"><input name="in1" type="color3" interfacename="tint" /><input name="in2" type="color3" nodename="scaled_lum" /></add>
+    <add name="s2" type="color3"><input name="in1" type="color3" nodename="s1" /><input name="in2" type="color3" nodegraph="NG_hdmitsuba_tex_fwd" output="out" /></add>
+    <add name="s3" type="color3"><input name="in1" type="color3" nodename="s2" /><input name="in2" type="color3" nodename="n" /></add>
+    <surface_unlit name="sa" type="surfaceshader"><input name="emission_color" type="color3" value="9, 9, 9" /></surface_unlit>
+    <surface_unlit name="surf" type="surfaceshader"><input name="emission_color" type="color3" nodename="s3" /></surface_unlit>
+    <output name="out_a" type="surfaceshader" nodename="sa" />
+    <output name="out_surface" type="surfaceshader" nodename="surf" />
+  </nodegraph>
+</materialx>

@@ -39,30 +39,37 @@ struct CompiledSurfaceShader {
 };
 
 // Compiles the BSDF closures (including cutout `opacity`) and emission (`edf`,
-// weighted by `opacity`) of a flattened MaterialX surface shader (`surface`,
+// weighted by `opacity`) of a MaterialX surface shader (`surface`,
 // `surface_unlit`, `mix`, `surfacematerial`, or raw BSDF/EDF closures).
 CompiledSurfaceShader CompileSurfaceShader(
-    const MaterialX::NodePtr& shader_node, std::string_view variant,
+    const MaterialX::NodePtr& shader_node, std::string_view output_name,
+    std::string_view variant,
     const std::function<const CachedTexture*(const TextureKey&)>&
         lookup_texture);
 
 // Dry-run compiles the active branches of `shader_node` and invokes `callback`
 // with the `TextureKey` of every bitmap texture it consumes.
 void DiscoverSurfaceShaderTextures(
-    const MaterialX::NodePtr& shader_node,
+    const MaterialX::NodePtr& shader_node, std::string_view output_name,
     const std::function<void(const TextureKey&)>& callback);
 
-// Compiles a flattened MaterialX displacement shader (`displacement` float or
-// vector3, `mix`, `dot`, or `surfacematerial`) into a `materialx_expr` texture.
+// Returns true if `shader_node` (unwrapping `dot`, `NodeGraph`, and
+// `surfacematerial`) resolves to a connected displacement shader.
+bool HasDisplacementShader(const MaterialX::NodePtr& shader_node,
+                           std::string_view output_name);
+
+// Compiles a MaterialX displacement shader (`displacement` float or vector3,
+// `mix`, `dot`, or `surfacematerial`) into a `materialx_expr` texture.
 MaterialDisplacement CompileDisplacementShader(
-    const MaterialX::NodePtr& shader_node, std::string_view variant,
+    const MaterialX::NodePtr& shader_node, std::string_view output_name,
+    std::string_view variant,
     const std::function<const CachedTexture*(const TextureKey&)>&
         lookup_texture);
 
 // Dry-run compiles the active branches of a displacement shader and invokes
 // `callback` with the `TextureKey` of every bitmap texture it consumes.
 void DiscoverDisplacementShaderTextures(
-    const MaterialX::NodePtr& shader_node,
+    const MaterialX::NodePtr& shader_node, std::string_view output_name,
     const std::function<void(const TextureKey&)>& callback);
 
 PXR_NAMESPACE_CLOSE_SCOPE

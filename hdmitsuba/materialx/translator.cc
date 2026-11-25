@@ -80,9 +80,9 @@ namespace {
 
 namespace mx = MaterialX;
 
-// Prepares a MaterialX library document before `flattenSubgraphs()`:
-// 1. Resolves non-empty relative filenames (`importLibrary` and
-//    `flattenSubgraphs` drop enclosing `<materialx>` / `<nodegraph>`
+// Prepares a MaterialX library document before use:
+// 1. Resolves non-empty relative filenames (`importLibrary` and lazy
+//    `NodeGraph` compilation drop enclosing `<materialx>` / `<nodegraph>`
 //    `fileprefix` attributes).
 // 2. Forwards `thin_walled` / `geometry_thin_walled` onto `<surface>` nodes
 //    inside `surfaceshader` implementation nodegraphs when omitted (e.g.,
@@ -118,9 +118,63 @@ void PrepareLibraryDocument(const mx::DocumentPtr& doc) {
   }
 }
 
+struct MaterialXStdLibraries {
+  mx::ConstDocumentPtr doc;
+  absl::flat_hash_set<const mx::GraphElement*> image_graphs;
+};
+
+// Returns true if `g` or any `NodeGraph` it transitively invokes contains an
+// `image` node, short-circuiting graphs owned by `std_libs->doc` via
+// `std_libs->image_graphs`.
+bool GraphHasImageNode(const mx::ConstGraphElementPtr& g,
+                       const MaterialXStdLibraries* std_libs,
+                       absl::flat_hash_set<const mx::GraphElement*>& visited) {
+  if (!g) return false;
+  if (std_libs && g->getDocument() == std_libs->doc) {
+    return std_libs->image_graphs.contains(g.get());
+  }
+  if (!visited.insert(g.get()).second) return false;
+  std::vector<mx::NodePtr> nodes = g->getNodes();
+  for (const mx::NodePtr& node : nodes) {
+    if (node->getCategory() == "image") return true;
+  }
+  auto visit_port = [&](const mx::PortElementPtr& port) {
+    if (!port->hasNodeGraphString() &&
+        (port->hasNodeName() || port->hasInterfaceName() ||
+         !port->hasOutputString())) {
+      return false;
+    }
+    mx::OutputPtr out = port->getConnectedOutput();
+    return out && GraphHasImageNode(out->getParent()->asA<mx::GraphElement>(),
+                                    std_libs, visited);
+  };
+  for (const mx::InputPtr& in : g->getInputs()) {
+    if (visit_port(in)) return true;
+    if (in->hasNodeName() && g->getParent() &&
+        GraphHasImageNode(g->getParent()->asA<mx::GraphElement>(), std_libs,
+                          visited)) {
+      return true;
+    }
+  }
+  for (const mx::OutputPtr& out : g->getOutputs()) {
+    if (visit_port(out)) return true;
+  }
+  for (const mx::NodePtr& node : nodes) {
+    for (const mx::InputPtr& in : node->getInputs()) {
+      if (visit_port(in)) return true;
+    }
+    if (mx::InterfaceElementPtr impl = node->getImplementation()) {
+      if (GraphHasImageNode(impl->asA<mx::NodeGraph>(), std_libs, visited)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 // Returns the immutable MaterialX standard libraries (initialized once).
-const mx::ConstDocumentPtr& GetMaterialXStdLibraries() {
-  static const absl::NoDestructor<mx::ConstDocumentPtr> std_libs([] {
+const MaterialXStdLibraries& GetMaterialXStdLibraries() {
+  static const absl::NoDestructor<MaterialXStdLibraries> std_libs([] {
     mx::FileSearchPath search_path;
     for (const char* env :
          {"PXR_MTLX_PLUGIN_SEARCH_PATHS", "PXR_MTLX_STDLIB_SEARCH_PATHS"}) {
@@ -138,7 +192,15 @@ const mx::ConstDocumentPtr& GetMaterialXStdLibraries() {
     mx::DocumentPtr doc = mx::createDocument();
     mx::loadLibraries({}, search_path, doc);
     PrepareLibraryDocument(doc);
-    return mx::ConstDocumentPtr(std::move(doc));
+    absl::flat_hash_set<const mx::GraphElement*> image_graphs;
+    for (const mx::NodeGraphPtr& ng : doc->getNodeGraphs()) {
+      absl::flat_hash_set<const mx::GraphElement*> visited;
+      if (GraphHasImageNode(ng, nullptr, visited)) {
+        image_graphs.insert(ng.get());
+      }
+    }
+    return MaterialXStdLibraries{mx::ConstDocumentPtr(std::move(doc)),
+                                 std::move(image_graphs)};
   }());
   return *std_libs;
 }
@@ -489,7 +551,9 @@ TranslatedMaterial TranslateWithTextureCache(
 struct PreparedMaterialX {
   mx::DocumentPtr doc;
   mx::NodePtr surface_node;
+  std::string surface_output;
   mx::NodePtr displacement_node;
+  std::string displacement_output;
 };
 
 bool HasMaterialXSurface(const PreparedMaterialX& prepared) {
@@ -511,9 +575,9 @@ std::shared_ptr<const PreparedMaterialX> PrepareMaterialXNetwork(
   if (!IsMaterialXTerminal(network, disp_conn)) disp_conn = nullptr;
   if (!surface_conn && !disp_conn) return nullptr;
   try {
-    const mx::ConstDocumentPtr& std_libs = GetMaterialXStdLibraries();
+    const MaterialXStdLibraries& std_libs = GetMaterialXStdLibraries();
     const std::string* version = GetMtlxVersion(network);
-    auto [doc, custom_libs] = DocumentBuilder(network, std_libs, version)
+    auto [doc, custom_libs] = DocumentBuilder(network, std_libs.doc, version)
                                   .Build(surface_conn, disp_conn);
     if (!doc) return nullptr;
 
@@ -521,38 +585,44 @@ std::shared_ptr<const PreparedMaterialX> PrepareMaterialXNetwork(
     UpgradeMaterialXDocument(doc, version != nullptr);
 
     if (custom_libs.empty()) {
-      doc->setDataLibrary(std_libs);
+      doc->setDataLibrary(std_libs.doc);
     } else {
       mx::DocumentPtr overlay = mx::createDocument();
-      overlay->setDataLibrary(std_libs);
+      overlay->setDataLibrary(std_libs.doc);
       for (const mx::ConstDocumentPtr& lib : custom_libs) {
         overlay->importLibrary(lib);
       }
       doc->setDataLibrary(overlay);
     }
-    doc->flattenSubgraphs();
     mx::OutputPtr surf_out = doc->getOutput("out_surface");
     mx::NodePtr surface_node =
         surf_out ? surf_out->getConnectedNode() : nullptr;
+    std::string surface_output = surf_out ? surf_out->getOutputString() : "";
     mx::OutputPtr disp_out = doc->getOutput("out_displacement");
     mx::NodePtr displacement_node =
         disp_out ? disp_out->getConnectedNode() : nullptr;
-    if (surface_node && surface_node->getCategory() == "surfacematerial" &&
-        disp_rank < surf_rank) {
-      if (mx::NodePtr mat_disp =
-              surface_node->getConnectedNode("displacementshader")) {
-        displacement_node = std::move(mat_disp);
-      }
+    std::string displacement_output =
+        disp_out ? disp_out->getOutputString() : "";
+    if (surface_node && disp_rank < surf_rank &&
+        surf_out->getType() == mx::MATERIAL_TYPE_STRING &&
+        HasDisplacementShader(surface_node, surface_output)) {
+      displacement_node = surface_node;
+      displacement_output = surface_output;
     }
     if (!surface_node && !displacement_node) return nullptr;
-    if (!doc->getNodes("image").empty()) {
-      if (surface_node) DiscoverSurfaceShaderTextures(surface_node, callback);
+    absl::flat_hash_set<const mx::GraphElement*> visited;
+    if (GraphHasImageNode(doc, &std_libs, visited)) {
+      if (surface_node) {
+        DiscoverSurfaceShaderTextures(surface_node, surface_output, callback);
+      }
       if (displacement_node) {
-        DiscoverDisplacementShaderTextures(displacement_node, callback);
+        DiscoverDisplacementShaderTextures(displacement_node,
+                                           displacement_output, callback);
       }
     }
     return std::make_shared<PreparedMaterialX>(PreparedMaterialX{
-        std::move(doc), std::move(surface_node), std::move(displacement_node)});
+        std::move(doc), std::move(surface_node), std::move(surface_output),
+        std::move(displacement_node), std::move(displacement_output)});
   } catch (const std::exception& e) {
     TF_WARN("Failed to translate MaterialX network '%s': %s", id.GetText(),
             e.what());
@@ -569,7 +639,8 @@ TranslatedMaterial TranslateMaterialXNetwork(
   try {
     if (prepared.surface_node) {
       CompiledSurfaceShader compiled =
-          CompileSurfaceShader(prepared.surface_node, variant, lookup_texture);
+          CompileSurfaceShader(prepared.surface_node, prepared.surface_output,
+                               variant, lookup_texture);
       res.mesh_attributes = std::move(compiled.mesh_attributes);
       if (compiled.radiance_texture) {
         mitsuba::ref<mitsuba::Object> radiance = compiled.radiance_texture;
@@ -590,6 +661,7 @@ TranslatedMaterial TranslateMaterialXNetwork(
     }
     if (prepared.displacement_node) {
       res.displacement = CompileDisplacementShader(prepared.displacement_node,
+                                                   prepared.displacement_output,
                                                    variant, lookup_texture);
     }
   } catch (const std::exception& e) {
