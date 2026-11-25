@@ -453,6 +453,7 @@ class MtlxExprCompiler : private MtlxGraphResolver {
   DisplacementExpr CompileDisplacement(const ScopedNode& node);
   Expr CompileOpacity(const ScopedNode& node);
   int CompileBsdfClosure(const ScopedNode& node);
+  bool IsClosureOpaque(int idx) const;
   int EmitOpaqueBlocker();
   int FrameSlot(const ScopedNode& node, const std::string& name,
                 const Expr& def);
@@ -537,6 +538,8 @@ class MtlxExprCompiler : private MtlxGraphResolver {
   absl::flat_hash_map<NodeKey, DisplacementExpr> disp_expr_;
   absl::flat_hash_map<NodeKey, Expr> opacity_expr_;
   absl::flat_hash_map<NodeKey, int> bsdf_closure_;
+  std::vector<bool> closure_opaque_;
+  int opaque_blocker_ = -1;
   absl::flat_hash_map<const mx::ValueElement*, Expr> authored_opaque_expr_;
   absl::flat_hash_map<const mx::ValueElement*, MatExpr> authored_opaque_matrix_;
   absl::flat_hash_map<NodeOutKey, MatExpr> node_matrix_expr_;
@@ -2140,15 +2143,43 @@ void MtlxExprCompiler::MarkTwoSidedDielectrics(size_t start) {
 }
 
 int MtlxExprCompiler::EmitClosure(mtlx::ClosureNode node) {
+  bool opaque = true;
+  switch (node.op) {
+    case mtlx::ClosureOp::Null:
+      opaque = false;
+      break;
+    case mtlx::ClosureOp::Layer:
+    case mtlx::ClosureOp::Add:
+      opaque =
+          IsClosureOpaque(node.comb.first) || IsClosureOpaque(node.comb.second);
+      break;
+    case mtlx::ClosureOp::Mix:
+      opaque =
+          IsClosureOpaque(node.comb.first) && IsClosureOpaque(node.comb.second);
+      break;
+    case mtlx::ClosureOp::Multiply:
+      opaque = IsClosureOpaque(node.comb.first);
+      break;
+    default:
+      opaque = !mtlx::leaf_has_layer_throughput(node);
+      break;
+  }
   prog_.closures.push_back(node);
+  closure_opaque_.push_back(opaque);
   return static_cast<int>(prog_.closures.size()) - 1;
+}
+
+bool MtlxExprCompiler::IsClosureOpaque(int idx) const {
+  return idx >= 0 && closure_opaque_[idx];
 }
 
 int MtlxExprCompiler::EmitOpaqueBlocker() {
   // Opaque and transmissive leaves still block `layer` bases (`throughput = 0`)
-  // at `weight == 0`, without compiling dead inputs.
-  int z = EmitTmp(Expr::zero());
-  return EmitClosure(mtlx::ClosureNode::MakeDiffuse(z, z, z, 0, -1));
+  // at `weight == 0`, without compiling dead inputs or emitting an active leaf.
+  if (opaque_blocker_ < 0) {
+    opaque_blocker_ = EmitClosure(mtlx::ClosureNode::MakeOpaqueBlocker());
+  }
+  return opaque_blocker_;
 }
 
 int MtlxExprCompiler::FrameSlot(const ScopedNode& node, const std::string& name,
@@ -2285,8 +2316,11 @@ int MtlxExprCompiler::CompileBsdfClosure(const ScopedNode& node) {
   }
 
   const std::string& cat = NodeCategory(node.node);
+  auto is_blocker = [&](int c) {
+    return c >= 0 && prog_.closures[c].op == mtlx::ClosureOp::OpaqueBlocker;
+  };
   auto scale = [&](int c, const Expr& w) {
-    return (c < 0 || w.is_one())
+    return (c < 0 || w.is_one() || is_blocker(c))
                ? c
                : EmitClosure(mtlx::ClosureNode::MakeMultiply(c, EmitTmp(w)));
   };
@@ -2308,12 +2342,16 @@ int MtlxExprCompiler::CompileBsdfClosure(const ScopedNode& node) {
     bool is_layer = cat == "layer";
     int c0 =
         CompileBsdfClosure(ResolveConnected(node, is_layer ? "top" : "in1"));
-    int c1 =
-        CompileBsdfClosure(ResolveConnected(node, is_layer ? "base" : "in2"));
-    if (c0 < 0) {
-      idx = c1;
-    } else if (c1 < 0) {
+    // Prune occluded BSDF bases (and VDF bases under a zero-weight blocker),
+    // while still visiting active `layer_vdf` bases for VDF warnings.
+    if (is_layer && IsClosureOpaque(c0) &&
+        (is_blocker(c0) ||
+         InputType(node.node, "base") != mx::VDF_TYPE_STRING)) {
       idx = c0;
+    } else if (int c1 = CompileBsdfClosure(
+                   ResolveConnected(node, is_layer ? "base" : "in2"));
+               c0 < 0 || c1 < 0) {
+      idx = c0 < 0 ? c1 : c0;
     } else {
       idx = EmitClosure(is_layer ? mtlx::ClosureNode::MakeLayer(c0, c1)
                                  : mtlx::ClosureNode::MakeAdd(c0, c1));
@@ -2338,8 +2376,10 @@ int MtlxExprCompiler::CompileBsdfClosure(const ScopedNode& node) {
       }
     }
   } else if (cat == "multiply") {
-    Expr w = CompileInputExpr(node, "in2", Expr::one());
-    idx = scale(CompileBsdfClosure(ResolveConnected(node, "in1")), w);
+    int c = CompileBsdfClosure(ResolveConnected(node, "in1"));
+    idx = (c < 0 || is_blocker(c))
+              ? c
+              : scale(c, CompileInputExpr(node, "in2", Expr::one()));
   } else if (cat == "surface") {
     if (Expr op = CompileOpacity(node); !op.is_zero()) {
       if (!CompileInputExpr(node, "thin_walled").is_zero()) thin_walled_ = true;
