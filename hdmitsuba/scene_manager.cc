@@ -492,8 +492,14 @@ class SceneModel final : public SceneManager {
       const HdRenderPass* render_pass,
       const HdRenderPassAovBindingVector& aov_bindings) override {
     if (aov_bindings.empty()) {
-      absl::MutexLock lock(aov_states_mutex_);
-      pass_aov_states_.erase(render_pass);
+      absl::MutexLock state_lock(state_mutex_);
+      absl::MutexLock aov_lock(aov_states_mutex_);
+      if (auto it = pass_aov_states_.find(render_pass);
+          it != pass_aov_states_.end()) {
+        if (it->second.aov_integrator && frozen_render_)
+          frozen_render_->Clear();
+        pass_aov_states_.erase(it);
+      }
       return;
     }
 
@@ -517,14 +523,18 @@ class SceneModel final : public SceneManager {
       }
     }
     pass_state.aov_integrator_keys = absl::StrJoin(aov_strings, ",");
-    pass_state.aov_integrator = nullptr;
     absl::MutexLock state_lock(state_mutex_);
     absl::MutexLock aov_lock(aov_states_mutex_);
     reset_progressive_ = true;
-    if (frozen_render_) {
-      frozen_render_->Clear();
+    RenderPassState& existing = pass_aov_states_[render_pass];
+    if (existing.aov_integrator) {
+      if (existing.aov_integrator_keys == pass_state.aov_integrator_keys) {
+        pass_state.aov_integrator = std::move(existing.aov_integrator);
+      } else if (frozen_render_) {
+        frozen_render_->Clear();
+      }
     }
-    pass_aov_states_[render_pass] = std::move(pass_state);
+    existing = std::move(pass_state);
   }
 
   void Render(const HdRenderPass* render_pass, const HdCamera* camera,
@@ -610,6 +620,7 @@ class SceneModel final : public SceneManager {
         sensor->set_film(
             PluginManager::instance()->create_object<Film>(film_props).get());
         film = sensor->film();
+        if (frozen_render_) frozen_render_->Clear();
         film_changed = true;
       }
     }
@@ -637,8 +648,6 @@ class SceneModel final : public SceneManager {
 
     if (film_changed) {
       sensor->parameters_changed();
-      if (frozen_render_)
-        frozen_render_->Clear();  // Invalidate cache on resize
       reset_progressive_ = true;
     }
 
@@ -828,14 +837,10 @@ class SceneModel final : public SceneManager {
       const VtDictionary& namespaced_settings) override {
     absl::MutexLock state_lock(state_mutex_);
     absl::MutexLock aov_lock(aov_states_mutex_);
-    const int new_samples_per_pass =
+    interactive_samples_per_pass_ =
         std::max(1, GetSetting<int>(namespaced_settings,
                                     "mitsuba:interactive_samples_per_pass")
                         .value_or(1));
-    if (new_samples_per_pass != interactive_samples_per_pass_) {
-      interactive_samples_per_pass_ = new_samples_per_pass;
-      reset_progressive_ = true;
-    }
     PluginSpecNode integrator_spec = ParsePluginSpec(
         namespaced_settings, "mitsuba:integrator:", /*default_type=*/"path");
     const bool has_hide_emitters =
