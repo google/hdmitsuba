@@ -34,8 +34,8 @@ from hdmitsuba.tests import test_helpers
 
 
 @pytest.fixture(autouse=True)
-def _enable_materialx_and_variant(monkeypatch: pytest.MonkeyPatch) -> None:
-  mtlx.enable_materialx_and_default_variant(monkeypatch)
+def _set_default_variant() -> None:
+  mtlx.set_default_variant()
 
 
 def _check_op(
@@ -1259,20 +1259,12 @@ def test_mi_traverse_emitter_param_update() -> None:
   np.testing.assert_allclose(out_tb[0], [0.5, 0.5], atol=1e-5)
 
 
-def test_feature_flag_disabled_by_default(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-  """Verifies MaterialX is opt-in via HDMITSUBA_ENABLE_MATERIALX and falls back when unset.
-
-  Args:
-    monkeypatch: Pytest monkeypatch fixture.
-  """
+def test_mtlx_surface_precedence_and_preview_emissive_edit() -> None:
+  """Verifies UsdPreviewSurface emissive edits and mtlx:surface precedence."""
   stage, quad = mtlx.create_base_scene(
       with_lights=False, quad_half_size=0.8, resolution=(16, 16), spp=4
   )
-  mtlx.bind_mtlx_shader(
-      stage, quad, 'ND_surface_unlit', emission_color=(0.9, 0.1, 0.3)
-  )
+  material = UsdShade.Material.Define(stage, '/mesh/Material')
   preview = mtlx.define_shader(
       stage,
       'Preview',
@@ -1280,25 +1272,21 @@ def test_feature_flag_disabled_by_default(
       diffuseColor=(0.0, 0.0, 0.0),
       emissiveColor=(0.1, 0.8, 0.2),
   )
-  UsdShade.Material.Get(
-      stage, '/mesh/Material'
-  ).CreateSurfaceOutput().ConnectToSource(
+  material.CreateSurfaceOutput().ConnectToSource(
       preview.CreateOutput('surface', Sdf.ValueTypeNames.Token)
   )
+  UsdShade.MaterialBindingAPI.Apply(quad.GetPrim()).Bind(material)
 
-  # TODO(vicini): Remove `HDMITSUBA_ENABLE_MATERIALX` (and this test) once
-  # MaterialX support is complete.
-  monkeypatch.delenv('HDMITSUBA_ENABLE_MATERIALX', raising=False)
   engine = mtlx.create_engine(stage)
-  img_off, _ = test_helpers.assert_hydra_equal_to_offline(
+  img_preview, _ = test_helpers.assert_hydra_equal_to_offline(
       stage,
-      output_prefix='test_mtlx_flag_off',
+      output_prefix='test_mtlx_preview_emissive',
       engine=engine,
       spp=4,
       subdivision_level=0,
   )
   np.testing.assert_allclose(
-      mtlx.render_center(img_off), (0.1, 0.8, 0.2), atol=2e-2
+      mtlx.render_center(img_preview), (0.1, 0.8, 0.2), atol=2e-2
   )
   # Dynamic `UsdPreviewSurface.emissiveColor` edit in Hydra must rebuild the
   # emitter.
@@ -1307,15 +1295,19 @@ def test_feature_flag_disabled_by_default(
       mtlx.render_center(engine), (0.2, 0.3, 0.9), atol=2e-2
   )
 
-  monkeypatch.setenv('HDMITSUBA_ENABLE_MATERIALX', '1')
-  img_on, _ = test_helpers.assert_hydra_equal_to_offline(
+  # Connecting an `mtlx:surface` terminal takes precedence over the universal
+  # `UsdPreviewSurface` output.
+  mtlx.bind_mtlx_shader(
+      stage, quad, 'ND_surface_unlit', emission_color=(0.9, 0.1, 0.3)
+  )
+  img_mtlx, _ = test_helpers.assert_hydra_equal_to_offline(
       stage,
-      output_prefix='test_mtlx_flag_on',
+      output_prefix='test_mtlx_surface_precedence',
       spp=4,
       subdivision_level=0,
   )
   np.testing.assert_allclose(
-      mtlx.render_center(img_on), (0.9, 0.1, 0.3), atol=2e-2
+      mtlx.render_center(img_mtlx), (0.9, 0.1, 0.3), atol=2e-2
   )
 
 

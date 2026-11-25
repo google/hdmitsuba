@@ -59,7 +59,6 @@
 #include <pxr/usd/usdSkel/skinningQuery.h>
 #include <pxr/usd/usdSkel/utils.h>
 
-#include "hdmitsuba/config.h"
 #include "hdmitsuba/ies_emitter.h"
 #include "hdmitsuba/materialx/translator.h"
 #include "hdmitsuba/mesh/displacement.h"
@@ -433,7 +432,6 @@ nb::object CastMitsubaObject(mitsuba::Object* obj) {
 
 nb::object TranslateMaterialX(const UsdPrim& prim, UsdTimeCode time,
                               bool double_sided) {
-  if (!IsMaterialXEnabled()) return nb::none();
   std::string variant = ActiveVariant();
   auto trans = TranslateUsdMaterialX(prim, time, variant);
   if (!trans) return nb::none();
@@ -518,14 +516,12 @@ NB_MODULE(geometry_ext, m) {
           }
           return out;
         });
-  m.def("is_materialx_enabled", &IsMaterialXEnabled,
-        "Returns True if MaterialX translation is enabled at runtime.");
   m.def("translate_materialx", &TranslateMaterialX, nb::arg("prim"),
         nb::arg("time"), nb::arg("double_sided") = false,
         "Translates a MaterialX UsdShadeMaterial prim into a "
         "`(bsdf, emitter, mesh_attributes, displacement)` tuple (where "
         "`displacement` is `(texture, requires_uv, is_vector, attributes)` "
         "or None, with the mesh `attributes` read by `texture`), or "
-        "None if MaterialX support is disabled or the material has no active "
-        "MaterialX surface or displacement shader.");
+        "None if the material has no active MaterialX surface or "
+        "displacement shader.");
 }
