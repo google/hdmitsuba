@@ -86,11 +86,13 @@ class MtlxEvaluator {
 
  private:
   void update_uniform_tmps();
-  Val load_uniform_tmp(int slot) const;
-  Val eval_code(absl::Span<const Inst> code, size_t tmp_count,
-                uint32_t stack_size, const SurfaceInteraction3f& si,
-                Mask active, Val* out_tmps = nullptr, int stop_after_tmp = -1,
-                bool use_uniforms = false) const;
+  Val load_uniform_tmp(const CodePartition& part,
+                       absl::Span<const uint8_t> tmp_channels, int slot) const;
+  Val eval_code(absl::Span<const Inst> code,
+                absl::Span<const uint8_t> tmp_channels, uint32_t stack_size,
+                const SurfaceInteraction3f& si, Mask active,
+                Val* out_tmps = nullptr, int stop_after_tmp = -1,
+                const CodePartition* uniform_part = nullptr) const;
 
   MtlxProgram m_prog;
   std::vector<ref<Texture>> m_inputs;

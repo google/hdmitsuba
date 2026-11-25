@@ -625,14 +625,26 @@ void for_each_closure_tmp_slot(const ClosureNode& c, Fn&& fn) {
 struct SubProgram {
   uint32_t code_begin = 0;
   uint32_t code_end = 0;
+  uint32_t tmp_channels_begin = 0;
   uint32_t tmp_count = 0;
   uint32_t stack_size = 1;
   uint32_t has_texcoord = 0;
 };
-static_assert(sizeof(SubProgram) == 20);
+static_assert(sizeof(SubProgram) == 24);
 static_assert(std::has_unique_object_representations_v<SubProgram>);
 
 enum class TmpKind : uint8_t { Varying, Const, Opaque, Uniform };
+
+// Pre-partitioned spatially-invariant vs spatially-varying bytecode and
+// per-temporary classification. `uniform_offset` indexes `consts` (`Const`),
+// `opaques` (`Opaque`), or the evaluator's packed uniform scalar buffer
+// (`Uniform`).
+struct CodePartition {
+  std::vector<Inst> invariant_code;
+  std::vector<Inst> varying_code;
+  std::vector<TmpKind> tmp_kind;
+  std::vector<uint32_t> uniform_offset;
+};
 
 // Variant-independent compiled MaterialX program passed via `Properties`.
 //
@@ -640,17 +652,12 @@ enum class TmpKind : uint8_t { Varying, Const, Opaque, Uniform };
 // each, and `stack_size` bounds the evaluation stack depth.
 struct MtlxProgram {
   std::vector<Inst> code;
-  // Pre-partitioned spatially-invariant vs spatially-varying bytecode and
-  // per-temporary classification. `uniform_offset` indexes `consts` (`Const`),
-  // `opaques` (`Opaque`), or the evaluator's packed uniform scalar buffer
-  // (`Uniform`).
-  std::vector<Inst> invariant_code;
-  std::vector<Inst> varying_code;
-  std::vector<TmpKind> tmp_kind;
-  std::vector<uint32_t> uniform_offset;
+  CodePartition main_part;
+  std::vector<CodePartition> sub_parts;
   uint32_t uniform_scalar_count = 0;
   std::vector<Inst> sub_code;
   std::vector<SubProgram> sub_programs;
+  std::vector<uint8_t> sub_tmp_channels;
   std::vector<double> consts = {0.0, 1.0};
   std::vector<double> opaques;
   std::vector<std::string> attr_names;
@@ -677,6 +684,7 @@ struct MtlxProgram {
     put_span(code, "code");
     put_span(sub_code, "sub_code");
     put_span(sub_programs, "sub_programs");
+    put_span(sub_tmp_channels, "sub_tmp_channels");
     put_span(consts, "consts");
     size_t n_attrs = attr_names.size();
     DR_TRAVERSE_STATE(n_attrs)

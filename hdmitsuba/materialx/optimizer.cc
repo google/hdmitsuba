@@ -80,33 +80,36 @@ void CompactLiveOpaques(MtlxProgram& prog) {
   }
 }
 
-void PartitionCode(MtlxProgram& prog, absl::Span<const int> root_slots) {
-  size_t n_tmps = prog.tmp_channels.size();
-  prog.invariant_code.clear();
-  prog.varying_code.clear();
-  prog.tmp_kind.assign(n_tmps, TmpKind::Varying);
-  prog.uniform_offset.assign(n_tmps, 0);
+CodePartition PartitionCodeSlice(absl::Span<const Inst> code,
+                                 absl::Span<const uint8_t> tmp_channels,
+                                 absl::Span<const int> root_slots,
+                                 uint32_t& uniform_scalars) {
+  CodePartition part;
+  if (code.empty()) return part;
+  size_t n_tmps = tmp_channels.size();
+  part.tmp_kind.assign(n_tmps, TmpKind::Varying);
+  part.uniform_offset.assign(n_tmps, 0);
 
   size_t stmt_begin = 0;
-  for (size_t i = 0; i < prog.code.size(); ++i) {
-    Inst inst = prog.code[i];
+  for (size_t i = 0; i < code.size(); ++i) {
+    Inst inst = code[i];
     if (!is_stmt_terminator(inst.op)) continue;
 
     size_t stmt_end = i + 1;
-    absl::Span<const Inst> stmt(prog.code.data() + stmt_begin,
+    absl::Span<const Inst> stmt(code.data() + stmt_begin,
                                 stmt_end - stmt_begin);
     stmt_begin = stmt_end;
 
     bool varying = false;
     for (Inst s : stmt) {
       if (is_spatially_varying_op(s.op) || s.op == Op::SampleInput ||
-          (s.op == Op::LoadTmp && prog.tmp_kind[s.imm] == TmpKind::Varying)) {
+          (s.op == Op::LoadTmp && part.tmp_kind[s.imm] == TmpKind::Varying)) {
         varying = true;
         break;
       }
     }
     if (varying) {
-      prog.varying_code.insert(prog.varying_code.end(), stmt.begin(),
+      part.varying_code.insert(part.varying_code.end(), stmt.begin(),
                                stmt.end());
       continue;
     }
@@ -114,44 +117,45 @@ void PartitionCode(MtlxProgram& prog, absl::Span<const int> root_slots) {
     if (inst.op == Op::StoreTmp) {
       if (stmt.size() == 2 &&
           (stmt[0].op == Op::Const || stmt[0].op == Op::Opaque)) {
-        prog.tmp_kind[inst.imm] =
+        part.tmp_kind[inst.imm] =
             stmt[0].op == Op::Const ? TmpKind::Const : TmpKind::Opaque;
-        prog.uniform_offset[inst.imm] = stmt[0].imm;
+        part.uniform_offset[inst.imm] = stmt[0].imm;
       } else {
-        prog.tmp_kind[inst.imm] = TmpKind::Uniform;
+        part.tmp_kind[inst.imm] = TmpKind::Uniform;
       }
     } else {
       for (uint8_t r = 0; r < inst.channels; ++r) {
-        prog.tmp_kind[inst.imm + r] = TmpKind::Uniform;
+        part.tmp_kind[inst.imm + r] = TmpKind::Uniform;
       }
     }
-    prog.invariant_code.insert(prog.invariant_code.end(), stmt.begin(),
+    part.invariant_code.insert(part.invariant_code.end(), stmt.begin(),
                                stmt.end());
   }
 
-  if (stmt_begin < prog.code.size()) {
-    prog.varying_code.insert(prog.varying_code.end(),
-                             prog.code.begin() + stmt_begin, prog.code.end());
+  if (stmt_begin < code.size()) {
+    part.varying_code.insert(part.varying_code.end(), code.begin() + stmt_begin,
+                             code.end());
   }
 
   // Prune intermediate uniform temporaries never read outside
   // `invariant_code` so they do not materialize unused hoisted buffers.
   std::vector<bool> live_out(n_tmps, false);
-  for (Inst inst : prog.varying_code) {
+  for (Inst inst : part.varying_code) {
     if (inst.op == Op::LoadTmp) live_out[inst.imm] = true;
   }
   for (int slot : root_slots) live_out[slot] = true;
-  uint32_t uniform_scalars = 0;
+  uint32_t part_scalars = 0;
   for (size_t k = 0; k < n_tmps; ++k) {
     if (!live_out[k]) {
-      prog.tmp_kind[k] = TmpKind::Varying;
-    } else if (prog.tmp_kind[k] == TmpKind::Uniform) {
-      prog.uniform_offset[k] = uniform_scalars;
-      uniform_scalars += prog.tmp_channels[k];
+      part.tmp_kind[k] = TmpKind::Varying;
+    } else if (part.tmp_kind[k] == TmpKind::Uniform) {
+      part.uniform_offset[k] = uniform_scalars + part_scalars;
+      part_scalars += tmp_channels[k];
     }
   }
-  prog.uniform_scalar_count = uniform_scalars;
-  if (uniform_scalars == 0) prog.invariant_code.clear();
+  uniform_scalars += part_scalars;
+  if (part_scalars == 0) part.invariant_code.clear();
+  return part;
 }
 
 }  // namespace
@@ -194,7 +198,21 @@ void OptimizeProgram(MtlxProgram& prog) {
   }
 
   CompactLiveOpaques(prog);
-  PartitionCode(prog, root_slots);
+
+  uint32_t uniform_scalars = 0;
+  prog.main_part = PartitionCodeSlice(prog.code, prog.tmp_channels, root_slots,
+                                      uniform_scalars);
+  prog.sub_parts.clear();
+  prog.sub_parts.reserve(prog.sub_programs.size());
+  for (const SubProgram& sub : prog.sub_programs) {
+    absl::Span<const Inst> slice(prog.sub_code.data() + sub.code_begin,
+                                 sub.code_end - sub.code_begin);
+    absl::Span<const uint8_t> ch(
+        prog.sub_tmp_channels.data() + sub.tmp_channels_begin, sub.tmp_count);
+    prog.sub_parts.push_back(
+        PartitionCodeSlice(slice, ch, {}, uniform_scalars));
+  }
+  prog.uniform_scalar_count = uniform_scalars;
 }
 
 }  // namespace mitsuba::mtlx
