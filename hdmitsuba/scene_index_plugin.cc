@@ -23,10 +23,11 @@
 //   transforms when it changes. It also resyncs the render settings prims when
 //   the active one changes.
 // - A keyless API-schema adapter contributing a lazy "mitsuba" container data
-//   source for authored `mitsuba:*` USD attributes on cameras, and fixing
-//   *invalidation*: UsdImagingStageSceneIndex drops a property change unless
-//   some adapter claims it (_ComputeDirtiedEntries has no resync fallback), and
-//   a few properties hdMitsuba cares about are claimed by nobody.
+//   source for authored `mitsuba:*` USD attributes on cameras, gprims, and
+//   lights, and fixing *invalidation*: UsdImagingStageSceneIndex drops a
+//   property change unless some adapter claims it (_ComputeDirtiedEntries has
+//   no resync fallback), and a few properties hdMitsuba cares about are
+//   claimed by nobody.
 //
 // TODO: keyless adapters cannot be scoped to a renderer. Constructing them
 // loads this library -- and with it Mitsuba and Dr.Jit -- into every
@@ -66,6 +67,7 @@
 #include <pxr/usd/usd/attribute.h>
 #include <pxr/usd/usd/property.h>
 #include <pxr/usd/usdGeom/camera.h>
+#include <pxr/usd/usdGeom/gprim.h>
 #include <pxr/usd/usdLux/lightAPI.h>
 #include <pxr/usd/usdLux/tokens.h>
 #include <pxr/usd/usdShade/material.h>
@@ -75,9 +77,7 @@
 #include <pxr/usdImaging/usdImaging/dataSourceStageGlobals.h>
 #include <pxr/usdImaging/usdImaging/types.h>
 
-#include "hdmitsuba/camera.h"
 #include "hdmitsuba/config.h"
-#include "hdmitsuba/mesh.h"
 #include "hdmitsuba/motion.h"
 #include "hdmitsuba/utils.h"
 
@@ -352,10 +352,23 @@ class HdMitsubaAttributesDataSource final : public HdContainerDataSource {
   HdDataSourceLocator time_varying_locator_;
 };
 
+HdDataSourceLocator MitsubaTargetLocator(const UsdPrim& prim) {
+  if (prim.IsA<UsdGeomCamera>()) {
+    return HdCameraSchema::GetDefaultLocator();
+  }
+  if (prim.IsA<UsdGeomGprim>()) {
+    return HdDataSourceLocator(HdMitsubaUtilsTokens->mitsuba);
+  }
+  if (prim.HasAPI<UsdLuxLightAPI>()) {
+    return HdLightSchema::GetDefaultLocator();
+  }
+  return HdDataSourceLocator();
+}
+
 }  // namespace
 
 // Contributes the lazy "mitsuba" container data source and covers invalidation
-// gaps for `mitsuba:sensor:*`, treatAsPoint/treatAsLine, and material outputs.
+// gaps for `mitsuba:*`, treatAsPoint/treatAsLine, and material outputs.
 // Being keyless, this runs for every prim of every stage in the process -- see
 // the TODO at the top of the file.
 class HdMitsuba_APISchemaAdapter : public UsdImagingAPISchemaAdapter {
@@ -367,13 +380,13 @@ class HdMitsuba_APISchemaAdapter : public UsdImagingAPISchemaAdapter {
     if (!subprim.IsEmpty() || !applied_instance_name.IsEmpty()) {
       return nullptr;
     }
-    if (prim.IsA<UsdGeomCamera>()) {
-      return HdRetainedContainerDataSource::New(
-          HdMitsubaUtilsTokens->mitsuba,
-          HdMitsubaAttributesDataSource::New(
-              prim, stage_globals, HdCameraSchema::GetDefaultLocator()));
+    HdDataSourceLocator locator = MitsubaTargetLocator(prim);
+    if (locator.IsEmpty()) {
+      return nullptr;
     }
-    return nullptr;
+    return HdRetainedContainerDataSource::New(
+        HdMitsubaUtilsTokens->mitsuba,
+        HdMitsubaAttributesDataSource::New(prim, stage_globals, locator));
   }
 
   HdDataSourceLocatorSet InvalidateImagingSubprim(
@@ -388,17 +401,24 @@ class HdMitsuba_APISchemaAdapter : public UsdImagingAPISchemaAdapter {
     for (const TfToken& prop : properties) {
       // Name test first: cheap, and keeps the schema lookups off the path
       // taken by the vast majority of prims, which match nothing here.
-      if (absl::StartsWith(prop.GetString(), kMitsubaSensorNamespace) &&
-          prim.IsA<UsdGeomCamera>()) {
-        // The camera adapter only maps UsdGeomCamera schema attributes.
-        result.insert(HdCameraSchema::GetDefaultLocator());
-        result.insert(HdDataSourceLocator(HdMitsubaUtilsTokens->mitsuba, prop));
-      } else if ((prop == UsdLuxTokens->treatAsPoint ||
-                  prop == UsdLuxTokens->treatAsLine ||
-                  prop == HdMitsubaUtilsTokens->visibility) &&
-                 prim.HasAPI<UsdLuxLightAPI>()) {
-        // The LightAPI adapter only claims `inputs:*` and `light:*`.
-        result.insert(HdLightSchema::GetDefaultLocator());
+      if (prop == UsdLuxTokens->treatAsPoint ||
+          prop == UsdLuxTokens->treatAsLine ||
+          prop == HdMitsubaUtilsTokens->visibility) {
+        if (prim.HasAPI<UsdLuxLightAPI>()) {
+          // The LightAPI adapter only claims `inputs:*` and `light:*`.
+          result.insert(HdLightSchema::GetDefaultLocator());
+        }
+      } else if (absl::StartsWith(prop.GetString(),
+                                  HdMitsubaPluginTokens->mitsubaNamespacePrefix
+                                      .GetString())) {
+        if (HdDataSourceLocator locator = MitsubaTargetLocator(prim);
+            !locator.IsEmpty()) {
+          if (locator != HdDataSourceLocator(HdMitsubaUtilsTokens->mitsuba)) {
+            result.insert(locator);
+          }
+          result.insert(
+              HdDataSourceLocator(HdMitsubaUtilsTokens->mitsuba, prop));
+        }
       } else if (absl::StartsWith(prop.GetString(),
                                   UsdShadeTokens->outputs.GetString()) &&
                  prim.IsA<UsdShadeMaterial>()) {
@@ -418,17 +438,26 @@ TF_REGISTRY_FUNCTION(TfType) {
       .SetFactory<
           UsdImagingAPISchemaAdapterFactory<HdMitsuba_APISchemaAdapter>>();
 
-  // Mesh lights are `mesh` rprims carrying a `light` data source, which the
-  // built-in rprim translator has no mapping for. Custom translators run in
-  // addition to the built-ins, so only the forward direction needs filling in.
-  HdDirtyBitsTranslator::RegisterTranslatorsForCustomRprimType(
-      HdPrimTypeTokens->mesh,
-      [](const HdDataSourceLocatorSet& set, HdDirtyBits* bits) {
-        if (set.Intersects(HdLightSchema::GetDefaultLocator())) {
-          *bits |= HdMitsubaMesh::DirtyLight;
-        }
-      },
-      [](const HdDirtyBits, HdDataSourceLocatorSet*) {});
+  // Mesh lights and custom `mitsuba:*` attributes are carried on shape rprims
+  // via data sources that the built-in rprim translator has no mapping for.
+  // Custom translators run in addition to the built-ins, so only the forward
+  // direction needs filling in.
+  auto translate_rprim_custom_bits = [](const HdDataSourceLocatorSet& set,
+                                        HdDirtyBits* bits) {
+    if (set.Intersects(HdLightSchema::GetDefaultLocator())) {
+      *bits |= kDirtyLight;
+    }
+    if (set.Intersects(HdDataSourceLocator(HdMitsubaUtilsTokens->mitsuba))) {
+      *bits |= kDirtyMitsubaParams;
+    }
+  };
+  auto noop_reverse = [](const HdDirtyBits, HdDataSourceLocatorSet*) {};
+  for (const TfToken& rprim_type :
+       {HdPrimTypeTokens->mesh, HdPrimTypeTokens->sphere,
+        HdPrimTypeTokens->cylinder, HdPrimTypeTokens->basisCurves}) {
+    HdDirtyBitsTranslator::RegisterTranslatorsForCustomRprimType(
+        rprim_type, translate_rprim_custom_bits, noop_reverse);
+  }
 }
 
 TF_REGISTRY_FUNCTION(HdSceneIndexPlugin) {

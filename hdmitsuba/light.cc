@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string_view>
 #include <utility>
 
 #include <drjit/math.h>
@@ -123,9 +124,9 @@ double CylinderPerimeter(const GfMatrix4d& transform, float radius) {
          (3.0 * (a + b) - std::sqrt((3.0 * a + b) * (a + 3.0 * b)));
 }
 
-ScalarAffineTransform4f ComputeLightTransform(const TfToken& type_id,
-                                              const GfMatrix4d& transform,
-                                              const LightParams& params) {
+ScalarAffineTransform4f ComputeLightTransform(
+    const TfToken& type_id, const GfMatrix4d& transform,
+    const LightParams& params, std::string_view emitter_plugin_type) {
   GfMatrix4d align_rotation;
   align_rotation.SetRotate(GfRotation(GfVec3d(1, 0, 0), 180.0));
   if (type_id == HdPrimTypeTokens->rectLight) {
@@ -165,8 +166,15 @@ ScalarAffineTransform4f ComputeLightTransform(const TfToken& type_id,
   // scale or shear, and AnimatedTransform rejects keyframe matrices with shear.
   ScalarAffineTransform4f to_world =
       RemoveScaleFromTransform(UsdToMitsubaTransform(transform));
-  if (type_id == HdPrimTypeTokens->sphereLight ||
-      type_id == HdPrimTypeTokens->distantLight) {
+  const bool flip_z =
+      emitter_plugin_type.empty()
+          ? (type_id == HdPrimTypeTokens->sphereLight ||
+             type_id == HdPrimTypeTokens->distantLight)
+          : (emitter_plugin_type == "point" || emitter_plugin_type == "spot" ||
+             emitter_plugin_type == "projector" ||
+             emitter_plugin_type == "directional" ||
+             emitter_plugin_type == "ies");
+  if (flip_z) {
     using ScalarVector3f = mitsuba::Vector<float, 3>;
     to_world = to_world *
                ScalarAffineTransform4f::rotate(ScalarVector3f(1, 0, 0), 180);
@@ -288,6 +296,27 @@ ShapingSpec GetShapingSpec(const HdContainerDataSourceHandle& light_container,
   return shaping;
 }
 
+std::optional<LightSpec> GetMeshEmitterSpec(
+    const HdContainerDataSourceHandle& prim_source, const SdfPath& id,
+    const GfMatrix4d& local_prefix) {
+  const HdContainerDataSourceHandle light =
+      HdLightSchema::GetFromParent(prim_source).GetContainer();
+  if (!light ||
+      !HdSampledDataSource::Cast(light->Get(HdLightTokens->intensity))) {
+    return std::nullopt;
+  }
+  LightSpec spec;
+  spec.id = id;
+  spec.emission = GetLightBaseEmission(light);
+  spec.shaping = GetShapingSpec(light, id);
+  // Meshes bake their transform into the vertices, so the `ies` light frame is
+  // given explicitly. USD lights emit along -Z, the `ies` emitter along +Z.
+  spec.transform = MotionTransform::Static(
+      UsdToMitsubaTransform(local_prefix * GetPrimTransform(prim_source)) *
+      ScalarAffineTransform4f::rotate(mitsuba::Vector<float, 3>(1, 0, 0), 180));
+  return spec;
+}
+
 HdMitsubaLight::HdMitsubaLight(const SdfPath& id, const TfToken& typeId)
     : HdLight(id) {
   type_id_ = typeId;
@@ -353,6 +382,12 @@ void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
       spec.shaping.cone_angle = 180.0f;
     }
   }
+  const bool plugin_spec_changed =
+      (!rebuild_key_.has_value() || (*dirtyBits & HdLight::DirtyParams) != 0) &&
+      SyncPrimPluginSpecs(data_source, render_param, &shape_spec_,
+                          &emitter_spec_);
+  spec.emitter_spec = emitter_spec_;
+  spec.shape_spec = shape_spec_;
   spec.dirty_bits = *dirtyBits;
 
   MotionSamples<GfMatrix4d> world_transform = SampleTransform(
@@ -367,7 +402,8 @@ void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
         MotionSamples<GfMatrix4d>::Static(GetPrimTransform(data_source));
   }
   spec.transform = world_transform.Map([&](const GfMatrix4d& m) {
-    return ComputeLightTransform(type_id_, m, params);
+    return ComputeLightTransform(type_id_, m, params,
+                                 spec.emitter_spec.plugin_type);
   });
   // Point lights may be animated, so use the transform at frame time for their
   // radius.
@@ -376,16 +412,17 @@ void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
                                             : world_transform.First();
   spec.emission = ComputeLightEmission(type_id_, emission_transform, params);
 
-  const RebuildKey rebuild_key{params.treat_as_point,
-                               params.angle > 0.0f,
-                               params.shaping_cone_angle != 0.0f,
-                               params.texture_file_path,
-                               spec.shaping,
-                               spec.transform.IsAnimated(),
-                               spec.visibility,
-                               spec.light_link_everything,
-                               spec.TexturedDomeTint()};
-  spec.needs_rebuild = rebuild_key_ != rebuild_key;
+  const RebuildKey rebuild_key{
+      params.treat_as_point,
+      !emitter_spec_.HasProperty("angle") && params.angle > 0.0f,
+      params.shaping_cone_angle != 0.0f,
+      params.texture_file_path,
+      spec.shaping,
+      spec.transform.IsAnimated(),
+      spec.visibility,
+      spec.light_link_everything,
+      spec.TexturedDomeTint()};
+  spec.needs_rebuild = (rebuild_key_ != rebuild_key) || plugin_spec_changed;
   rebuild_key_ = rebuild_key;
 
   scene->SyncLight(std::move(spec));
@@ -403,6 +440,8 @@ void HdMitsubaLight::Finalize(HdRenderParam* renderParam) {
 void HdMitsubaLight::RemoveFromScene(SceneManager* scene) {
   scene->RemoveLight(GetId());
   rebuild_key_.reset();
+  emitter_spec_ = {};
+  shape_spec_ = {};
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

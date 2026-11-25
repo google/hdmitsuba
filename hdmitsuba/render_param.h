@@ -22,8 +22,10 @@
 #include <pxr/pxr.h>
 #include <pxr/usd/ar/resolver.h>
 
+#include "hdmitsuba/plugin_builder.h"
 #include "hdmitsuba/render_delegate.h"
 #include "hdmitsuba/scene_manager.h"
+#include "hdmitsuba/utils.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -79,5 +81,27 @@ class HdMitsubaRenderParam final : public HdRenderParam {
   std::atomic<SceneManager*> scene_;
   VtValue resolver_cache_data_;
 };
+
+// Parses `mitsuba:shape:*` and `mitsuba:emitter:*` from `prim_source`, updates
+// `shape_spec` and `emitter_spec`, and returns whether either spec changed.
+inline bool SyncPrimPluginSpecs(const HdContainerDataSourceHandle& prim_source,
+                                const HdMitsubaRenderParam* render_param,
+                                PluginSpecNode* shape_spec,
+                                PluginSpecNode* emitter_spec) {
+  ScopedResolverCache resolver_cache(render_param->ResolverCacheData());
+  HdContainerDataSourceHandle mitsuba_source =
+      GetMitsubaDataSource(prim_source);
+  PluginSpecNode parsed_shape_spec =
+      ParsePluginSpec(mitsuba_source, "mitsuba:shape:");
+  PluginSpecNode parsed_emitter_spec =
+      ParsePluginSpec(mitsuba_source, "mitsuba:emitter:");
+  if (parsed_shape_spec == *shape_spec &&
+      parsed_emitter_spec == *emitter_spec) {
+    return false;
+  }
+  *shape_spec = std::move(parsed_shape_spec);
+  *emitter_spec = std::move(parsed_emitter_spec);
+  return true;
+}
 
 PXR_NAMESPACE_CLOSE_SCOPE

@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <utility>
 #include <vector>
 
 #include <pxr/base/gf/matrix4d.h>
@@ -45,6 +46,7 @@
 #include <pxr/usd/sdf/path.h>
 
 #include "hdmitsuba/debug_codes.h"
+#include "hdmitsuba/light.h"
 #include "hdmitsuba/render_param.h"
 #include "hdmitsuba/scene_manager.h"
 #include "hdmitsuba/spec_types.h"
@@ -127,7 +129,7 @@ HdDirtyBits HdMitsubaCurves::GetInitialDirtyBitsMask() const {
   return HdChangeTracker::Clean | HdChangeTracker::DirtyPrimvar |
          HdChangeTracker::DirtyRepr | HdChangeTracker::DirtyTopology |
          HdChangeTracker::DirtyTransform | HdChangeTracker::DirtyVisibility |
-         HdChangeTracker::DirtyMaterialId;
+         HdChangeTracker::DirtyMaterialId | kDirtyLight | kDirtyMitsubaParams;
 }
 
 void HdMitsubaCurves::Sync(HdSceneDelegate* sceneDelegate,
@@ -237,8 +239,8 @@ void HdMitsubaCurves::Sync(HdSceneDelegate* sceneDelegate,
     return;
   }
 
-  // 5. Material binding for the render delegate's purpose (e.g.
-  // material:binding:full), falling back to the allPurpose binding.
+  // 5. Material binding (for the render delegate's purpose, falling back to
+  // allPurpose) & Mitsuba plugin overrides.
   SdfPath material_id;
   if (HdPathDataSourceHandle material_path =
           HdMaterialBindingsSchema::GetFromParent(data_source)
@@ -248,14 +250,31 @@ void HdMitsubaCurves::Sync(HdSceneDelegate* sceneDelegate,
               .GetPath()) {
     material_id = material_path->GetTypedValue(0.0f);
   }
+  if (!in_scene_ || (*dirtyBits & kDirtyMitsubaParams) != 0) {
+    SyncPrimPluginSpecs(data_source,
+                        static_cast<HdMitsubaRenderParam*>(renderParam),
+                        &shape_spec_, &mitsuba_emitter_spec_);
+  }
 
   // 6. Convert data to CurveSpec and pass it to the scene manager.
   CurveSpec spec;
   spec.id = id;
+  spec.shape_spec = shape_spec_;
+  spec.mitsuba_emitter_spec = mitsuba_emitter_spec_;
+  spec.emitter_spec = GetMeshEmitterSpec(data_source, id);
+  if (auto transform_it = spec.shape_spec.params.find("to_world");
+      transform_it != spec.shape_spec.params.end()) {
+    if (const auto extra = ExtractMatrix4d(transform_it->second)) {
+      transform = *extra * transform;
+    }
+    spec.shape_spec.params.erase(transform_it);
+  }
   spec.transform = UsdToMitsubaTransform(transform);
   spec.material_id = std::move(material_id);
   spec.needs_rebuild = true;
-  spec.plugin_name = std::move(plugin_name);
+  spec.plugin_name = spec.shape_spec.plugin_type.empty()
+                         ? std::move(plugin_name)
+                         : spec.shape_spec.plugin_type;
   spec.visibility = GetShapeVisibility(data_source);
 
   // Pack control points [x, y, z, r] (lazy-evaluating widths based on layout)
@@ -308,6 +327,8 @@ void HdMitsubaCurves::Finalize(HdRenderParam* renderParam) {
 void HdMitsubaCurves::RemoveFromScene(SceneManager* scene) {
   if (in_scene_) {
     scene->RemoveShape(GetId());
+    shape_spec_ = {};
+    mitsuba_emitter_spec_ = {};
     in_scene_ = false;
   }
 }

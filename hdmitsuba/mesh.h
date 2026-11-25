@@ -22,7 +22,6 @@
 #include <pxr/base/tf/staticTokens.h>
 #include <pxr/base/tf/token.h>
 #include <pxr/base/vt/types.h>
-#include <pxr/imaging/hd/changeTracker.h>
 #include <pxr/imaging/hd/mesh.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
@@ -32,6 +31,7 @@
 
 #include "hdmitsuba/mesh/geometry_processor.h"
 #include "hdmitsuba/mesh/subdivision.h"
+#include "hdmitsuba/plugin_builder.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -43,10 +43,6 @@ class SceneManager;
 
 class HdMitsubaMesh final : public HdMesh {
  public:
-  // Custom dirty bit for mesh lights (may be removed in the future once
-  // Hydra tracks these correctly automatically)
-  static constexpr HdDirtyBits DirtyLight = HdChangeTracker::CustomBitsBegin;
-
   explicit HdMitsubaMesh(const SdfPath& id);
   ~HdMitsubaMesh() override = default;
 
@@ -65,6 +61,8 @@ class HdMitsubaMesh final : public HdMesh {
 
   // Topology (after subdivision), face materials and (refined) primvars.
   MeshGeometry geometry_;
+  PluginSpecNode shape_spec_;
+  PluginSpecNode mitsuba_emitter_spec_;
 
   // Resolves the effective subdivision level from the display style and the
   // optional `mitsuba:subdivision_level` override.

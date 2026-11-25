@@ -86,7 +86,6 @@
 #include <pxr/usd/sdf/path.h>
 
 #include "hdmitsuba/debug_codes.h"
-#include "hdmitsuba/ies_emitter.h"
 #include "hdmitsuba/material.h"
 #include "hdmitsuba/materialx/translator.h"
 #include "hdmitsuba/motion.h"
@@ -854,32 +853,72 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::SetSpectrumParameter(
   }
 }
 
+namespace {
+
+bool HasWorldTransform(const TraversalCallback& cb) {
+  return cb.data.contains("to_world") || cb.objects.contains("to_world");
+}
+
+bool HasExplicitEmitterFrame(const PluginSpecNode& spec) {
+  return spec.HasProperty("to_world") || spec.HasProperty("direction") ||
+         spec.HasProperty("origin") || spec.HasProperty("position");
+}
+
+const PluginSpecNode& ResolveNestedEmitterSpec(const PluginSpecNode& spec) {
+  static const absl::NoDestructor<PluginSpecNode> kEmptySpec;
+  if (spec.plugin_type == "ies") {
+    if (auto it = spec.children.find("nested_emitter");
+        it != spec.children.end()) {
+      return it->second;
+    }
+    return *kEmptySpec;
+  }
+  return spec;
+}
+
+// Returns the transform of the shape of the area light `spec`. Mitsuba's
+// `cylinder` spans z in [0, 1], while USD's CylinderLight is centered on the X
+// axis of its light frame.
+MotionTransform AreaShapeTransform(const LightSpec& spec) {
+  if (spec.prim_type != HdPrimTypeTokens->cylinderLight) {
+    return spec.transform;
+  }
+  return spec.transform.Map([](const ScalarAffineTransform4f& m) {
+    return m * ScalarAffineTransform4f::rotate(ScalarVector3f(0, 1, 0), 90) *
+           ScalarAffineTransform4f::translate(ScalarVector3f(0, 0, -0.5));
+  });
+}
+
+}  // namespace
+
 MI_VARIANT typename PrimTranslator<Float, Spectrum>::TranslatedLight
 PrimTranslator<Float, Spectrum>::BuildLight(const LightSpec& spec) {
   mitsuba::Properties props = BuildLightProperties(spec);
-  std::string id_str = spec.id.GetAsString();
   TranslatedLight res;
   if (spec.IsAreaLight()) {
     res.shape = mitsuba::PluginManager::instance()
                     ->create_object<mitsuba::Shape<Float, Spectrum>>(props);
-    res.shape->set_id(id_str);
+    res.shape->set_id(spec.shape_spec.id.empty() ? spec.id.GetAsString()
+                                                 : spec.shape_spec.id);
     if constexpr (dr::is_jit_v<Float>) {
       // Mitsuba's rectangle/disk constructors leave transforms or tangent
       // vectors as JIT literals; make them opaque from Frame 1 to avoid
       // recompilation and frozen-kernel re-recording on moves/resizes.
-      if ((spec.prim_type == HdPrimTypeTokens->rectLight ||
-           spec.prim_type == HdPrimTypeTokens->diskLight) &&
-          !spec.transform.IsAnimated()) {
+      if ((res.shape->class_name() == "Rectangle" ||
+           res.shape->class_name() == "Disk") &&
+          !spec.transform.IsAnimated() &&
+          !spec.shape_spec.HasProperty("to_world")) {
         TraversalCallback cb("", nullptr, /*recurse_objects=*/false);
         res.shape->traverse(&cb);
-        SetTransformParameter(cb, spec.transform);
+        SetTransformParameter(cb, AreaShapeTransform(spec));
         res.shape->parameters_changed({"to_world"});
       }
     }
   } else {
     res.emitter = mitsuba::PluginManager::instance()
                       ->create_object<mitsuba::Emitter<Float, Spectrum>>(props);
-    res.emitter->set_id(id_str);
+    res.emitter->set_id(spec.emitter_spec.id.empty() ? spec.id.GetAsString()
+                                                     : spec.emitter_spec.id);
   }
   return res;
 }
@@ -896,7 +935,6 @@ mitsuba::Properties MaybeWrapIesProps(mitsuba::Properties nested_props,
   if (!shaping.IsActive()) {
     return nested_props;
   }
-  RegisterIesEmitter();
   using Emitter = mitsuba::Emitter<Float, Spectrum>;
   mitsuba::Properties props("ies");
   props.set("nested_emitter",
@@ -923,29 +961,20 @@ mitsuba::Properties MaybeWrapIesProps(mitsuba::Properties nested_props,
 // The caller must still call `emitter->parameters_changed()`.
 template <typename Float, typename Spectrum>
 mitsuba::Emitter<Float, Spectrum>* UpdateIesFrameInPlace(
-    mitsuba::Emitter<Float, Spectrum>* emitter, const LightSpec& spec) {
+    mitsuba::Emitter<Float, Spectrum>* emitter, const LightSpec& spec,
+    const PluginSpecNode& effective_spec) {
   if (!spec.shaping.IsActive()) {
     return emitter;
   }
   TraversalCallback cb;
   emitter->traverse(&cb);
-  PrimTranslator<Float, Spectrum>::SetTransformParameter(
-      cb, spec.transform.Map(RemoveScaleFromTransform));
+  if (!(effective_spec.plugin_type == "ies" &&
+        HasExplicitEmitterFrame(effective_spec))) {
+    PrimTranslator<Float, Spectrum>::SetTransformParameter(
+        cb, spec.transform.Map(RemoveScaleFromTransform));
+  }
   return static_cast<mitsuba::Emitter<Float, Spectrum>*>(
       cb.objects.at("nested_emitter"));
-}
-
-// Returns the transform of the shape of the area light `spec`. Mitsuba's
-// `cylinder` spans z in [0, 1], while USD's CylinderLight is centered on the X
-// axis of its light frame.
-MotionTransform AreaShapeTransform(const LightSpec& spec) {
-  if (spec.prim_type != HdPrimTypeTokens->cylinderLight) {
-    return spec.transform;
-  }
-  return spec.transform.Map([](const ScalarAffineTransform4f& m) {
-    return m * ScalarAffineTransform4f::rotate(ScalarVector3f(0, 1, 0), 90) *
-           ScalarAffineTransform4f::translate(ScalarVector3f(0, 0, -0.5));
-  });
 }
 
 // Textured RectLights hold their emission in this input of their `math`
@@ -997,31 +1026,67 @@ mitsuba::ref<mitsuba::Bitmap> TintBitmap(const mitsuba::Bitmap& bitmap,
 }  // namespace
 
 MI_VARIANT mitsuba::ref<mitsuba::Object>
-PrimTranslator<Float, Spectrum>::CreateAreaEmitter(const LightSpec& spec) {
-  mitsuba::Properties emitter_props("area");
-  const mitsuba::Color<float, 3> emission(spec.emission[0], spec.emission[1],
-                                          spec.emission[2]);
-  if (spec.texture_file_path.empty()) {
-    emitter_props.set("radiance", emission);
-  } else {
-    emitter_props.set("radiance", CreateTexturedRadiance<Float, Spectrum>(
-                                      spec.texture_file_path, emission));
+PrimTranslator<Float, Spectrum>::CreateAreaEmitter(
+    const LightSpec& spec, const PluginSpecNode& emitter_override) {
+  const PluginSpecNode& effective_spec =
+      emitter_override.Empty() ? spec.emitter_spec : emitter_override;
+  const bool ies_wrapper_override =
+      spec.shaping.IsActive() && effective_spec.plugin_type == "ies";
+  const PluginSpecNode& base_spec =
+      ies_wrapper_override ? ResolveNestedEmitterSpec(effective_spec)
+                           : effective_spec;
+  const std::string_view emitter_type = base_spec.plugin_type.empty()
+                                            ? std::string_view("area")
+                                            : base_spec.plugin_type;
+  mitsuba::Properties emitter_props(emitter_type);
+  if (emitter_type == "area" && !base_spec.HasProperty("radiance")) {
+    const mitsuba::Color<float, 3> emission(spec.emission[0], spec.emission[1],
+                                            spec.emission[2]);
+    if (spec.texture_file_path.empty()) {
+      emitter_props.set("radiance", emission);
+    } else {
+      emitter_props.set("radiance", CreateTexturedRadiance<Float, Spectrum>(
+                                        spec.texture_file_path, emission));
+    }
+  }
+  MergePluginProperties(emitter_props, base_spec,
+                        mitsuba::Emitter<Float, Spectrum>::Variant);
+  emitter_props =
+      MaybeWrapIesProps<Float, Spectrum>(std::move(emitter_props), spec);
+  if (ies_wrapper_override) {
+    if (HasExplicitEmitterFrame(effective_spec)) {
+      emitter_props.remove_property("to_world");
+    }
+    PluginSpecNode outer_spec = effective_spec;
+    outer_spec.children.erase("nested_emitter");
+    MergePluginProperties(emitter_props, outer_spec,
+                          mitsuba::Emitter<Float, Spectrum>::Variant);
   }
   return mitsuba::PluginManager::instance()->create_object(
-      MaybeWrapIesProps<Float, Spectrum>(std::move(emitter_props), spec),
-      mitsuba::Emitter<Float, Spectrum>::Variant,
+      emitter_props, mitsuba::Emitter<Float, Spectrum>::Variant,
       mitsuba::Emitter<Float, Spectrum>::Type);
 }
 
 MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateAreaEmitterInPlace(
-    mitsuba::Emitter<Float, Spectrum>* emitter, const LightSpec& spec) {
-  auto* target = UpdateIesFrameInPlace<Float, Spectrum>(emitter, spec);
-  if (spec.emission_dirty) {
+    mitsuba::Emitter<Float, Spectrum>* emitter, const LightSpec& spec,
+    const PluginSpecNode& emitter_override) {
+  const PluginSpecNode& effective_spec =
+      emitter_override.Empty() ? spec.emitter_spec : emitter_override;
+  mitsuba::Emitter<Float, Spectrum>* nested =
+      UpdateIesFrameInPlace<Float, Spectrum>(emitter, spec, effective_spec);
+  const PluginSpecNode& nested_spec =
+      spec.shaping.IsActive() ? ResolveNestedEmitterSpec(effective_spec)
+                              : effective_spec;
+  const bool is_default_area =
+      nested_spec.plugin_type.empty() || nested_spec.plugin_type == "area";
+  if (spec.emission_dirty && is_default_area &&
+      !nested_spec.HasProperty("radiance")) {
     TraversalCallback cb;
-    target->traverse(&cb);
-    SetSpectrumParameter(
-        cb, spec.texture_file_path.empty() ? "radiance" : kTexturedEmissionKey,
-        spec.emission);
+    nested->traverse(&cb);
+    const std::string_view emission_key = spec.texture_file_path.empty()
+                                              ? std::string_view("radiance")
+                                              : kTexturedEmissionKey;
+    SetSpectrumParameter(cb, emission_key, spec.emission);
   }
   emitter->parameters_changed();
 }
@@ -1030,62 +1095,121 @@ MI_VARIANT mitsuba::Properties
 PrimTranslator<Float, Spectrum>::BuildLightProperties(const LightSpec& spec) {
   mitsuba::Color<float, 3> color(spec.emission[0], spec.emission[1],
                                  spec.emission[2]);
-  auto make_props = [&](std::string_view plugin) {
+  const bool has_explicit_emitter_frame =
+      HasExplicitEmitterFrame(spec.emitter_spec);
+  auto make_emitter_props = [&](std::string_view plugin) {
     mitsuba::Properties props(plugin);
-    SetTransformProperty(props, spec.transform);
+    if (plugin != "constant" && !has_explicit_emitter_frame) {
+      SetTransformProperty(props, spec.transform);
+    }
     return props;
   };
-  auto make_area_shape_props = [&](std::string_view shape_plugin) {
-    mitsuba::Properties props(shape_plugin);
+  auto make_area_shape_props = [&](std::string_view default_shape_plugin) {
+    mitsuba::Properties props(default_shape_plugin);
     SetTransformProperty(props, AreaShapeTransform(spec));
     props.set("visibility", spec.visibility);
-    props.set("emitter", CreateAreaEmitter(spec));
-    props.set("bsdf", mitsuba::ref<mitsuba::Object>(DefaultBsdf("", "null")));
+    MergePluginProperties(props, spec.shape_spec,
+                          mitsuba::Shape<Float, Spectrum>::Variant);
+    if (!props.has_property("emitter")) {
+      props.set("emitter", CreateAreaEmitter(spec));
+    }
+    if (!props.has_property("bsdf")) {
+      props.set("bsdf", mitsuba::ref<mitsuba::Object>(DefaultBsdf("", "null")));
+    }
+    return props;
+  };
+  auto merge_emitter_props = [&](mitsuba::Properties props,
+                                 const PluginSpecNode& emitter_spec) {
+    const bool explicit_frame = HasExplicitEmitterFrame(emitter_spec);
+    if (!emitter_spec.plugin_type.empty() &&
+        emitter_spec.plugin_type != props.plugin_name()) {
+      const bool had_visibility = props.has_property("visibility");
+      props = mitsuba::Properties(emitter_spec.plugin_type);
+      if (emitter_spec.plugin_type != "constant" && !explicit_frame) {
+        SetTransformProperty(props, spec.transform);
+      }
+      if (had_visibility && (emitter_spec.plugin_type == "envmap" ||
+                             emitter_spec.plugin_type == "constant")) {
+        props.set("visibility", spec.visibility);
+      }
+    } else if (explicit_frame) {
+      props.remove_property("to_world");
+    }
+    MergePluginProperties(props, emitter_spec,
+                          mitsuba::Emitter<Float, Spectrum>::Variant);
     return props;
   };
 
   if (spec.prim_type == HdPrimTypeTokens->sphereLight) {
     if (!spec.treat_as_point) return make_area_shape_props("sphere");
     const bool is_spot = spec.shaping_cone_angle != 0.0f;
-    mitsuba::Properties props = make_props(is_spot ? "spot" : "point");
+    const bool ies_wrapper_override =
+        spec.shaping.IsActive() && spec.emitter_spec.plugin_type == "ies";
+    mitsuba::Properties props(is_spot ? "spot" : "point");
+    if (!has_explicit_emitter_frame || ies_wrapper_override) {
+      SetTransformProperty(props, spec.transform);
+    }
     props.set("intensity", color);
     if (is_spot) {
       props.set("beam_width", spec.shaping_cone_beam_width);
       props.set("cutoff_angle", spec.shaping_cone_angle);
     }
-    return MaybeWrapIesProps<Float, Spectrum>(std::move(props), spec);
+    if (ies_wrapper_override) {
+      if (auto it = spec.emitter_spec.children.find("nested_emitter");
+          it != spec.emitter_spec.children.end()) {
+        props = merge_emitter_props(std::move(props), it->second);
+      }
+      props = MaybeWrapIesProps<Float, Spectrum>(std::move(props), spec);
+      PluginSpecNode outer_spec = spec.emitter_spec;
+      outer_spec.children.erase("nested_emitter");
+      return merge_emitter_props(std::move(props), outer_spec);
+    }
+    return MaybeWrapIesProps<Float, Spectrum>(
+        merge_emitter_props(std::move(props), spec.emitter_spec), spec);
   }
 
   if (spec.prim_type == HdPrimTypeTokens->domeLight) {
-    if (!spec.texture_file_path.empty()) {
-      try {
-        mitsuba::ref<mitsuba::Bitmap> bitmap =
-            ReadBitmap(spec.texture_file_path);
-        if (const GfVec3f tint = spec.TexturedDomeTint();
-            !GfIsClose(tint, GfVec3f(1.0f), 1e-6)) {
-          bitmap = TintBitmap(*bitmap, tint);
+    const bool has_custom_envmap_source =
+        spec.emitter_spec.HasProperty("filename") ||
+        spec.emitter_spec.HasProperty("bitmap");
+    if ((!spec.texture_file_path.empty() || has_custom_envmap_source) &&
+        (spec.emitter_spec.plugin_type.empty() ||
+         spec.emitter_spec.plugin_type == "envmap")) {
+      mitsuba::ref<mitsuba::Bitmap> bitmap;
+      if (!has_custom_envmap_source) {
+        try {
+          bitmap = ReadBitmap(spec.texture_file_path);
+          if (const GfVec3f tint = spec.TexturedDomeTint();
+              !GfIsClose(tint, GfVec3f(1.0f), 1e-6)) {
+            bitmap = TintBitmap(*bitmap, tint);
+          }
+        } catch (const std::exception& e) {
+          bitmap = nullptr;
+          TF_WARN("Failed to load environment texture '%s': %s",
+                  spec.texture_file_path.c_str(), e.what());
         }
-        mitsuba::Properties props = make_props("envmap");
+      }
+      if (has_custom_envmap_source || bitmap) {
+        mitsuba::Properties props = make_emitter_props("envmap");
         props.set("scale", (color[0] + color[1] + color[2]) / 3.f);
-        props.set("bitmap", bitmap.get());
+        if (bitmap) {
+          props.set("bitmap", bitmap.get());
+        }
         props.set("visibility", spec.visibility);
-        return props;
-      } catch (const std::exception& e) {
-        TF_WARN("Failed to load environment texture '%s': %s",
-                spec.texture_file_path.c_str(), e.what());
+        return merge_emitter_props(std::move(props), spec.emitter_spec);
       }
     }
     mitsuba::Properties props("constant");
     props.set("radiance", color);
     props.set("visibility", spec.visibility);
-    return props;
+    return merge_emitter_props(std::move(props), spec.emitter_spec);
   }
 
   if (spec.prim_type == HdPrimTypeTokens->distantLight) {
-    mitsuba::Properties props = make_props("directional");
+    mitsuba::Properties props = make_emitter_props("directional");
     props.set("irradiance", color);
     props.set("angle", spec.angle);
-    return props;
+    return merge_emitter_props(std::move(props), spec.emitter_spec);
   }
 
   if (spec.prim_type == HdPrimTypeTokens->rectLight) {
@@ -1100,58 +1224,101 @@ PrimTranslator<Float, Spectrum>::BuildLightProperties(const LightSpec& spec) {
     return make_area_shape_props("cylinder");
   }
 
-  return mitsuba::Properties("constant");
+  return merge_emitter_props(mitsuba::Properties("constant"),
+                             spec.emitter_spec);
 }
 
-MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateLightInPlace(
+MI_VARIANT bool PrimTranslator<Float, Spectrum>::UpdateLightInPlace(
     mitsuba::Object* light_obj, const LightSpec& spec) {
   if (auto* shape = dynamic_cast<mitsuba::Shape<Float, Spectrum>*>(light_obj)) {
     if (spec.transform_dirty) {
-      TraversalCallback cb_shape(
-          "", nullptr, /*recurse_objects=*/spec.transform.IsAnimated());
-      shape->traverse(&cb_shape);
-      SetTransformParameter(cb_shape, AreaShapeTransform(spec));
-      shape->parameters_changed({"to_world"});
+      if (HasShapeGeometryOverride(spec.shape_spec)) {
+        return false;
+      }
+      if (!spec.shape_spec.HasProperty("to_world")) {
+        if (HasDirectionalAreaEmitterSpec(spec.emitter_spec, spec.shape_spec)) {
+          return false;
+        }
+        TraversalCallback shape_callback(
+            "", nullptr, /*recurse_objects=*/spec.transform.IsAnimated());
+        shape->traverse(&shape_callback);
+        if (!HasWorldTransform(shape_callback)) {
+          return false;
+        }
+        SetTransformParameter(shape_callback, AreaShapeTransform(spec));
+        shape->parameters_changed({"to_world"});
+      }
     }
-    if (shape->is_emitter() &&
+    if (shape->is_emitter() && !spec.shape_spec.HasChildPlugin("emitter") &&
         (spec.emission_dirty ||
          (spec.transform_dirty && spec.shaping.IsActive()))) {
       UpdateAreaEmitterInPlace(shape->emitter(), spec);
     }
-  } else if (auto* emitter =
-                 dynamic_cast<mitsuba::Emitter<Float, Spectrum>*>(light_obj)) {
-    TraversalCallback cb;
-    UpdateIesFrameInPlace<Float, Spectrum>(emitter, spec)->traverse(&cb);
-
-    if (spec.prim_type == HdPrimTypeTokens->sphereLight &&
-        spec.treat_as_point) {
-      SetTransformParameter(cb, spec.transform);
-      SetSpectrumParameter(cb, "intensity", spec.emission);
-      if (spec.shaping_cone_angle != 0.0f) {
-        cb.set<Float>("beam_width", spec.shaping_cone_beam_width);
-        cb.set<Float>("cutoff_angle", spec.shaping_cone_angle);
-      }
-    } else if (spec.prim_type == HdPrimTypeTokens->domeLight) {
-      // A domeLight with a missing/corrupt texture falls back to a "constant"
-      // emitter in BuildLightProperties, which has "radiance.value" rather than
-      // "scale" and "to_world".
-      if (cb.data.contains("scale")) {
-        SetTransformParameter(cb, spec.transform);
-        cb.set<Float>(
-            "scale",
-            (spec.emission[0] + spec.emission[1] + spec.emission[2]) / 3.f);
-        emitter->parameters_changed({"scale", "to_world"});
-        return;
-      } else {
-        SetSpectrumParameter(cb, "radiance", spec.emission);
-      }
-    } else if (spec.prim_type == HdPrimTypeTokens->distantLight) {
-      SetTransformParameter(cb, spec.transform);
-      SetSpectrumParameter(cb, "irradiance", spec.emission);
-      cb.set<Float>("angle", spec.angle);
-    }
-    emitter->parameters_changed();
+    return true;
   }
+
+  auto* emitter = dynamic_cast<mitsuba::Emitter<Float, Spectrum>*>(light_obj);
+  if (emitter == nullptr) {
+    return false;
+  }
+  TraversalCallback cb;
+  UpdateIesFrameInPlace<Float, Spectrum>(emitter, spec, spec.emitter_spec)
+      ->traverse(&cb);
+  const PluginSpecNode& nested_spec =
+      spec.shaping.IsActive() ? ResolveNestedEmitterSpec(spec.emitter_spec)
+                              : spec.emitter_spec;
+  if (!HasExplicitEmitterFrame(nested_spec) && HasWorldTransform(cb)) {
+    SetTransformParameter(cb, spec.transform);
+  }
+  const std::string_view nested_type = nested_spec.plugin_type;
+  if (spec.prim_type == HdPrimTypeTokens->sphereLight && spec.treat_as_point) {
+    const bool is_default_plugin =
+        nested_type.empty() ||
+        nested_type == (spec.shaping_cone_angle != 0.0f ? "spot" : "point");
+    if (is_default_plugin && !nested_spec.HasProperty("intensity")) {
+      SetSpectrumParameter(cb, "intensity", spec.emission);
+    }
+    if (is_default_plugin && spec.shaping_cone_angle != 0.0f) {
+      if (!nested_spec.HasProperty("beam_width")) {
+        cb.set<Float>("beam_width",
+                      dr::opaque<Float>(spec.shaping_cone_beam_width));
+      }
+      if (!nested_spec.HasProperty("cutoff_angle")) {
+        cb.set<Float>("cutoff_angle",
+                      dr::opaque<Float>(spec.shaping_cone_angle));
+      }
+    }
+  } else if (spec.prim_type == HdPrimTypeTokens->domeLight) {
+    // A domeLight with a missing/corrupt texture falls back to a "constant"
+    // emitter in BuildLightProperties, which has "radiance.value" rather than
+    // "scale".
+    if ((nested_type.empty() || nested_type == "envmap") &&
+        cb.data.contains("scale")) {
+      if (!nested_spec.HasProperty("scale")) {
+        cb.set<Float>("scale",
+                      dr::opaque<Float>((spec.emission[0] + spec.emission[1] +
+                                         spec.emission[2]) /
+                                        3.f));
+      }
+      emitter->parameters_changed({"scale", "to_world"});
+      return true;
+    }
+    if ((nested_type.empty() || nested_type == "constant") &&
+        !nested_spec.HasProperty("radiance")) {
+      SetSpectrumParameter(cb, "radiance", spec.emission);
+    }
+  } else if (spec.prim_type == HdPrimTypeTokens->distantLight) {
+    if (nested_type.empty() || nested_type == "directional") {
+      if (!nested_spec.HasProperty("irradiance")) {
+        SetSpectrumParameter(cb, "irradiance", spec.emission);
+      }
+      if (!nested_spec.HasProperty("angle")) {
+        cb.set<Float>("angle", dr::opaque<Float>(spec.angle));
+      }
+    }
+  }
+  emitter->parameters_changed();
+  return true;
 }
 
 namespace {
@@ -1549,7 +1716,8 @@ PrimTranslator<Float, Spectrum>::BuildMesh(
     const VertexPrimvarMap& primvars,
     const MeshAttributeRequests& mesh_attributes, mitsuba::Object* bsdf,
     mitsuba::Object* emitter_ptr, mitsuba::Object* sensor_ptr,
-    const std::string& visibility, mitsuba::Object* interior_medium) {
+    const std::string& visibility, mitsuba::Object* interior_medium,
+    const PluginSpecNode& shape_spec) {
   using Mesh = mitsuba::Mesh<Float, Spectrum>;
 
   auto points_it = primvars.find(HdTokens->points);
@@ -1595,6 +1763,9 @@ PrimTranslator<Float, Spectrum>::BuildMesh(
   // computation is handled explicitly by the hydra delegate.
   props.set("face_normals", !has_normals);
   props.set("visibility", visibility);
+  if (bsdf != nullptr) {
+    props.set("bsdf", bsdf);
+  }
   if (emitter_ptr != nullptr) {
     props.set("emitter", emitter_ptr);
   }
@@ -1604,15 +1775,27 @@ PrimTranslator<Float, Spectrum>::BuildMesh(
   if (interior_medium != nullptr) {
     props.set("interior", interior_medium);
   }
-  if (bsdf != nullptr) {
-    props.set("bsdf", bsdf);
+  MergePluginProperties(props, shape_spec,
+                        mitsuba::Shape<Float, Spectrum>::Variant);
+  // Mesh::from_packed() requires flip_normals to be baked into the PackedMesh
+  // rather than left on the Mesh properties; to_world was already folded into
+  // the vertex positions by RunGeometryPipeline.
+  bool flip_normals = false;
+  mitsuba::ref<Mesh> mesh;
+  try {
+    flip_normals = props.get<bool>("flip_normals", false);
+    props.remove_property("flip_normals");
+    props.remove_property("to_world");
+    mesh = new Mesh(props);
+  } catch (const std::exception& e) {
+    TF_WARN("Failed to create mesh '%s': %s", id.c_str(), e.what());
+    return nullptr;
   }
-  mitsuba::ref<Mesh> mesh = new Mesh(props);
-  mesh->set_id(id);
 
+  const bool use_vertex_normals = has_normals && !mesh->has_face_normals();
   mitsuba::PackedMesh packed(
       dr::backend_v<Float>, vertex_count, face_count,
-      mitsuba::make_layout(has_normals, texcoords_ptr != nullptr));
+      mitsuba::make_layout(use_vertex_normals, texcoords_ptr != nullptr));
 
   const GfVec3f* points_ptr = points_array.cdata();
   float* vrec = packed.vertices.data();
@@ -1622,7 +1805,7 @@ PrimTranslator<Float, Spectrum>::BuildMesh(
     vrec[mitsuba::PackedPositionOffset + 1] = p[1];
     vrec[mitsuba::PackedPositionOffset + 2] = p[2];
     packed.bbox.expand(mitsuba::PackedMesh::ScalarPoint3f(p[0], p[1], p[2]));
-    if (normals_ptr) {
+    if (use_vertex_normals) {
       const GfVec3f& n = normals_ptr[i];
       vrec[mitsuba::PackedFrameOffset + 0] = n[0];
       vrec[mitsuba::PackedFrameOffset + 1] = n[1];
@@ -1650,6 +1833,11 @@ PrimTranslator<Float, Spectrum>::BuildMesh(
     frec[1] = static_cast<uint32_t>(faces_in[i * 3 + 1]);
     frec[2] = static_cast<uint32_t>(faces_in[i * 3 + 2]);
     frec[3] = 0u;
+  }
+
+  if (flip_normals) {
+    packed.set_transform(ScalarAffineTransform4f(), /*flip_normals=*/true);
+    packed.transform_records();
   }
 
   AddPackedMeshAttributes(packed, vertex_count, primvars, mesh_attributes);
@@ -1746,7 +1934,9 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::AttachMeshAttributes(
 MI_VARIANT mitsuba::ref<mitsuba::Shape<Float, Spectrum>>
 PrimTranslator<Float, Spectrum>::BuildCurves(const CurveSpec& spec,
                                              mitsuba::Object* bsdf,
-                                             mitsuba::Object* sensor_ptr) {
+                                             mitsuba::Object* emitter_ptr,
+                                             mitsuba::Object* sensor_ptr,
+                                             mitsuba::Object* interior_medium) {
   static const absl::NoDestructor<std::string> kCurveResourcePath([]() {
     if (auto plugin =
             PlugRegistry::GetInstance().GetPluginWithName("hdMitsuba")) {
@@ -1757,6 +1947,8 @@ PrimTranslator<Float, Spectrum>::BuildCurves(const CurveSpec& spec,
 
   const std::string id_str = spec.id.GetAsString();
   mitsuba::Properties props(spec.plugin_name);
+  props.set_id(id_str);
+  props.set("visibility", spec.visibility);
   if (!kCurveResourcePath->empty()) {
     props.set("filename", *kCurveResourcePath);
   } else {
@@ -1765,15 +1957,28 @@ PrimTranslator<Float, Spectrum>::BuildCurves(const CurveSpec& spec,
   if (bsdf != nullptr) {
     props.set("bsdf", bsdf);
   }
+  if (emitter_ptr != nullptr) {
+    props.set("emitter", emitter_ptr);
+  }
   if (sensor_ptr != nullptr) {
     props.set("sensor", sensor_ptr);
   }
-  props.set("visibility", spec.visibility);
+  if (interior_medium != nullptr) {
+    props.set("interior", interior_medium);
+  }
+  MergePluginProperties(props, spec.shape_spec,
+                        mitsuba::Shape<Float, Spectrum>::Variant);
+  props.remove_property("to_world");
 
-  mitsuba::ref<mitsuba::Shape<Float, Spectrum>> shape =
-      mitsuba::PluginManager::instance()
-          ->template create_object<mitsuba::Shape<Float, Spectrum>>(props);
-  shape->set_id(id_str);
+  mitsuba::ref<mitsuba::Shape<Float, Spectrum>> shape;
+  try {
+    shape =
+        mitsuba::PluginManager::instance()
+            ->template create_object<mitsuba::Shape<Float, Spectrum>>(props);
+  } catch (const std::exception& e) {
+    TF_WARN("Failed to create curves '%s': %s", id_str.c_str(), e.what());
+    return nullptr;
+  }
 
   TraversalCallback cb("", nullptr, /*recurse_objects=*/false);
   shape->traverse(&cb);

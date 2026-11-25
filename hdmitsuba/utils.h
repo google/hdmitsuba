@@ -38,10 +38,12 @@
 #include <pxr/base/tf/staticTokens.h>
 #include <pxr/base/tf/type.h>
 #include <pxr/base/vt/value.h>
+#include <pxr/imaging/hd/changeTracker.h>
 #include <pxr/imaging/hd/dataSource.h>
 #include <pxr/imaging/hd/renderIndex.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/imaging/hd/sceneIndex.h>
+#include <pxr/imaging/hd/types.h>
 #include <pxr/imaging/hd/visibilitySchema.h>
 #include <pxr/imaging/hd/xformSchema.h>
 #include <pxr/pxr.h>
@@ -52,6 +54,11 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 // Prefix used for Mitsuba mesh vertex attributes created from USD primvars.
 inline constexpr std::string_view kVertexAttributePrefix = "vertex_";
+
+// Custom Hydra rprim dirty bits for mesh lights and `mitsuba:*` attributes.
+inline constexpr HdDirtyBits kDirtyLight = HdChangeTracker::CustomBitsBegin;
+inline constexpr HdDirtyBits kDirtyMitsubaParams =
+    HdChangeTracker::CustomBitsBegin << 1;
 
 // Primvars that a material reads as mesh attributes, paired with the number of
 // channels read (1 or 3). A primvar read with both channel counts appears
@@ -203,13 +210,20 @@ inline std::optional<ScalarAffineTransform3f> ExtractTransform3f(
   return std::nullopt;
 }
 
-inline std::optional<ScalarAffineTransform4f> ExtractTransform4f(
-    const VtValue& val) {
+inline std::optional<GfMatrix4d> ExtractMatrix4d(const VtValue& val) {
   if (val.IsHolding<GfMatrix4f>()) {
-    return UsdToMitsubaTransform(GfMatrix4d(val.Get<GfMatrix4f>()));
+    return GfMatrix4d(val.Get<GfMatrix4f>());
   }
   if (val.IsHolding<GfMatrix4d>()) {
-    return UsdToMitsubaTransform(val.Get<GfMatrix4d>());
+    return val.Get<GfMatrix4d>();
+  }
+  return std::nullopt;
+}
+
+inline std::optional<ScalarAffineTransform4f> ExtractTransform4f(
+    const VtValue& val) {
+  if (std::optional<GfMatrix4d> m = ExtractMatrix4d(val)) {
+    return UsdToMitsubaTransform(*m);
   }
   return std::nullopt;
 }

@@ -95,7 +95,7 @@ This document provides an overview of the USD features supported by `hdMitsuba`,
 *   **Fallback Shading (displayColor)**: If a mesh has no bound material (or its bound material yields neither a BSDF nor an emitter), the delegate automatically maps the USD `displayColor` attribute to a fallback `diffuse` BSDF with its `reflectance` bound to the color.
 
 ### Lights & Camera
-*   **Light Types**: Sphere lights, point lights, spot lights, rectangle lights, distant lights, and dome lights (for HDR environment map backgrounds). IES profiles (`UsdLuxShapingAPI` `inputs:shaping:ies:*`, Type C) are supported on sphere, point, rectangle, disk, and mesh lights. As OpenUSD doesn't define the profile orientation, it follows hdEmbree: `theta = 0` along the light's -Z axis (its emission direction), and `phi = 0` along its -X axis, increasing towards -Y. Standard USDLux area lights (`SphereLight` when not point, `RectLight`, `DiskLight`) default to `"secondary"` ray visibility (invisible to primary camera rays while still illuminating the scene and reflecting in secondary rays). Ray visibility on area lights and dome lights can be controlled by setting the `mitsuba:visibility` (string or token) attribute (`"all"`, `"primary"`, `"secondary"`, `"hidden"`).
+*   **Light Types**: Sphere lights, point lights, spot lights, rectangle lights, distant lights, and dome lights (for HDR environment map backgrounds). IES profiles (`UsdLuxShapingAPI` `inputs:shaping:ies:*`, Type C) are supported on sphere, point, rectangle, disk, and mesh lights. As OpenUSD doesn't define the profile orientation, it follows hdEmbree: `theta = 0` along the light's -Z axis (its emission direction), and `phi = 0` along its -X axis, increasing towards -Y. Standard USDLux area lights (`SphereLight` when not point, `RectLight`, `DiskLight`) default to `"secondary"` ray visibility (invisible to primary camera rays while still illuminating the scene and reflecting in secondary rays). Ray visibility on area lights and dome lights can be controlled by setting the `mitsuba:visibility` (string or token) attribute (`"all"`, `"primary"`, `"secondary"`, `"hidden"`). Supported USD lights and geometry prims (`Mesh`, `Sphere`, `Cylinder`, `Cube`, `Plane`, and `BasisCurves`) can also customize or attach native Mitsuba emitters and shape parameters via `mitsuba:emitter:*` and `mitsuba:shape:*` attributes.
 *   **Cameras & Custom Sensors**:
     *   Supports standard perspective cameras with horizontal/vertical aperture
         offsets, and thin-lens depth of field (`thinlens`) whenever both `fStop`
@@ -146,7 +146,7 @@ Both `hdMitsuba` and the offline `usd_mitsuba` translator share a uniform USD
 namespace convention for configuring native Mitsuba plugins and nested child
 plugins:
 
-*   **Supported Namespaces**: `mitsuba:integrator:*` and `mitsuba:sampler:*` on `RenderSettings` prims, and `mitsuba:sensor:*` on `Camera` prims.
+*   **Supported Namespaces**: `mitsuba:integrator:*` and `mitsuba:sampler:*` on `RenderSettings` prims; `mitsuba:sensor:*` on `Camera` prims; and `mitsuba:emitter:*` and `mitsuba:shape:*` on supported USD light and geometry prims (`Mesh`, `Sphere`, `Cylinder`, `Cube`, `Plane`, and `BasisCurves`).
 *   **Hierarchy & Plugin Selection**: Colon-separated attribute names map to
     nested Mitsuba plugin properties. `:type` selects a plugin type, `:id`
     assigns a Mitsuba object ID, and nested `:child:type` / `:child:<param>`

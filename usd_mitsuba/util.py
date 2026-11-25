@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import drjit as dr
@@ -351,3 +352,117 @@ def get_implicit_surface_parts(
           'flip_normals': True,
       },
   }
+
+
+def strip_nested_ids(value: Any) -> Any:
+  """Returns a copy of nested override dicts with all `'id'` keys removed."""
+  if isinstance(value, dict):
+    return {
+        key: strip_nested_ids(child)
+        for key, child in value.items()
+        if key != 'id'
+    }
+  return value
+
+
+def merge_shape_overrides(
+    shape_dict: dict[str, Any], shape_overrides: Mapping[str, Any]
+) -> None:
+  """Applies `mitsuba:shape:*` overrides onto `shape_dict` in place.
+
+  Mirrors `MergePluginProperties` in hdmitsuba/plugin_builder.cc: nested child
+  plugin dictionaries replace any existing entry outright when they specify a
+  non-empty `'type'`, and warn and skip otherwise.
+
+  Args:
+    shape_dict: Target Mitsuba shape dictionary to update in place.
+    shape_overrides: Parsed `mitsuba:shape:*` override dictionary.
+  """
+  for key, value in shape_overrides.items():
+    if isinstance(value, dict) and not value.get('type'):
+      Tf.Warn(
+          f"Missing 'type' attribute for nested Mitsuba plugin '{key}';"
+          ' skipping.'
+      )
+      continue
+    shape_dict[key] = value
+
+
+def apply_cylinder_geometry_overrides(
+    parts: dict[str, dict[str, Any]],
+    shape_overrides: dict[str, Any],
+) -> None:
+  """Folds cylinder `radius`/`p0`/`p1` overrides into body and cap transforms.
+
+  Args:
+    parts: Implicit surface part dictionaries (`body`, `cap_top`, `cap_bottom`).
+    shape_overrides: Parsed `mitsuba:shape:` overrides (popped in place).
+  """
+  if (
+      len(parts) <= 1
+      or shape_overrides.get('type', 'cylinder') != 'cylinder'
+      or not any(key in shape_overrides for key in ('radius', 'p0', 'p1'))
+  ):
+    return
+  radius = float(shape_overrides.pop('radius', 1.0))
+  start_point = mi.ScalarVector3f(*shape_overrides.pop('p0', (0.0, 0.0, 0.0)))
+  axis = (
+      mi.ScalarVector3f(*shape_overrides.pop('p1', (0.0, 0.0, 1.0)))
+      - start_point
+  )
+  length = dr.norm(axis)
+  if length <= 0.0:
+    return
+  body_to_world = (
+      parts['body']['to_world']
+      .translate(start_point)
+      .to_frame(mi.scalar_rgb.Frame3f(axis / length))
+      .scale([radius, radius, length])
+  )
+  parts['body']['to_world'] = body_to_world
+  parts['cap_top']['to_world'] = body_to_world.translate([0.0, 0.0, 1.0])
+  parts['cap_bottom']['to_world'] = body_to_world
+
+
+def apply_implicit_surface_overrides(
+    prim: Usd.Prim,
+    parts: dict[str, dict[str, Any]],
+    time: Usd.TimeCode,
+    shape_overrides: dict[str, Any],
+    bsdf: mi.BSDF | None,
+    interior_medium: mi.Medium | None,
+) -> None:
+  """Applies `mitsuba:shape:*` overrides, visibility, and BSDF defaults to `parts`.
+
+  Args:
+    prim: The USD implicit surface prim.
+    parts: Implicit surface part dictionaries from `get_implicit_surface_parts`.
+    time: The time code to evaluate visibility at.
+    shape_overrides: Parsed `mitsuba:shape:` overrides (managed keys popped).
+    bsdf: Converted material BSDF, if any.
+    interior_medium: Converted interior medium, if any.
+  """
+  extra_flip_normals = bool(shape_overrides.pop('flip_normals', False))
+  apply_cylinder_geometry_overrides(parts, shape_overrides)
+  visibility = get_ray_visibility(prim, time)
+  part_overrides = shape_overrides
+  for part_index, part in enumerate(parts.values()):
+    if part_index == 1:
+      part_overrides = strip_nested_ids({
+          key: value
+          for key, value in shape_overrides.items()
+          if key not in ('sensor', 'type', 'radius', 'p0', 'p1')
+      })
+    part['visibility'] = visibility
+    if extra_flip_normals:
+      part['flip_normals'] = not part.get('flip_normals', False)
+    if interior_medium is not None:
+      part['interior'] = interior_medium
+    merge_shape_overrides(part, part_overrides)
+    if 'bsdf' not in part:
+      if bsdf is not None:
+        part['bsdf'] = bsdf
+      elif 'interior' in part or 'exterior' in part:
+        part['bsdf'] = {'type': 'null'}
+      elif 'emitter' in part:
+        part['bsdf'] = {'type': 'diffuse', 'reflectance': 0.0}

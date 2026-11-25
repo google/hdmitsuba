@@ -48,6 +48,11 @@ struct PluginSpecNode {
     return params.contains(key) || children.contains(key);
   }
 
+  bool HasChildPlugin(std::string_view key) const {
+    auto it = children.find(key);
+    return it != children.end() && !it->second.plugin_type.empty();
+  }
+
   PluginSpecNode() = default;
   explicit PluginSpecNode(std::string type) : plugin_type(std::move(type)) {}
 

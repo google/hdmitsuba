@@ -36,6 +36,7 @@ from pxr import Usd
 from pxr import UsdShade
 
 from hdmitsuba import geometry_ext as geom_lib
+from usd_mitsuba import light
 
 USD_TO_MI_PRINCIPLED_RENAMING = {
     'diffuseColor': 'base_color',
@@ -643,6 +644,41 @@ def usd_preview_surface_to_mitsuba(
   return bsdf_dict, res_emitter_dict
 
 
+def _extract_emitter_radiance(emitter: mi.Emitter) -> mi.Object | None:
+  """Extracts the `radiance` child texture from an `area` emitter."""
+
+  class _RadianceCollector(mi.TraversalCallback):
+
+    def __init__(self) -> None:
+      super().__init__()
+      self.radiance: mi.Object | None = None
+
+    def put(self, name: str, value: Any, flags: int, *_args: Any) -> None:
+      del flags
+      if name == 'radiance' and isinstance(value, mi.Object):
+        self.radiance = value
+
+  collector = _RadianceCollector()
+  emitter.traverse(collector)
+  return collector.radiance
+
+
+def _apply_materialx_emitter_overrides(
+    emitter: mi.Emitter,
+    double_sided: bool,
+    emitter_overrides: dict[str, Any],
+) -> mi.Emitter:
+  """Rebuilds a MaterialX area emitter with `mitsuba:emitter:*` overrides."""
+  base_dict: dict[str, Any] = {'type': 'area', 'twosided': double_sided}
+  custom_type = emitter_overrides.get('type')
+  if custom_type in (None, '', 'area') and 'radiance' not in emitter_overrides:
+    if (radiance := _extract_emitter_radiance(emitter)) is not None:
+      base_dict['radiance'] = radiance
+  return mi.load_dict(
+      light.merge_emitter_overrides(base_dict, emitter_overrides)
+  )
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class MeshMaterial:
   """Converted Mitsuba material objects and displacement/attribute metadata.
@@ -676,6 +712,7 @@ def convert_mesh_material(
     double_sided: bool = False,
     time: Usd.TimeCode = Usd.TimeCode.Default(),
     fallback_prim: Usd.Prim | None = None,
+    emitter_overrides: dict[str, Any] | None = None,
 ) -> MeshMaterial:
   """Parses a USD geometry or material prim and returns Mitsuba material properties.
 
@@ -691,6 +728,7 @@ def convert_mesh_material(
     time: The time code to evaluate the material at.
     fallback_prim: Optional geometry prim providing fallback `displayColor`
       (e.g. the parent `Mesh` when `prim` is a `GeomSubset`).
+    emitter_overrides: Optional `mitsuba:emitter:*` overrides from the shape.
 
   Returns:
     The converted material.
@@ -718,7 +756,11 @@ def convert_mesh_material(
           bsdf = mi.load_dict(bsdf_dict)
         if emitter_dict:
           # Like hdMitsuba, double-sided geometry emits from both sides.
-          emitter = mi.load_dict(emitter_dict | {'twosided': double_sided})
+          emitter_dict = light.merge_emitter_overrides(
+              emitter_dict | {'twosided': double_sided},
+              emitter_overrides or {},
+          )
+          emitter = mi.load_dict(emitter_dict)
       elif surf_id.startswith(_MI_PREFIX):
         if bsdf_dict := usd_mitsuba_material_to_dict(
             surf_conn[0], mesh_attributes=mesh_attributes, time=time
@@ -734,6 +776,10 @@ def convert_mesh_material(
           # Like hdMitsuba, a MaterialX surface that fails to translate does not
           # fall back to the surface shader of another render context.
           bsdf, emitter, mesh_attributes, mtlx_disp = mtlx
+          if emitter is not None and emitter_overrides:
+            emitter = _apply_materialx_emitter_overrides(
+                emitter, double_sided, emitter_overrides
+            )
 
     if shader := _get_volume_shader(material):
       medium_dict = usd_mitsuba_material_to_dict(shader, 'volume', time=time)
@@ -807,6 +853,7 @@ def convert_material(
     prim: Usd.Prim,
     double_sided: bool = False,
     time: Usd.TimeCode = Usd.TimeCode.Default(),
+    emitter_overrides: dict[str, Any] | None = None,
 ) -> tuple[
     mi.BSDF | None, mi.Emitter | None, mi.Texture | None, mi.Medium | None
 ]:
@@ -818,12 +865,15 @@ def convert_material(
     prim: The USD prim to extract the material from.
     double_sided: Whether the emitter of an emissive material is two-sided.
     time: The time code to evaluate the material at.
+    emitter_overrides: Optional `mitsuba:emitter:*` overrides from the shape.
 
   Returns:
     A tuple of the Mitsuba BSDF, emitter, displacement texture, and interior
     medium (each may be None if not found).
   """
-  mat = convert_mesh_material(prim, double_sided, time)
+  mat = convert_mesh_material(
+      prim, double_sided, time, emitter_overrides=emitter_overrides
+  )
   return mat.bsdf, mat.emitter, mat.displacement, mat.interior_medium
 
 

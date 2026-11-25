@@ -54,6 +54,7 @@ def _set_mitsuba_variant():
         ('skel_deformation', Usd.TimeCode(20), True),
         ('gaussian_splats', Usd.TimeCode.Default(), True),
         ('implicit_surfaces', Usd.TimeCode.Default(), True),
+        ('mitsuba_shape_overrides', Usd.TimeCode.Default(), True),
         ('visibility', Usd.TimeCode.Default(), True),
         ('points', Usd.TimeCode.Default(), True),
     ],
@@ -464,3 +465,97 @@ def test_skel_deformation_time_change():
   test_helpers.robust_assert_close(
       image_t20[..., :3], image_baked[..., :3], atol=0.05
   )
+
+
+def test_mitsuba_shape_dynamic_updates():
+  stage = Usd.Stage.Open(
+      f'{test_helpers.TEST_ASSETS_PATH}/shapes/mitsuba_shape_overrides.usda'
+  )
+  test_helpers.create_render_settings(stage, resolution=(48, 48), spp=32)
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin', camera_path='/World/Camera'
+  )
+  image_initial = engine.render()['color']
+  assert np.max(image_initial[..., :3]) > 0.2
+
+  # Flip mesh normals, mutate emitter/medium leaves, and translate the
+  # X-aligned cylinder.
+  quad = stage.GetPrimAtPath('/World/Quad')
+  quad.GetAttribute('mitsuba:shape:flip_normals').Set(True)
+  quad.GetAttribute('mitsuba:emitter:radiance:value').Set((0.1, 0.3, 0.9))
+  stage.GetPrimAtPath('/World/Cube').GetAttribute(
+      'mitsuba:emitter:radiance:value'
+  ).Set((0.9, 0.5, 0.1))
+  sphere = stage.GetPrimAtPath('/World/MediumSphere')
+  sphere.GetAttribute('mitsuba:shape:interior:scale').Set(4.0)
+  sphere.GetAttribute('mitsuba:shape:interior:phase:g').Set(-0.4)
+  stage.GetPrimAtPath('/World/Cylinder').GetAttribute('xformOp:translate').Set(
+      (0.5, -0.6, 0.0)
+  )
+
+  image_updated, _ = test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      output_prefix='test_mitsuba_shape_dynamic_updates',
+      spp=32,
+      engine=engine,
+  )
+  assert np.mean(np.abs(image_updated - image_initial)) > 0.02
+
+  # Translate the mesh while `flip_normals` stays True, and add a
+  # constructor-only shape override (`mitsuba:shape:radius`) before
+  # deactivating the custom-ID sphere.
+  quad.GetAttribute('xformOp:translate').Set((-0.9, 0.75, 0.0))
+  sphere.CreateAttribute('mitsuba:shape:radius', Sdf.ValueTypeNames.Float).Set(
+      0.2
+  )
+  test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      output_prefix='test_mitsuba_shape_radius_override_rebuild',
+      spp=32,
+      engine=engine,
+  )
+
+  sphere.SetActive(False)
+  test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      output_prefix='test_mitsuba_shape_custom_id_deactivated',
+      spp=32,
+      engine=engine,
+  )
+
+
+def test_basis_curves_mitsuba_shape_overrides():
+  stage = Usd.Stage.Open(f'{test_helpers.TEST_ASSETS_PATH}/shapes/curve.usda')
+  test_helpers.create_render_settings(stage, resolution=(40, 40), spp=32)
+  curve_prim = stage.GetPrimAtPath('/root/mycurve/curve')
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin')
+  image_initial = engine.render()['color']
+
+  curve_prim.CreateAttribute('mitsuba:shape:id', Sdf.ValueTypeNames.String).Set(
+      'hero_curves'
+  )
+  curve_prim.CreateAttribute(
+      'mitsuba:shape:bsdf:type', Sdf.ValueTypeNames.String
+  ).Set('diffuse')
+  curve_prim.CreateAttribute(
+      'mitsuba:shape:bsdf:reflectance', Sdf.ValueTypeNames.Color3f
+  ).Set((0.95, 0.1, 0.2))
+  curve_prim.CreateAttribute(
+      'mitsuba:shape:to_world', Sdf.ValueTypeNames.Matrix4d
+  ).Set(Gf.Matrix4d(1.0).SetTranslate((0.15, 0.0, 0.0)))
+
+  image_updated, _ = test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      output_prefix='test_curves_mitsuba_overrides_updated',
+      spp=32,
+      engine=engine,
+  )
+  assert np.max(np.abs(image_updated - image_initial)) > 0.1
+
+  # Invalid shape plugin type on curves warns and skips without crashing.
+  curve_prim.CreateAttribute(
+      'mitsuba:shape:type', Sdf.ValueTypeNames.String
+  ).Set('nonexistent_curve_shape')
+  np.testing.assert_array_equal(engine.render()['color'][..., :3], 0.0)

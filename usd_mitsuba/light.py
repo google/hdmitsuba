@@ -42,6 +42,53 @@ def _get_or(attr: Usd.Attribute, time: Usd.TimeCode, default: Any) -> Any:
   return default if value is None else value
 
 
+def merge_emitter_overrides(
+    emitter_dict: dict[str, Any],
+    overrides: dict[str, Any],
+    default_to_world: (
+        mi.ScalarTransform4f | mi.AnimatedTransform4f | None
+    ) = None,
+) -> dict[str, Any]:
+  """Merges `mitsuba:emitter:*` overrides onto `emitter_dict`.
+
+  Replaces `emitter_dict` when `overrides` specifies a different plugin `type`,
+  preserving `to_world` (except for `constant` or when `overrides` sets an
+  explicit frame) and `visibility` (for `envmap`/`constant`).
+
+  Args:
+    emitter_dict: Base Mitsuba emitter dictionary to merge into.
+    overrides: Parsed `mitsuba:emitter:*` override dictionary.
+    default_to_world: Optional fallback `to_world` transform when replacing a
+      plugin that omits one (e.g., `constant`).
+
+  Returns:
+    The merged Mitsuba emitter dictionary.
+  """
+  if not overrides:
+    return emitter_dict
+  custom_type = overrides.get('type')
+  has_explicit_frame = any(
+      key in overrides
+      for key in ('to_world', 'direction', 'origin', 'position')
+  )
+  if custom_type and custom_type != emitter_dict.get('type'):
+    result: dict[str, Any] = {'type': custom_type}
+    if (
+        custom_type != 'constant'
+        and not has_explicit_frame
+        and (to_world := emitter_dict.get('to_world', default_to_world))
+        is not None
+    ):
+      result['to_world'] = to_world
+    if custom_type in ('envmap', 'constant') and 'visibility' in emitter_dict:
+      result['visibility'] = emitter_dict['visibility']
+    emitter_dict = result
+  elif has_explicit_frame:
+    emitter_dict.pop('to_world', None)
+  util.deep_merge_dict(emitter_dict, overrides)
+  return emitter_dict
+
+
 def _maybe_wrap_shaping(
     prim: Usd.Prim,
     time: Usd.TimeCode,
@@ -75,7 +122,9 @@ def _maybe_wrap_shaping(
       max(_get_or(shaping_api.GetShapingConeSoftnessAttr(), time, 0.0), 0.0),
       1.0,
   )
-  if emitter_dict['type'] == 'area' and (cone_angle < 180.0 or softness > 0.0):
+  if emitter_dict.get('type') not in ('point', 'spot') and (
+      cone_angle < 180.0 or softness > 0.0
+  ):
     shaping |= {'cone_angle': cone_angle, 'cone_softness': softness}
   if (focus := _get_or(shaping_api.GetShapingFocusAttr(), time, 0.0)) > 0.0:
     shaping |= {
@@ -102,6 +151,7 @@ def _area_emitter(
     time: Usd.TimeCode,
     radiance: mi.ScalarColor3f,
     to_world: mi.ScalarTransform4f,
+    emitter_overrides: dict[str, Any],
     texture_file: Sdf.AssetPath | None = None,
 ) -> dict[str, Any]:
   """Returns an `'area'` emitter, wrapped in `'ies'` if `prim` has shaping.
@@ -109,8 +159,13 @@ def _area_emitter(
   `to_world` is the transform of the emitting shape, whose +Z axis is the
   photometric axis. A `texture_file` modulates `radiance`.
   """
+  custom_type = emitter_overrides.get('type')
   radiance_dict: dict[str, Any] = {'type': 'rgb', 'value': radiance}
-  if texture_file:
+  if (
+      texture_file
+      and custom_type in (None, '', 'area', 'ies')
+      and 'radiance' not in emitter_overrides
+  ):
     if not texture_file.resolvedPath:
       raise ValueError(
           f'Could not resolve texture {texture_file.path!r} of'
@@ -125,12 +180,16 @@ def _area_emitter(
         },
         'in1': {'type': 'srgb', 'color': radiance, 'unbounded': True},
     }
-  return _maybe_wrap_shaping(
-      prim,
-      time,
-      {'type': 'area', 'radiance': radiance_dict},
-      util.remove_scale_from_transform(to_world),
-  )
+  emitter_dict: dict[str, Any] = {
+      'type': 'area',
+      'radiance': radiance_dict,
+  }
+  light_frame = util.remove_scale_from_transform(to_world)
+  if custom_type == 'ies':
+    wrapped = _maybe_wrap_shaping(prim, time, emitter_dict, light_frame)
+    return merge_emitter_overrides(wrapped, emitter_overrides)
+  emitter_dict = merge_emitter_overrides(emitter_dict, emitter_overrides)
+  return _maybe_wrap_shaping(prim, time, emitter_dict, light_frame)
 
 
 def _convert_dome_light(
@@ -139,30 +198,37 @@ def _convert_dome_light(
     color: mi.ScalarColor3f,
     intensity: float,
     time: Usd.TimeCode,
+    emitter_overrides: dict[str, Any],
 ) -> dict[str, Any]:
   dome_light = UsdLux.DomeLight(prim)
   texture_file_attr = dome_light.GetTextureFileAttr().Get(time)
-  if texture_file_attr:
-    bitmap = mi.Bitmap(texture_file_attr.resolvedPath)
-    # Mitsuba's `envmap` only has a scalar `scale` (the mean of `color`), so
-    # the per-channel tint is baked into its texture.
+  has_custom_envmap_source = (
+      'filename' in emitter_overrides or 'bitmap' in emitter_overrides
+  )
+  if (texture_file_attr or has_custom_envmap_source) and emitter_overrides.get(
+      'type', 'envmap'
+  ) == 'envmap':
     mean = dr.mean(color)
-    if mean > 0.0 and not dr.allclose(color, mean):
-      linear = bitmap.convert(
-          mi.Bitmap.PixelFormat.RGB, mi.Struct.Type.Float32, srgb_gamma=False
-      )
-      bitmap = mi.Bitmap(np.array(linear) * np.array(color / mean))
-    return {
+    result: dict[str, Any] = {
         'type': 'envmap',
-        'bitmap': bitmap,
         'to_world': world_transform,
         'scale': intensity * mean,
     }
-  else:
-    return {
-        'type': 'constant',
-        'radiance': {'type': 'rgb', 'value': color * intensity},
-    }
+    if not has_custom_envmap_source:
+      bitmap = mi.Bitmap(texture_file_attr.resolvedPath)
+      # Mitsuba's `envmap` only has a scalar `scale` (the mean of `color`), so
+      # the per-channel tint is baked into its texture.
+      if mean > 0.0 and not dr.allclose(color, mean):
+        linear = bitmap.convert(
+            mi.Bitmap.PixelFormat.RGB, mi.Struct.Type.Float32, srgb_gamma=False
+        )
+        bitmap = mi.Bitmap(np.array(linear) * np.array(color / mean))
+      result['bitmap'] = bitmap
+    return result
+  return {
+      'type': 'constant',
+      'radiance': {'type': 'rgb', 'value': color * intensity},
+  }
 
 
 def _is_point_light(
@@ -231,6 +297,7 @@ def _convert_sphere_light(
     color: mi.ScalarColor3f,
     intensity: float,
     time: Usd.TimeCode,
+    emitter_overrides: dict[str, Any],
 ) -> dict[str, Any]:
   color = color * intensity
   sphere_light = UsdLux.SphereLight(prim)
@@ -272,7 +339,13 @@ def _convert_sphere_light(
   return {
       'type': 'sphere',
       'to_world': world_transform,
-      'emitter': _area_emitter(prim, time, color, world_transform),
+      'emitter': _area_emitter(
+          prim,
+          time,
+          color,
+          world_transform,
+          emitter_overrides,
+      ),
   }
 
 
@@ -282,7 +355,9 @@ def _convert_distant_light(
     color: mi.ScalarColor3f,
     intensity: float,
     time: Usd.TimeCode,
+    emitter_overrides: dict[str, Any],
 ) -> dict[str, Any]:
+  del emitter_overrides
   distant_light = UsdLux.DistantLight(prim)
   # Mitsuba's `directional` emitter requires angles below 180 deg.
   angle = min(max(distant_light.GetAngleAttr().Get(time), 0.0), 179.99)
@@ -306,6 +381,7 @@ def _convert_rect_light(
     color: mi.ScalarColor3f,
     intensity: float,
     time: Usd.TimeCode,
+    emitter_overrides: dict[str, Any],
 ) -> dict[str, Any]:
   rect_light = UsdLux.RectLight(prim)
   scale = mi.ScalarVector3f(
@@ -331,6 +407,7 @@ def _convert_rect_light(
           time,
           color * intensity,
           world_transform,
+          emitter_overrides,
           rect_light.GetTextureFileAttr().Get(time),
       ),
   }
@@ -342,6 +419,7 @@ def _convert_disk_light(
     color: mi.ScalarColor3f,
     intensity: float,
     time: Usd.TimeCode,
+    emitter_overrides: dict[str, Any],
 ) -> dict[str, Any]:
   disk_light = UsdLux.DiskLight(prim)
   radius = disk_light.GetRadiusAttr().Get(time)
@@ -352,7 +430,13 @@ def _convert_disk_light(
   return {
       'type': 'disk',
       'to_world': world_transform,
-      'emitter': _area_emitter(prim, time, color * intensity, world_transform),
+      'emitter': _area_emitter(
+          prim,
+          time,
+          color * intensity,
+          world_transform,
+          emitter_overrides,
+      ),
   }
 
 
@@ -375,6 +459,7 @@ def _convert_cylinder_light(
     color: mi.ScalarColor3f,
     intensity: float,
     time: Usd.TimeCode,
+    emitter_overrides: dict[str, Any],
 ) -> dict[str, Any]:
   cylinder_light = UsdLux.CylinderLight(prim)
   length = dr.norm(
@@ -400,7 +485,13 @@ def _convert_cylinder_light(
           .rotate([0, 1, 0], 90)
           .translate([0, 0, -0.5])
       ),
-      'emitter': _area_emitter(prim, time, color * intensity, light_frame),
+      'emitter': _area_emitter(
+          prim,
+          time,
+          color * intensity,
+          light_frame,
+          emitter_overrides,
+      ),
   }
 
 
@@ -429,6 +520,7 @@ def convert_mesh_light(
     prim: Usd.Prim,
     time: Usd.TimeCode,
     world_transform: Gf.Matrix4d,
+    emitter_overrides: dict[str, Any] | None = None,
 ) -> mi.Emitter | None:
   """Returns the emitter of a `MeshLightAPI` mesh.
 
@@ -436,6 +528,7 @@ def convert_mesh_light(
     prim: The USD mesh prim.
     time: The time code to evaluate attributes at.
     world_transform: The world transform of `prim`.
+    emitter_overrides: Optional `mitsuba:emitter:*` overrides from the shape.
 
   Returns:
     The `'area'` emitter, wrapped in an `'ies'` emitter if `prim` has active
@@ -452,24 +545,26 @@ def convert_mesh_light(
           time,
           color * intensity,
           util.to_mitsuba_transform(world_transform).rotate([1, 0, 0], 180),
+          emitter_overrides or {},
       )
   )
 
 
-_LIGHT_CONVERTERS = [
+_LIGHT_CONVERTERS = (
     (UsdLux.DomeLight, _convert_dome_light),
     (UsdLux.SphereLight, _convert_sphere_light),
     (UsdLux.DistantLight, _convert_distant_light),
     (UsdLux.RectLight, _convert_rect_light),
     (UsdLux.DiskLight, _convert_disk_light),
     (UsdLux.CylinderLight, _convert_cylinder_light),
-]
+)
 
 
 def _sample_light_transform(
     prim: Usd.Prim,
     time: Usd.TimeCode,
     motion_interval: tuple[float, float],
+    emitter_plugin_type: str | None,
 ) -> mi.ScalarTransform4f | mi.AnimatedTransform4f:
   """Samples the light's world transform, falling back to static for area lights."""
   if _is_area_light(prim, time):
@@ -479,10 +574,19 @@ def _sample_light_transform(
       return util.get_world_transform(prim, time)
     return transform
 
-  # USD distant, spot, and IES point lights emit along -Z, while Mitsuba's
-  # directional, spot, and ies emitters point along +Z. Unshaped point lights
-  # are isotropic, so they are flipped too.
-  flip_z = prim.IsA(UsdLux.DistantLight) or prim.IsA(UsdLux.SphereLight)
+  # USD distant, spot, and shaped point lights emit along -Z, while Mitsuba's
+  # directional, spot, projector, and ies emitters point along +Z. Unshaped
+  # point lights are isotropic, so they are flipped too.
+  if emitter_plugin_type:
+    flip_z = emitter_plugin_type in (
+        'point',
+        'spot',
+        'projector',
+        'directional',
+        'ies',
+    )
+  else:
+    flip_z = prim.IsA(UsdLux.DistantLight) or prim.IsA(UsdLux.SphereLight)
 
   # Non-area emitters do not support scale or shear, and AnimatedTransform
   # rejects keyframe matrices with shear.
@@ -511,19 +615,45 @@ def convert_light(
   Returns:
     The Mitsuba emitter dictionary.
   """
-  world_transform = _sample_light_transform(prim, time, motion_interval)
+  emitter_overrides = util.extract_nested_dict(prim, 'mitsuba:emitter:', time)
+  world_transform = _sample_light_transform(
+      prim, time, motion_interval, emitter_overrides.get('type')
+  )
   color, intensity = _base_emission(prim, time)
 
   for light_class, converter in _LIGHT_CONVERTERS:
     if prim.IsA(light_class):
-      emitter = converter(prim, world_transform, color, intensity, time)
-      vis = util.parse_ray_visibility(
-          prim.GetAttribute('mitsuba:visibility').Get(time), None
+      emitter_dict = converter(
+          prim, world_transform, color, intensity, time, emitter_overrides
       )
-      if _is_area_light(prim, time):
-        emitter['bsdf'] = {'type': 'null'}
-        emitter['visibility'] = vis or 'secondary'
-      elif prim.IsA(UsdLux.DomeLight) and vis:
-        emitter['visibility'] = vis
-      return emitter
-  raise ValueError(f'Unsupported light prim: {prim.GetPath()}.')
+      break
+  else:
+    raise ValueError(f'Unsupported light prim: {prim.GetPath()}.')
+
+  visibility = util.parse_ray_visibility(
+      prim.GetAttribute('mitsuba:visibility').Get(time), None
+  )
+  if _is_area_light(prim, time):
+    emitter_dict['bsdf'] = {'type': 'null'}
+    emitter_dict['visibility'] = visibility or 'secondary'
+    util.merge_shape_overrides(
+        emitter_dict, util.extract_nested_dict(prim, 'mitsuba:shape:', time)
+    )
+  else:
+    if prim.IsA(UsdLux.DomeLight) and visibility:
+      emitter_dict['visibility'] = visibility
+    if emitter_overrides:
+      if (
+          emitter_dict.get('type') == 'ies'
+          and 'nested_emitter' in emitter_dict
+          and emitter_overrides.get('type') != 'ies'
+      ):
+        emitter_dict['nested_emitter'] = merge_emitter_overrides(
+            emitter_dict['nested_emitter'], emitter_overrides
+        )
+      else:
+        emitter_dict = merge_emitter_overrides(
+            emitter_dict, emitter_overrides, default_to_world=world_transform
+        )
+
+  return emitter_dict

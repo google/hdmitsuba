@@ -93,7 +93,7 @@ struct ShapingSpec {
 struct LightSpec : public BaseSpec {
   TfToken prim_type;
   // For mesh lights, which bake their transform into the vertices, this is the
-  // light frame of the `ies` emitter (see `GetMeshEmitterSpec` in mesh.cc).
+  // light frame of the `ies` emitter (see `GetMeshEmitterSpec` in light.h).
   MotionTransform transform;
   GfVec3f emission;
   float angle = 0.0f;
@@ -107,10 +107,15 @@ struct LightSpec : public BaseSpec {
   ShapingSpec shaping;
   bool transform_dirty = true;
   bool emission_dirty = true;
+  PluginSpecNode emitter_spec;
+  PluginSpecNode shape_spec;
 
   void FoldPendingFrom(const LightSpec& prev) {
     transform_dirty = (transform != prev.transform) || prev.transform_dirty;
     emission_dirty = (emission != prev.emission) || prev.emission_dirty;
+    if (emitter_spec != prev.emitter_spec || shape_spec != prev.shape_spec) {
+      needs_rebuild = true;
+    }
     BaseSpec::FoldPendingFrom(prev);
   }
 
@@ -187,6 +192,8 @@ struct MeshSpec : public BaseSpec {
   // If set, the shape is rendered as this native Mitsuba shape with a single
   // material, and the topology is unused.
   std::optional<ImplicitSurface> implicit_surface = std::nullopt;
+  PluginSpecNode shape_spec;
+  PluginSpecNode mitsuba_emitter_spec;
   // Instance-to-world transforms when rendered through Mitsuba instances. For a
   // non-instanced mesh with an animated transform (or an implicit surface whose
   // transform is not supported by its native shape) this holds a single entry
@@ -198,6 +205,16 @@ struct MeshSpec : public BaseSpec {
   // Mitsuba ray visibility of the shape (`mitsuba:visibility` primvar).
   std::string visibility = "all";
 
+  GfMatrix4d EffectiveTransform() const {
+    if (auto xform_it = shape_spec.params.find("to_world");
+        xform_it != shape_spec.params.end()) {
+      if (const auto extra = ExtractMatrix4d(xform_it->second)) {
+        return *extra * transform;
+      }
+    }
+    return transform;
+  }
+
   void FoldPendingFrom(const MeshSpec& prev) {
     if (emitter_spec.has_value() != prev.emitter_spec.has_value() ||
         (emitter_spec && emitter_spec->shaping != prev.emitter_spec->shaping) ||
@@ -205,8 +222,11 @@ struct MeshSpec : public BaseSpec {
         double_sided != prev.double_sided || visibility != prev.visibility ||
         geometry.left_handed != prev.geometry.left_handed ||
         // A mirroring transform flips the triangle winding.
-        (transform.GetDeterminant() < 0.0) !=
-            (prev.transform.GetDeterminant() < 0.0) ||
+        (EffectiveTransform().GetDeterminant() < 0.0) !=
+            (prev.EffectiveTransform().GetDeterminant() < 0.0) ||
+        motion_wrapped != prev.motion_wrapped ||
+        prev.shape_spec != shape_spec ||
+        prev.mitsuba_emitter_spec != mitsuba_emitter_spec ||
         !std::equal(instance_transforms.begin(), instance_transforms.end(),
                     prev.instance_transforms.begin(),
                     prev.instance_transforms.end(),
@@ -219,6 +239,35 @@ struct MeshSpec : public BaseSpec {
   }
 };
 
+// Returns true if `shape_spec` overrides implicit-surface geometry parameters
+// (`center`, `radius`, `p0`, `p1`) that require rebuilding on transform or
+// primvar updates.
+inline bool HasShapeGeometryOverride(const PluginSpecNode& shape_spec) {
+  return shape_spec.HasProperty("center") || shape_spec.HasProperty("radius") ||
+         shape_spec.HasProperty("p0") || shape_spec.HasProperty("p1");
+}
+
+// Returns true if the shape's effective emitter spec selects `directionalarea`
+// (directly or nested inside `ies`), which caches surface area at construction.
+inline bool HasDirectionalAreaEmitterSpec(const PluginSpecNode& emitter_spec,
+                                          const PluginSpecNode& shape_spec) {
+  const auto shape_emitter_it = shape_spec.children.find("emitter");
+  const PluginSpecNode& effective =
+      (shape_emitter_it != shape_spec.children.end() &&
+       !shape_emitter_it->second.plugin_type.empty())
+          ? shape_emitter_it->second
+          : emitter_spec;
+  if (effective.plugin_type == "directionalarea") {
+    return true;
+  }
+  if (effective.plugin_type == "ies") {
+    auto nested_it = effective.children.find("nested_emitter");
+    return nested_it != effective.children.end() &&
+           nested_it->second.plugin_type == "directionalarea";
+  }
+  return false;
+}
+
 struct CurveSpec : public BaseSpec {
   SdfPath material_id;
   ScalarAffineTransform4f transform;
@@ -227,6 +276,9 @@ struct CurveSpec : public BaseSpec {
   std::vector<uint32_t> segment_indices;  // Precomputed segment indices
   // Mitsuba ray visibility of the shape (`mitsuba:visibility` primvar).
   std::string visibility = "all";
+  std::optional<LightSpec> emitter_spec;
+  PluginSpecNode shape_spec;
+  PluginSpecNode mitsuba_emitter_spec;
 };
 
 struct ParticleFieldSpec : public BaseSpec {
