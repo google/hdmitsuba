@@ -353,25 +353,30 @@ def test_bsdf_layer_throughput() -> None:
   si = mtlx.make_test_si(wi=(0.0, 0.0, 1.0))
   wo = mi.Vector3f(0.3, 0.4, 0.8660254)
   top = ('ND_oren_nayar_diffuse_bsdf', {'color': (0.2, 0.2, 0.2)})
+  zero_top = (
+      'ND_oren_nayar_diffuse_bsdf',
+      {'color': (0.2, 0.2, 0.2), 'weight': 0.0},
+  )
   base = ('ND_oren_nayar_diffuse_bsdf', {'color': (1.0, 1.0, 1.0)})
 
   cases = (
       # Opaque top (even at weight=0) and multiplied tops block base (tp = 0).
-      (top, (0.2, 0.2, 0.2)),
-      (
-          (
-              'ND_oren_nayar_diffuse_bsdf',
-              {'color': (0.2, 0.2, 0.2), 'weight': 0.0},
-          ),
-          (0.0, 0.0, 0.0),
-      ),
+      (top, (0.2, 0.2, 0.2), False),
+      (zero_top, (0.0, 0.0, 0.0), False),
       (
           ('ND_multiply_bsdfC', {'in1': top, 'in2': (1.0, 0.0, 0.0)}),
           (0.2, 0.0, 0.0),
+          False,
       ),
-      (('ND_multiply_bsdfF', {'in1': top, 'in2': 0.0}), (0.0, 0.0, 0.0)),
-      # Partial mix (unconnected bg = Null, tp = 1) and add throughputs.
-      (('ND_mix_bsdf', {'fg': top, 'mix': 0.5}), (0.6, 0.6, 0.6)),
+      (('ND_multiply_bsdfF', {'in1': top, 'in2': 0.0}), (0.0, 0.0, 0.0), False),
+      # Partial mix (unconnected bg = Null, tp = 1), runtime OpaqueBlocker in a
+      # partial mix (`tp = lerp(1, 0, 0.5) = 0.5`), and add throughputs.
+      (('ND_mix_bsdf', {'fg': top, 'mix': 0.5}), (0.6, 0.6, 0.6), True),
+      (
+          ('ND_mix_bsdf', {'fg': zero_top, 'mix': 0.5}),
+          (0.5, 0.5, 0.5),
+          True,
+      ),
       (
           (
               'ND_add_bsdf',
@@ -381,17 +386,28 @@ def test_bsdf_layer_throughput() -> None:
               },
           ),
           (0.44, 0.44, 0.44),
+          True,
       ),
   )
-  for top_spec, expected in cases:
+  for top_spec, expected, is_layered in cases:
     bsdf = _compile_bsdf('ND_layer_bsdf', top=top_spec, base=base)
-    assert mi.has_flag(bsdf.flags(), mi.BSDFFlags.NonSymmetric)
+    assert mi.has_flag(bsdf.flags(), mi.BSDFFlags.NonSymmetric) == is_layered
     assert dr.allclose(
         bsdf.eval(ctx, si, wo),
         mi.Color3f(*expected) * (wo.z * dr.inv_pi),
         rtol=1e-4,
         atol=1e-5,
     )
+
+  # Pruning an opaque-top layer drops authored base opaque parameters, and a
+  # root `OpaqueBlocker` (`weight=0` diffuse) emits empty flags and 0 params.
+  colored_base = ('ND_oren_nayar_diffuse_bsdf', {'color': (0.3, 0.4, 0.5)})
+  assert len(
+      mi.traverse(_compile_bsdf('ND_layer_bsdf', top=top, base=colored_base))
+  ) == len(mi.traverse(_compile_bsdf(top[0], **top[1])))
+  bsdf_blocker = _compile_bsdf('ND_layer_bsdf', top=zero_top, base=colored_base)
+  assert bsdf_blocker.flags() == 0
+  assert not mi.traverse(bsdf_blocker)
 
   # Transmissive dielectric top blocks the base layer (`throughput = 0`).
   kw_rt = _diel_kw('RT', 0.2)
@@ -900,8 +916,12 @@ def test_eval_features() -> None:
   )
 
 
-def test_dielectric_bsdf() -> None:
-  """Tests dielectric energy, unit IOR, relative eta, TIR, and ignored VDFs."""
+def test_dielectric_bsdf(capfd: pytest.CaptureFixture[str]) -> None:
+  """Tests dielectric energy, unit IOR, relative eta, TIR, and ignored VDFs.
+
+  Args:
+    capfd: Pytest file-descriptor capture fixture.
+  """
   ctx = mi.BSDFContext()
   u1, u2 = _sample_inputs(seed=7)
 
@@ -959,8 +979,9 @@ def test_dielectric_bsdf() -> None:
     assert dr.allclose(bs.eta, exp_eta, atol=1e-5)
     assert dr.allclose(w * dr.square(bs.eta), 1.0, atol=2e-3)
 
-  # Ignored VDF absorption emits no dead opaque parameters.
+  # Ignored VDF absorption warns once and emits no dead opaque parameters.
   bsdf_vdf_ref = _compile_bsdf('ND_dielectric_bsdf', **_diel_kw('T'))
+  capfd.readouterr()
   bsdf_vdf = _compile_bsdf(
       'ND_layer_vdf',
       top=('ND_dielectric_bsdf', _diel_kw('T')),
@@ -977,6 +998,7 @@ def test_dielectric_bsdf() -> None:
           },
       ),
   )
+  assert 'Unsupported MaterialX VDF closure' in capfd.readouterr().err
   assert len(mi.traverse(bsdf_vdf)) == len(mi.traverse(bsdf_vdf_ref))
 
 

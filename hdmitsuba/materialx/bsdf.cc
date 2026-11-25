@@ -707,12 +707,11 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
         const ClosureNode& c = closures[i];
         if (c.op == ClosureOp::Null) {
           tp[i] = 1.0f;
+        } else if (c.op == ClosureOp::OpaqueBlocker) {
+          tp[i] = 0.0f;
         } else if (is_leaf(c.op)) {
           size_t k = leaf_k++;
-          if (((c.op == ClosureOp::Dielectric ||
-                c.op == ClosureOp::GeneralizedSchlick) &&
-               scatter_mode(c) == kScatterR) ||
-              c.op == ClosureOp::Sheen) {
+          if (leaf_has_layer_throughput(c)) {
             UnpolarizedSpectrum albedo =
                 c.op == ClosureOp::Sheen
                     ? UnpolarizedSpectrum(sheen_dir_albedo(

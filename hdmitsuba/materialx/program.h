@@ -392,6 +392,7 @@ inline constexpr int kSheenContyKulla = 0, kSheenZeltner = 1;
 
 enum class ClosureOp : int32_t {
   Null,
+  OpaqueBlocker,
   OrenNayarDiffuse,
   BurleyDiffuse,
   Sheen,
@@ -407,7 +408,7 @@ enum class ClosureOp : int32_t {
 };
 
 constexpr bool is_leaf(ClosureOp op) {
-  return op > ClosureOp::Null && op < ClosureOp::Layer;
+  return op > ClosureOp::OpaqueBlocker && op < ClosureOp::Layer;
 }
 constexpr bool is_combinator(ClosureOp op) { return op >= ClosureOp::Layer; }
 
@@ -455,6 +456,10 @@ struct ClosureNode {
   ClosureNode() = default;
 
   static ClosureNode MakeNull() { return ClosureNode(ClosureOp::Null); }
+
+  static ClosureNode MakeOpaqueBlocker() {
+    return ClosureNode(ClosureOp::OpaqueBlocker);
+  }
 
   static ClosureNode MakeDiffuse(int weight, int color, int roughness,
                                  int energy_comp, int normal) {
@@ -534,6 +539,15 @@ struct ClosureNode {
 };
 static_assert(sizeof(ClosureNode) == 48);
 static_assert(std::has_unique_object_representations_v<ClosureNode>);
+
+// Returns true if a leaf BSDF closure transmits energy to an underlying `layer`
+// base (sheen or reflection-only dielectric / generalized Schlick).
+constexpr bool leaf_has_layer_throughput(const ClosureNode& c) {
+  return c.op == ClosureOp::Sheen ||
+         ((c.op == ClosureOp::Dielectric ||
+           c.op == ClosureOp::GeneralizedSchlick) &&
+          (c.microfacet.mode & kScatterModeMask) == kScatterR);
+}
 
 // Self-contained bytecode slice evaluated at perturbed surface interactions by
 // `Op::HeightToNormal`. Uses the enclosing program's `consts`, `opaques`,
