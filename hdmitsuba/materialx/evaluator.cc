@@ -86,24 +86,25 @@ void eval_noise_op(Op op, uint16_t imm, Vector<Float, 4>*& sp) {
   Out res;
   if (op == Op::CellNoise) {
     Vector<Float, 4>* a = pop(1);
-    res = detail::mx_cell_noise<Dim, Out, Float>(dr::head<3>(a[0]));
+    res = detail::mx_cell_noise<Dim, Out, Float>(dr::head<Dim>(a[0]));
   } else if (op == Op::Noise) {
     Vector<Float, 4>* a = pop(1);
-    res = detail::mx_perlin_noise<Dim, Out, Float>(dr::head<3>(a[0]));
+    res = detail::mx_perlin_noise<Dim, Out, Float>(dr::head<Dim>(a[0]));
   } else if (op == Op::Worley) {
     Vector<Float, 4>* a = pop(3);
-    res = detail::mx_worley_noise<Dim, Out, Float>(dr::head<3>(a[0]), a[1].x(),
-                                                   dr::round(a[2].x()) == 1.0f);
+    res = detail::mx_worley_noise<Dim, Out, Float>(
+        dr::head<Dim>(a[0]), a[1].x(), dr::round(a[2].x()) == 1.0f);
   } else {
     uint16_t oct = fractal_octaves(imm);
     if (oct == kFractalDynamicOctaves) {
       Vector<Float, 4>* a = pop(4);
       res = detail::mx_fractal_noise<Dim, Out, Float>(
-          dr::head<3>(a[0]), a[3].x(), a[1].x(), a[2].x(), kMaxFractalOctaves);
+          dr::head<Dim>(a[0]), a[3].x(), a[1].x(), a[2].x(),
+          kMaxFractalOctaves);
     } else {
       Vector<Float, 4>* a = pop(3);
       res = detail::mx_fractal_noise<Dim, Out, Float>(
-          dr::head<3>(a[0]), int(oct), a[1].x(), a[2].x());
+          dr::head<Dim>(a[0]), int(oct), a[1].x(), a[2].x());
     }
   }
   if constexpr (std::is_same_v<Out, Float>) {

@@ -19,6 +19,7 @@
 // MaterialX Project). Include only from `evaluator.cc`.
 
 #include <cstddef>
+#include <cstdint>
 #include <tuple>
 #include <type_traits>
 
@@ -28,6 +29,10 @@
 
 NAMESPACE_BEGIN(mitsuba)
 namespace mtlx::detail {
+
+constexpr uint32_t mx_hash_seed(uint32_t n) {
+  return 0xdeadbeefu + (n << 2u) + 13u;
+}
 
 template <typename UInt32>
 UInt32 mx_rotl32(const UInt32& x, int k) {
@@ -82,14 +87,14 @@ Float mx_bits_to_01(const UInt32& bits) {
 
 template <typename Float>
 Float mx_fade(const Float& t) {
-  return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
+  return t * t * t * dr::fmadd(t, dr::fmadd(t, 6.0f, -15.0f), 10.0f);
 }
 
 template <typename Int32, typename... Z>
 dr::uint32_array_t<Int32> mx_hash_int(const Int32& x, const Int32& y,
                                       const Z&... z) {
   using UInt32 = dr::uint32_array_t<Int32>;
-  UInt32 seed = UInt32(0xdeadbeefu + ((2u + sizeof...(Z)) << 2u) + 13u);
+  UInt32 seed(mx_hash_seed(2u + static_cast<uint32_t>(sizeof...(Z))));
   return mx_bjfinal(seed + UInt32(x), seed + UInt32(y),
                     (seed + ... + UInt32(z)));
 }
@@ -104,19 +109,18 @@ Float mx_floorfrac(const Float& x, Int32& i) {
 template <int Dim, typename Float, typename UInt32>
 Float mx_gradient_float(const UInt32& hash, const Float& x, const Float& y,
                         const Float& z) {
-  UInt32 h;
   Float u, v;
   if constexpr (Dim == 2) {
-    h = hash & 7u;
-    auto lt4 = h < 4u;
+    auto lt4 = (hash & 4u) == 0u;
     u = dr::select(lt4, x, y);
     v = 2.0f * dr::select(lt4, y, x);
   } else {
-    h = hash & 15u;
-    u = dr::select(h < 8u, x, y);
-    v = dr::select(h < 4u, y, dr::select((h == 12u) | (h == 14u), x, z));
+    u = dr::select((hash & 8u) == 0u, x, y);
+    v = dr::select((hash & 12u) == 0u, y,
+                   dr::select((hash & 13u) == 12u, x, z));
   }
-  return dr::select((h & 1u) != 0u, -u, u) + dr::select((h & 2u) != 0u, -v, v);
+  return dr::select((hash & 1u) != 0u, -u, u) +
+         dr::select((hash & 2u) != 0u, -v, v);
 }
 
 template <int Dim, typename Out, typename Float,
@@ -136,7 +140,7 @@ Out mx_cell_noise(const Int32& ix, const Int32& iy, const Int32& iz) {
     return r;
   } else {
     using UInt32 = dr::uint32_array_t<Float>;
-    UInt32 a = UInt32(0xdeadbeefu + (4u << 2u) + 13u);
+    UInt32 a(mx_hash_seed(4u));
     UInt32 b = a + UInt32(iy), c = a + UInt32(iz);
     a += UInt32(ix);
     mx_bjmix(a, b, c);
@@ -147,7 +151,7 @@ Out mx_cell_noise(const Int32& ix, const Int32& iy, const Int32& iz) {
 }
 
 template <int Dim, typename Out, typename Float>
-Out mx_cell_noise(const Vector<Float, 3>& p) {
+Out mx_cell_noise(const Vector<Float, Dim>& p) {
   using Int32 = dr::int32_array_t<Float>;
   Int32 ix(dr::floor(p.x())), iy(dr::floor(p.y())), iz(0);
   if constexpr (Dim == 3) iz = Int32(dr::floor(p.z()));
@@ -155,22 +159,26 @@ Out mx_cell_noise(const Vector<Float, 3>& p) {
 }
 
 template <int Dim, typename Out, typename Float>
-Out mx_perlin_noise(const Vector<Float, 3>& p) {
+Out mx_perlin_noise(const Vector<Float, Dim>& p) {
   using Int32 = dr::int32_array_t<Float>;
-  using Vec = Vector<Float, 3>;
-  Vector<Int32, 3> cell(0);
-  Vec frac(mx_floorfrac(p.x(), cell.x()), mx_floorfrac(p.y(), cell.y()), 0.0f);
-  if constexpr (Dim == 3) frac.z() = mx_floorfrac(p.z(), cell.z());
-  Vec fade = mx_fade(frac);
+  using UInt32 = dr::uint32_array_t<Float>;
+  using VecD = Vector<Float, Dim>;
+  Vector<Int32, Dim> cell;
+  VecD frac;
+  for (int i = 0; i < Dim; ++i) frac[i] = mx_floorfrac(p[i], cell[i]);
+  VecD fade = mx_fade(frac);
+  constexpr uint32_t kSeed = mx_hash_seed(uint32_t(Dim));
+  Vector<UInt32, Dim> hbase = Vector<UInt32, Dim>(cell) + kSeed;
+  Vector<UInt32, Dim> hbase1 = hbase + 1u;
   size_t w = dr::width(p);
   Out sum = std::get<1>(dr::while_loop(
       std::make_tuple(dr::zeros<Int32>(w), dr::zeros<Out>(w), frac, fade),
-      [](const Int32& k, const Out&, const Vec&, const Vec&) {
-        return k < (1 << Dim);
-      },
-      [cell](Int32& k, Out& acc, Vec& f, Vec& fd) {
+      [](const Int32& k, const auto&...) { return k < (1 << Dim); },
+      [hbase, hbase1](Int32& k, Out& acc, VecD& f, VecD& fd) {
         auto bx = (k & 1) != 0, by = (k & 2) != 0;
-        dr::uint32_array_t<Float> h;
+        UInt32 hx = dr::select(bx, hbase1.x(), hbase.x());
+        UInt32 hy = dr::select(by, hbase1.y(), hbase.y());
+        UInt32 h;
         Float gx = dr::select(bx, f.x() - 1.0f, f.x());
         Float gy = dr::select(by, f.y() - 1.0f, f.y());
         Float gz(0.0f);
@@ -178,19 +186,20 @@ Out mx_perlin_noise(const Vector<Float, 3>& p) {
                    dr::select(by, fd.y(), 1.0f - fd.y());
         if constexpr (Dim == 3) {
           auto bz = (k & 4) != 0;
-          h = mx_hash_int(cell.x() + (k & 1), cell.y() + ((k >> 1) & 1),
-                          cell.z() + (k >> 2));
+          h = mx_bjfinal(hx, hy, dr::select(bz, hbase1.z(), hbase.z()));
           gz = dr::select(bz, f.z() - 1.0f, f.z());
           wt *= dr::select(bz, fd.z(), 1.0f - fd.z());
         } else {
-          h = mx_hash_int(cell.x() + (k & 1), cell.y() + ((k >> 1) & 1));
+          h = mx_bjfinal(hx, hy, UInt32(kSeed));
         }
         if constexpr (std::is_same_v<Out, Float>) {
-          acc += wt * mx_gradient_float<Dim>(h, gx, gy, gz);
+          acc = dr::fmadd(wt, mx_gradient_float<Dim>(h, gx, gy, gz), acc);
         } else {
-          acc += wt * Out(mx_gradient_float<Dim>(h, gx, gy, gz),
-                          mx_gradient_float<Dim>(h >> 8, gx, gy, gz),
-                          mx_gradient_float<Dim>(h >> 16, gx, gy, gz));
+          acc = dr::fmadd(wt,
+                          Out(mx_gradient_float<Dim>(h, gx, gy, gz),
+                              mx_gradient_float<Dim>(h >> 8, gx, gy, gz),
+                              mx_gradient_float<Dim>(h >> 16, gx, gy, gz)),
+                          acc);
         }
         k += 1;
       },
@@ -200,11 +209,11 @@ Out mx_perlin_noise(const Vector<Float, 3>& p) {
 
 // Fractal noise with an octave count that varies per sample.
 template <int Dim, typename Out, typename Float>
-Out mx_fractal_noise(const Vector<Float, 3>& p, const Float& octaves,
+Out mx_fractal_noise(const Vector<Float, Dim>& p, const Float& octaves,
                      const Float& lacunarity, const Float& diminish,
                      int max_octaves) {
   using Int32 = dr::int32_array_t<Float>;
-  using Vec = Vector<Float, 3>;
+  using VecD = Vector<Float, Dim>;
   // Widen loop-carried state up front so forward-mode AD never sees a width
   // 1 -> W transition mid-body, and copy invariant scalar parameters so
   // symbolic virtual calls wrap outer AD variables in `Gather` nodes.
@@ -217,23 +226,21 @@ Out mx_fractal_noise(const Vector<Float, 3>& p, const Float& octaves,
   }
   return std::get<1>(dr::while_loop(
       std::make_tuple(dr::zeros<Int32>(w), dr::zeros<Out>(w),
-                      dr::full<Float>(1.0f, w), p + dr::zeros<Float>(w),
-                      max_oct, lac, dim),
-      [](const Int32& i, const Out&, const Float&, const Vec&,
-         const Int32& octaves, const Float&,
-         const Float&) { return i < octaves; },
-      [](Int32& i, Out& result, Float& amplitude, Vec& p, Int32&,
-         Float& lacunarity, Float& diminish) {
-        result += amplitude * mx_perlin_noise<Dim, Out>(p);
-        amplitude *= diminish;
-        p *= lacunarity;
+                      dr::full<Float>(1.0f, w), p + dr::zeros<Float>(w), lac,
+                      dim),
+      [max_oct](const Int32& i, const auto&...) { return i < max_oct; },
+      [](Int32& i, Out& result, Float& amplitude, VecD& p_cur, Float& lac_in,
+         Float& dim_in) {
+        result = dr::fmadd(amplitude, mx_perlin_noise<Dim, Out>(p_cur), result);
+        amplitude *= dim_in;
+        p_cur *= lac_in;
         i += 1;
       },
       "MaterialX fractal noise", max_octaves));
 }
 
 template <int Dim, typename Out, typename Float>
-Out mx_fractal_noise(const Vector<Float, 3>& p, int octaves,
+Out mx_fractal_noise(const Vector<Float, Dim>& p, int octaves,
                      const Float& lacunarity, const Float& diminish) {
   if (octaves <= 0) return Out(0.0f);
   if (octaves == 1) return mx_perlin_noise<Dim, Out>(p);
@@ -246,51 +253,59 @@ Out mx_fractal_noise(const Vector<Float, 3>& p, int octaves,
 // to the three nearest feature points elsewhere, matching
 // `mx_worley_noise_*()` in `mx_noise.glsl`.
 template <int Dim, typename Out, typename Float>
-Out mx_worley_noise(const Vector<Float, 3>& p, const Float& jitter,
+Out mx_worley_noise(const Vector<Float, Dim>& p, const Float& jitter,
                     const dr::mask_t<Float>& cell) {
   using Int32 = dr::int32_array_t<Float>;
   using Mask = dr::mask_t<Float>;
   using VecD = Vector<Float, Dim>;
-  Vector<Int32, 3> base(0);
+  Vector<Int32, Dim> base;
   VecD local_pos;
-  local_pos.x() = mx_floorfrac(p.x(), base.x());
-  local_pos.y() = mx_floorfrac(p.y(), base.y());
-  if constexpr (Dim == 3) local_pos.z() = mx_floorfrac(p.z(), base.z());
+  for (int i = 0; i < Dim; ++i) local_pos[i] = mx_floorfrac(p[i], base[i]);
 
   size_t w = dr::width(p, jitter);
   Float jit = jitter;
   if constexpr (dr::is_diff_v<Float>) jit = jit.copy();
-  Vector<Int32, 3> d0(dr::full<Int32>(-1, w), dr::full<Int32>(-1, w),
-                      dr::full<Int32>(Dim == 3 ? -1 : 0, w));
-  auto [_, f, min_off, _lp, _jit] = dr::while_loop(
+  VecD bias = dr::fmadd(jit, -0.5f, 0.5f) - local_pos;
+  Vector<Int32, Dim> d0(dr::full<Int32>(-1, w));
+  auto [_, f, min_delta, _b, _j] = dr::while_loop(
       std::make_tuple(d0, Out(dr::full<Float>(1e6f, w)), dr::zeros<VecD>(w),
-                      local_pos, jit),
-      [](const Vector<Int32, 3>& d, const auto&...) { return d.x() <= 1; },
-      [base](Vector<Int32, 3>& d, Out& f_acc, VecD& min_off_acc, VecD& lp,
-             Float& jit_in) {
-        VecD rnd = mx_cell_noise<Dim, VecD, Float>(
-            base.x() + d.x(), base.y() + d.y(), base.z() + d.z());
-        VecD cell_off = (rnd - 0.5f) * jit_in + VecD(dr::head<Dim>(d)) + 0.5f;
-        Float d2 = dr::squared_norm(cell_off - lp);
+                      bias, jit),
+      [](const Vector<Int32, Dim>& d, const auto&...) { return d.x() <= 1; },
+      [base](Vector<Int32, Dim>& d, Out& f_acc, VecD& min_delta_acc, VecD& b,
+             Float& j) {
+        Int32 dz(0);
+        if constexpr (Dim == 3) dz = base.z() + d.z();
+        VecD rnd = mx_cell_noise<Dim, VecD, Float>(base.x() + d.x(),
+                                                   base.y() + d.y(), dz);
+        VecD delta = dr::fmadd(rnd, j, VecD(d) + b);
+        Float d2 = dr::squared_norm(delta);
         if constexpr (std::is_same_v<Out, Float>) {
-          min_off_acc = dr::select(d2 < f_acc, cell_off, min_off_acc);
+          min_delta_acc =
+              dr::select(d2 < f_acc, dr::detach(delta), min_delta_acc);
           f_acc = dr::minimum(f_acc, d2);
         } else {
-          min_off_acc = dr::select(d2 < f_acc.x(), cell_off, min_off_acc);
+          min_delta_acc =
+              dr::select(d2 < f_acc.x(), dr::detach(delta), min_delta_acc);
           f_acc = Out(dr::minimum(f_acc.x(), d2),
                       dr::minimum(f_acc.y(), dr::maximum(d2, f_acc.x())),
                       dr::minimum(f_acc.z(), dr::maximum(d2, f_acc.y())));
         }
-        Mask z_wrap = (Dim == 3) ? (d.z() == 1) : Mask(true);
-        Mask y_wrap = z_wrap & (d.y() == 1);
-        if constexpr (Dim == 3)
+        if constexpr (Dim == 3) {
+          Mask z_wrap = d.z() == 1;
+          Mask y_wrap = z_wrap & (d.y() == 1);
           d.z() = dr::select(z_wrap, Int32(-1), d.z() + 1);
-        d.y() =
-            dr::select(y_wrap, Int32(-1), dr::select(z_wrap, d.y() + 1, d.y()));
-        d.x() = dr::select(y_wrap, d.x() + 1, d.x());
+          d.y() = dr::select(y_wrap, Int32(-1),
+                             dr::select(z_wrap, d.y() + 1, d.y()));
+          d.x() = dr::select(y_wrap, d.x() + 1, d.x());
+        } else {
+          Mask y_wrap = d.y() == 1;
+          d.y() = dr::select(y_wrap, Int32(-1), d.y() + 1);
+          d.x() = dr::select(y_wrap, d.x() + 1, d.x());
+        }
       },
       "MaterialX Worley noise", (Dim == 3) ? 27 : 9);
 
+  VecD min_off = min_delta + dr::detach(local_pos);
   Int32 cx = base.x() + Int32(dr::floor(min_off.x()));
   Int32 cy = base.y() + Int32(dr::floor(min_off.y()));
   Int32 cz(0);
