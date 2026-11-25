@@ -31,11 +31,11 @@
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-// Opaque flattened MaterialX shading network shared between texture discovery
+// Opaque prepared MaterialX shading network shared between texture discovery
 // and material translation within a single Hydra commit.
 struct PreparedMaterialX;
 
-// Flattens a Hydra MaterialX shading network and invokes `callback` with the
+// Builds a Hydra MaterialX shading network and invokes `callback` with the
 // `TextureKey` of every bitmap texture it consumes for parallel preloading.
 // Returns nullptr if MaterialX is disabled or `network` has no valid MaterialX
 // surface or displacement shader.

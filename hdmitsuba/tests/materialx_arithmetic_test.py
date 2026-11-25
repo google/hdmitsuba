@@ -638,50 +638,47 @@ def test_colorspace_and_cycle_handling(
     Sdf.FileFormat.FindByExtension('mtlx') is None,
     reason='Requires an OpenUSD build with MaterialX support.',
 )
-def test_custom_source_asset_shader(tmp_path: pathlib.Path) -> None:
-  """Tests custom sourceAsset .mtlx surface shaders.
+def test_custom_source_asset_shader(capfd: pytest.CaptureFixture[str]) -> None:
+  """Tests custom sourceAsset .mtlx NodeGraphs, multi-output ports, and helper textures.
 
   Args:
-    tmp_path: Pytest temporary directory fixture.
+    capfd: Pytest file-descriptor capture fixture.
   """
-  # Custom `sourceAsset` `.mtlx` surface shader renders identically in Hydra and
-  # offline `usd_mitsuba` (also exercising repeated Sdr library resolution).
-  mtlx_file = tmp_path / 'custom_glow.mtlx'
-  mtlx_file.write_text("""<?xml version="1.0"?>
-<materialx version="1.38">
-  <nodedef name="ND_hdmitsuba_custom_glow" node="hdmitsuba_custom_glow">
-    <input name="tint" type="color3" value="0.2, 0.5, 0.8" />
-    <output name="out" type="surfaceshader" />
-  </nodedef>
-  <nodegraph name="NG_hdmitsuba_custom_glow" nodedef="ND_hdmitsuba_custom_glow">
-    <surface_unlit name="surf" type="surfaceshader">
-      <input name="emission" type="float" value="2.0" />
-      <input name="emission_color" type="color3" interfacename="tint" />
-    </surface_unlit>
-    <output name="out" type="surfaceshader" nodename="surf" />
-  </nodegraph>
-</materialx>
-""")
   asset_stage, asset_mesh = mtlx.create_base_scene(
       with_lights=False, resolution=(16, 16), spp=4
   )
-  asset_mat = UsdShade.Material.Define(asset_stage, '/mesh/Material')
   asset_sh = UsdShade.Shader.Define(asset_stage, '/mesh/Material/CustomGlow')
-  asset_sh.SetSourceAsset(Sdf.AssetPath(str(mtlx_file)), 'mtlx')
+  asset_sh.SetSourceAsset(
+      Sdf.AssetPath(
+          f'{test_helpers.TEST_ASSETS_PATH}/materials/custom_glow.mtlx'
+      ),
+      'mtlx',
+  )
   asset_sh.SetSourceAssetSubIdentifier('ND_hdmitsuba_custom_glow', 'mtlx')
   asset_sh.CreateInput('tint', Sdf.ValueTypeNames.Color3f).Set((0.3, 0.4, 0.2))
-  asset_mat.CreateSurfaceOutput('mtlx').ConnectToSource(
-      asset_sh.CreateOutput('out', Sdf.ValueTypeNames.Token)
+  mtlx.bind_mtlx_shader(
+      asset_stage,
+      asset_mesh,
+      'ND_surfacematerial',
+      surfaceshader=asset_sh.CreateOutput(
+          'out_surface', Sdf.ValueTypeNames.Token
+      ),
   )
-  UsdShade.MaterialBindingAPI.Apply(asset_mesh.GetPrim()).Bind(asset_mat)
+  capfd.readouterr()
   img_asset, _ = test_helpers.assert_hydra_equal_to_offline(
       asset_stage,
       output_prefix='test_mtlx_source_asset',
       spp=4,
       subdivision_level=0,
   )
+  assert 'Unsupported' not in capfd.readouterr().err
+  # tint=(0.3,0.4,0.2) + lum=(0.2,0.2,0.2) + ng_tint=(0.05,0,0) +
+  # mat*norm=(0,0,0.5) + srgb_to_linear(uv_quadrants(0.25,0.25)=(60,80,220)/255)
   np.testing.assert_allclose(
-      mtlx.render_center(img_asset), (0.6, 0.8, 0.4), atol=2e-2
+      mtlx.render_center(img_asset),
+      np.array([0.55, 0.6, 0.9])
+      + ((np.array([60.0, 80.0, 220.0]) / 255.0 + 0.055) / 1.055) ** 2.4,
+      atol=2e-2,
   )
 
 
