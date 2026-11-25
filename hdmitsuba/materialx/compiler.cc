@@ -15,9 +15,11 @@
 #include "hdmitsuba/materialx/compiler.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <deque>
 #include <initializer_list>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -33,11 +35,13 @@
 #include <absl/base/no_destructor.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
+#include <absl/container/inlined_vector.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/strip.h>
 #include <absl/types/span.h>
 #include <mitsuba/core/plugin.h>
 #include <mitsuba/core/properties.h>
+#include <mitsuba/core/vector.h>
 #include <pxr/base/gf/color.h>
 #include <pxr/base/gf/colorSpace.h>
 #include <pxr/base/gf/vec3f.h>
@@ -47,6 +51,7 @@
 #include <pxr/usd/ar/resolver.h>
 
 #include "hdmitsuba/debug_codes.h"
+#include "hdmitsuba/materialx/math.h"
 #include "hdmitsuba/materialx/program.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -97,6 +102,13 @@ struct Expr {
   bool uniform() const { return channels == 1; }
   bool is_zero() const { return *this == zero(); }
   bool is_one() const { return *this == one(); }
+  bool is_const() const {
+    return !code.empty() &&
+           std::all_of(code.begin(), code.end(), [](mtlx::Inst i) {
+             return i.op == mtlx::Op::Const || i.op == mtlx::Op::Vec2 ||
+                    i.op == mtlx::Op::Rgb || i.op == mtlx::Op::Vec4;
+           });
+  }
 
   Expr with_channels(uint8_t ch) const {
     Expr e = *this;
@@ -188,7 +200,9 @@ Expr call(mtlx::Op op, const Expr& arg0, const Exprs&... rest) {
 Expr rgb(const Expr& r, const Expr& g, const Expr& b) {
   return (r.uniform() && r == g && g == b) ? r : call(mtlx::Op::Rgb, r, g, b);
 }
-Expr vec2(const Expr& x, const Expr& y) { return call(mtlx::Op::Vec2, x, y); }
+Expr vec2(const Expr& x, const Expr& y) {
+  return (x.uniform() && x == y) ? x : call(mtlx::Op::Vec2, x, y);
+}
 Expr vec4(const Expr& xyz, const Expr& w) {
   return (xyz.uniform() && xyz == w) ? xyz : call(mtlx::Op::Vec4, xyz, w);
 }
@@ -412,15 +426,25 @@ class MtlxExprCompiler : private MtlxGraphResolver {
     }
   };
 
+  bool IsAuthoredInput(const mx::ValueElementPtr& elem) const {
+    mx::ElementPtr parent = elem->getParent();
+    return parent && parent->isA<mx::Node>() && parent->getParent() == doc_;
+  }
   Expr Const(double value);
   Expr ConstRgb(double r, double g, double b);
   Expr Opaque(double value);
-  // Emits a scalar or multi-channel parameter value. All-zero and all-one
-  // tuples are baked into the program to enable constant simplifications, while
-  // other values become opaque scalars exposed via traversal.
-  Expr EmitTuple(std::initializer_list<float> vals);
+  // Emits a scalar or multi-channel parameter value. Library-internal constants
+  // and unauthored NodeDef defaults (`!is_authored`) are baked as `Op::Const`
+  // to enable constant folding and CSE; authored inputs emit `Op::Opaque`
+  // (except all-zero and all-one tuples) for traversal and kernel freezing.
+  Expr EmitTuple(std::initializer_list<float> vals, bool is_authored);
+  std::optional<mitsuba::Vector<double, 4>> TryEvalConst(
+      const Expr& expr) const;
+  Expr FoldExpr(const Expr& expr);
+  int EmitTmpFolded(const Expr& folded);
   int EmitTmp(const Expr& expr);
   Expr EmitTmpExpr(const Expr& expr);
+  Expr FoldAndSpill(const Expr& expr);
   Expr LoadTmp(int slot) const {
     return Expr({mtlx::Op::LoadTmp, 0, static_cast<uint16_t>(slot)},
                 prog_.tmp_channels[slot]);
@@ -439,6 +463,7 @@ class MtlxExprCompiler : private MtlxGraphResolver {
   void CompileVdfWarning(const ScopedNode& node, const std::string& cat);
   void MarkTwoSidedDielectrics(size_t start);
   int EmitClosure(mtlx::ClosureNode node);
+  void CompactLiveOpaques();
   ref<Object> CreatePlugin(std::string_view name, ObjectType type,
                            std::string_view variant);
 
@@ -492,7 +517,7 @@ class MtlxExprCompiler : private MtlxGraphResolver {
   Expr CompileHeightToNormal(const ScopedNode& node);
   Expr SampleImage(const ScopedNode& node);
   Expr CompileValueElement(const mx::ValueElementPtr& elem,
-                           const Expr& default_expr);
+                           const Expr& default_expr, bool is_authored);
 
   // Warns once per message about an unsupported feature of the compiled shader
   // (not during texture discovery, which compiles it a second time).
@@ -512,7 +537,8 @@ class MtlxExprCompiler : private MtlxGraphResolver {
   absl::flat_hash_map<NodeKey, DisplacementExpr> disp_expr_;
   absl::flat_hash_map<NodeKey, Expr> opacity_expr_;
   absl::flat_hash_map<NodeKey, int> bsdf_closure_;
-  absl::flat_hash_map<NodeOutKey, Expr> value_input_expr_;
+  absl::flat_hash_map<const mx::ValueElement*, Expr> authored_opaque_expr_;
+  absl::flat_hash_map<const mx::ValueElement*, MatExpr> authored_opaque_matrix_;
   absl::flat_hash_map<NodeOutKey, MatExpr> node_matrix_expr_;
   absl::flat_hash_map<Expr, int> expr_to_slot_;
   std::vector<ref<Object>> inputs_;
@@ -751,6 +777,38 @@ Expr MtlxExprCompiler::Opaque(double value) {
       1);
 }
 
+std::optional<mitsuba::Vector<double, 4>> MtlxExprCompiler::TryEvalConst(
+    const Expr& expr) const {
+  if (expr.code.empty()) return std::nullopt;
+  using Vec4d = mitsuba::Vector<double, 4>;
+  absl::InlinedVector<Vec4d, 16> stack(expr.max_depth);
+  Vec4d* sp = stack.data();
+  for (mtlx::Inst inst : expr.code) {
+    if (inst.op == mtlx::Op::Const) {
+      *sp++ = Vec4d(prog_.consts[inst.imm]);
+    } else if (!mtlx::detail::eval_pure_op<double>(inst, sp)) {
+      return std::nullopt;
+    }
+  }
+  const Vec4d& r = stack[0];
+  for (uint8_t c = 0; c < expr.channels; ++c) {
+    if (!(std::abs(r[c]) <= std::numeric_limits<float>::max())) {
+      return std::nullopt;
+    }
+  }
+  return r;
+}
+
+Expr MtlxExprCompiler::FoldExpr(const Expr& expr) {
+  if (expr.code.size() <= 1) return expr;
+  auto v = TryEvalConst(expr);
+  if (!v) return expr;
+  if (expr.channels <= 1) return Const((*v)[0]);
+  if (expr.channels == 2) return vec2(Const((*v)[0]), Const((*v)[1]));
+  Expr c3 = ConstRgb((*v)[0], (*v)[1], (*v)[2]);
+  return expr.channels == 3 ? c3 : vec4(c3, Const((*v)[3]));
+}
+
 // Maps MaterialX `cmlib` and USD `GfColorSpace` names to a canonical
 // `GfColorSpace` token when conversion to linear Rec.709 is needed, or an empty
 // token if `color_space` is empty, data/raw, or already linear Rec.709.
@@ -829,7 +887,8 @@ Expr MtlxExprCompiler::MeshAttr(std::string_view name, int dim,
   return e.with_channels(std::max<uint8_t>(def.channels, read_ch));
 }
 
-Expr MtlxExprCompiler::EmitTuple(std::initializer_list<float> vals) {
+Expr MtlxExprCompiler::EmitTuple(std::initializer_list<float> vals,
+                                 bool is_authored) {
   if (std::all_of(vals.begin(), vals.end(),
                   [](float x) { return x == 0.0f; })) {
     return Expr::zero();
@@ -840,42 +899,58 @@ Expr MtlxExprCompiler::EmitTuple(std::initializer_list<float> vals) {
   }
   Expr e[4];
   int n = 0;
-  for (float v : vals) e[n++] = Opaque(v);
+  for (float v : vals) e[n++] = is_authored ? Opaque(v) : Const(v);
   if (n == 1) return e[0];
   if (n == 2) return vec2(e[0], e[1]);
   Expr c3 = rgb(e[0], e[1], e[2]);
   return n == 3 ? c3 : vec4(c3, e[3]);
 }
 
-int MtlxExprCompiler::EmitTmp(const Expr& expr) {
-  if (expr.code.size() == 1 && expr.code[0].op == mtlx::Op::LoadTmp) {
-    return expr.code[0].imm;
+int MtlxExprCompiler::EmitTmpFolded(const Expr& folded) {
+  if (folded.code.size() == 1 && folded.code[0].op == mtlx::Op::LoadTmp) {
+    return folded.code[0].imm;
   }
   size_t next_slot = prog_.tmp_channels.size();
   auto [it, inserted] =
-      expr_to_slot_.try_emplace(expr, static_cast<int>(next_slot));
+      expr_to_slot_.try_emplace(folded, static_cast<int>(next_slot));
   if (inserted) {
     if (next_slot >= mtlx::kMaxImm) {
       throw std::runtime_error("materialx_expr: too many temporaries");
     }
-    prog_.code.insert(prog_.code.end(), expr.code.begin(), expr.code.end());
+    prog_.code.insert(prog_.code.end(), folded.code.begin(), folded.code.end());
     prog_.code.push_back(
         {mtlx::Op::StoreTmp, 0, static_cast<uint16_t>(next_slot)});
-    prog_.stack_size = std::max(prog_.stack_size, expr.max_depth);
-    prog_.tmp_channels.push_back(expr.channels);
+    prog_.stack_size = std::max(prog_.stack_size, folded.max_depth);
+    prog_.tmp_channels.push_back(folded.channels);
   }
   return it->second;
 }
 
+int MtlxExprCompiler::EmitTmp(const Expr& expr) {
+  return EmitTmpFolded(FoldExpr(expr));
+}
+
+// Spills non-trivial expressions (including 1-op geometry intrinsics) for
+// intra-node operand reuse.
 Expr MtlxExprCompiler::EmitTmpExpr(const Expr& expr) {
-  if (expr.code.size() == 1 && expr.code[0].op <= mtlx::Op::LoadTmp) {
-    return expr;
+  Expr folded = FoldExpr(expr);
+  if ((folded.code.size() == 1 && folded.code[0].op <= mtlx::Op::LoadTmp) ||
+      folded.is_const()) {
+    return folded;
   }
-  return LoadTmp(EmitTmp(expr));
+  return LoadTmp(EmitTmpFolded(folded));
+}
+
+// Like `EmitTmpExpr`, but keeps 1-op intrinsics inline across cached node
+// boundaries so downstream `== Expr::n_world()` / `DefaultTexcoord()` checks
+// still match.
+Expr MtlxExprCompiler::FoldAndSpill(const Expr& expr) {
+  return expr.code.size() > 1 ? EmitTmpExpr(expr) : expr;
 }
 
 Expr MtlxExprCompiler::CompileValueElement(const mx::ValueElementPtr& elem,
-                                           const Expr& default_expr) {
+                                           const Expr& default_expr,
+                                           bool is_authored) {
   const std::string& type = elem->getType();
   if (type == "boolean") {
     const std::string& s = elem->getValueString();
@@ -884,31 +959,31 @@ Expr MtlxExprCompiler::CompileValueElement(const mx::ValueElementPtr& elem,
   mx::ValuePtr val = elem->getValue();
   if (!val) return default_expr;
 
-  if (type == "float") return EmitTuple({val->asA<float>()});
+  if (type == "float") return EmitTuple({val->asA<float>()}, is_authored);
   // Integers and booleans select code paths (e.g. switch branches) and are
   // baked.
   if (type == "integer") return Const(val->asA<int>());
   if (type == "color3") {
     mx::Color3 v = val->asA<mx::Color3>();
     GfVec3f c = ToLinearRec709({v[0], v[1], v[2]}, elem->getActiveColorSpace());
-    return EmitTuple({c[0], c[1], c[2]});
+    return EmitTuple({c[0], c[1], c[2]}, is_authored);
   }
   if (type == "color4") {
     mx::Color4 v = val->asA<mx::Color4>();
     GfVec3f c = ToLinearRec709({v[0], v[1], v[2]}, elem->getActiveColorSpace());
-    return EmitTuple({c[0], c[1], c[2], v[3]});
+    return EmitTuple({c[0], c[1], c[2], v[3]}, is_authored);
   }
   if (type == "vector2") {
     mx::Vector2 v = val->asA<mx::Vector2>();
-    return EmitTuple({v[0], v[1]});
+    return EmitTuple({v[0], v[1]}, is_authored);
   }
   if (type == "vector3") {
     mx::Vector3 v = val->asA<mx::Vector3>();
-    return EmitTuple({v[0], v[1], v[2]});
+    return EmitTuple({v[0], v[1], v[2]}, is_authored);
   }
   if (type == "vector4") {
     mx::Vector4 v = val->asA<mx::Vector4>();
-    return EmitTuple({v[0], v[1], v[2], v[3]});
+    return EmitTuple({v[0], v[1], v[2], v[3]}, is_authored);
   }
   return default_expr;
 }
@@ -919,45 +994,46 @@ Expr MtlxExprCompiler::CompileResolvedInput(const ResolvedInput& r,
     NodeOutKey key{r.upstream.frame, r.upstream.node.get(), r.output_name};
     auto it = node_output_expr_.find(key);
     if (it == node_output_expr_.end()) {
-      Expr se = CompileNodeOutputExpr(r.upstream, r.output_name);
-      if (se.code.size() > 1) se = EmitTmpExpr(se);
+      Expr se = FoldAndSpill(CompileNodeOutputExpr(r.upstream, r.output_name));
       it = node_output_expr_.emplace(std::move(key), std::move(se)).first;
     }
     return it->second;
   }
   if (r.kind == ResolvedInput::GeomProp) {
-    Expr ge =
+    return FoldAndSpill(
         CompileGeomProp(r.elem->asA<mx::Input>()->getDefaultGeomPropString(),
-                        r.elem->getType());
-    return ge.code.size() > 1 ? EmitTmpExpr(ge) : ge;
+                        r.elem->getType()));
   }
   if (r.kind != ResolvedInput::Value) return default_expr;
-  return CompileValueElement(r.elem, default_expr);
+  if (!IsAuthoredInput(r.elem)) {
+    return CompileValueElement(r.elem, default_expr, /*is_authored=*/false);
+  }
+  // Cache raw Opaque/tuple expressions (never LoadTmp) so cached entries are
+  // scope-safe across HeightToNormal and dead opaques remain compactable.
+  auto [it, inserted] = authored_opaque_expr_.try_emplace(r.elem.get());
+  if (inserted) {
+    it->second =
+        CompileValueElement(r.elem, default_expr, /*is_authored=*/true);
+  }
+  return it->second;
 }
 
 Expr MtlxExprCompiler::CompileInputExpr(const ScopedNode& s,
                                         const std::string& input_name,
                                         const Expr& default_expr) {
-  ResolvedInput r = ResolveInput(s, input_name);
-  if (r.kind != ResolvedInput::Value) {
-    return CompileResolvedInput(r, default_expr);
-  }
-  auto [it, inserted] = value_input_expr_.try_emplace(
-      NodeOutKey{s.frame, s.node.get(), input_name});
-  if (inserted) {
-    Expr ve = CompileValueElement(r.elem, default_expr);
-    if (ve.code.size() > 1) ve = EmitTmpExpr(ve);
-    it->second = std::move(ve);
-  }
-  return it->second;
+  return CompileResolvedInput(ResolveInput(s, input_name), default_expr);
 }
 
 std::optional<int> MtlxExprCompiler::ConstIntInput(const ScopedNode& node,
                                                    const std::string& name) {
   Expr e = CompileInputExpr(node, name, Expr{});
-  return (e.code.size() == 1 && e.code[0].op == mtlx::Op::Const)
-             ? std::optional<int>(static_cast<int>(prog_.consts[e.code[0].imm]))
-             : std::nullopt;
+  if (e.channels != 1) return std::nullopt;
+  if (auto v = TryEvalConst(e)) {
+    return static_cast<int>(
+        std::clamp<double>((*v)[0], std::numeric_limits<int>::min(),
+                           std::numeric_limits<int>::max()));
+  }
+  return std::nullopt;
 }
 
 Expr MtlxExprCompiler::CompileIfCondition(const ScopedNode& node,
@@ -965,18 +1041,9 @@ Expr MtlxExprCompiler::CompileIfCondition(const ScopedNode& node,
   Expr v1 = CompileInputExpr(node, "value1");
   Expr v2 = CompileInputExpr(node, "value2");
   if (v1 == v2) return cat != "ifgreater" ? Expr::one() : Expr::zero();
-  if (v1.code.size() == 1 && v1.code[0].op == mtlx::Op::Const &&
-      v2.code.size() == 1 && v2.code[0].op == mtlx::Op::Const) {
-    double c1 = prog_.consts[v1.code[0].imm];
-    double c2 = prog_.consts[v2.code[0].imm];
-    bool b = cat == "ifgreater"     ? (c1 > c2)
-             : cat == "ifgreatereq" ? (c1 >= c2)
-                                    : (c1 == c2);
-    return b ? Expr::one() : Expr::zero();
-  }
-  return cat == "ifgreater"     ? (v1 > v2)
-         : cat == "ifgreatereq" ? (v1 >= v2)
-                                : call(mtlx::Op::Eq, v1, v2);
+  return FoldExpr(cat == "ifgreater"     ? (v1 > v2)
+                  : cat == "ifgreatereq" ? (v1 >= v2)
+                                         : call(mtlx::Op::Eq, v1, v2));
 }
 
 MtlxExprCompiler::MatExpr MtlxExprCompiler::MatrixOp(mtlx::Op op,
@@ -1017,19 +1084,28 @@ MtlxExprCompiler::MatExpr MtlxExprCompiler::CompileResolvedMatrix(
   if (!val) return MatExpr::Identity(n);
   const std::string& t = r.elem->getType();
   if (t != "matrix33" && t != "matrix44") return MatExpr::Identity(n);
+  bool is_authored = IsAuthoredInput(r.elem);
+  if (is_authored) {
+    if (auto it = authored_opaque_matrix_.find(r.elem.get());
+        it != authored_opaque_matrix_.end()) {
+      return it->second;
+    }
+  }
   MatExpr out;
   if (t == "matrix44") {
     out.n = 4;
     mx::Matrix44 m = val->asA<mx::Matrix44>();
     for (int i = 0; i < 4; ++i) {
-      out.rows[i] = EmitTuple({m[i][0], m[i][1], m[i][2], m[i][3]});
+      out.rows[i] =
+          EmitTuple({m[i][0], m[i][1], m[i][2], m[i][3]}, is_authored);
     }
   } else {
     mx::Matrix33 m = val->asA<mx::Matrix33>();
     for (int i = 0; i < 3; ++i) {
-      out.rows[i] = EmitTuple({m[i][0], m[i][1], m[i][2]});
+      out.rows[i] = EmitTuple({m[i][0], m[i][1], m[i][2]}, is_authored);
     }
   }
+  if (is_authored) authored_opaque_matrix_.emplace(r.elem.get(), out);
   return out;
 }
 
@@ -1108,9 +1184,7 @@ MtlxExprCompiler::MatExpr MtlxExprCompiler::CompileMatrixNode(
                     "'; using identity.");
   }
 
-  for (int i = 0; i < res.n; ++i) {
-    if (res.rows[i].code.size() > 1) res.rows[i] = EmitTmpExpr(res.rows[i]);
-  }
+  for (int i = 0; i < res.n; ++i) res.rows[i] = FoldAndSpill(res.rows[i]);
   node_matrix_expr_[std::move(key)] = res;
   return res;
 }
@@ -1439,14 +1513,12 @@ Expr MtlxExprCompiler::CompileHeightToNormal(const ScopedNode& node) {
   // surface interactions without referencing outer temporaries.
   auto scope = [&] {
     return std::tie(prog_.code, prog_.tmp_channels, prog_.stack_size,
-                    node_output_expr_, value_input_expr_, node_matrix_expr_,
-                    expr_to_slot_);
+                    node_output_expr_, node_matrix_expr_, expr_to_slot_);
   };
   auto outer = std::apply(
       [](auto&... state) { return std::tuple(std::exchange(state, {})...); },
       scope());
   prog_.stack_size = 1;
-  size_t outer_opaques = prog_.opaques.size();
 
   std::optional<uint16_t> sub_idx;
   Expr h = CompileInputExpr(node, "in");
@@ -1478,8 +1550,6 @@ Expr MtlxExprCompiler::CompileHeightToNormal(const ScopedNode& node) {
     }
   }
 
-  // Drop the opaque values of a constant height, which nothing references.
-  if (!sub_idx) prog_.opaques.resize(outer_opaques);
   scope() = std::move(outer);
   return sub_idx ? call(mtlx::Op::HeightToNormal, *sub_idx, scale)
                  : ConstRgb(0.5, 0.5, 1.0);
@@ -1970,15 +2040,16 @@ Expr MtlxExprCompiler::CompileEdf(const ScopedNode& node) {
     } else {
       Expr em = CompileInputExpr(node, "emission", Expr::one());
       if (!em.is_zero()) {
-        em = em *
-             (Expr::one() - saturate(CompileInputExpr(node, "transmission")));
+        em = em * FoldExpr(Expr::one() -
+                           saturate(CompileInputExpr(node, "transmission")));
       }
       if (!em.is_zero()) {
         res = em * CompileInputExpr(node, "emission_color", Expr::one());
       }
     }
     if (!res.is_zero()) {
-      res = res * saturate(CompileInputExpr(node, "opacity", Expr::one()));
+      res = res *
+            FoldExpr(saturate(CompileInputExpr(node, "opacity", Expr::one())));
     }
   } else if (cat == "uniform_edf" || cat == "conical_edf" ||
              cat == "measured_edf") {
@@ -2023,7 +2094,7 @@ Expr MtlxExprCompiler::CompileEdf(const ScopedNode& node) {
         [&] { return CompileEdf(ResolveConnected(node, "fg")); },
         [&] { return CompileEdf(ResolveConnected(node, "bg")); });
   }
-  if (res.code.size() > 1) res = EmitTmpExpr(res);
+  res = FoldAndSpill(res);
   edf_expr_[key] = res;
   return res;
 }
@@ -2041,12 +2112,12 @@ Expr MtlxExprCompiler::CompileOpacity(const ScopedNode& node) {
   } else if (cat == "mix" &&
              node.node->getType() == mx::SURFACE_SHADER_TYPE_STRING) {
     res = CompileMix(
-        saturate(CompileInputExpr(node, "mix")),
+        FoldExpr(saturate(CompileInputExpr(node, "mix"))),
         [&] { return CompileOpacity(ResolveConnected(node, "fg")); },
         [&] { return CompileOpacity(ResolveConnected(node, "bg")); });
   }
   if (!res.uniform()) res = call(mtlx::Op::Dot, res, Const(1.0 / 3.0));
-  if (res.code.size() > 1) res = EmitTmpExpr(res);
+  res = FoldAndSpill(res);
   opacity_expr_[key] = res;
   return res;
 }
@@ -2249,9 +2320,10 @@ int MtlxExprCompiler::CompileBsdfClosure(const ScopedNode& node) {
     }
   } else if (cat == "mix") {
     Expr mix_expr = CompileInputExpr(node, "mix");
-    if (mix_expr.is_zero()) {
+    Expr mix_sat = FoldExpr(saturate(mix_expr));
+    if (mix_sat.is_zero()) {
       idx = CompileBsdfClosure(ResolveConnected(node, "bg"));
-    } else if (mix_expr.is_one()) {
+    } else if (mix_sat.is_one()) {
       idx = CompileBsdfClosure(ResolveConnected(node, "fg"));
     } else {
       int fg_idx = CompileBsdfClosure(ResolveConnected(node, "fg"));
@@ -2360,7 +2432,7 @@ MtlxExprCompiler::DisplacementExpr MtlxExprCompiler::CompileDisplacement(
     WarnUnsupported("Unsupported MaterialX displacement shader '" + cat +
                     "'; ignoring displacement.");
   }
-  if (res.expr.code.size() > 1) res.expr = EmitTmpExpr(res.expr);
+  res.expr = FoldAndSpill(res.expr);
   disp_expr_[key] = res;
   return res;
 }
@@ -2384,9 +2456,33 @@ bool MtlxExprCompiler::ProgramUsesUv(const Expr& expr) const {
       [&](const mtlx::Inst& i) { return inst_uses_uv(inst_uses_uv, i); });
 }
 
+void MtlxExprCompiler::CompactLiveOpaques() {
+  if (prog_.opaques.empty()) return;
+  std::vector<uint16_t> remap(prog_.opaques.size(), mtlx::kMaxImm);
+  for (const auto* code : {&prog_.code, &prog_.sub_code}) {
+    for (mtlx::Inst in : *code) {
+      if (in.op == mtlx::Op::Opaque) remap[in.imm] = 0;
+    }
+  }
+  size_t n = 0;
+  for (size_t i = 0; i < prog_.opaques.size(); ++i) {
+    if (remap[i] == mtlx::kMaxImm) continue;
+    remap[i] = static_cast<uint16_t>(n);
+    prog_.opaques[n++] = prog_.opaques[i];
+  }
+  if (n == prog_.opaques.size()) return;
+  prog_.opaques.resize(n);
+  for (auto* code : {&prog_.code, &prog_.sub_code}) {
+    for (mtlx::Inst& in : *code) {
+      if (in.op == mtlx::Op::Opaque) in.imm = remap[in.imm];
+    }
+  }
+}
+
 ref<Object> MtlxExprCompiler::CreatePlugin(std::string_view name,
                                            ObjectType type,
                                            std::string_view variant) {
+  CompactLiveOpaques();
   Properties props(name);
   for (size_t i = 0; i < inputs_.size(); ++i) {
     props.set("in" + std::to_string(i), std::move(inputs_[i]));

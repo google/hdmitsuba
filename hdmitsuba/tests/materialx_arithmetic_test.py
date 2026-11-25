@@ -1401,3 +1401,162 @@ def test_mixed_context_and_dynamic_material_switch() -> None:
   np.testing.assert_allclose(
       mtlx.render_center(engine), (0.0, 0.0, 0.0), atol=1e-3
   )
+
+
+def test_constant_folding_and_opaque_compaction() -> None:
+  """Tests unauthored const baking, independent shader params, and opaque compaction."""
+
+  def num_params(obj: Any, prefix: str = 'radiance.param') -> int:
+    return sum(k.startswith(prefix) for k in mi.traverse(obj).keys())
+
+  stage = Usd.Stage.CreateInMemory()
+  si = mtlx.make_test_si(wi=(0.0, 0.0, 1.0))
+
+  bsdf_def, _ = mtlx.compile_mtlx_material(
+      'ND_standard_surface_surfaceshader', stage=stage
+  )
+  assert bsdf_def is not None
+  assert num_params(bsdf_def, 'param') == 0
+
+  a = mtlx.define_shader(stage, 'A', 'ND_constant_float', value=0.25)
+  b = mtlx.define_shader(stage, 'B', 'ND_constant_float', value=0.25)
+  _, em_pair = mtlx.compile_mtlx_material(
+      'ND_surface_unlit',
+      emission_color=('ND_combine3_color3', {'in1': a, 'in2': b, 'in3': 0.0}),
+      stage=stage,
+  )
+  assert em_pair is not None
+  assert num_params(em_pair) == 2
+
+  # Dead `* 0` opaques (indices 0..2) are pruned and live `fg` opaques remap
+  # from 3..5 -> 0..2; `mix` requires `FoldExpr` to fold `2.0 / 2.0 -> 1.0`.
+  two = ('ND_convert_integer_float', {'in_': 2})
+  _, em = mtlx.compile_mtlx_material(
+      'ND_surface_unlit',
+      emission_color=(
+          'ND_add_color3',
+          {
+              'in1': (
+                  'ND_multiply_color3FA',
+                  {'in1': (0.8, 0.9, 0.2), 'in2': 0.0},
+              ),
+              'in2': (
+                  'ND_mix_color3',
+                  {
+                      'fg': (0.2, 0.3, 0.4),
+                      'bg': (0.5, 0.6, 0.7),
+                      'mix': ('ND_divide_float', {'in1': two, 'in2': two}),
+                  },
+              ),
+          },
+      ),
+      stage=stage,
+  )
+  assert em is not None
+  assert num_params(em) == 3
+  np.testing.assert_allclose(em.eval(si), mi.Color3f(0.2, 0.3, 0.4), atol=1e-5)
+
+  # Widening an equal non-zero `vector2` (both folded constants and non-uniform
+  # ops like a missing `geompropvalue`) to `vector3` zero-pads `.z`, and
+  # `combine2(0, 0)` canonicalizes to zero and prunes dead operands.
+  half = (
+      'ND_divide_float',
+      {'in1': ('ND_convert_integer_float', {'in_': 1}), 'in2': two},
+  )
+  for v2_expr in [
+      (
+          'ND_add_vector2',
+          {
+              'in1': ('ND_combine2_vector2', {'in1': half, 'in2': half}),
+              'in2': (
+                  'ND_multiply_vector2',
+                  {
+                      'in1': ('ND_combine2_vector2', {'in1': 0.0, 'in2': 0.0}),
+                      'in2': (0.7, 0.8),
+                  },
+              ),
+          },
+      ),
+      (
+          'ND_geompropvalue_vector2',
+          {
+              'geomprop': 'missing_vec2',
+              'default': ('ND_combine2_vector2', {'in1': half, 'in2': half}),
+          },
+      ),
+  ]:
+    _, em_v2 = mtlx.compile_mtlx_material(
+        'ND_surface_unlit',
+        emission_color=(
+            'ND_convert_vector3_color3',
+            {'in_': ('ND_convert_vector2_vector3', {'in_': v2_expr})},
+        ),
+        stage=stage,
+    )
+    assert em_v2 is not None
+    assert num_params(em_v2) == 0
+    np.testing.assert_allclose(
+        em_v2.eval(si), mi.Color3f(0.5, 0.5, 0.0), atol=1e-5
+    )
+
+  # Folded `1 - saturate(transmission)`, `saturate(mix)`, and float32
+  # overflow guards prune dead branches while preserving float32 runtime results.
+  _, em_trans = mtlx.compile_mtlx_material(
+      'ND_surface_unlit',
+      transmission=1.0,
+      emission_color=(0.3, 0.4, 0.5),
+      stage=stage,
+  )
+  assert em_trans is None
+  bsdf_mix, _ = mtlx.compile_mtlx_material(
+      'ND_mix_surfaceshader',
+      fg=(
+          'ND_standard_surface_surfaceshader',
+          {
+              'transmission': 1.0,
+              'specular_roughness': 0.0,
+              'opacity': (1.0, 1.0, 1.0),
+          },
+      ),
+      bg=(
+          'ND_standard_surface_surfaceshader',
+          {'thin_walled': True, 'opacity': (0.5, 0.5, 0.5)},
+      ),
+      mix=('ND_add_float', {'in1': two, 'in2': two}),
+      stage=stage,
+  )
+  assert bsdf_mix is not None
+  assert not mi.has_flag(bsdf_mix.flags(), mi.BSDFFlags.Null)
+  assert num_params(bsdf_mix, 'param') == 0
+  bs_tir, _ = bsdf_mix.sample(
+      mi.BSDFContext(),
+      mtlx.make_test_si(wi=(0.8, 0.0, -0.6)),
+      mi.Float(0.99),
+      mi.Point2f(0.5, 0.5),
+  )
+  assert dr.all(bs_tir.wo.z < 0.0)
+
+  exp100 = ('ND_exp_float', {'in_': ('ND_convert_integer_float', {'in_': 100})})
+  exp_m70 = (
+      'ND_exp_float',
+      {'in_': ('ND_convert_integer_float', {'in_': -70})},
+  )
+  exp50 = ('ND_exp_float', {'in_': ('ND_convert_integer_float', {'in_': 50})})
+  _, em_ovf = mtlx.compile_mtlx_material(
+      'ND_surface_unlit',
+      emission=(
+          'ND_ifgreater_float',
+          {
+              'value1': (
+                  'ND_multiply_float',
+                  {'in1': exp100, 'in2': exp_m70},
+              ),
+              'value2': exp50,
+              'in1': 1.0,
+              'in2': 0.0,
+          },
+      ),
+      stage=stage,
+  )
+  assert em_ovf is not None
+  np.testing.assert_allclose(em_ovf.eval(si), mi.Color3f(1.0), atol=1e-5)

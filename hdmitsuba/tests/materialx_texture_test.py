@@ -1320,3 +1320,101 @@ def test_heighttonormal_image_and_object_space(
       dr.normalize(mi.Color3f(0.0, -1.0, 1.0)),
       atol=1e-3,
   )
+
+
+def test_heighttonormal_shared_authored_inputs() -> None:
+  """Tests authored inputs shared between outer scope and `heighttonormal`."""
+  si = mtlx.make_test_si(wi=(0.0, 0.0, 1.0))
+  si.uv = mi.Point2f(0.5, 0.5)
+  stage = Usd.Stage.CreateInMemory()
+
+  def check(
+      expr: tuple[str, dict[str, object]],
+      n_params: int,
+      expected: tuple[float, float, float] | np.ndarray,
+      atol: float = 1e-3,
+  ) -> None:
+    _, em = mtlx.compile_mtlx_material(
+        'ND_surface_unlit',
+        emission_color=('ND_convert_vector3_color3', {'in_': expr}),
+        stage=stage,
+    )
+    assert (
+        em is not None
+        and sum(k.startswith('radiance.param') for k in mi.traverse(em).keys())
+        == n_params
+    )
+    np.testing.assert_allclose(
+        em.eval(si), mi.Color3f(*map(float, expected)), atol=atol
+    )
+
+  slope = mtlx.define_shader(
+      stage, 'Slope', 'ND_constant_vector2', value=(16.0, 32.0)
+  )
+  check(
+      (
+          'ND_add_vector3FA',
+          {
+              'in1': (
+                  'ND_heighttonormal_vector3',
+                  {
+                      'in_': (
+                          'ND_dotproduct_vector2',
+                          {
+                              'in1': ('ND_texcoord_vector2', {}),
+                              'in2': slope,
+                          },
+                      )
+                  },
+              ),
+              'in2': ('ND_extract_vector2', {'in_': slope, 'index': 0}),
+          },
+      ),
+      2,
+      _h2n_expected(1.0, 2.0) + 16.0,
+  )
+
+  c = mtlx.define_shader(stage, 'C', 'ND_constant_float', value=0.25)
+  check(
+      (
+          'ND_add_vector3FA',
+          {'in1': ('ND_heighttonormal_vector3', {'in_': c}), 'in2': c},
+      ),
+      1,
+      (0.75, 0.75, 1.25),
+      atol=1e-4,
+  )
+
+  m3 = mtlx.define_shader(
+      stage,
+      'M3',
+      'ND_constant_matrix33',
+      value=Gf.Matrix3d(2.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 4.0),
+  )
+  pos_x = (
+      'ND_extract_vector3',
+      {
+          'in_': (
+              'ND_transformmatrix_vector3',
+              {
+                  'in_': ('ND_position_vector3', {'space': 'world'}),
+                  'mat': m3,
+              },
+          ),
+          'index': 0,
+      },
+  )
+  check(
+      (
+          'ND_add_vector3',
+          {
+              'in1': ('ND_heighttonormal_vector3', {'in_': pos_x}),
+              'in2': (
+                  'ND_transformmatrix_vector3',
+                  {'in_': Gf.Vec3f(1.0, 1.0, 1.0), 'mat': m3},
+              ),
+          },
+      ),
+      9,
+      _h2n_expected(0.125, 0.0) + (2.0, 3.0, 4.0),
+  )
