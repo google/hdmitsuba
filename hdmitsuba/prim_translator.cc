@@ -1225,13 +1225,12 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateSensorInPlace(
     cb.set<ScalarFloat>("near_clip", spec.near_clip);
     cb.set<ScalarFloat>("far_clip", spec.far_clip);
     if (spec.sensor_type == "perspective" || spec.sensor_type.empty()) {
-      cb.set<Float>("x_fov", spec.fov);
+      cb.set<Float>("x_fov", dr::opaque<Float>(spec.fov));
       cb.set<Float>("principal_point_offset_x",
-                    spec.horizontal_aperture_offset);
-      cb.set<Float>("principal_point_offset_y", spec.vertical_aperture_offset);
+                    dr::opaque<Float>(spec.horizontal_aperture_offset));
+      cb.set<Float>("principal_point_offset_y",
+                    dr::opaque<Float>(spec.vertical_aperture_offset));
       if (spec.aperture_radius > 0.0f && spec.focus_distance > 0.0f) {
-        // Unlike `x_fov`, the thinlens sensor doesn't make these opaque in
-        // `parameters_changed()`, so do it here to avoid recompilation.
         cb.set<Float>("aperture_radius",
                       dr::opaque<Float>(spec.aperture_radius));
         cb.set<Float>("focus_distance", dr::opaque<Float>(spec.focus_distance));

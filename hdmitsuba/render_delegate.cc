@@ -129,9 +129,9 @@ void HdMitsubaRenderDelegate::Initialize() {
        VtValue(std::string("independent"))},
       {"Enable Interactive Mode", HdRenderSettingsTokens->enableInteractive,
        VtValue(true)},
-      {"Enable Kernel Freezing (Experimental)",
+      {"Enable Kernel Freezing",
        HdMitsubaRenderSettingsTokens->use_kernel_freezing,
-       VtValue(config.use_kernel_freezing == 1)},
+       VtValue(config.use_kernel_freezing != 0)},
       {"Enable Denoising (OptiX on CUDA, OIDN on CPU)",
        HdMitsubaRenderSettingsTokens->denoise, VtValue(false)},
   };
