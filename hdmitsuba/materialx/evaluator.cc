@@ -25,7 +25,6 @@
 #include <vector>
 
 #include <absl/container/inlined_vector.h>
-#include <drjit/color.h>
 #include <drjit/matrix.h>
 #include <drjit/while_loop.h>
 #include <mitsuba/core/config.h>
@@ -46,110 +45,6 @@
 NAMESPACE_BEGIN(mitsuba)
 namespace mtlx {
 namespace {
-
-template <typename Float, typename Fn>
-Vector<Float, 4> map_channels(int channels, Fn&& fn) {
-  if (channels == 1) return Vector<Float, 4>(fn(0));
-  Vector<Float, 4> out(0.0f);
-  for (int c = 0; c < channels; ++c) out[c] = fn(c);
-  return out;
-}
-
-template <typename Float>
-Vector<Float, 4> eval_elementwise(Op op, int channels,
-                                  const Vector<Float, 4>* a) {
-  auto unary = [&](auto fn) {
-    return map_channels<Float>(channels, [&](int c) { return fn(a[0][c]); });
-  };
-  auto binary = [&](auto fn) {
-    return map_channels<Float>(channels,
-                               [&](int c) { return fn(a[0][c], a[1][c]); });
-  };
-  auto ternary = [&](auto fn) {
-    return map_channels<Float>(
-        channels, [&](int c) { return fn(a[0][c], a[1][c], a[2][c]); });
-  };
-  switch (op) {
-    case Op::Neg:
-      return unary([](const Float& x) { return -x; });
-    case Op::Abs:
-      return unary([](const Float& x) { return dr::abs(x); });
-    case Op::Sin:
-      return unary([](const Float& x) { return dr::sin(x); });
-    case Op::Cos:
-      return unary([](const Float& x) { return dr::cos(x); });
-    case Op::Tan:
-      return unary([](const Float& x) { return dr::tan(x); });
-    case Op::Exp:
-      return unary([](const Float& x) { return dr::exp(x); });
-    case Op::Round:
-      return unary([](const Float& x) { return detail::mx_round(x); });
-    case Op::Floor:
-      return unary([](const Float& x) { return dr::floor(x); });
-    case Op::Ceil:
-      return unary([](const Float& x) { return dr::ceil(x); });
-    case Op::Sqrt:
-      return unary([](const Float& x) { return dr::safe_sqrt(x); });
-    case Op::Log:
-      return unary([](const Float& x) { return detail::mx_safe_log(x); });
-    case Op::Asin:
-      return unary([](const Float& x) { return dr::safe_asin(x); });
-    case Op::Acos:
-      return unary([](const Float& x) { return dr::safe_acos(x); });
-    case Op::Fract:
-      return unary([](const Float& x) { return x - dr::floor(x); });
-    case Op::Add:
-      return binary([](const Float& x, const Float& y) { return x + y; });
-    case Op::Sub:
-      return binary([](const Float& x, const Float& y) { return x - y; });
-    case Op::Mul:
-      return binary([](const Float& x, const Float& y) { return x * y; });
-    case Op::Div:
-      return binary([](const Float& x, const Float& y) {
-        return detail::mx_safe_div(x, y);
-      });
-    case Op::Lt:
-      return binary([](const Float& x, const Float& y) {
-        return dr::select(x < y, 1.0f, 0.0f);
-      });
-    case Op::Le:
-      return binary([](const Float& x, const Float& y) {
-        return dr::select(x <= y, 1.0f, 0.0f);
-      });
-    case Op::Eq:
-      return binary([](const Float& x, const Float& y) {
-        return dr::select(x == y, 1.0f, 0.0f);
-      });
-    case Op::Min:
-      return binary(
-          [](const Float& x, const Float& y) { return dr::minimum(x, y); });
-    case Op::Max:
-      return binary(
-          [](const Float& x, const Float& y) { return dr::maximum(x, y); });
-    case Op::Pow:
-      return binary([](const Float& x, const Float& y) {
-        return detail::mx_safe_pow(x, y);
-      });
-    case Op::Atan2:
-      return binary([](const Float& y, const Float& x) {
-        return detail::mx_safe_atan2(y, x);
-      });
-    case Op::Select:
-      return ternary([](const Float& c, const Float& t, const Float& f) {
-        return dr::select(c != 0.0f, t, f);
-      });
-    case Op::Mix:
-      return ternary([](const Float& fg, const Float& bg, const Float& m) {
-        return dr::lerp(bg, fg, m);
-      });
-    case Op::Clip:
-      return ternary([](const Float& x, const Float& lo, const Float& hi) {
-        return dr::clip(x, lo, hi);
-      });
-    default:
-      return Vector<Float, 4>(0.0f);
-  }
-}
 
 template <size_t N, typename Float>
 void eval_matrix_op(Op op, uint16_t imm, Vector<Float, 4>*& sp,
@@ -443,7 +338,6 @@ MtlxEvaluator<Float, Spectrum>::eval_code(absl::Span<const Inst> code,
     sp -= n;
     return sp;
   };
-  auto xy = [](const Val& v) -> Vector2f { return dr::head<2>(v); };
   auto xyz = [](const Val& v) -> Vector3f { return dr::head<3>(v); };
   auto val3 = [](const auto& v, const Float& w = 0.0f) {
     return Val(v.x(), v.y(), v.z(), w);
@@ -456,12 +350,8 @@ MtlxEvaluator<Float, Spectrum>::eval_code(absl::Span<const Inst> code,
   };
 
   for (Inst inst : code) {
+    if (detail::eval_pure_op<Float>(inst, sp)) continue;
     uint16_t imm = inst.imm;
-    if (int n = elementwise_arity(inst.op)) {
-      Val* a = pop(n);
-      *sp++ = eval_elementwise<Float>(inst.op, inst.channels, a);
-      continue;
-    }
     switch (inst.op) {
       case Op::Const:
         *sp++ = Val(static_cast<ScalarFloat>(m_prog.consts[imm]));
@@ -523,62 +413,11 @@ MtlxEvaluator<Float, Spectrum>::eval_code(absl::Span<const Inst> code,
         *sp++ = val3(-si.to_world(si.wi));
         break;
 
-      case Op::Rgb: {
-        Val* a = pop(3);
-        *sp++ = Val(a[0].x(), a[1].x(), a[2].x(), 0.0f);
-        break;
-      }
-      case Op::Vec2: {
-        Val* a = pop(2);
-        *sp++ = Val(a[0].x(), a[1].x(), 0.0f, 0.0f);
-        break;
-      }
-      case Op::Vec4: {
-        Val* a = pop(2);
-        *sp++ = val3(a[0], a[1].x());
-        break;
-      }
-      case Op::Chan: {
-        Val* a = pop(1);
-        *sp++ = Val(a[0].entry(imm));
-        break;
-      }
-      case Op::Dot: {
-        Val* a = pop(2);
-        *sp++ = Val(imm == 2   ? dr::dot(xy(a[0]), xy(a[1]))
-                    : imm == 4 ? dr::dot(a[0], a[1])
-                               : dr::dot(xyz(a[0]), xyz(a[1])));
-        break;
-      }
-      case Op::Cross: {
-        Val* a = pop(2);
-        *sp++ = val3(dr::cross(xyz(a[0]), xyz(a[1])));
-        break;
-      }
-      case Op::Normalize: {
-        Val* a = pop(1);
-        *sp++ = imm == 2   ? Val(dr::concat(detail::safe_normalize(xy(a[0])),
-                                            Vector2f(0.0f)))
-                : imm == 4 ? detail::safe_normalize(a[0])
-                           : val3(detail::safe_normalize(xyz(a[0])));
-        break;
-      }
-      case Op::Rotate2D: {
-        Val* a = pop(2);
-        Vector2f r = detail::mx_rotate2d(xy(a[0]), a[1].x());
-        *sp++ = Val(r.x(), r.y(), 0.0f, 0.0f);
-        break;
-      }
-      case Op::Rotate3D: {
-        Val* a = pop(3);
-        *sp++ = val3(detail::mx_rotate3d(xyz(a[0]), a[1].x(), xyz(a[2])));
-        break;
-      }
       case Op::NormalMap: {
         Val* a = pop(5);
-        *sp++ = val3(detail::mx_normal_map(xyz(a[0]), xy(a[1]), xyz(a[2]),
-                                           xyz(a[3]), xyz(a[4]),
-                                           Vector3f(si.sh_frame.n)));
+        *sp++ = val3(detail::mx_normal_map(
+            xyz(a[0]), Vector2f(dr::head<2>(a[1])), xyz(a[2]), xyz(a[3]),
+            xyz(a[4]), Vector3f(si.sh_frame.n)));
         break;
       }
       case Op::HeightToNormal: {
@@ -650,22 +489,6 @@ MtlxEvaluator<Float, Spectrum>::eval_code(absl::Span<const Inst> code,
         *sp++ = val3(n * 0.5f + 0.5f);
         break;
       }
-      // The color conversions keep a fourth (alpha) channel.
-      case Op::RgbToHsv: {
-        Val* a = pop(1);
-        *sp++ = val3(dr::rgb_to_hsv(xyz(a[0])), a[0].w());
-        break;
-      }
-      case Op::HsvToRgb: {
-        Val* a = pop(1);
-        *sp++ = val3(dr::hsv_to_rgb(xyz(a[0])), a[0].w());
-        break;
-      }
-      case Op::Blackbody: {
-        Val* a = pop(1);
-        *sp++ = val3(detail::mx_blackbody(a[0].x()));
-        break;
-      }
       case Op::CellNoise:
       case Op::Noise:
       case Op::Worley:
@@ -696,7 +519,7 @@ MtlxEvaluator<Float, Spectrum>::eval_code(absl::Span<const Inst> code,
           eval_matrix_op<4>(inst.op, imm, sp, tmps);
         }
         break;
-      default:  // Element-wise ops are handled above.
+      default:  // Pure ops are handled above.
         break;
     }
   }
