@@ -559,7 +559,9 @@ TfToken MtlxExprCompiler::ResolveSourceColorSpace(
           {"g22_ap1", GfColorSpaceNames->G22AP1},
           {"g22_rec709", GfColorSpaceNames->G22Rec709},
           {"g18_rec709", GfColorSpaceNames->G18Rec709},
-          {"rec709_display", GfColorSpaceNames->G24Rec709},
+          // Use token string directly: some OpenUSD 26.05 snapshots (e.g.
+          // Houdini 22.0) omit the `GfColorSpaceNames->G24Rec709` constant.
+          {"rec709_display", TfToken("g24_rec709_scene")},
           {"srgb", GfColorSpaceNames->SRGBRec709},
           {"srgb_texture", GfColorSpaceNames->SRGBRec709},
           {"lin_adobergb", GfColorSpaceNames->LinearAdobeRGB},
