@@ -213,3 +213,73 @@ def test_dynamic_fractal_ad() -> None:
       rtol=1e-5,
       atol=1e-6,
   )
+
+
+def test_worley_ad() -> None:
+  """Verifies Worley reverse AD for static `style=0` and dynamic `style`."""
+  stage = Usd.Stage.CreateInMemory()
+  pos = mtlx.define_shader(stage, 'PosW', 'ND_position_vector3', space='world')
+  px = mtlx.define_shader(stage, 'PxW', 'ND_extract_vector3', in_=pos, index=0)
+  xs = [-0.25, 0.35, -0.75, 0.85]
+  cell_mask = np.array(xs) > 0.0
+  dyn_style = (
+      'ND_ifgreater_integer',
+      {'value1': px, 'value2': 0.0, 'in1': 1, 'in2': 0},
+  )
+  ems = [
+      mtlx.compile_mtlx_material(
+          'ND_surface_unlit',
+          stage=stage,
+          emission_color=(
+              'ND_worleynoise3d_float',
+              {'position': pos, 'jitter': 0.8, 'style': style},
+          ),
+      )[1]
+      for style in (0, dyn_style)
+  ]
+  assert ems[0] is not None and ems[1] is not None
+
+  eps = 1e-4
+  si = dr.zeros(mi.SurfaceInteraction3f, 4)
+  si.wi = mi.Vector3f(0.0, 0.0, 1.0)
+  si.p = mi.Point3f([x + eps for x in xs], 0.3, 0.4)
+  y_hi = np.array(ems[0].eval(si)[0])
+  si.p = mi.Point3f([x - eps for x in xs], 0.3, 0.4)
+  fd_px = (y_hi - np.array(ems[0].eval(si)[0])) / (2.0 * eps)
+
+  px_grads = []
+  for em in ems:
+    px_g = mi.Float(xs)
+    dr.enable_grad(px_g)
+    si.p = mi.Point3f(px_g, 0.3, 0.4)
+    dr.backward(dr.sum(em.eval(si)[0]))
+    px_grads.append(np.array(dr.grad(px_g)))
+  np.testing.assert_allclose(px_grads[0], fd_px, rtol=1e-2, atol=1e-3)
+  np.testing.assert_allclose(
+      px_grads[1], np.where(cell_mask, 0.0, px_grads[0]), rtol=1e-5, atol=1e-6
+  )
+
+  # Symbolic vcall reverse AD wrt `jitter`.
+  si.p = mi.Point3f(xs, 0.3, 0.4)
+  jit_grads = []
+  for em in ems:
+    p = mi.traverse(em)
+    key = next(k for k in p.keys() if k.startswith('radiance.param'))
+    dr.enable_grad(p[key])
+    p.update()
+    dr.backward(dr.sum(dr.full(mi.EmitterPtr, em, 4).eval(si)[0]))
+    jit_grads.append(float(dr.grad(p[key])[0]))
+    dr.disable_grad(p[key])
+    p.update()
+  p = mi.traverse(ems[0])
+  key = next(k for k in p.keys() if k.startswith('radiance.param'))
+  p[key] = mi.Float(0.8 + eps)
+  p.update()
+  j_hi = np.array(ems[0].eval(si)[0])
+  p[key] = mi.Float(0.8 - eps)
+  p.update()
+  fd_jit = (j_hi - np.array(ems[0].eval(si)[0])) / (2.0 * eps)
+  np.testing.assert_allclose(jit_grads[0], np.sum(fd_jit), rtol=1e-2, atol=1e-3)
+  np.testing.assert_allclose(
+      jit_grads[1], np.sum(fd_jit[~cell_mask]), rtol=1e-2, atol=1e-3
+  )
