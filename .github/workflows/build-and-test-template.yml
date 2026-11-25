@@ -59,6 +59,12 @@ jobs:
         # sync with HDMITSUBA_MIN_PXR_VERSION in CMakeLists.txt.
         OPENUSD_SPEC: "openusd>=26.05,<27"
       run: |
+        # Work around conda-forge openusd 26.08 Linux build where binary prefix
+        # replacement pads `PXR_MATERIALX_STDLIB_DIR` with embedded NULs, causing
+        # infinite recursion in `Tf_WalkDirsRec` during `SdrRegistry` discovery.
+        if [ "$RUNNER_OS" = "Linux" ]; then
+          OPENUSD_SPEC="openusd>=26.05,<26.08"
+        fi
         # Note: conda-forge publishes `libmaterialx` for linux-64 and win-64,
         # but not yet for osx-arm64 (built and cached below on macOS).
         EXTRA_PKGS=()
