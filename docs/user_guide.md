@@ -101,9 +101,10 @@ This document provides an overview of the USD features supported by `hdMitsuba`,
         offsets, and thin-lens depth of field (`thinlens`) whenever both `fStop`
         and `focusDistance` are positive (`aperture_radius = 0.5 *
         focalLength_scene_units / fStop`).
-    *   **Custom Sensor Type**: Customize the Mitsuba sensor backend by setting `mitsuba:sensor:type` (string, e.g., `perspective`, `irradiancemeter`, `radmeter`) on the Camera prim.
-    *   **Pixel Filter**: Customize the film's pixel filter by setting `mitsuba:sensor:film:pixel_filter:type` (string) on the Camera prim.
-    *   **Surface Sensors**: Attach a surface sensor (e.g., `irradiancemeter`) to a Mesh geometry prim by setting `mitsuba:sensor:shape` (string) on the Camera prim. This allows measuring light hitting that specific surface (e.g., for irradiance mapping). An example is provided in `test_assets/shapes`.
+    *   **Custom Sensor Plugins (`mitsuba:sensor:*`)**: Customize the Mitsuba sensor backend and any flat or nested sensor properties on a `Camera` prim (e.g., `mitsuba:sensor:type` = `"perspective"`, `"thinlens"`, `"orthographic"`, `"radiancemeter"`, `"distant"`, or `"irradiancemeter"`, along with parameters such as `mitsuba:sensor:fov`, `mitsuba:sensor:fov_axis`, `mitsuba:sensor:aperture_radius`, `mitsuba:sensor:focus_distance`, `mitsuba:sensor:origin`, `mitsuba:sensor:direction`, or spectral response `mitsuba:sensor:srf:*`). Single-pixel signal sensors (`radiancemeter`, `distant`) use a `1x1` film and tile their output across larger Hydra render buffers.
+    *   **Film & Pixel Filter (`mitsuba:sensor:film:*`)**: Customize the film and nested reconstruction filter on a `Camera` prim (e.g., `mitsuba:sensor:film:rfilter:type = "gaussian"`, `mitsuba:sensor:film:rfilter:stddev`, `mitsuba:sensor:film:sample_border`, `mitsuba:sensor:film:pixel_format`, or `mitsuba:sensor:film:crop_*`). Interactive progressive mode and denoising override the reconstruction filter with `box`.
+    *   **Per-Camera Sampler (`mitsuba:sensor:sampler:*`)**: Override the global `RenderSettings` sampler for an individual `Camera` prim (e.g., `mitsuba:sensor:sampler:type`, `mitsuba:sensor:sampler:sample_count`).
+    *   **Surface Sensors**: Attach a surface sensor (e.g., `irradiancemeter`) to a geometry prim by setting `mitsuba:sensor:shape` (string or token) on the `Camera` prim. This allows measuring light hitting that specific surface (e.g., for irradiance mapping). An example is provided in `test_assets/shapes`.
 *   **Motion Blur**: Transformation motion blur is supported for cameras, non-area lights (point, spot, distant, and dome lights), and geometry (meshes, implicit surfaces, and point instancers, wrapped in Mitsuba instances when their transform is animated) via standard USD time-sampled transforms and camera `shutter:open` / `shutter:close` attributes. The maximum number of transform samples over the shutter interval can be overridden by authoring the `primvars:mitsuba:motion_samples` (int, default `32`) primvar on a prim or any of its ancestors. Area lights, emissive meshes, meshes with an attached surface sensor, and deformation motion blur are not supported; these render with their static transform at frame time.
 
 ### Hydra AOVs (Arbitrary Output Variables)
@@ -145,7 +146,7 @@ Both `hdMitsuba` and the offline `usd_mitsuba` translator share a uniform USD
 namespace convention for configuring native Mitsuba plugins and nested child
 plugins:
 
-*   **Supported Namespaces**: `mitsuba:integrator:*` and `mitsuba:sampler:*` on `RenderSettings` prims.
+*   **Supported Namespaces**: `mitsuba:integrator:*` and `mitsuba:sampler:*` on `RenderSettings` prims, and `mitsuba:sensor:*` on `Camera` prims.
 *   **Hierarchy & Plugin Selection**: Colon-separated attribute names map to
     nested Mitsuba plugin properties. `:type` selects a plugin type, `:id`
     assigns a Mitsuba object ID, and nested `:child:type` / `:child:<param>`

@@ -89,6 +89,9 @@ mitsuba::ref<mitsuba::Object> CreateMaterialEmitter(mitsuba::Properties props,
                                                     bool double_sided,
                                                     std::string_view variant);
 
+// Removes any child `ReconstructionFilter` plugin entries from `film_spec`.
+void StripReconstructionFilters(PluginSpecNode* film_spec);
+
 MI_VARIANT
 class PrimTranslator {
  public:
@@ -134,11 +137,23 @@ class PrimTranslator {
   static void UpdateLightInPlace(mitsuba::Object* light_obj,
                                  const LightSpec& spec);
 
-  static mitsuba::ref<mitsuba::Sensor<Float, Spectrum>> BuildSensor(
-      const CameraSpec& spec, bool is_interactive = false,
-      const PluginSpecNode& sampler_spec = {});
+  struct TranslatedSensor {
+    mitsuba::ref<mitsuba::Sensor<Float, Spectrum>> sensor = nullptr;
+    bool has_camera_sampler = false;
+  };
 
-  static void UpdateSensorInPlace(mitsuba::Object* sensor_obj,
+  static TranslatedSensor BuildSensor(const CameraSpec& spec,
+                                      bool use_box_filter = false,
+                                      const PluginSpecNode& sampler_spec = {},
+                                      bool force_independent_sampler = false);
+
+  static void UpdateSensorAspectRatio(mitsuba::Sensor<Float, Spectrum>* sensor,
+                                      const CameraSpec& spec, double aspect);
+
+  // Updates `sensor` in place for standard USD camera transform and intrinsic
+  // parameter changes, skipping properties explicitly authored in
+  // `spec.sensor_spec`. Returns false if `sensor` must be rebuilt instead.
+  static bool UpdateSensorInPlace(mitsuba::Sensor<Float, Spectrum>* sensor,
                                   const CameraSpec& spec);
 
   // Builds a mesh from expanded per-vertex `primvars`. The primvars listed in
@@ -166,7 +181,8 @@ class PrimTranslator {
       const MeshAttributeRequests& mesh_attributes);
 
   static mitsuba::ref<mitsuba::Shape<Float, Spectrum>> BuildCurves(
-      const CurveSpec& spec, mitsuba::Object* bsdf);
+      const CurveSpec& spec, mitsuba::Object* bsdf,
+      mitsuba::Object* sensor_ptr = nullptr);
 
   static mitsuba::ref<mitsuba::Shape<Float, Spectrum>> BuildParticleField(
       const ParticleFieldSpec& spec);

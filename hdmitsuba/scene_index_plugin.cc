@@ -20,11 +20,11 @@
 //   (see implicit_surface.h).
 // - A scene index publishing the motion interval (the union of all camera
 //   shutter intervals) on the absolute root prim, and invalidating light
-//   transforms when it changes. This is the only data source contributed here.
-//   It also resyncs the render settings prims when the active one changes.
-// - A keyless API-schema adapter fixing *invalidation*: every other value
-//   hdMitsuba reads is a schema property or a primvar UsdImaging already
-//   surfaces, but UsdImagingStageSceneIndex drops a property change unless
+//   transforms when it changes. It also resyncs the render settings prims when
+//   the active one changes.
+// - A keyless API-schema adapter contributing a lazy "mitsuba" container data
+//   source for authored `mitsuba:*` USD attributes on cameras, and fixing
+//   *invalidation*: UsdImagingStageSceneIndex drops a property change unless
 //   some adapter claims it (_ComputeDirtiedEntries has no resync fallback), and
 //   a few properties hdMitsuba cares about are claimed by nobody.
 //
@@ -40,8 +40,11 @@
 #include <absl/strings/match.h>
 #include <pxr/base/gf/vec2f.h>
 #include <pxr/base/tf/registryManager.h>
+#include <pxr/base/tf/staticTokens.h>
 #include <pxr/base/tf/type.h>
 #include <pxr/imaging/hd/cameraSchema.h>
+#include <pxr/imaging/hd/dataSource.h>
+#include <pxr/imaging/hd/dataSourceLocator.h>
 #include <pxr/imaging/hd/dependencyForwardingSceneIndex.h>
 #include <pxr/imaging/hd/dirtyBitsTranslator.h>
 #include <pxr/imaging/hd/filteringSceneIndex.h>
@@ -59,12 +62,17 @@
 #include <pxr/imaging/hd/xformSchema.h>
 #include <pxr/imaging/hdsi/implicitSurfaceSceneIndex.h>
 #include <pxr/pxr.h>
+#include <pxr/usd/sdf/types.h>
+#include <pxr/usd/usd/attribute.h>
+#include <pxr/usd/usd/property.h>
 #include <pxr/usd/usdGeom/camera.h>
 #include <pxr/usd/usdLux/lightAPI.h>
 #include <pxr/usd/usdLux/tokens.h>
 #include <pxr/usd/usdShade/material.h>
 #include <pxr/usd/usdShade/tokens.h>
 #include <pxr/usdImaging/usdImaging/apiSchemaAdapter.h>
+#include <pxr/usdImaging/usdImaging/dataSourceAttribute.h>
+#include <pxr/usdImaging/usdImaging/dataSourceStageGlobals.h>
 #include <pxr/usdImaging/usdImaging/types.h>
 
 #include "hdmitsuba/camera.h"
@@ -78,6 +86,15 @@
 #endif
 
 PXR_NAMESPACE_OPEN_SCOPE
+
+// clang-format off
+TF_DEFINE_PRIVATE_TOKENS(
+    HdMitsubaPluginTokens,
+    ((mitsubaNamespacePrefix, "mitsuba:"))
+    (type)
+    (vector)
+    (value));
+// clang-format on
 
 // Publishes the motion interval, i.e., the union of the shutter intervals of
 // all cameras, on the absolute root prim (see motion.h), and dirties shape,
@@ -272,11 +289,93 @@ class HdMitsuba_SceneIndexPlugin : public HdSceneIndexPlugin {
   }
 };
 
-// Covers invalidation gaps for `mitsuba:sensor:*`, treatAsPoint/treatAsLine,
-// and material outputs. Being keyless, this runs for every prim of every stage
-// in the process -- see the TODO at the top of the file.
+// Helpers only: the registered classes must stay at namespace scope so their
+// demangled type names match the plugInfo.json keys.
+namespace {
+
+class HdMitsubaAttributesDataSource final : public HdContainerDataSource {
+ public:
+  HD_DECLARE_DATASOURCE(HdMitsubaAttributesDataSource);
+
+  TfTokenVector GetNames() override {
+    TfTokenVector names;
+    for (const UsdProperty& prop : prim_.GetAuthoredPropertiesInNamespace(
+             HdMitsubaPluginTokens->mitsubaNamespacePrefix.GetString())) {
+      if (UsdAttribute attr = prop.As<UsdAttribute>();
+          attr && attr.HasAuthoredValue()) {
+        names.push_back(prop.GetName());
+      }
+    }
+    return names;
+  }
+
+  HdDataSourceBaseHandle Get(const TfToken& name) override {
+    if (!absl::StartsWith(
+            name.GetString(),
+            HdMitsubaPluginTokens->mitsubaNamespacePrefix.GetString())) {
+      return nullptr;
+    }
+    UsdAttribute attr = prim_.GetAttribute(name);
+    if (!attr || !attr.HasAuthoredValue()) {
+      return nullptr;
+    }
+    HdDataSourceBaseHandle attribute_source = UsdImagingDataSourceAttributeNew(
+        attr, stage_globals_, prim_.GetPath(), time_varying_locator_);
+    if (!attribute_source) {
+      return nullptr;
+    }
+    TfToken role = attr.GetRoleName();
+    if (!absl::EndsWith(name.GetString(), ":value") &&
+        (role == SdfValueRoleNames->Point ||
+         role == SdfValueRoleNames->Vector ||
+         role == SdfValueRoleNames->Normal)) {
+      return HdRetainedContainerDataSource::New(
+          HdMitsubaPluginTokens->type,
+          HdRetainedTypedSampledDataSource<TfToken>::New(
+              HdMitsubaPluginTokens->vector),
+          HdMitsubaPluginTokens->value, attribute_source);
+    }
+    return attribute_source;
+  }
+
+ private:
+  HdMitsubaAttributesDataSource(
+      const UsdPrim& prim,
+      const UsdImagingDataSourceStageGlobals& stage_globals,
+      const HdDataSourceLocator& time_varying_locator)
+      : prim_(prim),
+        stage_globals_(stage_globals),
+        time_varying_locator_(time_varying_locator) {}
+
+  UsdPrim prim_;
+  const UsdImagingDataSourceStageGlobals& stage_globals_;
+  HdDataSourceLocator time_varying_locator_;
+};
+
+}  // namespace
+
+// Contributes the lazy "mitsuba" container data source and covers invalidation
+// gaps for `mitsuba:sensor:*`, treatAsPoint/treatAsLine, and material outputs.
+// Being keyless, this runs for every prim of every stage in the process -- see
+// the TODO at the top of the file.
 class HdMitsuba_APISchemaAdapter : public UsdImagingAPISchemaAdapter {
  public:
+  HdContainerDataSourceHandle GetImagingSubprimData(
+      const UsdPrim& prim, const TfToken& subprim,
+      const TfToken& applied_instance_name,
+      const UsdImagingDataSourceStageGlobals& stage_globals) override {
+    if (!subprim.IsEmpty() || !applied_instance_name.IsEmpty()) {
+      return nullptr;
+    }
+    if (prim.IsA<UsdGeomCamera>()) {
+      return HdRetainedContainerDataSource::New(
+          HdMitsubaUtilsTokens->mitsuba,
+          HdMitsubaAttributesDataSource::New(
+              prim, stage_globals, HdCameraSchema::GetDefaultLocator()));
+    }
+    return nullptr;
+  }
+
   HdDataSourceLocatorSet InvalidateImagingSubprim(
       const UsdPrim& prim, const TfToken& subprim,
       const TfToken& applied_instance_name, const TfTokenVector& properties,
@@ -293,6 +392,7 @@ class HdMitsuba_APISchemaAdapter : public UsdImagingAPISchemaAdapter {
           prim.IsA<UsdGeomCamera>()) {
         // The camera adapter only maps UsdGeomCamera schema attributes.
         result.insert(HdCameraSchema::GetDefaultLocator());
+        result.insert(HdDataSourceLocator(HdMitsubaUtilsTokens->mitsuba, prop));
       } else if ((prop == UsdLuxTokens->treatAsPoint ||
                   prop == UsdLuxTokens->treatAsLine ||
                   prop == HdMitsubaUtilsTokens->visibility) &&

@@ -17,9 +17,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -31,7 +33,6 @@
 #include <absl/container/flat_hash_set.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
-#include <absl/strings/str_join.h>
 #include <absl/strings/strip.h>
 #include <drjit/matrix.h>
 #include <drjit/tensor.h>
@@ -45,7 +46,6 @@
 #include <mitsuba/core/object.h>
 #include <mitsuba/core/plugin.h>
 #include <mitsuba/core/properties.h>
-#include <mitsuba/core/rfilter.h>
 #include <mitsuba/core/spectrum.h>
 #include <mitsuba/core/transform.h>
 #include <mitsuba/core/vector.h>
@@ -65,6 +65,7 @@
 #include <pxr/base/gf/matrix4f.h>
 #include <pxr/base/gf/quatf.h>
 #include <pxr/base/gf/rotation.h>
+#include <pxr/base/gf/vec2f.h>
 #include <pxr/base/gf/vec3d.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/gf/vec4f.h>
@@ -1153,92 +1154,264 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateLightInPlace(
   }
 }
 
-MI_VARIANT mitsuba::ref<mitsuba::Sensor<Float, Spectrum>> PrimTranslator<
-    Float, Spectrum>::BuildSensor(const CameraSpec& spec, bool is_interactive,
-                                  const PluginSpecNode& sampler_spec) {
-  mitsuba::Properties props;
-  if (spec.sensor_type == "irradiancemeter") {
-    props = mitsuba::Properties("irradiancemeter");
-  } else {
-    const bool use_thinlens =
-        spec.aperture_radius > 0.0f && spec.focus_distance > 0.0f;
-    props = mitsuba::Properties(use_thinlens ? "thinlens" : "perspective");
-    SetTransformProperty(props, spec.transform);
-    props.set("fov", spec.fov);
-    props.set("fov_axis", "x");
-    props.set("principal_point_offset_x", spec.horizontal_aperture_offset);
-    props.set("principal_point_offset_y", spec.vertical_aperture_offset);
-    if (use_thinlens) {
-      props.set("aperture_radius", spec.aperture_radius);
-      props.set("focus_distance", spec.focus_distance);
+namespace {
+
+bool UsesUsdCameraTransform(const CameraSpec& spec) {
+  const std::string& sensor_type = spec.sensor_spec.plugin_type;
+  return sensor_type != "irradiancemeter" &&
+         !spec.target_shape_id.has_value() &&
+         !spec.sensor_spec.HasProperty("to_world") &&
+         !spec.sensor_spec.HasProperty("direction") &&
+         !spec.sensor_spec.HasProperty("origin");
+}
+
+std::optional<double> ComputePerspectiveXFov(const CameraSpec& spec,
+                                             double aspect) {
+  if (!spec.sensor_spec.HasProperty("fov") &&
+      !spec.sensor_spec.HasProperty("focal_length") &&
+      !spec.sensor_spec.HasProperty("fov_axis")) {
+    return static_cast<double>(spec.fov);
+  }
+  mitsuba::Properties fov_props(spec.sensor_spec.plugin_type);
+  if (!spec.sensor_spec.HasProperty("focal_length")) {
+    fov_props.set("fov", spec.fov);
+    fov_props.set("fov_axis", "x");
+  }
+  for (const char* key : {"fov", "focal_length", "fov_axis"}) {
+    if (auto it = spec.sensor_spec.params.find(key);
+        it != spec.sensor_spec.params.end()) {
+      SetMitsubaPropertyFromValue(fov_props, key, it->second,
+                                  /*invert_float=*/false,
+                                  /*raise_if_exists=*/false);
     }
   }
-  props.set("near_clip", spec.near_clip);
-  props.set("far_clip", spec.far_clip);
+  if (auto it = spec.sensor_spec.params.find("pixel_aspect_ratio");
+      it != spec.sensor_spec.params.end()) {
+    if (std::optional<double> pixel_aspect_ratio =
+            ExtractDoubleValue(it->second);
+        pixel_aspect_ratio.has_value() && *pixel_aspect_ratio > 0.0) {
+      aspect *= *pixel_aspect_ratio;
+    }
+  }
+  try {
+    return mitsuba::parse_fov(fov_props, aspect);
+  } catch (const std::exception& e) {
+    TF_WARN("Failed to parse FOV for sensor '%s': %s", spec.id.GetText(),
+            e.what());
+    return std::nullopt;
+  }
+}
+
+}  // namespace
+
+void StripReconstructionFilters(PluginSpecNode* film_spec) {
+  auto* plugin_manager = mitsuba::PluginManager::instance();
+  absl::erase_if(film_spec->children, [plugin_manager](const auto& entry) {
+    return !entry.second.plugin_type.empty() &&
+           plugin_manager->plugin_type(entry.second.plugin_type) ==
+               mitsuba::ObjectType::ReconstructionFilter;
+  });
+}
+
+MI_VARIANT typename PrimTranslator<Float, Spectrum>::TranslatedSensor
+PrimTranslator<Float, Spectrum>::BuildSensor(const CameraSpec& spec,
+                                             bool use_box_filter,
+                                             const PluginSpecNode& sampler_spec,
+                                             bool force_independent_sampler) {
+  const std::string& sensor_type = spec.sensor_spec.plugin_type;
+  mitsuba::Properties props(sensor_type);
+  if (UsesUsdCameraTransform(spec)) {
+    SetTransformProperty(props, spec.transform);
+  }
+  if (sensor_type == "perspective" || sensor_type == "thinlens") {
+    if (!spec.sensor_spec.HasProperty("focal_length")) {
+      props.set("fov", spec.fov);
+      props.set("fov_axis", "x");
+    }
+    props.set("principal_point_offset_x", spec.horizontal_aperture_offset);
+    props.set("principal_point_offset_y", spec.vertical_aperture_offset);
+    if (sensor_type == "thinlens") {
+      props.set("aperture_radius", spec.aperture_radius);
+      if (spec.aperture_radius > 0.0f && spec.focus_distance > 0.0f) {
+        props.set("focus_distance", spec.focus_distance);
+      }
+    }
+  }
+  if (sensor_type == "perspective" || sensor_type == "thinlens" ||
+      sensor_type == "orthographic") {
+    props.set("near_clip", spec.near_clip);
+    props.set("far_clip", spec.far_clip);
+  }
   props.set("shutter_open", spec.shutter[0]);
   props.set("shutter_close", spec.shutter[1]);
 
-  std::string filter_type = is_interactive ? "box" : spec.pixel_filter_type;
-  if (!filter_type.empty()) {
-    mitsuba::Properties film_props("hdrfilm");
-    film_props.set(
-        "pixel_filter",
-        static_cast<mitsuba::Object*>(
-            mitsuba::PluginManager::instance()
-                ->create_object<mitsuba::ReconstructionFilter<Float, Spectrum>>(
-                    mitsuba::Properties(filter_type))
-                .get()));
-    props.set(
-        "film",
-        static_cast<mitsuba::Object*>(
-            mitsuba::PluginManager::instance()
-                ->create_object<mitsuba::Film<Float, Spectrum>>(film_props)
-                .get()));
+  PluginSpecNode effective_spec = spec.sensor_spec;
+
+  const bool is_signal_sensor =
+      sensor_type == "radiancemeter" || sensor_type == "distant";
+  if (effective_spec.children.contains("film") || use_box_filter ||
+      is_signal_sensor) {
+    PluginSpecNode& film_spec = effective_spec.children["film"];
+    if (film_spec.plugin_type.empty()) {
+      film_spec.plugin_type = "hdrfilm";
+    }
+    if (is_signal_sensor) {
+      film_spec.params["width"] = VtValue(1);
+      film_spec.params["height"] = VtValue(1);
+    }
+    if (use_box_filter) {
+      StripReconstructionFilters(&film_spec);
+      film_spec.children["rfilter"] = PluginSpecNode("box");
+    }
   }
-  if (!sampler_spec.Empty()) {
+
+  if (auto sampler_it = effective_spec.children.find("sampler");
+      sampler_it != effective_spec.children.end()) {
+    if (force_independent_sampler) {
+      sampler_it->second.plugin_type = "independent";
+      absl::erase_if(sampler_it->second.params, [](const auto& entry) {
+        return entry.first != "sample_count" && entry.first != "seed";
+      });
+      sampler_it->second.children.clear();
+    } else if (sampler_it->second.plugin_type.empty()) {
+      sampler_it->second.plugin_type = "independent";
+    }
+  }
+
+  MergePluginProperties(props, effective_spec,
+                        mitsuba::Sensor<Float, Spectrum>::Variant);
+  const bool has_camera_sampler = props.has_property("sampler");
+
+  if (!sampler_spec.Empty() && !has_camera_sampler) {
     if (mitsuba::ref<mitsuba::Sampler<Float, Spectrum>> sampler =
             BuildPluginObject<mitsuba::Sampler<Float, Spectrum>>(
                 sampler_spec)) {
       props.set("sampler", static_cast<mitsuba::Object*>(sampler.get()));
     }
   }
-  mitsuba::ref<mitsuba::Sensor<Float, Spectrum>> sensor =
-      mitsuba::PluginManager::instance()
-          ->create_object<mitsuba::Sensor<Float, Spectrum>>(props);
+  mitsuba::ref<mitsuba::Object> expanded;
+  try {
+    expanded =
+        CreateExpandedObject(props, mitsuba::Sensor<Float, Spectrum>::Variant,
+                             mitsuba::ObjectType::Sensor);
+  } catch (const std::exception& e) {
+    TF_WARN("Failed to create sensor '%s' (type '%s'): %s", spec.id.GetText(),
+            sensor_type.c_str(), e.what());
+    return {};
+  }
+  mitsuba::ref<mitsuba::Sensor<Float, Spectrum>> sensor(
+      dynamic_cast<mitsuba::Sensor<Float, Spectrum>*>(expanded.get()));
+  if (!sensor) {
+    TF_WARN("Mitsuba plugin '%s' for camera '%s' is not a valid Sensor.",
+            sensor_type.c_str(), spec.id.GetText());
+    return {};
+  }
   sensor->set_id(spec.id.GetAsString());
-  return sensor;
+  return {std::move(sensor), has_camera_sampler};
 }
 
-MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateSensorInPlace(
-    mitsuba::Object* sensor_obj, const CameraSpec& spec) {
-  using ScalarFloat = float;
-  auto* sensor = dynamic_cast<mitsuba::Sensor<Float, Spectrum>*>(sensor_obj);
-  if (!sensor) return;
-
-  TraversalCallback cb;
-  sensor->traverse(&cb);
-
-  if (spec.dirty_bits & HdCamera::DirtyBits::DirtyTransform) {
-    SetTransformParameter(cb, spec.transform);
+MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateSensorAspectRatio(
+    mitsuba::Sensor<Float, Spectrum>* sensor, const CameraSpec& spec,
+    double aspect) {
+  if (aspect <= 0.0) return;
+  const std::string& sensor_type = spec.sensor_spec.plugin_type;
+  if (sensor_type != "perspective" && sensor_type != "thinlens") {
+    return;
   }
-  if (spec.dirty_bits & HdCamera::DirtyBits::DirtyParams) {
-    cb.set<ScalarFloat>("near_clip", spec.near_clip);
-    cb.set<ScalarFloat>("far_clip", spec.far_clip);
-    if (spec.sensor_type == "perspective" || spec.sensor_type.empty()) {
-      cb.set<Float>("x_fov", spec.fov);
-      cb.set<Float>("principal_point_offset_x",
-                    spec.horizontal_aperture_offset);
-      cb.set<Float>("principal_point_offset_y", spec.vertical_aperture_offset);
-      if (spec.aperture_radius > 0.0f && spec.focus_distance > 0.0f) {
-        // Unlike `x_fov`, the thinlens sensor doesn't make these opaque in
-        // `parameters_changed()`, so do it here to avoid recompilation.
-        cb.set<Float>("aperture_radius",
-                      dr::opaque<Float>(spec.aperture_radius));
-        cb.set<Float>("focus_distance", dr::opaque<Float>(spec.focus_distance));
+  if (!spec.sensor_spec.HasProperty("focal_length") &&
+      !spec.sensor_spec.HasProperty("fov_axis")) {
+    return;
+  }
+
+  std::optional<double> x_fov = ComputePerspectiveXFov(spec, aspect);
+  if (!x_fov.has_value()) return;
+  TraversalCallback cb("", nullptr, /*recurse_objects=*/false);
+  sensor->traverse(&cb);
+  cb.set<Float>("x_fov", dr::opaque<Float>(*x_fov));
+  sensor->parameters_changed({"x_fov"});
+}
+
+MI_VARIANT bool PrimTranslator<Float, Spectrum>::UpdateSensorInPlace(
+    mitsuba::Sensor<Float, Spectrum>* sensor, const CameraSpec& spec) {
+  using ScalarFloat = dr::scalar_t<Float>;
+  const std::string& sensor_type = spec.sensor_spec.plugin_type;
+  const bool dirty_params =
+      (spec.dirty_bits & HdCamera::DirtyBits::DirtyParams) != 0;
+  const bool update_transform =
+      (spec.dirty_bits & HdCamera::DirtyBits::DirtyTransform) != 0 &&
+      UsesUsdCameraTransform(spec);
+  const bool is_perspective =
+      sensor_type == "perspective" || sensor_type == "thinlens";
+  const bool update_params =
+      dirty_params && (is_perspective || sensor_type == "orthographic");
+  if (!update_transform && !update_params) {
+    return true;
+  }
+
+  TraversalCallback cb(
+      "", nullptr,
+      /*recurse_objects=*/update_transform && spec.transform.IsAnimated());
+  sensor->traverse(&cb);
+  std::vector<std::string> changed_keys;
+
+  if (update_transform) {
+    if (!cb.data.contains("to_world") && !cb.objects.contains("to_world")) {
+      return false;
+    }
+    SetTransformParameter(cb, spec.transform);
+    changed_keys.push_back("to_world");
+  }
+
+  if (update_params) {
+    auto update_clip = [&](const char* key, float clip_value) {
+      if (!spec.sensor_spec.HasProperty(key)) {
+        const ScalarFloat target = static_cast<ScalarFloat>(clip_value);
+        ScalarFloat* ptr = cb.get<ScalarFloat>(key);
+        if (ptr != nullptr && *ptr != target) {
+          *ptr = target;
+          changed_keys.push_back(key);
+        }
+      }
+    };
+    update_clip("near_clip", spec.near_clip);
+    update_clip("far_clip", spec.far_clip);
+
+    if (is_perspective) {
+      // Make scalar sensor parameters opaque to avoid JIT recompilation.
+      auto update_float = [&](const char* key, float value) {
+        if (!spec.sensor_spec.HasProperty(key)) {
+          cb.set<Float>(key, dr::opaque<Float>(value));
+          changed_keys.push_back(key);
+        }
+      };
+      if (!spec.sensor_spec.HasProperty("fov") &&
+          !spec.sensor_spec.HasProperty("focal_length")) {
+        double aspect = 1.0;
+        if (const auto* film = sensor->film();
+            film && dr::all(film->size() > 0)) {
+          aspect = static_cast<double>(film->size().x()) /
+                   static_cast<double>(film->size().y());
+        }
+        if (std::optional<double> x_fov = ComputePerspectiveXFov(spec, aspect);
+            x_fov.has_value()) {
+          cb.set<Float>("x_fov", dr::opaque<Float>(*x_fov));
+          changed_keys.push_back("x_fov");
+        }
+      }
+      update_float("principal_point_offset_x", spec.horizontal_aperture_offset);
+      update_float("principal_point_offset_y", spec.vertical_aperture_offset);
+      if (sensor_type == "thinlens") {
+        update_float("aperture_radius", spec.aperture_radius);
+        if (spec.aperture_radius > 0.0f && spec.focus_distance > 0.0f) {
+          update_float("focus_distance", spec.focus_distance);
+        }
       }
     }
   }
-  sensor->parameters_changed();
+  if (!changed_keys.empty()) {
+    sensor->parameters_changed(changed_keys);
+  }
+  return true;
 }
 
 namespace {
@@ -1572,7 +1745,8 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::AttachMeshAttributes(
 
 MI_VARIANT mitsuba::ref<mitsuba::Shape<Float, Spectrum>>
 PrimTranslator<Float, Spectrum>::BuildCurves(const CurveSpec& spec,
-                                             mitsuba::Object* bsdf) {
+                                             mitsuba::Object* bsdf,
+                                             mitsuba::Object* sensor_ptr) {
   static const absl::NoDestructor<std::string> kCurveResourcePath([]() {
     if (auto plugin =
             PlugRegistry::GetInstance().GetPluginWithName("hdMitsuba")) {
@@ -1590,6 +1764,9 @@ PrimTranslator<Float, Spectrum>::BuildCurves(const CurveSpec& spec,
   }
   if (bsdf != nullptr) {
     props.set("bsdf", bsdf);
+  }
+  if (sensor_ptr != nullptr) {
+    props.set("sensor", sensor_ptr);
   }
   props.set("visibility", spec.visibility);
 

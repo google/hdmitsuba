@@ -47,10 +47,14 @@ void CopyFromHostToRenderBuffer(
     return;
   }
   int dst_channels = HdGetComponentCount(render_buffer->GetFormat());
-  // RGB <-> RGBA conversions pad alpha with 1 or drop it, respectively.
+  const bool is_luminance_to_color = !is_int &&
+                                     (channels == 1 || channels == 2) &&
+                                     (dst_channels == 3 || dst_channels == 4);
+  // Supports matching channel counts, RGB <-> RGBA (pad/drop alpha), and
+  // luminance/luminance-alpha (Y/YA) broadcast into RGB/RGBA color buffers.
   if (!TF_VERIFY(
           dst_channels == channels || (dst_channels == 4 && channels == 3) ||
-              (dst_channels == 3 && channels == 4),
+              (dst_channels == 3 && channels == 4) || is_luminance_to_color,
           "Destination and source channel counts do not match (%d vs %d)",
           dst_channels, channels)) {
     return;
@@ -128,6 +132,24 @@ void CopyFromHostToRenderBuffer(
           dp[1] = sp[1];
           dp[2] = sp[2];
           dp[3] = 1.0f;
+        }
+      }
+    } else if (is_luminance_to_color) {
+      for (size_t src_y = 0; src_y < crop_h; ++src_y) {
+        size_t dst_y = (dst_height - 1) - (crop_y + src_y);
+        const float* src_row =
+            src_data + src_y * crop_w * src_channels + src_offset;
+        float* dst_row =
+            dst_float + (dst_y * dst_width + crop_x) * dst_channels;
+        for (size_t src_x = 0; src_x < crop_w; ++src_x) {
+          const float* sp = src_row + src_x * src_channels;
+          float* dp = dst_row + src_x * dst_channels;
+          dp[0] = sp[0];
+          dp[1] = sp[0];
+          dp[2] = sp[0];
+          if (dst_channels == 4) {
+            dp[3] = channels == 2 ? sp[1] : 1.0f;
+          }
         }
       }
     } else {
@@ -222,11 +244,26 @@ void PerformBatchedCopy(
       UInt32 repeated_pixel_idx = dr::repeat(src_pixel_idx, dst_channels);
       UInt32 channel_offsets =
           dr::tile(dr::arange<UInt32>(dst_channels), dst_pixel_count);
+      const bool is_luminance_to_color =
+          !dest.is_int && (dest.channels == 1 || dest.channels == 2) &&
+          (dst_channels == 3 || dst_channels == 4);
+      UInt32 src_channel_offsets = channel_offsets;
+      if (is_luminance_to_color) {
+        src_channel_offsets =
+            (dest.channels == 2 && dst_channels == 4)
+                ? dr::select(channel_offsets == 3, UInt32(1), UInt32(0))
+                : UInt32(0);
+      }
       UInt32 final_idx = repeated_pixel_idx * tensor.shape()[2] +
-                         dest.src_offset + channel_offsets;
+                         dest.src_offset + src_channel_offsets;
 
       auto in_crop_channel = dr::repeat(in_crop, dst_channels);
-      auto valid_channel = in_crop_channel && (channel_offsets < dest.channels);
+      auto valid_channel =
+          is_luminance_to_color
+              ? (dest.channels == 1 && dst_channels == 4
+                     ? (in_crop_channel && (channel_offsets < 3))
+                     : in_crop_channel)
+              : (in_crop_channel && (channel_offsets < dest.channels));
 
       if (dest.is_int) {
         Int32 gathered_int =
@@ -236,7 +273,7 @@ void PerformBatchedCopy(
       } else {
         Float gathered_float =
             dr::gather<Float>(tensor.array(), final_idx, valid_channel);
-        if (dst_channels == 4 && dest.channels == 3) {
+        if (dst_channels == 4 && (dest.channels == 3 || dest.channels == 1)) {
           gathered_float = dr::select(in_crop_channel && (channel_offsets == 3),
                                       1.0f, gathered_float);
         }
