@@ -8,7 +8,7 @@
 <p align="center">
   <img src="docs/usdview_example.gif" alt="Mitsuba in usdview" width="640" />
   <br>
-  <p align="center"><i>The video shows interactive rendering using Mitsuba in usdview on MacOS (using Metal GPU acceleration, and with experimental kernel freezing enabled).</i></p>
+  <p align="center"><i>The video shows interactive rendering using Mitsuba in usdview on MacOS (using Metal GPU acceleration and kernel freezing).</i></p>
 </p>
 
 ## Motivation
