@@ -1457,3 +1457,65 @@ def test_default_frame_normalmap() -> None:
       np.broadcast_to(np.asarray(n0).T, (3, 3)),
       atol=1e-5,
   )
+
+
+def test_heighttonormal_traverse_freeze_and_ad() -> None:
+  """Verifies `mi.traverse()`, `@dr.freeze`, and AD through `heighttonormal`."""
+  si = mtlx.make_test_si(wi=(0.0, 0.0, 1.0))
+  si.uv = mi.Point2f(0.5, 0.5)
+  # `h = u * (k * 16 + 8)` has `dh_du = k + 0.5`, `dh_dv = 0`.
+  expr = (
+      'ND_heighttonormal_vector3',
+      {
+          'in_': (
+              'ND_multiply_float',
+              {
+                  'in1': (
+                      'ND_extract_vector2',
+                      {'in_': ('ND_texcoord_vector2', {}), 'index': 0},
+                  ),
+                  'in2': (
+                      'ND_add_float',
+                      {
+                          'in1': (
+                              'ND_multiply_float',
+                              {
+                                  'in1': ('ND_constant_float', {'value': 0.5}),
+                                  'in2': 16.0,
+                              },
+                          ),
+                          'in2': 8.0,
+                      },
+                  ),
+              },
+          ),
+      },
+  )
+  _, em = mtlx.compile_mtlx_material('ND_surface_unlit', emission_color=expr)
+  assert em is not None
+  expected0 = mi.Color3f(*map(float, _h2n_expected(1.0, 0.0)))
+  expected1 = mi.Color3f(*map(float, _h2n_expected(2.0, 0.0)))
+  np.testing.assert_allclose(em.eval(si), expected0, atol=1e-4)
+
+  @dr.freeze
+  def eval_frozen(s: mi.SurfaceInteraction3f) -> mi.Color3f:
+    return em.eval(s)
+
+  for _ in range(2):
+    np.testing.assert_allclose(eval_frozen(si), expected0, atol=1e-4)
+
+  params = mi.traverse(em)
+  key = next(
+      k
+      for k in params.keys()
+      if k.startswith('radiance.param') and np.allclose(params[k], 0.5)
+  )
+  params[key] = mi.Float(1.5)
+  params.update()
+  np.testing.assert_allclose(eval_frozen(si), expected1, atol=1e-4)
+
+  # `out.x = 0.5 - 0.5 * s / sqrt(1 + s^2)` with `s = k + 0.5 = 2` -> `-0.5 / 5^1.5`.
+  dr.enable_grad(params[key])
+  params.update()
+  dr.backward(em.eval(si).x)
+  np.testing.assert_allclose(dr.grad(params[key]), -0.5 / 5.0**1.5, rtol=1e-3)

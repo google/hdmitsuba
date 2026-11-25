@@ -1740,8 +1740,12 @@ Expr MtlxExprCompiler::CompileHeightToNormal(const ScopedNode& node) {
                             prog_.code.end());
       prog_.sub_code.insert(prog_.sub_code.end(), out.code.begin(),
                             out.code.end());
+      uint32_t ch_begin = static_cast<uint32_t>(prog_.sub_tmp_channels.size());
+      prog_.sub_tmp_channels.insert(prog_.sub_tmp_channels.end(),
+                                    prog_.tmp_channels.begin(),
+                                    prog_.tmp_channels.end());
       prog_.sub_programs.push_back(
-          {begin, static_cast<uint32_t>(prog_.sub_code.size()),
+          {begin, static_cast<uint32_t>(prog_.sub_code.size()), ch_begin,
            static_cast<uint32_t>(prog_.tmp_channels.size()),
            std::max(prog_.stack_size, out.max_depth), has_tc ? 1u : 0u});
       sub_idx = static_cast<uint16_t>(prog_.sub_programs.size() - 1);
