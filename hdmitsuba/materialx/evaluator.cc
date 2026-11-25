@@ -582,7 +582,9 @@ MtlxEvaluator<Float, Spectrum>::eval_code(absl::Span<const Inst> code,
         break;
       }
       case Op::HeightToNormal: {
-        Float scale = pop(1)[0].x();
+        Val* args = pop(2);
+        Float scale = args[0].x();
+        Vector3f center = xyz(args[1]);
         const SubProgram& sub = m_prog.sub_programs[imm];
         absl::Span<const Inst> sub_code(m_prog.sub_code.data() + sub.code_begin,
                                         sub.code_end - sub.code_begin);
@@ -598,30 +600,29 @@ MtlxEvaluator<Float, Spectrum>::eval_code(absl::Span<const Inst> code,
         }
         // Use an exact multiple of 1/256 texel (`0.125 / res`) when sampling
         // bitmaps so CUDA's 8-bit fixed-point `tex2D` sub-texel interpolation
-        // introduces zero quantization error in central differences.
+        // introduces zero quantization error in finite differences.
         ScalarPoint2f eps =
             dr::select(max_res > 1,
                        dr::maximum(ScalarFloat(0.125f) / ScalarPoint2f(max_res),
                                    ScalarFloat(1e-5f)),
                        ScalarPoint2f(1e-4f));
-        ScalarFloat inv_2eps_u = 0.5f / eps.x();
-        ScalarFloat inv_2eps_v = 0.5f / eps.y();
+        ScalarFloat inv_eps_u = 1.0f / eps.x();
+        ScalarFloat inv_eps_v = 1.0f / eps.y();
         constexpr ScalarFloat kSobelScale = 1.0f / 16.0f;
         using Int32 = dr::int32_array_t<Float>;
         size_t w = dr::width(si, active);
-        auto [_, d_u, d_v, _si] = dr::while_loop(
+        auto [_, v_u, v_v, _si] = dr::while_loop(
             std::make_tuple(dr::zeros<Int32>(w), dr::zeros<Vector3f>(w),
                             dr::zeros<Vector3f>(w), si),
             [](const Int32& k, const Vector3f&, const Vector3f&,
-               const SurfaceInteraction3f&) { return k < 4; },
-            [this, sub_code, sub, active, eps](Int32& k, Vector3f& du_acc,
-                                               Vector3f& dv_acc,
+               const SurfaceInteraction3f&) { return k < 2; },
+            [this, sub_code, sub, active, eps](Int32& k, Vector3f& probe_u,
+                                               Vector3f& probe_v,
                                                SurfaceInteraction3f& si_in) {
-              Mask is_v = (k & 2) != 0;
-              Float sgn = dr::select((k & 1) == 0, Float(1.0f), Float(-1.0f));
+              Mask is_v = k != 0;
               // MaterialX's v is `1 - si.uv.y`, so `+v` steps along `-si.uv.y`.
-              Float du = dr::select(is_v, Float(0.0f), sgn * eps.x());
-              Float dv = dr::select(is_v, -sgn * eps.y(), Float(0.0f));
+              Float du = dr::select(is_v, Float(0.0f), Float(eps.x()));
+              Float dv = dr::select(is_v, Float(-eps.y()), Float(0.0f));
               SurfaceInteraction3f s = si_in;
               s.uv += Point2f(du, dv);
               s.p += du * si_in.dp_du + dv * si_in.dp_dv;
@@ -629,17 +630,21 @@ MtlxEvaluator<Float, Spectrum>::eval_code(absl::Span<const Inst> code,
                   eval_code(sub_code, sub.tmp_count, sub.stack_size, s, active);
               Vector3f val = sub.has_texcoord ? Vector3f(v.x(), v.y(), v.z())
                                               : Vector3f(v.x(), 0.0f, 0.0f);
-              du_acc += dr::select(is_v, Vector3f(0.0f), sgn * val);
-              dv_acc += dr::select(is_v, sgn * val, Vector3f(0.0f));
+              probe_u = dr::select(is_v, probe_u, val);
+              probe_v = dr::select(is_v, val, probe_v);
               k += 1;
             },
-            "MaterialX heighttonormal", 4);
-        Float dh_du = d_u.x() * (inv_2eps_u * kSobelScale) * scale;
-        Float dh_dv = d_v.x() * (inv_2eps_v * kSobelScale) * scale;
+            "MaterialX heighttonormal", 2);
+        Float dh_du =
+            (v_u.x() - center.x()) * (inv_eps_u * kSobelScale) * scale;
+        Float dh_dv =
+            (v_v.x() - center.x()) * (inv_eps_v * kSobelScale) * scale;
         Vector3f n;
         if (sub.has_texcoord) {
-          Vector3f tangent(d_u.y() * inv_2eps_u, d_u.z() * inv_2eps_u, dh_du);
-          Vector3f bitangent(d_v.y() * inv_2eps_v, d_v.z() * inv_2eps_v, dh_dv);
+          Vector3f tangent((v_u.y() - center.y()) * inv_eps_u,
+                           (v_u.z() - center.z()) * inv_eps_u, dh_du);
+          Vector3f bitangent((v_v.y() - center.y()) * inv_eps_v,
+                             (v_v.z() - center.z()) * inv_eps_v, dh_dv);
           n = dr::cross(tangent, bitangent);
           n = detail::safe_normalize(
               dr::select(n.z() < 0.0f, -n, n), Vector3f(0.0f, 0.0f, 1.0f),

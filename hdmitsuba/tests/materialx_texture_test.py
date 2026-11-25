@@ -1320,3 +1320,172 @@ def test_heighttonormal_image_and_object_space(
       dr.normalize(mi.Color3f(0.0, -1.0, 1.0)),
       atol=1e-3,
   )
+
+
+def test_heighttonormal_shared_height_traverse_and_ad() -> None:
+  """Verifies shared height/matrix params are not duplicated across scopes."""
+  # `h = dot(uv, (16, 32))` shared between `heighttonormal` and a direct read.
+  # Without cross-scope literal caching, `sub_code` and outer `center` allocate
+  # separate `param*` slots, causing `mi.traverse()` edits and AD gradients to
+  # diverge by O(1/eps).
+  stage = Usd.Stage.CreateInMemory()
+  quad = mtlx.define_quad(stage, '/Quad')
+  uv = mtlx.define_shader(stage, 'UV', 'ND_texcoord_vector2')
+  dot = mtlx.define_shader(
+      stage,
+      'Height',
+      'ND_dotproduct_vector2',
+      in1=uv,
+      in2=(16.0, 32.0),
+  )
+  h2n = mtlx.define_shader(stage, 'H2N', 'ND_heighttonormal_vector3', in_=dot)
+  # Also read `dot` in the outer scope so the height expression is shared.
+  zero_h = mtlx.define_shader(
+      stage, 'ZeroH', 'ND_multiply_float', in1=dot, in2=0.0
+  )
+  out = mtlx.define_shader(
+      stage, 'Out', 'ND_add_vector3FA', in1=h2n, in2=zero_h
+  )
+  mtlx.bind_mtlx_shader(stage, quad, 'ND_surface_unlit', emission_color=out)
+  mi_scene = mi.load_dict(usd_mitsuba.convert_to_mitsuba(stage))
+  emitter = mi_scene.shapes()[0].emitter()
+  params = mi.traverse(emitter)
+  param_keys = sorted(
+      k for k in params.keys() if k.startswith('radiance.param')
+  )
+  assert len(param_keys) == 2
+
+  si = mtlx.make_test_si(wi=(0.0, 0.0, 1.0))
+  si.uv = mi.Point2f(0.4, 0.3)
+  np.testing.assert_allclose(
+      np.array(emitter.eval(si)).ravel()[:3],
+      _h2n_expected(1.0, 2.0),
+      atol=1e-3,
+  )
+
+  # Mutating `param0` (16 -> 16.01) must update both `sub_code` and `center`.
+  params[param_keys[0]] = mi.Float(16.01)
+  params.update()
+  np.testing.assert_allclose(
+      np.array(emitter.eval(si)).ravel()[:3],
+      _h2n_expected(16.01 / 16.0, 2.0),
+      atol=1e-3,
+  )
+
+  # Verify AD gradient w.r.t. `param0` matches analytic finite difference.
+  p0 = mi.Float(16.0)
+  dr.enable_grad(p0)
+  params[param_keys[0]] = p0
+  params.update()
+  val = emitter.eval(si)
+  dr.backward(val.x)
+  analytic_dx = (
+      _h2n_expected((16.0 + 1e-3) / 16.0, 2.0)[0]
+      - _h2n_expected((16.0 - 1e-3) / 16.0, 2.0)[0]
+  ) / 2e-3
+  np.testing.assert_allclose(float(dr.grad(p0)[0]), analytic_dx, atol=2e-3)
+
+  # Constant-height rollback must not leave dangling cached opaques for a
+  # subsequent outer use of the same node.
+  stage_const = Usd.Stage.CreateInMemory()
+  quad_const = mtlx.define_quad(stage_const, '/Quad')
+  c_node = mtlx.define_shader(
+      stage_const, 'ConstH', 'ND_constant_float', value=0.75
+  )
+  h2n_const = mtlx.define_shader(
+      stage_const, 'H2N', 'ND_heighttonormal_vector3', in_=c_node
+  )
+  out_const = mtlx.define_shader(
+      stage_const, 'Out', 'ND_add_vector3FA', in1=h2n_const, in2=c_node
+  )
+  mtlx.bind_mtlx_shader(
+      stage_const, quad_const, 'ND_surface_unlit', emission_color=out_const
+  )
+  mi_const = mi.load_dict(usd_mitsuba.convert_to_mitsuba(stage_const))
+  em_const = mi_const.shapes()[0].emitter()
+  np.testing.assert_allclose(
+      np.array(em_const.eval(si)).ravel()[:3],
+      (1.25, 1.25, 1.75),
+      atol=1e-5,
+  )
+
+  # Matrix literal inputs inside `heighttonormal` must also share opaque slots
+  # between `sub_code` and outer `center`.
+  stage_mat = Usd.Stage.CreateInMemory()
+  quad_mat = mtlx.define_quad(stage_mat, '/Quad')
+  uv_m = mtlx.define_shader(stage_mat, 'UV', 'ND_texcoord_vector2')
+  xform = mtlx.define_shader(
+      stage_mat,
+      'Xform',
+      'ND_transformmatrix_vector2M3',
+      in_=uv_m,
+      mat=Gf.Matrix3d(16.0, 0.0, 0.0, 0.0, 32.0, 0.0, 0.0, 0.0, 1.0),
+  )
+  h_m = mtlx.define_shader(
+      stage_mat, 'H', 'ND_extract_vector2', in_=xform, index=0
+  )
+  h2n_m = mtlx.define_shader(
+      stage_mat, 'H2N', 'ND_heighttonormal_vector3', in_=h_m
+  )
+  mtlx.bind_mtlx_shader(
+      stage_mat, quad_mat, 'ND_surface_unlit', emission_color=h2n_m
+  )
+  mi_mat = mi.load_dict(usd_mitsuba.convert_to_mitsuba(stage_mat))
+  em_mat = mi_mat.shapes()[0].emitter()
+  mat_params = mi.traverse(em_mat)
+  mat_keys = sorted(
+      k for k in mat_params.keys() if k.startswith('radiance.param')
+  )
+  assert len(mat_keys) == 9
+  mat_params[mat_keys[0]] = mi.Float(16.01)
+  mat_params.update()
+  np.testing.assert_allclose(
+      np.array(em_mat.eval(si)).ravel()[:3],
+      _h2n_expected(16.01 / 16.0, 0.0),
+      atol=1e-3,
+  )
+
+
+def test_heighttonormal_nonlinear_height_and_texcoord() -> None:
+  """Verifies 2-tap forward differences on non-linear height and texcoord."""
+  si = mtlx.make_test_si(wi=(0.0, 0.0, 1.0))
+  # MaterialX `v = 1 - si.uv.y`; pick `(u, v) = (0.4, 0.3)` -> `si.uv = (0.4, 0.7)`.
+  si.uv = mi.Point2f(0.4, 0.7)
+  uv = ('ND_texcoord_vector2', {})
+  u = ('ND_extract_vector2', {'in_': uv, 'index': 0})
+  v = ('ND_extract_vector2', {'in_': uv, 'index': 1})
+  u2 = ('ND_multiply_float', {'in1': u, 'in2': u})
+  v2 = ('ND_multiply_float', {'in1': v, 'in2': v})
+  # `h(u, v) = 16 * u^2 + 32 * v^2` -> `dh/du = 32*u = 12.8`, `dh/dv = 64*v = 19.2`.
+  h_nl = (
+      'ND_add_float',
+      {
+          'in1': ('ND_multiply_float', {'in1': u2, 'in2': 16.0}),
+          'in2': ('ND_multiply_float', {'in1': v2, 'in2': 32.0}),
+      },
+  )
+  np.testing.assert_allclose(
+      mtlx.eval_emission_expr(
+          ('ND_heighttonormal_vector3', {'in_': h_nl}), si=si
+      ),
+      _h2n_expected(12.8 / 16.0, 19.2 / 16.0),
+      atol=2e-3,
+  )
+
+  # Non-linear custom texcoord `tc = (u^2, v)` with `h = 16 * u^2 = 16 * tc.x`
+  # yields exact `dH/d(tc.x) = 16`, `dH/d(tc.y) = 0`.
+  tc_nl = ('ND_combine2_vector2', {'in1': u2, 'in2': v})
+  np.testing.assert_allclose(
+      mtlx.eval_emission_expr(
+          (
+              'ND_heighttonormal_vector3',
+              {
+                  'in_': ('ND_multiply_float', {'in1': u2, 'in2': 16.0}),
+                  'texcoord': tc_nl,
+              },
+          ),
+          si=si,
+      ),
+      _h2n_expected(1.0, 0.0),
+      atol=2e-3,
+  )

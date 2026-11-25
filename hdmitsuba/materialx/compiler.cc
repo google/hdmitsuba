@@ -505,6 +505,8 @@ class MtlxExprCompiler {
   absl::flat_hash_map<const mx::Node*, int> bsdf_closure_;
   absl::flat_hash_map<std::pair<const mx::Node*, std::string>, Expr>
       value_input_expr_;
+  absl::flat_hash_map<std::pair<const mx::Node*, std::string>, MatExpr>
+      matrix_input_expr_;
   absl::flat_hash_map<const mx::Node*, MatExpr> node_matrix_expr_;
   absl::flat_hash_map<Expr, int> expr_to_slot_;
   std::vector<ref<Object>> inputs_;
@@ -724,11 +726,9 @@ Expr MtlxExprCompiler::CompileInputExpr(const mx::NodePtr& node,
   if (!val_in) return default_expr;
   auto [it, inserted] = value_input_expr_.try_emplace({node.get(), input_name});
   if (inserted) {
-    Expr ve = CompileValueElement(val_in, default_expr);
-    if (ve.code.size() > 1) ve = EmitTmpExpr(ve);
-    it->second = std::move(ve);
+    it->second = CompileValueElement(val_in, default_expr);
   }
-  return it->second;
+  return it->second.code.size() > 1 ? EmitTmpExpr(it->second) : it->second;
 }
 
 std::optional<int> MtlxExprCompiler::ConstIntInput(const mx::NodePtr& node,
@@ -796,20 +796,25 @@ MtlxExprCompiler::MatExpr MtlxExprCompiler::CompileMatrixInput(
   if (!val_in || !val_in->getValue()) return MatExpr::Identity(n);
   const std::string& t = val_in->getType();
   if (t != "matrix33" && t != "matrix44") return MatExpr::Identity(n);
-  MatExpr out;
-  if (t == "matrix44") {
-    out.n = 4;
-    mx::Matrix44 m = val_in->getValue()->asA<mx::Matrix44>();
-    for (int i = 0; i < 4; ++i) {
-      out.rows[i] = EmitTuple({m[i][0], m[i][1], m[i][2], m[i][3]});
+  auto [it, inserted] =
+      matrix_input_expr_.try_emplace({node.get(), input_name});
+  if (inserted) {
+    MatExpr out;
+    if (t == "matrix44") {
+      out.n = 4;
+      mx::Matrix44 m = val_in->getValue()->asA<mx::Matrix44>();
+      for (int i = 0; i < 4; ++i) {
+        out.rows[i] = EmitTuple({m[i][0], m[i][1], m[i][2], m[i][3]});
+      }
+    } else {
+      mx::Matrix33 m = val_in->getValue()->asA<mx::Matrix33>();
+      for (int i = 0; i < 3; ++i) {
+        out.rows[i] = EmitTuple({m[i][0], m[i][1], m[i][2]});
+      }
     }
-  } else {
-    mx::Matrix33 m = val_in->getValue()->asA<mx::Matrix33>();
-    for (int i = 0; i < 3; ++i) {
-      out.rows[i] = EmitTuple({m[i][0], m[i][1], m[i][2]});
-    }
+    it->second = std::move(out);
   }
-  return out;
+  return it->second;
 }
 
 MtlxExprCompiler::MatExpr MtlxExprCompiler::CompileMatrixNode(
@@ -1202,8 +1207,7 @@ Expr MtlxExprCompiler::CompileHeightToNormal(const mx::NodePtr& node) {
   // surface interactions without referencing outer temporaries.
   auto scope = [&] {
     return std::tie(prog_.code, prog_.tmp_channels, prog_.stack_size,
-                    node_output_expr_, value_input_expr_, node_matrix_expr_,
-                    expr_to_slot_);
+                    node_output_expr_, node_matrix_expr_, expr_to_slot_);
   };
   auto outer = std::apply(
       [](auto&... state) { return std::tuple(std::exchange(state, {})...); },
@@ -1241,11 +1245,39 @@ Expr MtlxExprCompiler::CompileHeightToNormal(const mx::NodePtr& node) {
     }
   }
 
-  // Drop the opaque values of a constant height, which nothing references.
-  if (!sub_idx) prog_.opaques.resize(outer_opaques);
+  // Drop the opaque values of a constant height, which nothing references,
+  // along with any cached literal inputs pointing into the dropped range.
+  if (!sub_idx) {
+    prog_.opaques.resize(outer_opaques);
+    auto has_dropped_opaque = [outer_opaques](const Expr& e) {
+      return std::any_of(
+          e.code.begin(), e.code.end(), [outer_opaques](const mtlx::Inst& i) {
+            return i.op == mtlx::Op::Opaque && i.imm >= outer_opaques;
+          });
+    };
+    absl::erase_if(value_input_expr_, [&](const auto& kv) {
+      return has_dropped_opaque(kv.second);
+    });
+    absl::erase_if(matrix_input_expr_, [&](const auto& kv) {
+      return std::any_of(kv.second.rows, kv.second.rows + kv.second.n,
+                         has_dropped_opaque);
+    });
+  }
   scope() = std::move(outer);
-  return sub_idx ? call(mtlx::Op::HeightToNormal, *sub_idx, scale)
-                 : ConstRgb(0.5, 0.5, 1.0);
+  if (!sub_idx) return ConstRgb(0.5, 0.5, 1.0);
+  if (discover_texture_) {
+    return call(mtlx::Op::HeightToNormal, *sub_idx, scale, Expr::zero());
+  }
+  // Evaluate the unperturbed height (and custom texcoord) in the outer scope so
+  // upstream procedural noise shared with other surface inputs is deduplicated
+  // via CSE, allowing Op::HeightToNormal to run 2 forward-difference probes.
+  Expr center = CompileInputExpr(node, "in").x();
+  if (prog_.sub_programs[*sub_idx].has_texcoord) {
+    Expr tc_center =
+        EmitTmpExpr(CompileInputExpr(node, "texcoord", DefaultTexcoord()));
+    center = rgb(center, tc_center.x(), tc_center.y());
+  }
+  return call(mtlx::Op::HeightToNormal, *sub_idx, scale, center);
 }
 
 std::optional<Expr> MtlxExprCompiler::CompileGeomNode(const mx::NodePtr& node,
