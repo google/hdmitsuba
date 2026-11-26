@@ -15,10 +15,11 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
-#include <absl/types/span.h>
+#include <absl/container/inlined_vector.h>
 #include <mitsuba/core/object.h>
 #include <mitsuba/core/properties.h>
 #include <mitsuba/core/spectrum.h>
@@ -36,8 +37,9 @@ template <typename Float, typename Spectrum>
 class SrgbUpsampler;
 }  // namespace detail
 
-// Evaluates an `MtlxProgram` for the variant `Float`/`Spectrum`, given its
-// texture inputs.
+// Evaluates a flat SSA `MtlxValueProgram` for the variant `Float`/`Spectrum`,
+// given its texture inputs. Used standalone by `MtlxExprTexture` and embedded
+// by `MtlxBsdf`.
 template <typename Float, typename Spectrum>
 class MtlxEvaluator {
  public:
@@ -46,38 +48,49 @@ class MtlxEvaluator {
   // of them, and the unused channels of other values are unspecified.
   using Val = Vector<Float, 4>;
 
+  struct CachedAttr {
+    Mask has;
+    Val val;
+  };
+
+  // Per-query evaluation buffers shared across the opacity and surface stages
+  // of a BSDF query. Only varying nodes (`main_end - uniform_end`) are stored
+  // per ray; uniform nodes `[0 .. uniform_end)` live in `m_uniform_scalars`
+  // (except under AD on `m_opaques`, where width-1 attached values are stored
+  // in `uniform_vals`).
+  struct EvalState {
+    absl::InlinedVector<Val, 32> uniform_vals;
+    absl::InlinedVector<Val, 64> varying_vals;
+    absl::InlinedVector<Val, 4> mat_rows;
+    absl::InlinedVector<std::optional<CachedAttr>, 4> attr_cache;
+    std::optional<SurfaceInteraction3f> si_uv;
+    uint32_t evaluated_end = 0;
+    bool uniform_ready = false;
+  };
+
   MtlxEvaluator();
   ~MtlxEvaluator();
 
   void compile(const Properties& props);
+  void compile(const Properties& props, MtlxValueProgram prog);
   void load_srgb_lut();
 
-  const MtlxProgram& program() const { return m_prog; }
-
-  // Reports texture inputs ("in<i>") and opaque parameters ("param<i>").
+  const MtlxValueProgram& program() const { return m_prog; }
   void traverse(TraversalCallback* cb);
-
   void parameters_changed();
-
-  // Returns the indented code size and texture inputs, one per line, for
-  // `MtlxExprTexture::to_string()` and `MtlxBsdf::to_string()`.
   std::string to_string() const;
-
-  // Returns true if the program reads geometric intrinsics or samples a
-  // spatially varying (or re-parameterized) input.
   bool is_spatially_varying() const;
 
-  // Evaluates the program and returns its result. If `out_tmps` is given, it
-  // receives the evaluated temporaries; if `stop_after_tmp >= 0`, evaluation
-  // returns right after storing temporary `stop_after_tmp`.
-  Val eval(const SurfaceInteraction3f& si, Mask active, Val* out_tmps = nullptr,
-           int stop_after_tmp = -1) const;
+  Val read_val(ValueId id, const EvalState& state) const;
+  Val eval_opacity(ValueId opacity_root, const SurfaceInteraction3f& si,
+                   Mask active, EvalState& state) const;
+  void eval_surface(const SurfaceInteraction3f& si, Mask active,
+                    EvalState& state) const;
+  Val eval_expr(const SurfaceInteraction3f& si, Mask active) const;
 
   // Returns the luminance of 3-channel results, like Mitsuba's `bitmap`.
   Float eval_1(const SurfaceInteraction3f& si, Mask active) const;
   Color3f eval_3(const SurfaceInteraction3f& si, Mask active) const;
-
-  // Upsamples an RGB color to a spectrum using the traversable sRGB LUT.
   UnpolarizedSpectrum upsample_rgb(const Color3f& c,
                                    const Wavelength& wavelengths,
                                    bool unbounded) const;
@@ -85,22 +98,27 @@ class MtlxEvaluator {
   void traverse_cb(void* payload, const drjit::TraverseVisitor& cb);
 
  private:
-  void update_uniform_tmps();
-  Val load_uniform_tmp(const CodePartition& part,
-                       absl::Span<const uint8_t> tmp_channels, int slot) const;
-  Val eval_code(absl::Span<const Inst> code,
-                absl::Span<const uint8_t> tmp_channels, uint32_t stack_size,
-                const SurfaceInteraction3f& si, Mask active,
-                Val* out_tmps = nullptr, int stop_after_tmp = -1,
-                const CodePartition* uniform_part = nullptr) const;
+  bool has_opaque_grad() const;
+  void update_uniform_state();
+  Val load_uniform(ValueId id) const;
+  void eval_uniform_nodes(absl::InlinedVector<Val, 32>& uvals) const;
+  void eval_until(uint32_t end, const SurfaceInteraction3f& si, Mask active,
+                  EvalState& state) const;
+  void eval_range(uint32_t begin, uint32_t end, uint32_t base_offset,
+                  Val* out_vals, Val* mat_rows, const Val* uniform_vals,
+                  const SurfaceInteraction3f& si, Mask active,
+                  absl::InlinedVector<std::optional<CachedAttr>, 4>& attr_cache,
+                  std::optional<SurfaceInteraction3f>& si_uv) const;
 
-  MtlxProgram m_prog;
+  MtlxValueProgram m_prog;
   std::vector<ref<Texture>> m_inputs;
   // Opaque scalars (`dr::opaque`), passed as kernel inputs rather than
   // literals.
   std::vector<Float> m_opaques;
-  // Hoisted size-1 evaluated spatially-invariant temporaries.
+  // Hoisted size-1 evaluated spatially-invariant scalars.
   std::vector<Float> m_uniform_scalars;
+  // Precomputed finite-difference UV step per `HeightToNormal` region.
+  std::vector<ScalarPoint2f> m_region_eps;
   std::unique_ptr<detail::SrgbUpsampler<Float, Spectrum>> m_srgb;
 };
 
