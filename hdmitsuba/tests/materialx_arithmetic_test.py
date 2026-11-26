@@ -82,6 +82,16 @@ def _compile_float_emission(
   return _compile_emission(('ND_convert_float_color3', {'in_': expr}), stage)
 
 
+def _const_ratio(num: int, den: int = 1) -> tuple[str, dict[str, Any]]:
+  n = ('ND_convert_integer_float', {'in_': num})
+  if den == 1:
+    return n
+  return (
+      'ND_divide_float',
+      {'in1': n, 'in2': ('ND_convert_integer_float', {'in_': den})},
+  )
+
+
 def _check_op(
     stage: Usd.Stage, node_id: str, expected: Any, **inputs: Any
 ) -> None:
@@ -1602,63 +1612,55 @@ def test_constant_folding_and_opaque_compaction() -> None:
   np.testing.assert_allclose(em_ovf.eval(si), mi.Color3f(1.0), atol=1e-5)
 
 
+def _check_freeze_update_and_ad(
+    expr: tuple[str, dict[str, Any]],
+    si: mi.SurfaceInteraction3f,
+    param_init: float,
+    param_new: float,
+    expected0: Any,
+    expected1: Any,
+    expected_grad: float,
+    rtol: float = 1e-5,
+) -> mi.Emitter:
+  em = _compile_emission(expr)
+  np.testing.assert_allclose(em.eval(si), expected0, atol=1e-5)
+
+  @dr.freeze
+  def eval_frozen(s: mi.SurfaceInteraction3f) -> mi.Color3f:
+    return em.eval(s)
+
+  np.testing.assert_allclose(eval_frozen(si), expected0, atol=1e-5)
+  np.testing.assert_allclose(eval_frozen(si), expected0, atol=1e-5)
+
+  params = mi.traverse(em)
+  key = next(
+      k
+      for k in params.keys()
+      if k.startswith('radiance.param') and np.allclose(params[k], param_init)
+  )
+  params[key] = mi.Float(param_new)
+  params.update()
+  np.testing.assert_allclose(eval_frozen(si), expected1, atol=1e-5)
+
+  dr.enable_grad(params[key])
+  params.update()
+  dr.backward(dr.sum(em.eval(si).x))
+  np.testing.assert_allclose(dr.grad(params[key]), expected_grad, rtol=rtol)
+  return em
+
+
 def test_invariant_hoisting_freeze_and_ad() -> None:
   """Verifies parameter updates, `@dr.freeze`, and AD through hoisted temporaries."""
-
-  def check(
-      expr: tuple[str, dict[str, Any]],
-      si: mi.SurfaceInteraction3f,
-      param_init: float,
-      param_new: float,
-      expected0: mi.Color3f,
-      expected1: mi.Color3f,
-      expected_grad: float,
-  ) -> None:
-    _, em = mtlx.compile_mtlx_material('ND_surface_unlit', emission_color=expr)
-    assert em is not None
-    np.testing.assert_allclose(em.eval(si), expected0, atol=1e-5)
-
-    @dr.freeze
-    def eval_frozen(s: mi.SurfaceInteraction3f) -> mi.Color3f:
-      return em.eval(s)
-
-    np.testing.assert_allclose(eval_frozen(si), expected0, atol=1e-5)
-    np.testing.assert_allclose(eval_frozen(si), expected0, atol=1e-5)
-
-    params = mi.traverse(em)
-    key = next(
-        k
-        for k in params.keys()
-        if k.startswith('radiance.param') and np.allclose(params[k], param_init)
-    )
-    params[key] = mi.Float(param_new)
-    params.update()
-    np.testing.assert_allclose(eval_frozen(si), expected1, atol=1e-5)
-
-    dr.enable_grad(params[key])
-    params.update()
-    dr.backward(dr.sum(em.eval(si).x))
-    np.testing.assert_allclose(dr.grad(params[key]), expected_grad, rtol=1e-5)
-
   u = [0.15, 0.55, 0.85]
-  si_uv = dr.zeros(mi.SurfaceInteraction3f, len(u))
-  si_uv.wi = mi.Vector3f(0.0, 0.0, 1.0)
-  si_uv.uv = mi.Point2f(u, 0.0)
+  si_uv, u_node, _ = _make_uv_batch(u)
   base_rgb = mi.Color3f(u, 0.2, 0.4)
-  check(
+  _check_freeze_update_and_ad(
       (
           'ND_colorcorrect_color3',
           {
               'in_': (
                   'ND_combine3_color3',
-                  {
-                      'in1': (
-                          'ND_extract_vector2',
-                          {'in_': ('ND_texcoord_vector2', {}), 'index': 0},
-                      ),
-                      'in2': 0.2,
-                      'in3': 0.4,
-                  },
+                  {'in1': u_node, 'in2': 0.2, 'in3': 0.4},
               ),
               'exposure': 1.5,
           },
@@ -1674,7 +1676,7 @@ def test_invariant_hoisting_freeze_and_ad() -> None:
   si_p = dr.zeros(mi.SurfaceInteraction3f, 2)
   si_p.wi = mi.Vector3f(0.0, 0.0, 1.0)
   si_p.p = mi.Point3f([2.0, 4.0], [3.0, 6.0], [4.0, 8.0])
-  check(
+  _check_freeze_update_and_ad(
       (
           'ND_convert_vector3_color3',
           {
@@ -1765,3 +1767,365 @@ def test_dead_code_and_subprogram_pruning() -> None:
       ],
       atol=1e-4,
   )
+
+
+def test_affine_chain_collapse_freeze_and_ad() -> None:
+  """Verifies chained affine collapse across `@dr.freeze`, updates, and AD."""
+  u = np.array([0.1, 0.35, 0.6, 0.85])
+  si, u_node, _ = _make_uv_batch(u)
+  inner = (
+      'ND_add_float',
+      {
+          'in1': (
+              'ND_divide_float',
+              {
+                  'in1': (
+                      'ND_multiply_float',
+                      {'in1': u_node, 'in2': 3.0},
+                  ),
+                  'in2': 1.5,
+              },
+          ),
+          'in2': 0.25,
+      },
+  )
+
+  def make_chain(remapped_in: tuple[str, dict[str, Any]]) -> Any:
+    return (
+        'ND_mix_color3',
+        {
+            'fg': (0.9, 0.4, 0.2),
+            'bg': (0.1, 0.6, 0.8),
+            'mix': (
+                'ND_invert_float',
+                {
+                    'amount': 1.2,
+                    'in_': (
+                        'ND_remap_float',
+                        {
+                            'in_': remapped_in,
+                            'inlow': 0.25,
+                            'inhigh': 2.25,
+                            'outlow': 0.1,
+                            'outhigh': 0.9,
+                        },
+                    ),
+                },
+            ),
+        },
+    )
+
+  def expected_chain(s1: float, s2: float) -> np.ndarray:
+    t = 0.1 + (((u * s1 / s2 + 0.25) - 0.25) / 2.0) * 0.8
+    m = 1.2 - t
+    fg = np.array([0.9, 0.4, 0.2])
+    bg = np.array([0.1, 0.6, 0.8])
+    return bg[:, None] + m * (fg - bg)[:, None]
+
+  em_aff = _check_freeze_update_and_ad(
+      make_chain(inner),
+      si,
+      1.5,
+      2.5,
+      expected_chain(3.0, 1.5),
+      expected_chain(3.0, 2.5),
+      # Red channel slope in `m`: `(0.9 - 0.1) = 0.8`; `dm/ds2 = +0.4 * u * 3 / s2^2`.
+      float(np.sum(0.8 * 0.4 * u * 3.0 / (2.5**2))),
+      rtol=1e-4,
+  )
+  em_uncollapsed = _compile_emission(
+      make_chain(('ND_absval_float', {'in_': inner}))
+  )
+  assert _code_size(em_aff) < _code_size(em_uncollapsed)
+
+
+def test_screen_and_clip01_fast_paths() -> None:
+  """Verifies `screen` FMA/folding, `Clip01` elision, and `tmp_clipped01_` alignment."""
+  u = np.array([0.1, 0.35, 0.6, 0.85])
+  v = np.array([0.2, 0.7, 0.15, 0.9])
+  si, u_node, v_node = _make_uv_batch(u, v)
+  np.testing.assert_allclose(
+      mtlx.eval_emission_expr(
+          ('ND_screen_float', {'fg': u_node, 'bg': v_node}),
+          si=si,
+          channels=1,
+      ),
+      u + v - u * v,
+      atol=1e-6,
+  )
+  em_screen_one = _compile_emission((
+      'ND_screen_color3',
+      {'fg': (1.0, 1.0, 1.0), 'bg': (0.2, 0.4, 0.6)},
+  ))
+  assert _num_params(em_screen_one) == 0
+  np.testing.assert_allclose(em_screen_one.eval(si), mi.Color3f(1.0), atol=1e-6)
+
+  # Matrix ops must keep `tmp_clipped01_` aligned for subsequent `clamp(0, 1)`.
+  stage = Usd.Stage.CreateInMemory()
+  mat_t = mtlx.define_shader(
+      stage,
+      'MatT',
+      'ND_transpose_matrix33',
+      in_=('ND_creatematrix_vector3_matrix33', {'in1': (2.0, 0.0, 0.0)}),
+  )
+  row0 = ('ND_extract_matrix33', {'in_': mat_t, 'index': 0})
+  m00 = ('ND_extract_vector3', {'in_': row0, 'index': 0})
+  clamped_mat = (
+      'ND_clamp_float',
+      {
+          'in_': ('ND_add_float', {'in1': u_node, 'in2': m00}),
+          'low': 0.0,
+          'high': 1.0,
+      },
+  )
+  np.testing.assert_allclose(
+      mtlx.eval_emission_expr(clamped_mat, stage=stage, si=si, channels=1),
+      np.ones(len(u)),
+      atol=1e-6,
+  )
+
+  # Multi-channel constants in [0, 1] and repeated `clamp(0, 1)` elide `Op::Clip`.
+  c01 = (
+      'ND_combine3_color3',
+      {'in1': _const_ratio(1, 2), 'in2': 0.0, 'in3': 1.0},
+  )
+  em_c01 = _compile_emission(c01)
+  em_c01_clamped = _compile_emission((
+      'ND_clamp_color3',
+      {'in_': c01, 'low': (0.0, 0.0, 0.0), 'high': (1.0, 1.0, 1.0)},
+  ))
+  assert _code_size(em_c01_clamped) == _code_size(em_c01)
+
+
+def test_artistic_ior_fast_paths() -> None:
+  """Verifies `artistic_ior` exact fast paths (`edge_color` 0, 1, intermediate)."""
+  u = np.array([0.1, 0.35, 0.6, 0.85])
+  si, u_node, _ = _make_uv_batch(u)
+  stage = Usd.Stage.CreateInMemory()
+
+  def compile_ior(ec: float) -> tuple[mi.Emitter | None, mi.Emitter | None]:
+    ior_node = mtlx.define_shader(
+        stage,
+        f'ArtIor_{int(ec * 100)}',
+        'ND_artistic_ior',
+        reflectivity=('ND_convert_float_color3', {'in_': u_node}),
+        edge_color=(ec, ec, ec),
+    )
+    out_ior = ior_node.CreateOutput('ior', Sdf.ValueTypeNames.Color3f)
+    out_ext = ior_node.CreateOutput('extinction', Sdf.ValueTypeNames.Color3f)
+    _, em_i = mtlx.compile_mtlx_material(
+        'ND_surface_unlit', stage=stage, emission_color=out_ior
+    )
+    _, em_e = mtlx.compile_mtlx_material(
+        'ND_surface_unlit', stage=stage, emission_color=out_ext
+    )
+    return em_i, em_e
+
+  em_mid_ior, em_mid_ext = compile_ior(0.35)
+  assert em_mid_ior is not None and em_mid_ext is not None
+  # Concrete values at u=[0.1, 0.35, 0.6, 0.85], edge_c=0.35.
+  np.testing.assert_allclose(
+      em_mid_ior.eval(si)[0],
+      [1.5375815, 2.7017345, 5.204939, 16.035316],
+      rtol=1e-5,
+      atol=1e-5,
+  )
+  np.testing.assert_allclose(
+      em_mid_ext.eval(si)[0],
+      [0.62799335, 1.7097427, 3.6807773, 11.722049],
+      rtol=1e-5,
+      atol=1e-5,
+  )
+
+  em_ior0, em_ext0 = compile_ior(0.0)
+  assert em_ior0 is not None and em_ext0 is None
+  assert _code_size(em_ior0) < _code_size(em_mid_ior)
+  np.testing.assert_allclose(
+      em_ior0.eval(si)[0],
+      (1.0 + np.sqrt(u)) / (1.0 - np.sqrt(u)),
+      rtol=1e-5,
+      atol=1e-5,
+  )
+
+  em_ior1, em_ext1 = compile_ior(1.0)
+  assert em_ior1 is not None and em_ext1 is not None
+  assert _code_size(em_ior1) < _code_size(em_mid_ior)
+  assert _code_size(em_ext1) < _code_size(em_mid_ext)
+  np.testing.assert_allclose(
+      em_ior1.eval(si)[0], (1.0 - u) / (1.0 + u), rtol=1e-5, atol=1e-5
+  )
+  np.testing.assert_allclose(
+      em_ext1.eval(si)[0],
+      2.0 * np.sqrt(u) / (1.0 + u),
+      rtol=1e-5,
+      atol=1e-5,
+  )
+
+
+def test_range_smoothstep_and_if_fast_paths() -> None:
+  """Verifies unit-gamma `range`, `smoothstep`, and `ifgreater` fast paths."""
+  u = np.array([0.1, 0.35, 0.6, 0.85])
+  si, u_node, _ = _make_uv_batch(u)
+  gamma_15 = _const_ratio(3, 2)
+  range_args = {
+      'in_': u_node,
+      'inlow': 0.1,
+      'inhigh': 0.9,
+      'outlow': -0.5,
+      'outhigh': 1.5,
+  }
+  t_lin = -0.5 + (u - 0.1) / 0.8 * 2.0
+  for doclamp, expected in [
+      (False, t_lin),
+      (True, np.clip(t_lin, -0.5, 1.5)),
+  ]:
+    em_fast = _compile_float_emission(
+        ('ND_range_float', {**range_args, 'doclamp': doclamp})
+    )
+    em_slow = _compile_float_emission((
+        'ND_range_float',
+        {**range_args, 'gamma': gamma_15, 'doclamp': doclamp},
+    ))
+    assert _code_size(em_fast) < _code_size(em_slow)
+    np.testing.assert_allclose(em_fast.eval(si)[0], expected, atol=1e-5)
+
+  # Pre-NodeGraph `smoothstep` keeps multi-channel `color3` vectorized and
+  # collapses `(x - lo) / (hi - lo)` via Affine.
+  ss_c3 = (
+      'ND_smoothstep_color3',
+      {
+          'in_': (
+              'ND_combine3_color3',
+              {'in1': u_node, 'in2': 0.3, 'in3': 0.7},
+          ),
+          'low': (0.2, 0.2, 0.2),
+          'high': (0.8, 0.8, 0.8),
+      },
+  )
+  ss_sep = (
+      'ND_combine3_color3',
+      {
+          'in1': (
+              'ND_smoothstep_float',
+              {'in_': u_node, 'low': 0.2, 'high': 0.8},
+          ),
+          'in2': ('ND_smoothstep_float', {'in_': 0.3, 'low': 0.2, 'high': 0.8}),
+          'in3': ('ND_smoothstep_float', {'in_': 0.7, 'low': 0.2, 'high': 0.8}),
+      },
+  )
+  em_ss_c3 = _compile_emission(ss_c3)
+  em_ss_sep = _compile_emission(ss_sep)
+  assert _code_size(em_ss_c3) < _code_size(em_ss_sep)
+  vals = np.stack([u, np.full_like(u, 0.3), np.full_like(u, 0.7)])
+  ts = np.clip((vals - 0.2) / 0.6, 0.0, 1.0)
+  np.testing.assert_allclose(
+      em_ss_c3.eval(si), ts * ts * (3.0 - 2.0 * ts), atol=1e-5
+  )
+
+  # `ifgreater` / `ifgreatereq` with (1, 0) and (0, 1) omit `Op::Select`.
+  for cat, in1, in2, expected in [
+      ('ND_ifgreater_float', 1.0, 0.0, u > 0.5),
+      ('ND_ifgreater_float', 0.0, 1.0, u <= 0.5),
+      ('ND_ifgreatereq_float', 1.0, 0.0, u >= 0.5),
+      ('ND_ifgreatereq_float', 0.0, 1.0, u < 0.5),
+  ]:
+    em_if = _compile_float_emission(
+        (cat, {'value1': u_node, 'value2': 0.5, 'in1': in1, 'in2': in2})
+    )
+    em_sel = _compile_float_emission(
+        (cat, {'value1': u_node, 'value2': 0.5, 'in1': 1.0, 'in2': 0.5})
+    )
+    assert _code_size(em_if) < _code_size(em_sel)
+    np.testing.assert_allclose(em_if.eval(si)[0], expected, atol=1e-6)
+
+
+@pytest.mark.parametrize(
+    ('node_id', 'in_type', 'extra_inputs'),
+    [
+        pytest.param('ND_hsvadjust_color3', 'color3', {}, id='hsvadjust'),
+        pytest.param(
+            'ND_contrast_color3',
+            'color3',
+            {'amount': (1.0, 1.0, 1.0), 'pivot': (0.3, 0.4, 0.5)},
+            id='contrast',
+        ),
+        pytest.param(
+            'ND_rotate2d_vector2', 'vector2', {'amount': 0.0}, id='rotate2d'
+        ),
+    ],
+)
+def test_identity_fast_paths(
+    node_id: str, in_type: str, extra_inputs: dict[str, Any]
+) -> None:
+  """Verifies identity stdlib fast paths elide ops and unused opaque inputs."""
+  u = np.array([0.1, 0.35, 0.6, 0.85])
+  v = np.array([0.2, 0.7, 0.15, 0.9])
+  si, u_node, v_node = _make_uv_batch(u, v)
+  if in_type == 'vector2':
+    base_expr: Any = ('ND_texcoord_vector2', {})
+    em_in: Any = (
+        'ND_convert_vector3_color3',
+        {'in_': ('ND_convert_vector2_vector3', {'in_': base_expr})},
+    )
+    fast_in: Any = (
+        'ND_convert_vector3_color3',
+        {
+            'in_': (
+                'ND_convert_vector2_vector3',
+                {'in_': (node_id, {'in_': base_expr, **extra_inputs})},
+            )
+        },
+    )
+  else:
+    base_expr = (
+        'ND_combine3_color3',
+        {'in1': u_node, 'in2': v_node, 'in3': 0.4},
+    )
+    em_in = base_expr
+    fast_in = (node_id, {'in_': base_expr, **extra_inputs})
+  em_base = _compile_emission(em_in)
+  em_fast = _compile_emission(fast_in)
+  assert _num_params(em_fast) == _num_params(em_base)
+  assert _code_size(em_fast) == _code_size(em_base)
+  np.testing.assert_allclose(em_fast.eval(si), em_base.eval(si), atol=1e-5)
+
+
+def test_power_fast_paths() -> None:
+  """Verifies constant-exponent `power` fast paths (0, 1, 0.5, 2, 3)."""
+  xs = [-0.25, 0.0, 0.4, 2.0]
+  stage = Usd.Stage.CreateInMemory()
+  si, px, _, _ = _make_position_batch(stage, xs, [0.0] * 4, [0.0] * 4)
+  xs_arr = np.array(xs)
+
+  # `exp == 0` skips compiling `in1` and prunes its opaque parameters.
+  em_pow0 = _compile_float_emission(
+      (
+          'ND_power_float',
+          {'in1': ('ND_add_float', {'in1': px, 'in2': 0.25}), 'in2': 0.0},
+      ),
+      stage=stage,
+  )
+  assert _num_params(em_pow0) == 0
+  np.testing.assert_allclose(em_pow0.eval(si), mi.Color3f(1.0), atol=1e-6)
+
+  em_base = _compile_float_emission(px, stage=stage)
+  em_pow1 = _compile_float_emission(
+      ('ND_power_float', {'in1': px}), stage=stage
+  )
+  assert _code_size(em_pow1) == _code_size(em_base)
+  np.testing.assert_allclose(em_pow1.eval(si), em_base.eval(si), atol=1e-6)
+
+  em_pow25 = _compile_float_emission(
+      ('ND_power_float', {'in1': px, 'in2': _const_ratio(5, 2)}), stage=stage
+  )
+  for exp_node, expected, expect_smaller in [
+      (_const_ratio(1, 2), np.sqrt(np.maximum(xs_arr, 0.0)), True),
+      (_const_ratio(2), xs_arr**2, False),
+      (_const_ratio(3), xs_arr**3, False),
+  ]:
+    em_p = _compile_float_emission(
+        ('ND_power_float', {'in1': px, 'in2': exp_node}), stage=stage
+    )
+    if expect_smaller:
+      assert _code_size(em_p) < _code_size(em_pow25)
+    np.testing.assert_allclose(em_p.eval(si)[0], expected, atol=1e-5)
