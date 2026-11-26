@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -36,6 +37,7 @@
 
 #include "hdmitsuba/mesh/geometry_processor.h"
 #include "hdmitsuba/motion.h"
+#include "hdmitsuba/plugin_builder.h"
 #include "hdmitsuba/utils.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -260,8 +262,14 @@ struct ParticleFieldSpec : public BaseSpec {
   }
 };
 
+struct FilmCrop {
+  std::optional<int64_t> offset_x;
+  std::optional<int64_t> offset_y;
+  std::optional<int64_t> width;
+  std::optional<int64_t> height;
+};
+
 struct CameraSpec : public BaseSpec {
-  std::string sensor_type = "perspective";
   MotionTransform transform;
   GfVec2f shutter{0.0f};
   float fov = 90.0f;
@@ -271,8 +279,9 @@ struct CameraSpec : public BaseSpec {
   float focus_distance = 0.0f;
   float near_clip = 0.01f;
   float far_clip = 1000.0f;
-  std::string pixel_filter_type = "";
   std::optional<SdfPath> target_shape_id = std::nullopt;
+  std::optional<FilmCrop> film_crop = std::nullopt;
+  PluginSpecNode sensor_spec{"perspective"};
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

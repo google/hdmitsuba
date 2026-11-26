@@ -14,6 +14,7 @@
 
 #include "hdmitsuba/plugin_builder.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -40,10 +41,12 @@
 #include <pxr/base/gf/vec4d.h>
 #include <pxr/base/gf/vec4f.h>
 #include <pxr/base/tf/diagnostic.h>
+#include <pxr/base/tf/token.h>
 #include <pxr/base/vt/array.h>
 #include <pxr/base/vt/dictionary.h>
 #include <pxr/base/vt/types.h>
 #include <pxr/base/vt/value.h>
+#include <pxr/imaging/hd/dataSource.h>
 #include <pxr/pxr.h>
 
 #include "hdmitsuba/utils.h"
@@ -317,6 +320,51 @@ PluginSpecNode ParsePluginSpec(const VtDictionary& settings,
   return root;
 }
 
+PluginSpecNode ParsePluginSpec(const HdContainerDataSourceHandle& container,
+                               std::string_view prefix,
+                               std::string_view default_type) {
+  if (!container) {
+    return PluginSpecNode(std::string(default_type));
+  }
+  static const TfToken kTypeToken("type", TfToken::Immortal);
+  static const TfToken kValueToken("value", TfToken::Immortal);
+  PluginSpecNode root;
+  for (const TfToken& token : container->GetNames()) {
+    std::string_view key = token.GetString();
+    if (!absl::StartsWith(key, prefix)) {
+      continue;
+    }
+    std::string_view relative_path = key.substr(prefix.size());
+    HdDataSourceBaseHandle child_source = container->Get(token);
+    if (auto sampled = HdSampledDataSource::Cast(child_source)) {
+      InsertPropertyPath(&root, relative_path, sampled->GetValue(0.0f));
+      continue;
+    }
+    auto typed_container = HdContainerDataSource::Cast(child_source);
+    if (!typed_container) {
+      continue;
+    }
+    auto type_source =
+        HdSampledDataSource::Cast(typed_container->Get(kTypeToken));
+    auto value_source =
+        HdSampledDataSource::Cast(typed_container->Get(kValueToken));
+    if (!type_source || !value_source) {
+      continue;
+    }
+    VtValue value = value_source->GetValue(0.0f);
+    if (value.IsEmpty()) {
+      continue;
+    }
+    InsertPropertyPath(&root, absl::StrCat(relative_path, ":type"),
+                       type_source->GetValue(0.0f));
+    InsertPropertyPath(&root, absl::StrCat(relative_path, ":value"), value);
+  }
+  if (root.plugin_type.empty() && !default_type.empty()) {
+    root.plugin_type = std::string(default_type);
+  }
+  return root;
+}
+
 void MergePluginProperties(mitsuba::Properties& props,
                            const PluginSpecNode& spec,
                            std::string_view variant) {
@@ -334,7 +382,19 @@ void MergePluginProperties(mitsuba::Properties& props,
                                 /*invert_float=*/false,
                                 /*raise_if_exists=*/false);
   }
-  for (const auto& [child_name, child_spec] : spec.children) {
+  // Sort child keys so positional Mitsuba plugins (e.g. blendbsdf, blendphase)
+  // match usd_mitsuba order.
+  std::vector<const decltype(spec.children)::value_type*> ordered_children;
+  ordered_children.reserve(spec.children.size());
+  for (const auto& entry : spec.children) {
+    ordered_children.push_back(&entry);
+  }
+  std::sort(ordered_children.begin(), ordered_children.end(),
+            [](const auto* left, const auto* right) {
+              return left->first < right->first;
+            });
+  for (const auto* entry : ordered_children) {
+    const auto& [child_name, child_spec] = *entry;
     if (child_spec.Empty()) {
       continue;
     }

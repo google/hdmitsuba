@@ -29,6 +29,7 @@
 #include <mitsuba/core/properties.h>
 #include <mitsuba/core/transform.h>
 #include <nanothread/nanothread.h>
+#include <pxr/base/gf/half.h>
 #include <pxr/base/gf/matrix3d.h>
 #include <pxr/base/gf/matrix3f.h>
 #include <pxr/base/gf/matrix4d.h>
@@ -63,7 +64,11 @@ using MeshAttributeRequests = std::set<std::pair<std::string, int>>;
 // capitalized to keep the raw values.
 std::string MeshAttributeName(std::string_view primvar, int channels);
 
-#define HDMITSUBA_UTILS_TOKENS ((visibility, "mitsuba:visibility"))
+// clang-format off
+#define HDMITSUBA_UTILS_TOKENS         \
+  ((mitsuba, "mitsuba"))               \
+  ((visibility, "mitsuba:visibility"))
+// clang-format on
 
 TF_DECLARE_PUBLIC_TOKENS(HdMitsubaUtilsTokens, HDMITSUBA_UTILS_TOKENS);
 
@@ -122,6 +127,13 @@ inline HdContainerDataSourceHandle GetPrimDataSource(
       scene_delegate->GetRenderIndex().GetTerminalSceneIndex();
   if (!TF_VERIFY(scene_index)) return nullptr;
   return scene_index->GetPrim(id).dataSource;
+}
+
+inline HdContainerDataSourceHandle GetMitsubaDataSource(
+    const HdContainerDataSourceHandle& prim_source) {
+  if (!prim_source) return nullptr;
+  return HdContainerDataSource::Cast(
+      prim_source->Get(HdMitsubaUtilsTokens->mitsuba));
 }
 
 inline bool GetPrimVisible(const HdContainerDataSourceHandle& prim_source,
@@ -214,6 +226,27 @@ inline std::string ExtractStringOrToken(const VtValue& value) {
     return value.UncheckedGet<TfToken>().GetString();
   }
   return ResolvePathFromValue(value);
+}
+
+inline std::optional<int64_t> ExtractInt64Value(const VtValue& value) {
+  if (value.IsHolding<bool>() || value.IsHolding<float>() ||
+      value.IsHolding<double>() || value.IsHolding<GfHalf>()) {
+    return std::nullopt;
+  }
+  VtValue casted = VtValue::Cast<int64_t>(value);
+  return casted.IsHolding<int64_t>()
+             ? std::optional<int64_t>(casted.UncheckedGet<int64_t>())
+             : std::nullopt;
+}
+
+inline std::optional<double> ExtractDoubleValue(const VtValue& value) {
+  if (value.IsHolding<bool>()) {
+    return std::nullopt;
+  }
+  VtValue casted = VtValue::Cast<double>(value);
+  return casted.IsHolding<double>()
+             ? std::optional<double>(casted.UncheckedGet<double>())
+             : std::nullopt;
 }
 
 // Creates the Mitsuba object of type `type` described by `props`, and returns

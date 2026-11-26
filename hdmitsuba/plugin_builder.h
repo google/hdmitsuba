@@ -25,6 +25,7 @@
 #include <pxr/base/tf/diagnostic.h>
 #include <pxr/base/vt/dictionary.h>
 #include <pxr/base/vt/value.h>
+#include <pxr/imaging/hd/dataSource.h>
 #include <pxr/pxr.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -70,6 +71,13 @@ void SetMitsubaPropertyFromValue(mitsuba::Properties& props,
 // Parses all entries starting with `prefix` (e.g. `"mitsuba:integrator:"`) from
 // a `VtDictionary` into a hierarchical `PluginSpecNode`.
 PluginSpecNode ParsePluginSpec(const VtDictionary& settings,
+                               std::string_view prefix,
+                               std::string_view default_type = "");
+
+// Parses all entries starting with `prefix` (e.g. `"mitsuba:shape:"`) from a
+// Hydra 2.0 `HdContainerDataSourceHandle` (flat colon-delimited keys and
+// role-tagged `{"type", "value"}` value containers) into a `PluginSpecNode`.
+PluginSpecNode ParsePluginSpec(const HdContainerDataSourceHandle& container,
                                std::string_view prefix,
                                std::string_view default_type = "");
 
