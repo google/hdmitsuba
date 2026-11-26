@@ -261,6 +261,10 @@ Vector<Float, 4> eval_elementwise(Op op, int channels,
       return ternary([](const Float& x, const Float& lo, const Float& hi) {
         return dr::clip(x, lo, hi);
       });
+    case Op::Fma:
+      return ternary([](const Float& x, const Float& y, const Float& z) {
+        return dr::fmadd(x, y, z);
+      });
     default:
       return Vector<Float, 4>(0.0f);
   }

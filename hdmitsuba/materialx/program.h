@@ -110,6 +110,7 @@ enum class Op : uint8_t {
   Select,
   Mix,
   Clip,
+  Fma,
 
   // Color & vector ops (`Dot` and `Normalize` take `imm = 2` for 2D and
   // `imm = 4` for 4D; `NormalMap` takes `imm = kNormalMapDefaultFrame` for the
@@ -199,6 +200,7 @@ constexpr int elementwise_arity(Op op) {
     case Op::Select:
     case Op::Mix:
     case Op::Clip:
+    case Op::Fma:
       return 3;
     case Op::Const:
     case Op::Opaque:
@@ -300,6 +302,7 @@ constexpr uint8_t result_channels(Op op, uint16_t imm = 0) {
     case Op::Select:
     case Op::Mix:
     case Op::Clip:
+    case Op::Fma:
     case Op::Rgb:
     case Op::Cross:
     case Op::Rotate3D:
@@ -364,6 +367,7 @@ constexpr bool is_spatially_varying_op(Op op) {
     case Op::Select:
     case Op::Mix:
     case Op::Clip:
+    case Op::Fma:
     case Op::Chan:
     case Op::Dot:
     case Op::Vec2:

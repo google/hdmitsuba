@@ -80,7 +80,7 @@ Expr call_with_channels(mtlx::Op op, uint8_t inst_ch, uint16_t imm,
 // Reverse-Polish-Notation expression fragment that evaluates to one stack slot.
 // Constants 0.0 and 1.0 are always at indices 0 and 1 in `MtlxProgram::consts`.
 //
-// Arithmetic, `mix()` and `select()` simplify constant 0 and 1 operands. This
+// Arithmetic, `Mix()` and `select()` simplify constant 0 and 1 operands. This
 // is not an optimization (Dr.Jit simplifies the traced program itself), but
 // determines what is known before rendering: whether a surface emits or is
 // cut out at all, and which textures and primvars its shader reads.
@@ -143,7 +143,10 @@ struct Expr {
     return is_zero() ? b : b.is_zero() ? *this : call(mtlx::Op::Add, *this, b);
   }
   Expr operator-(const Expr& b) const {
-    return b.is_zero() ? *this : is_zero() ? -b : call(mtlx::Op::Sub, *this, b);
+    return (*this == b)  ? zero()
+           : b.is_zero() ? *this
+           : is_zero()   ? -b
+                         : call(mtlx::Op::Sub, *this, b);
   }
   Expr operator*(const Expr& b) const {
     return (is_zero() || b.is_zero()) ? zero()
@@ -198,6 +201,14 @@ Expr call(mtlx::Op op, const Expr& arg0, const Exprs&... rest) {
   return call(op, uint16_t{0}, arg0, rest...);
 }
 
+Expr fma(const Expr& a, const Expr& b, const Expr& c) {
+  if (a.is_zero() || b.is_zero()) return c;
+  if (c.is_zero()) return a * b;
+  if (a.is_one()) return b + c;
+  if (b.is_one()) return a + c;
+  return call(mtlx::Op::Fma, a, b, c);
+}
+
 Expr rgb(const Expr& r, const Expr& g, const Expr& b) {
   return (r.uniform() && r == g && g == b) ? r : call(mtlx::Op::Rgb, r, g, b);
 }
@@ -211,23 +222,6 @@ Expr select(const Expr& cond, const Expr& t, const Expr& f) {
   return (cond.is_zero() || t == f) ? f
          : cond.is_one()            ? t
                                     : call(mtlx::Op::Select, cond, t, f);
-}
-Expr saturate(const Expr& e) {
-  return (e.is_zero() || e.is_one())
-             ? e
-             : call(mtlx::Op::Clip, e, Expr::zero(), Expr::one());
-}
-Expr mix(const Expr& fg, const Expr& bg, const Expr& m) {
-  return (m.is_zero() || fg == bg) ? bg
-         : m.is_one()              ? fg
-                                   : call(mtlx::Op::Mix, fg, bg, m);
-}
-template <typename FgFn, typename BgFn>
-Expr CompileMix(const Expr& m, FgFn&& fg_fn, BgFn&& bg_fn) {
-  if (m.is_zero()) return bg_fn();
-  if (m.is_one()) return fg_fn();
-  Expr fg = fg_fn(), bg = bg_fn();
-  return mix(fg, bg, m);
 }
 
 // Expression of the default `texcoord` node (UV0).
@@ -438,9 +432,24 @@ class MtlxExprCompiler : private MtlxGraphResolver {
   // to enable constant folding and CSE; authored inputs emit `Op::Opaque`
   // (except all-zero and all-one tuples) for traversal and kernel freezing.
   Expr EmitTuple(std::initializer_list<float> vals, bool is_authored);
+  bool IsVaryingExpr(const Expr& expr) const;
+  bool IsClipped01Expr(const Expr& expr) const;
+  Expr Clip01(const Expr& expr);
+  Expr Affine(Expr x, Expr scale, Expr bias, bool negate_bias = false);
   std::optional<mitsuba::Vector<double, 4>> TryEvalConst(
       const Expr& expr) const;
   Expr FoldExpr(const Expr& expr);
+  Expr SafeDiv(const Expr& a, const Expr& b);
+  Expr Mix(const Expr& fg, const Expr& bg, const Expr& m);
+  template <typename FgFn, typename BgFn>
+  Expr CompileMixExpr(const Expr& m, FgFn&& fg_fn, BgFn&& bg_fn) {
+    if (m.is_zero()) return bg_fn();
+    if (m.is_one()) return fg_fn();
+    Expr fg = fg_fn(), bg = bg_fn();
+    return Mix(fg, bg, m);
+  }
+  Expr CompileLinearRemap(const ScopedNode& node, const Expr& ilo,
+                          const Expr& ihi, const Expr& olo, const Expr& ohi);
   int EmitTmpFolded(const Expr& folded);
   int EmitTmp(const Expr& expr);
   Expr EmitTmpExpr(const Expr& expr);
@@ -527,10 +536,19 @@ class MtlxExprCompiler : private MtlxGraphResolver {
     }
   }
 
+  struct AffineInfo {
+    Expr x;
+    Expr scale;
+    Expr bias;
+  };
+
   mx::DocumentPtr doc_;
   const LookupTextureFn* lookup_texture_ = nullptr;
   const DiscoverTextureFn* discover_texture_ = nullptr;
   mtlx::MtlxProgram prog_;
+  std::vector<uint8_t> tmp_varying_;
+  std::vector<uint8_t> tmp_clipped01_;
+  absl::flat_hash_map<int, AffineInfo> tmp_affine_;
   std::vector<std::pair<std::string, int>> attr_requests_;
   absl::flat_hash_map<NodeOutKey, Expr> node_output_expr_;
   absl::flat_hash_map<NodeKey, Expr> edf_expr_;
@@ -811,6 +829,151 @@ Expr MtlxExprCompiler::FoldExpr(const Expr& expr) {
   return expr.channels == 3 ? c3 : vec4(c3, Const((*v)[3]));
 }
 
+bool MtlxExprCompiler::IsVaryingExpr(const Expr& expr) const {
+  for (const mtlx::Inst& inst : expr.code) {
+    if (mtlx::is_spatially_varying_op(inst.op) ||
+        inst.op == mtlx::Op::SampleInput) {
+      return true;
+    }
+    if (inst.op == mtlx::Op::LoadTmp && tmp_varying_[inst.imm]) return true;
+  }
+  return false;
+}
+
+bool MtlxExprCompiler::IsClipped01Expr(const Expr& expr) const {
+  if (expr.is_const()) {
+    return std::all_of(expr.code.begin(), expr.code.end(), [&](mtlx::Inst i) {
+      return i.op != mtlx::Op::Const ||
+             (prog_.consts[i.imm] >= 0.0 && prog_.consts[i.imm] <= 1.0);
+    });
+  }
+  if (expr.code.size() == 1) {
+    return expr.code[0].op == mtlx::Op::LoadTmp &&
+           tmp_clipped01_[expr.code[0].imm] != 0;
+  }
+  mtlx::Op last = expr.code.back().op;
+  if (last == mtlx::Op::Fract || last == mtlx::Op::Lt || last == mtlx::Op::Le ||
+      last == mtlx::Op::Eq) {
+    return true;
+  }
+  if (last == mtlx::Op::Clip && expr.code.size() >= 3) {
+    mtlx::Inst hi = expr.code[expr.code.size() - 2];
+    mtlx::Inst lo = expr.code[expr.code.size() - 3];
+    if (lo.op == mtlx::Op::Const && hi.op == mtlx::Op::Const) {
+      double lo_v = prog_.consts[lo.imm], hi_v = prog_.consts[hi.imm];
+      return lo_v >= 0.0 && hi_v <= 1.0 && lo_v <= hi_v;
+    }
+  }
+  return false;
+}
+
+Expr MtlxExprCompiler::Clip01(const Expr& expr) {
+  Expr folded = FoldExpr(expr);
+  return IsClipped01Expr(folded) ? folded
+                                 : FoldExpr(call(mtlx::Op::Clip, folded,
+                                                 Expr::zero(), Expr::one()));
+}
+
+Expr MtlxExprCompiler::Affine(Expr x, Expr scale, Expr bias, bool negate_bias) {
+  scale = FoldExpr(scale);
+  bias = FoldExpr(bias);
+  auto signed_bias = [&] { return negate_bias ? FoldExpr(-bias) : bias; };
+  if (scale.is_zero()) return signed_bias();
+  if (scale.is_one() && bias.is_zero()) return x;
+
+  auto is_neg_one = [&](const Expr& e) {
+    return e.code.size() == 1 && e.code[0].op == mtlx::Op::Const &&
+           prog_.consts[e.code[0].imm] == -1.0;
+  };
+
+  bool varying = IsVaryingExpr(x);
+  // Collapse chained affine transforms `((x * s1 + b1) * s2 + b2)` into one
+  // varying `fma(x, s1 * s2, b1 * s2 + b2)` with hoisted uniform coefficients.
+  if (varying && x.code.size() == 1 && x.code[0].op == mtlx::Op::LoadTmp) {
+    if (auto it = tmp_affine_.find(x.code[0].imm); it != tmp_affine_.end()) {
+      const AffineInfo& up = it->second;
+      uint8_t out_ch = std::max({x.channels, scale.channels, bias.channels});
+      auto ch_ok = [out_ch](uint8_t c) { return c == 1 || c == out_ch; };
+      if (ch_ok(x.channels) && ch_ok(up.x.channels) &&
+          ch_ok(up.scale.channels) && ch_ok(up.bias.channels) &&
+          ch_ok(scale.channels) && ch_ok(bias.channels)) {
+        x = up.x;
+        if (!up.bias.is_zero()) {
+          bias = FoldExpr(negate_bias ? (up.bias * scale - bias)
+                                      : fma(up.bias, scale, bias));
+          negate_bias = false;
+        }
+        scale = FoldExpr(up.scale * scale);
+        if (scale.is_zero()) return signed_bias();
+        if (scale.is_one() && bias.is_zero()) return x;
+      }
+    }
+  }
+
+  auto hoist = [&](const Expr& e) { return varying ? EmitTmpExpr(e) : e; };
+  Expr emitted;
+  if (bias.is_zero()) {
+    if (is_neg_one(scale)) {
+      emitted = -x;
+    } else {
+      scale = hoist(scale);
+      emitted = x * scale;
+    }
+  } else if (negate_bias && scale.is_one()) {
+    bias = hoist(bias);
+    emitted = x - bias;
+  } else {
+    bias = hoist(signed_bias());
+    negate_bias = false;
+    if (scale.is_one()) {
+      emitted = x + bias;
+    } else if (is_neg_one(scale)) {
+      emitted = bias - x;
+    } else {
+      scale = hoist(scale);
+      emitted = fma(x, scale, bias);
+    }
+  }
+  if (!varying) return FoldExpr(emitted);
+  int slot = EmitTmpFolded(emitted);
+  tmp_affine_.try_emplace(slot, AffineInfo{x, scale, signed_bias()});
+  return LoadTmp(slot);
+}
+
+Expr MtlxExprCompiler::SafeDiv(const Expr& a, const Expr& b) {
+  if (a.is_zero() || b.is_zero()) return Expr::zero();
+  if (b.is_one()) return a;
+  if (!IsVaryingExpr(b)) {
+    if (IsVaryingExpr(a)) {
+      return Affine(a, Expr::one() / b, Expr::zero());
+    }
+    Expr folded = FoldExpr(a / b);
+    if (folded.is_const()) return folded;
+    if (Expr inv = FoldExpr(Expr::one() / b); inv.is_const()) return a * inv;
+    return folded;
+  }
+  return a / b;
+}
+
+Expr MtlxExprCompiler::Mix(const Expr& fg, const Expr& bg, const Expr& m) {
+  if (m.is_zero() || fg == bg) return bg;
+  if (m.is_one()) return fg;
+  if (!IsVaryingExpr(fg) && !IsVaryingExpr(bg) && IsVaryingExpr(m)) {
+    return Affine(m, fg - bg, bg);
+  }
+  return call(mtlx::Op::Mix, fg, bg, m);
+}
+
+Expr MtlxExprCompiler::CompileLinearRemap(const ScopedNode& node,
+                                          const Expr& ilo, const Expr& ihi,
+                                          const Expr& olo, const Expr& ohi) {
+  Expr scale = EmitTmpExpr(SafeDiv(FoldExpr(ohi - olo), FoldExpr(ihi - ilo)));
+  if (!IsVaryingExpr(ilo) && !IsVaryingExpr(olo) && !IsVaryingExpr(scale)) {
+    return Affine(CompileInputExpr(node, "in"), scale, olo - ilo * scale);
+  }
+  return fma(FoldExpr(CompileInputExpr(node, "in") - ilo), scale, olo);
+}
+
 // Maps MaterialX `cmlib` and USD `GfColorSpace` names to a canonical
 // `GfColorSpace` token when conversion to linear Rec.709 is needed, or an empty
 // token if `color_space` is empty, data/raw, or already linear Rec.709.
@@ -924,6 +1087,8 @@ int MtlxExprCompiler::EmitTmpFolded(const Expr& folded) {
         {mtlx::Op::StoreTmp, 0, static_cast<uint16_t>(next_slot)});
     prog_.stack_size = std::max(prog_.stack_size, folded.max_depth);
     prog_.tmp_channels.push_back(folded.channels);
+    tmp_clipped01_.push_back(IsClipped01Expr(folded) ? 1 : 0);
+    tmp_varying_.push_back(IsVaryingExpr(folded) ? 1 : 0);
   }
   return it->second;
 }
@@ -1068,8 +1233,15 @@ MtlxExprCompiler::MatExpr MtlxExprCompiler::MatrixOp(mtlx::Op op,
   if (b) emit_rows(*b);
   uint16_t first = static_cast<uint16_t>(prog_.tmp_channels.size());
   prog_.code.push_back({op, static_cast<uint8_t>(a.n), first});
+  bool varying = false;
+  for (int i = 0; i < a.n; ++i) {
+    varying |= IsVaryingExpr(a.rows[i]);
+    if (b) varying |= IsVaryingExpr(b->rows[i]);
+  }
   prog_.tmp_channels.insert(prog_.tmp_channels.end(), a.n,
                             static_cast<uint8_t>(a.n));
+  tmp_clipped01_.insert(tmp_clipped01_.end(), a.n, 0);
+  tmp_varying_.insert(tmp_varying_.end(), a.n, varying ? 1 : 0);
   MatExpr out;
   out.n = a.n;
   for (int i = 0; i < a.n; ++i) out.rows[i] = LoadTmp(first + i);
@@ -1384,50 +1556,63 @@ std::optional<Expr> MtlxExprCompiler::CompileMathNode(const ScopedNode& node,
   };
   // Arithmetic and interpolation, simplifying constant operands without
   // compiling unused inputs.
+  auto sub_affine = [&](const Expr& a, const Expr& b) {
+    bool va = IsVaryingExpr(a), vb = IsVaryingExpr(b);
+    if (va && !vb) return Affine(a, Expr::one(), b, /*negate_bias=*/true);
+    if (!va && vb) return Affine(b, Const(-1.0), a);
+    return a - b;
+  };
   if (cat == "multiply") {
+    Expr i1, i2;
     if (GetValueInput(node, "in2") && !GetValueInput(node, "in1")) {
-      Expr i2 = in("in2", Expr::one());
-      return i2.is_zero() ? Expr::zero() : in("in1") * i2;
+      i2 = in("in2", Expr::one());
+      if (i2.is_zero()) return Expr::zero();
+      i1 = in("in1");
+    } else {
+      i1 = in("in1");
+      if (i1.is_zero()) return Expr::zero();
+      i2 = in("in2", Expr::one());
     }
-    Expr i1 = in("in1");
-    return i1.is_zero() ? Expr::zero() : i1 * in("in2", Expr::one());
+    bool v1 = IsVaryingExpr(i1), v2 = IsVaryingExpr(i2);
+    if (v1 != v2) return Affine(v1 ? i1 : i2, v1 ? i2 : i1, Expr::zero());
+    return i1 * i2;
   }
-  if (cat == "add") return in("in1") + in("in2");
-  if (cat == "subtract") return in("in1") - in("in2");
+  if (cat == "add") {
+    Expr a = in("in1"), b = in("in2");
+    bool va = IsVaryingExpr(a), vb = IsVaryingExpr(b);
+    if (va != vb) return Affine(va ? a : b, Expr::one(), va ? b : a);
+    return a + b;
+  }
+  if (cat == "subtract") return sub_affine(in("in1"), in("in2"));
   if (cat == "divide") {
     Expr i1 = in("in1");
-    return i1.is_zero() ? Expr::zero() : i1 / in("in2", Expr::one());
+    return i1.is_zero() ? Expr::zero() : SafeDiv(i1, in("in2", Expr::one()));
   }
   if (cat == "mix") {
-    return CompileMix(
+    return CompileMixExpr(
         in("mix"), [&] { return in("fg"); }, [&] { return in("bg"); });
   }
   if (cat == "clamp") {
     Expr x = in("in"), lo = in("low"), hi = in("high", Expr::one());
+    if (lo.is_zero() && hi.is_one()) return Clip01(x);
     return call(mtlx::Op::Clip, x, lo, hi);
   }
-  if (cat == "invert") return in("amount", Expr::one()) - in("in");
+  if (cat == "invert") return sub_affine(in("amount", Expr::one()), in("in"));
   if (cat == "sign") {
     Expr x = in_slot("in");
     return (x > Expr::zero()) - (x < Expr::zero());
   }
   if (cat == "modulo") {
-    Expr x = in_slot("in1"), y = in_slot("in2", Expr::one());
-    return x - y * call(mtlx::Op::Floor, x / y);
-  }
-  if (cat == "smoothstep") {
-    // Like OSL, a step function at `low` if `low >= high`.
-    Expr lo = in_slot("low"), hi = in_slot("high", Expr::one()),
-         x = in_slot("in");
-    Expr t = EmitTmpExpr((x - lo) / (hi - lo));
-    return select(
-        x < lo, Expr::zero(),
-        select(x >= hi, Expr::one(), t * t * (Const(3.0) - Const(2.0) * t)));
+    Expr x = in("in1"), y = in("in2", Expr::one());
+    if (y.is_one()) return call(mtlx::Op::Fract, x);
+    x = EmitTmpExpr(x);
+    y = EmitTmpExpr(y);
+    return x - y * call(mtlx::Op::Floor, SafeDiv(x, y));
   }
   if (cat == "remap") {
     Expr ilo = in_slot("inlow"), olo = in_slot("outlow");
-    return olo + (in("in") - ilo) / (in("inhigh", Expr::one()) - ilo) *
-                     (in("outhigh", Expr::one()) - olo);
+    return CompileLinearRemap(node, ilo, in("inhigh", Expr::one()), olo,
+                              in("outhigh", Expr::one()));
   }
   return std::nullopt;
 }
@@ -1443,6 +1628,15 @@ std::optional<Expr> MtlxExprCompiler::CompileLogicNode(
     if (cond.is_one()) return in("in1");
     if (cond.is_zero()) return in("in2");
     Expr i1 = in("in1"), i2 = in("in2");
+    if (i1.is_one() && i2.is_zero()) return cond;
+    if (i1.is_zero() && i2.is_one()) {
+      if (cat == "ifgreater") {
+        return call(mtlx::Op::Le, in("value1"), in("value2"));
+      }
+      if (cat == "ifgreatereq") {
+        return call(mtlx::Op::Lt, in("value1"), in("value2"));
+      }
+    }
     return select(cond, i1, i2);
   }
   if (cat == "and" || cat == "or") {
@@ -1519,6 +1713,7 @@ Expr MtlxExprCompiler::CompileHeightToNormal(const ScopedNode& node) {
   // surface interactions without referencing outer temporaries.
   auto scope = [&] {
     return std::tie(prog_.code, prog_.tmp_channels, prog_.stack_size,
+                    tmp_varying_, tmp_clipped01_, tmp_affine_,
                     node_output_expr_, node_matrix_expr_, expr_to_slot_);
   };
   auto outer = std::apply(
@@ -1528,10 +1723,7 @@ Expr MtlxExprCompiler::CompileHeightToNormal(const ScopedNode& node) {
 
   std::optional<uint16_t> sub_idx;
   Expr h = CompileInputExpr(node, "in");
-  auto op_varies = [](const mtlx::Inst& i) {
-    return mtlx::is_spatially_varying_op(i.op) || i.op == mtlx::Op::SampleInput;
-  };
-  if (AnyLiveInst(prog_.code, h.code, prog_.tmp_channels.size(), op_varies)) {
+  if (IsVaryingExpr(h)) {
     Expr tc = CompileInputExpr(node, "texcoord", DefaultTexcoord());
     if (discover_texture_) {
       sub_idx = discover_input_idx_++;
@@ -1713,13 +1905,14 @@ std::optional<Expr> MtlxExprCompiler::CompileCompositingNode(
       Expr blend =
           cat == "burn" ? Expr::one() - (Expr::one() - bg) / denom : bg / denom;
       return select(call(mtlx::Op::Abs, denom) < Const(mtlx::kMtlxFloatEps),
-                    Expr::zero(), mix(blend, bg, m));
+                    Expr::zero(), Mix(blend, bg, m));
     }
     Expr blend = cat == "plus"         ? (bg + fg)
                  : cat == "minus"      ? (bg - fg)
                  : cat == "difference" ? call(mtlx::Op::Abs, bg - fg)
-                                       : (bg + fg - bg * fg);
-    return mix(blend, bg, m);
+                 : fg.is_one()         ? Expr::one()
+                                       : fma(Expr::one() - bg, fg, bg);
+    return Mix(blend, bg, m);
   }
   if (cat == "inside") return in("in") * in("mask", Expr::one());
   if (cat == "outside") return in("in") * (Expr::one() - in("mask"));
@@ -1755,7 +1948,7 @@ std::optional<Expr> MtlxExprCompiler::CompileCompositingNode(
       composite =
           vec4(composite.xyz(), call(mtlx::Op::Min, fa + ba, Expr::one()));
     }
-    return mix(composite, bg, in("mix", Expr::one()));
+    return Mix(composite, bg, in("mix", Expr::one()));
   }
   if (cat == "ramplr" || cat == "ramptb" || cat == "splitlr" ||
       cat == "splittb") {
@@ -1764,7 +1957,7 @@ std::optional<Expr> MtlxExprCompiler::CompileCompositingNode(
     Expr tc = in("texcoord", DefaultTexcoord());
     Expr tc_comp = lr ? tc.x() : tc.y();
     if (cat == "ramplr" || cat == "ramptb") {
-      return mix(v0, v1, saturate(tc_comp));
+      return Mix(v0, v1, Clip01(tc_comp));
     }
     return select(tc_comp >= in("center", Const(0.5)), v0, v1);
   }
@@ -1810,28 +2003,45 @@ std::optional<Expr> MtlxExprCompiler::CompileColorPbrNode(
     Expr aspect = EmitTmpExpr(call(
         mtlx::Op::Sqrt, Expr::one() - call(mtlx::Op::Clip, in("anisotropy"),
                                            Expr::zero(), Const(0.98))));
-    return vec2(call(mtlx::Op::Min, r2 / aspect, Expr::one()), r2 * aspect);
+    if (aspect.is_one()) return r2;
+    return vec2(call(mtlx::Op::Min, SafeDiv(r2, aspect), Expr::one()),
+                r2 * aspect);
   }
   if (cat == "roughness_dual") {
-    Expr r = in_slot("roughness"), rx = EmitTmpExpr(r.x());
+    Expr r = in_slot("roughness");
+    if (r.uniform()) {
+      return call(mtlx::Op::Clip, r * r, Const(mtlx::kMtlxFloatEps),
+                  Expr::one());
+    }
+    Expr rx = EmitTmpExpr(r.x());
     Expr ry = EmitTmpExpr(select(r.y() < Expr::zero(), rx, r.y()));
     return vec2(
         call(mtlx::Op::Clip, rx * rx, Const(mtlx::kMtlxFloatEps), Expr::one()),
         call(mtlx::Op::Clip, ry * ry, Const(mtlx::kMtlxFloatEps), Expr::one()));
   }
   if (cat == "artistic_ior") {
+    Expr g = in("edge_color");
+    if (g.is_zero() && output_name == "extinction") return Expr::zero();
     Expr r = EmitTmpExpr(
         call(mtlx::Op::Clip, in("reflectivity"), Expr::zero(), Const(0.99)));
+    if (g.is_one()) {
+      Expr inv = EmitTmpExpr(SafeDiv(Expr::one(), Expr::one() + r));
+      return output_name != "extinction"
+                 ? (Expr::one() - r) * inv
+                 : Const(2.0) * call(mtlx::Op::Sqrt, r) * inv;
+    }
     Expr r_sqrt = EmitTmpExpr(call(mtlx::Op::Sqrt, r));
-    Expr eta =
-        mix((Expr::one() - r) / (Expr::one() + r),
-            (Expr::one() + r_sqrt) / (Expr::one() - r_sqrt), in("edge_color"));
+    if (g.is_zero()) {
+      return SafeDiv(Expr::one() + r_sqrt, Expr::one() - r_sqrt);
+    }
+    Expr eta = Mix(SafeDiv(Expr::one() - r, Expr::one() + r),
+                   SafeDiv(Expr::one() + r_sqrt, Expr::one() - r_sqrt), g);
     if (output_name != "extinction") return eta;
     eta = EmitTmpExpr(eta);
     Expr np1 = EmitTmpExpr(eta + Expr::one()),
          nm1 = EmitTmpExpr(eta - Expr::one());
     return call(mtlx::Op::Sqrt,
-                (np1 * np1 * r - nm1 * nm1) / (Expr::one() - r));
+                SafeDiv(np1 * np1 * r - nm1 * nm1, Expr::one() - r));
   }
   if (cat == "chiang_hair_roughness") {
     auto clip_in = [&](const char* name, double def) {
@@ -1860,7 +2070,7 @@ std::optional<Expr> MtlxExprCompiler::CompileColorPbrNode(
         b * (Const(-0.215) +
              b * (Const(2.532) +
                   b * (Const(-10.73) + b * (Const(5.574) + b * Const(0.245)))));
-    Expr sigma = EmitTmpExpr(call(mtlx::Op::Log, c) / b_fac);
+    Expr sigma = EmitTmpExpr(SafeDiv(call(mtlx::Op::Log, c), b_fac));
     return sigma * sigma;
   }
   if (cat == "deon_hair_absorption_from_melanin") {
@@ -1869,7 +2079,7 @@ std::optional<Expr> MtlxExprCompiler::CompileColorPbrNode(
              call(mtlx::Op::Max,
                   Expr::one() - in("melanin_concentration", Const(0.25)),
                   Const(1e-4)));
-    Expr pigment = CompileMix(
+    Expr pigment = CompileMixExpr(
         in("melanin_redness", Const(0.5)),
         [&] {
           return call(mtlx::Op::Log, in("pheomelanin_color",
@@ -1966,6 +2176,56 @@ Expr MtlxExprCompiler::CompileNodeOutputExpr(const ScopedNode& node,
   const std::string& cat = NodeCategory(node.node);
   const std::string& type = node.node->getType();
 
+  // Fast path for `range` with unit gamma, collapsing `abs + pow + sign + mul`
+  // (e.g. default `range` nodes inside `NG_unifiednoise*`) to a linear remap.
+  if (cat == "range") {
+    if (CompileInputExpr(node, "gamma", Expr::one()).is_one()) {
+      Expr ilo = EmitTmpExpr(CompileInputExpr(node, "inlow"));
+      Expr ihi = CompileInputExpr(node, "inhigh", Expr::one());
+      Expr olo = EmitTmpExpr(CompileInputExpr(node, "outlow"));
+      Expr ohi = EmitTmpExpr(CompileInputExpr(node, "outhigh", Expr::one()));
+      Expr res = CompileLinearRemap(node, ilo, ihi, olo, ohi);
+      Expr doclamp = CompileInputExpr(node, "doclamp");
+      if (doclamp.is_zero()) return res;
+      if (!doclamp.is_one()) res = EmitTmpExpr(res);
+      Expr clamped = (olo.is_zero() && ohi.is_one())
+                         ? Clip01(res)
+                         : FoldExpr(call(mtlx::Op::Clip, res, olo, ohi));
+      return doclamp.is_one() ? clamped : select(doclamp, clamped, res);
+    }
+  }
+  if (cat == "smoothstep") {
+    // Handle before `graph_impl` expansion so multi-channel `NG_smoothstep_*`
+    // stays vectorized. Like OSL, a step function at `low` if `low >= high`.
+    Expr lo = EmitTmpExpr(CompileInputExpr(node, "low"));
+    Expr hi = EmitTmpExpr(CompileInputExpr(node, "high", Expr::one()));
+    Expr x = EmitTmpExpr(CompileInputExpr(node, "in"));
+    Expr span = FoldExpr(hi - lo);
+    Expr t;
+    if (!IsVaryingExpr(lo) && !IsVaryingExpr(span)) {
+      Expr inv = EmitTmpExpr(SafeDiv(Expr::one(), span));
+      t = EmitTmpExpr(Affine(x, inv, lo * inv, /*negate_bias=*/true));
+    } else {
+      t = EmitTmpExpr(SafeDiv(FoldExpr(x - lo), span));
+    }
+    return select(
+        x < lo, Expr::zero(),
+        select(x >= hi, Expr::one(), t * t * fma(Const(-2.0), t, Const(3.0))));
+  }
+  if (cat == "hsvadjust") {
+    Expr amt = CompileInputExpr(node, "amount", ConstRgb(0.0, 1.0, 1.0));
+    if (amt.channels == 3) {
+      if (auto v = TryEvalConst(amt);
+          v && (*v)[0] == 0.0 && (*v)[1] == 1.0 && (*v)[2] == 1.0) {
+        return CompileInputExpr(node, "in");
+      }
+    }
+  }
+  if (cat == "contrast") {
+    if (CompileInputExpr(node, "amount", Expr::one()).is_one()) {
+      return CompileInputExpr(node, "in");
+    }
+  }
   // Handle noise before NodeGraph expansion so stdlib noise/fractal NodeGraphs
   // emit native VM noise ops directly.
   if (auto e = CompileNoiseNode(node, cat, type)) return *e;
@@ -1996,6 +2256,27 @@ Expr MtlxExprCompiler::CompileNodeOutputExpr(const ScopedNode& node,
                           op == mtlx::Op::Log ? Expr::one() : Expr::zero()));
     }
   }
+  if (cat == "power") {
+    Expr exp = CompileInputExpr(node, "in2", Expr::one());
+    std::optional<double> ev;
+    if (exp.channels == 1) {
+      if (auto v = TryEvalConst(exp)) ev = (*v)[0];
+    }
+    if (ev == 0.0) return Expr::one();
+    Expr base = CompileInputExpr(node, "in1");
+    if (ev == 1.0) return base;
+    if (ev == 0.5) return call(mtlx::Op::Sqrt, base);
+    if (ev == 2.0 || ev == 3.0) {
+      base = EmitTmpExpr(base);
+      return ev == 2.0 ? base * base : base * base * base;
+    }
+    return call(mtlx::Op::Pow, base, exp);
+  }
+  if (cat == "rotate2d") {
+    Expr amt = CompileInputExpr(node, "amount");
+    if (amt.is_zero()) return CompileInputExpr(node, "in");
+    return call(mtlx::Op::Rotate2D, CompileInputExpr(node, "in"), amt);
+  }
   static constexpr struct {
     std::string_view name;
     const char *in1, *in2;
@@ -2004,10 +2285,8 @@ Expr MtlxExprCompiler::CompileNodeOutputExpr(const ScopedNode& node,
   } kBinaryOps[] = {
       {"min", "in1", "in2", mtlx::Op::Min, false},
       {"max", "in1", "in2", mtlx::Op::Max, false},
-      {"power", "in1", "in2", mtlx::Op::Pow, true},
       {"atan2", "iny", "inx", mtlx::Op::Atan2, true},
       {"crossproduct", "in1", "in2", mtlx::Op::Cross, false},
-      {"rotate2d", "in", "amount", mtlx::Op::Rotate2D, false},
   };
   for (const auto& [name, in1, in2, op, def2_one] : kBinaryOps) {
     if (cat == name) {
@@ -2047,15 +2326,14 @@ Expr MtlxExprCompiler::CompileEdf(const ScopedNode& node) {
       Expr em = CompileInputExpr(node, "emission", Expr::one());
       if (!em.is_zero()) {
         em = em * FoldExpr(Expr::one() -
-                           saturate(CompileInputExpr(node, "transmission")));
+                           Clip01(CompileInputExpr(node, "transmission")));
       }
       if (!em.is_zero()) {
         res = em * CompileInputExpr(node, "emission_color", Expr::one());
       }
     }
     if (!res.is_zero()) {
-      res = res *
-            FoldExpr(saturate(CompileInputExpr(node, "opacity", Expr::one())));
+      res = res * Clip01(CompileInputExpr(node, "opacity", Expr::one()));
     }
   } else if (cat == "uniform_edf" || cat == "conical_edf" ||
              cat == "measured_edf") {
@@ -2081,7 +2359,7 @@ Expr MtlxExprCompiler::CompileEdf(const ScopedNode& node) {
         Expr exp = EmitTmpExpr(
             call(mtlx::Op::Max, CompileInputExpr(node, "exponent", Const(5.0)),
                  Expr::zero()));
-        w = mix(c90, c0,
+        w = Mix(c90, c0,
                 Const(2.0) / ((exp + Expr::one()) * (exp + Const(2.0))));
       }
       res = base * w;
@@ -2095,7 +2373,7 @@ Expr MtlxExprCompiler::CompileEdf(const ScopedNode& node) {
       res = base * CompileInputExpr(node, "in2", Expr::one());
     }
   } else if (cat == "mix") {
-    res = CompileMix(
+    res = CompileMixExpr(
         CompileInputExpr(node, "mix"),
         [&] { return CompileEdf(ResolveConnected(node, "fg")); },
         [&] { return CompileEdf(ResolveConnected(node, "bg")); });
@@ -2114,11 +2392,11 @@ Expr MtlxExprCompiler::CompileOpacity(const ScopedNode& node) {
   const std::string& cat = NodeCategory(node.node);
   Expr res = Expr::one();
   if (cat == "surface" || cat == "surface_unlit") {
-    res = saturate(CompileInputExpr(node, "opacity", Expr::one()));
+    res = Clip01(CompileInputExpr(node, "opacity", Expr::one()));
   } else if (cat == "mix" &&
              node.node->getType() == mx::SURFACE_SHADER_TYPE_STRING) {
-    res = CompileMix(
-        FoldExpr(saturate(CompileInputExpr(node, "mix"))),
+    res = CompileMixExpr(
+        Clip01(CompileInputExpr(node, "mix")),
         [&] { return CompileOpacity(ResolveConnected(node, "fg")); },
         [&] { return CompileOpacity(ResolveConnected(node, "bg")); });
   }
@@ -2361,7 +2639,7 @@ int MtlxExprCompiler::CompileBsdfClosure(const ScopedNode& node) {
     }
   } else if (cat == "mix") {
     Expr mix_expr = CompileInputExpr(node, "mix");
-    Expr mix_sat = FoldExpr(saturate(mix_expr));
+    Expr mix_sat = Clip01(mix_expr);
     if (mix_sat.is_zero()) {
       idx = CompileBsdfClosure(ResolveConnected(node, "bg"));
     } else if (mix_sat.is_one()) {
@@ -2468,7 +2746,7 @@ MtlxExprCompiler::DisplacementExpr MtlxExprCompiler::CompileDisplacement(
                      ? d.expr
                      : rgb(Expr::zero(), Expr::zero(), d.expr);
         };
-        res = {mix(promote(fg), promote(bg), m), is_vec};
+        res = {Mix(promote(fg), promote(bg), m), is_vec};
       }
     }
   } else {
