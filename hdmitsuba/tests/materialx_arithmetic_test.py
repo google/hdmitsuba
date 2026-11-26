@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import math
 import pathlib
+import re
 from typing import Any
 
 import drjit as dr
@@ -37,6 +38,48 @@ from hdmitsuba.tests import test_helpers
 @pytest.fixture(autouse=True)
 def _set_default_variant() -> None:
   mtlx.set_default_variant()
+
+
+def _num_params(obj: Any, prefix: str = 'radiance.param') -> int:
+  return sum(k.startswith(prefix) for k in mi.traverse(obj).keys())
+
+
+def _code_size(obj: Any) -> int:
+  match = re.search(r'code_size = (\d+)', str(obj))
+  assert match is not None, str(obj)
+  return int(match.group(1))
+
+
+def _make_uv_batch(us: Any, vs: Any = 0.0) -> tuple[
+    mi.SurfaceInteraction3f,
+    tuple[str, dict[str, Any]],
+    tuple[str, dict[str, Any]],
+]:
+  us_arr = np.asarray(us, dtype=np.float64)
+  vs_arr = np.broadcast_to(np.asarray(vs, dtype=np.float64), us_arr.shape)
+  si = dr.zeros(mi.SurfaceInteraction3f, len(us_arr))
+  si.wi = mi.Vector3f(0.0, 0.0, 1.0)
+  si.uv = mi.Point2f(us_arr, 1.0 - vs_arr)
+  tc = ('ND_texcoord_vector2', {})
+  return (
+      si,
+      ('ND_extract_vector2', {'in_': tc, 'index': 0}),
+      ('ND_extract_vector2', {'in_': tc, 'index': 1}),
+  )
+
+
+def _compile_emission(expr: Any, stage: Usd.Stage | None = None) -> mi.Emitter:
+  _, em = mtlx.compile_mtlx_material(
+      'ND_surface_unlit', stage=stage, emission_color=expr
+  )
+  assert em is not None
+  return em
+
+
+def _compile_float_emission(
+    expr: Any, stage: Usd.Stage | None = None
+) -> mi.Emitter:
+  return _compile_emission(('ND_convert_float_color3', {'in_': expr}), stage)
 
 
 def _check_op(
@@ -1406,10 +1449,6 @@ def test_mixed_context_and_dynamic_material_switch() -> None:
 
 def test_constant_folding_and_opaque_compaction() -> None:
   """Tests unauthored const baking, independent shader params, and opaque compaction."""
-
-  def num_params(obj: Any, prefix: str = 'radiance.param') -> int:
-    return sum(k.startswith(prefix) for k in mi.traverse(obj).keys())
-
   stage = Usd.Stage.CreateInMemory()
   si = mtlx.make_test_si(wi=(0.0, 0.0, 1.0))
 
@@ -1417,7 +1456,7 @@ def test_constant_folding_and_opaque_compaction() -> None:
       'ND_standard_surface_surfaceshader', stage=stage
   )
   assert bsdf_def is not None
-  assert num_params(bsdf_def, 'param') == 0
+  assert _num_params(bsdf_def, 'param') == 0
 
   a = mtlx.define_shader(stage, 'A', 'ND_constant_float', value=0.25)
   b = mtlx.define_shader(stage, 'B', 'ND_constant_float', value=0.25)
@@ -1427,7 +1466,7 @@ def test_constant_folding_and_opaque_compaction() -> None:
       stage=stage,
   )
   assert em_pair is not None
-  assert num_params(em_pair) == 2
+  assert _num_params(em_pair) == 2
 
   # Dead `* 0` opaques (indices 0..2) are pruned and live `fg` opaques remap
   # from 3..5 -> 0..2; `mix` requires `FoldExpr` to fold `2.0 / 2.0 -> 1.0`.
@@ -1454,7 +1493,7 @@ def test_constant_folding_and_opaque_compaction() -> None:
       stage=stage,
   )
   assert em is not None
-  assert num_params(em) == 3
+  assert _num_params(em) == 3
   np.testing.assert_allclose(em.eval(si), mi.Color3f(0.2, 0.3, 0.4), atol=1e-5)
 
   # Widening an equal non-zero `vector2` (both folded constants and non-uniform
@@ -1495,7 +1534,7 @@ def test_constant_folding_and_opaque_compaction() -> None:
         stage=stage,
     )
     assert em_v2 is not None
-    assert num_params(em_v2) == 0
+    assert _num_params(em_v2) == 0
     np.testing.assert_allclose(
         em_v2.eval(si), mi.Color3f(0.5, 0.5, 0.0), atol=1e-5
     )
@@ -1528,7 +1567,7 @@ def test_constant_folding_and_opaque_compaction() -> None:
   )
   assert bsdf_mix is not None
   assert not mi.has_flag(bsdf_mix.flags(), mi.BSDFFlags.Null)
-  assert num_params(bsdf_mix, 'param') == 0
+  assert _num_params(bsdf_mix, 'param') == 0
   bs_tir, _ = bsdf_mix.sample(
       mi.BSDFContext(),
       mtlx.make_test_si(wi=(0.8, 0.0, -0.6)),
@@ -1661,4 +1700,68 @@ def test_invariant_hoisting_freeze_and_ad() -> None:
       mi.Color3f([1.0, 2.0], [1.0, 2.0], [1.0, 2.0]),
       mi.Color3f([0.5, 1.0], [1.0, 2.0], [1.0, 2.0]),
       -0.375,
+  )
+
+
+def test_dead_code_and_subprogram_pruning() -> None:
+  """Verifies dead temporary pruning in main bytecode and HeightToNormal subprograms."""
+  u = np.array([0.1, 0.35, 0.6, 0.85])
+  si, u_node, _ = _make_uv_batch(u)
+  dead_term = (
+      'ND_multiply_float',
+      {
+          'in1': ('ND_add_float', {'in1': u_node, 'in2': 0.25}),
+          'in2': ('ND_divide_float', {'in1': 0.0, 'in2': u_node}),
+      },
+  )
+  em_base = _compile_float_emission(u_node)
+  em_pruned = _compile_float_emission(
+      ('ND_add_float', {'in1': u_node, 'in2': dead_term})
+  )
+  assert _num_params(em_pruned) == 0
+  assert _code_size(em_pruned) == _code_size(em_base)
+  np.testing.assert_allclose(em_pruned.eval(si), em_base.eval(si), atol=1e-6)
+
+  em_h2n_clean = _compile_emission((
+      'ND_convert_vector3_color3',
+      {'in_': ('ND_heighttonormal_vector3', {'in_': u_node})},
+  ))
+  em_h2n_dead = _compile_emission((
+      'ND_convert_vector3_color3',
+      {
+          'in_': (
+              'ND_heighttonormal_vector3',
+              {'in_': ('ND_add_float', {'in1': u_node, 'in2': dead_term})},
+          )
+      },
+  ))
+  assert _num_params(em_h2n_dead) == 0
+  np.testing.assert_allclose(
+      em_h2n_dead.eval(si), em_h2n_clean.eval(si), atol=1e-6
+  )
+
+  # Nested `heighttonormal` must keep the callee subprogram live.
+  si_uv2, u2, v2 = _make_uv_batch([0.25, 0.75], [0.5, 0.75])
+  h2n_inner = (
+      'ND_heighttonormal_vector3',
+      {'in_': ('ND_multiply_float', {'in1': u2, 'in2': v2}), 'scale': 10.0},
+  )
+  h2n_outer = (
+      'ND_heighttonormal_vector3',
+      {
+          'in_': ('ND_extract_vector3', {'in_': h2n_inner, 'index': 0}),
+          'scale': 20.0,
+      },
+  )
+  em_nested = _compile_emission(
+      ('ND_convert_vector3_color3', {'in_': h2n_outer})
+  )
+  np.testing.assert_allclose(
+      em_nested.eval(si_uv2),
+      [
+          [0.46243557, 0.5],
+          [0.67793226, 0.46303481],
+          [0.96575642, 0.99863172],
+      ],
+      atol=1e-4,
   )
