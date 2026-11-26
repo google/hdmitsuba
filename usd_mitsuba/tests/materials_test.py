@@ -476,3 +476,66 @@ def test_materialx_translation() -> None:
   )
   surf.GetIdAttr().Set('UnknownCustomShader')
   assert material.convert_material(mesh) == (None, None, None, None)
+
+
+def test_materialx_emitter_overrides() -> None:
+  stage = Usd.Stage.CreateInMemory()
+  mesh = stage.DefinePrim('/Mesh', 'Mesh')
+  usd_material = UsdShade.Material.Define(stage, '/Material')
+  surface = UsdShade.Shader.Define(stage, '/Material/Surface')
+  surface.CreateIdAttr('ND_standard_surface_surfaceshader')
+  surface.CreateInput('emission', Sdf.ValueTypeNames.Float).Set(2.0)
+  surface.CreateInput('emission_color', Sdf.ValueTypeNames.Color3f).Set(
+      (0.1, 0.5, 0.9)
+  )
+  usd_material.CreateSurfaceOutput('mtlx').ConnectToSource(
+      surface.CreateOutput('out', Sdf.ValueTypeNames.Token)
+  )
+  UsdShade.MaterialBindingAPI.Apply(mesh).Bind(usd_material)
+
+  interaction = _make_z_up_si()
+
+  # Property override preserves the MaterialX radiance texture.
+  _, single_sided_emitter, _, _ = material.convert_material(
+      mesh, double_sided=True, emitter_overrides={'twosided': False}
+  )
+  assert isinstance(single_sided_emitter, mi.Emitter)
+  np.testing.assert_allclose(
+      single_sided_emitter.eval(interaction),
+      mi.Color3f(0.2, 1.0, 1.8),
+      rtol=1e-5,
+  )
+  interaction.wi = mi.Vector3f(0.0, 0.0, -1.0)
+  np.testing.assert_allclose(
+      single_sided_emitter.eval(interaction), mi.Color3f(0.0), atol=1e-6
+  )
+
+  # Radiance override replaces the MaterialX radiance while keeping `twosided`.
+  _, overridden_radiance_emitter, _, _ = material.convert_material(
+      mesh,
+      double_sided=True,
+      emitter_overrides={'radiance': {'type': 'rgb', 'value': (0.4, 0.6, 0.8)}},
+  )
+  assert isinstance(overridden_radiance_emitter, mi.Emitter)
+  np.testing.assert_allclose(
+      overridden_radiance_emitter.eval(interaction),
+      mi.Color3f(0.4, 0.6, 0.8),
+      rtol=1e-5,
+  )
+
+  # Plugin type override replaces the `area` emitter cleanly.
+  _, directional_emitter, _, _ = material.convert_material(
+      mesh,
+      double_sided=True,
+      emitter_overrides={
+          'type': 'directionalarea',
+          'radiance': {'type': 'rgb', 'value': (1.0, 2.0, 3.0)},
+      },
+  )
+  assert isinstance(directional_emitter, mi.Emitter)
+  assert directional_emitter.class_name() == 'DirectionalArea'
+  np.testing.assert_allclose(
+      mi.traverse(directional_emitter)['radiance.value'],
+      mi.Color3f(1.0, 2.0, 3.0),
+      rtol=1e-5,
+  )

@@ -26,9 +26,11 @@ from pxr import Sdf
 from pxr import Usd
 from pxr import UsdGeom
 from pxr import UsdLux
+from pxr import UsdShade
 import pytest
 
 from usd_mitsuba import light
+from usd_mitsuba import translator
 
 _EXR_PATH = os.path.abspath('hdmitsuba/test_assets/lights/textures/envmap.png')
 _IES_PATH = os.path.abspath(
@@ -452,3 +454,190 @@ def test_light_mitsuba_visibility(light_type, default_vis, override_vis):
   emitter_dict = light.convert_light(prim)
   assert emitter_dict['visibility'] == override_vis
   mi.load_dict(emitter_dict)
+
+
+def test_rect_light_emitter_and_shape_overrides():
+  _, prim = _create_stage_with_light(UsdLux.RectLight)
+  UsdLux.RectLight(prim).GetTextureFileAttr().Set(
+      Sdf.AssetPath('does_not_exist.exr')
+  )
+  prim.CreateAttribute(
+      'mitsuba:emitter:radiance:type', Sdf.ValueTypeNames.String
+  ).Set('rgb')
+  prim.CreateAttribute(
+      'mitsuba:emitter:radiance:value', Sdf.ValueTypeNames.Color3f
+  ).Set(Gf.Vec3f(12.0, 6.0, 3.0))
+  prim.CreateAttribute(
+      'mitsuba:shape:flip_normals', Sdf.ValueTypeNames.Bool
+  ).Set(True)
+
+  emitter_dict = light.convert_light(prim)
+  assert emitter_dict['type'] == 'rectangle'
+  assert emitter_dict['flip_normals']
+  np.testing.assert_allclose(
+      emitter_dict['emitter']['radiance']['value'],
+      mi.ScalarColor3f(12.0, 6.0, 3.0),
+  )
+  mi.load_dict(emitter_dict)
+
+
+def test_rect_light_custom_emitter_type_skips_texture_load():
+  _, prim = _create_stage_with_light(UsdLux.RectLight)
+  UsdLux.RectLight(prim).GetTextureFileAttr().Set(
+      Sdf.AssetPath('does_not_exist.exr')
+  )
+  prim.CreateAttribute('mitsuba:emitter:type', Sdf.ValueTypeNames.String).Set(
+      'directionalarea'
+  )
+
+  emitter_dict = light.convert_light(prim)
+  assert emitter_dict['emitter']['type'] == 'directionalarea'
+  mi.load_dict(emitter_dict)
+
+
+def test_point_light_spot_emitter_override():
+  _, spot_prim = _create_stage_with_light(UsdLux.SphereLight)
+  UsdLux.SphereLight(spot_prim).GetTreatAsPointAttr().Set(True)
+  spot_prim.CreateAttribute(
+      'mitsuba:emitter:type', Sdf.ValueTypeNames.String
+  ).Set('spot')
+  spot_prim.CreateAttribute(
+      'mitsuba:emitter:cutoff_angle', Sdf.ValueTypeNames.Float
+  ).Set(25.0)
+  spot_dict = light.convert_light(spot_prim)
+  assert spot_dict['type'] == 'spot'
+  assert spot_dict['cutoff_angle'] == 25.0
+  # Spot emitter should have the 180-degree X rotation applied so +Z maps to -Z.
+  np.testing.assert_allclose(
+      spot_dict['to_world'] @ mi.ScalarVector3f(0, 0, 1),
+      [0.0, 0.0, -1.0],
+      atol=1e-6,
+  )
+  mi.load_dict(spot_dict)
+
+
+def test_ies_light_explicit_emitter_overrides():
+  _, prim = _create_stage_with_light(UsdLux.DiskLight)
+  UsdLux.ShapingAPI.Apply(prim).GetShapingIesFileAttr().Set(
+      Sdf.AssetPath(_IES_PATH)
+  )
+  prim.CreateAttribute('mitsuba:emitter:type', Sdf.ValueTypeNames.String).Set(
+      'ies'
+  )
+  prim.CreateAttribute(
+      'mitsuba:emitter:angle_scale', Sdf.ValueTypeNames.Float
+  ).Set(0.8)
+
+  emitter_dict = light.convert_light(prim)
+  ies_dict = emitter_dict['emitter']
+  assert ies_dict['type'] == 'ies'
+  assert ies_dict['nested_emitter']['type'] == 'area'
+  assert ies_dict['angle_scale'] == pytest.approx(0.8)
+  mi.load_dict(emitter_dict)
+
+
+def test_dome_light_emitter_filename_without_texture_attr():
+  _, prim = _create_stage_with_light(UsdLux.DomeLight)
+  prim.CreateAttribute(
+      'mitsuba:emitter:filename', Sdf.ValueTypeNames.Asset
+  ).Set(Sdf.AssetPath(_EXR_PATH))
+  emitter_dict = light.convert_light(prim)
+  assert emitter_dict['type'] == 'envmap'
+  assert emitter_dict['filename'] == _EXR_PATH
+  mi.load_dict(emitter_dict)
+
+
+def test_dome_light_overridden_to_directional_preserves_transform():
+  _, prim = _create_stage_with_light(UsdLux.DomeLight)
+  UsdGeom.Xformable(prim).AddRotateXOp().Set(90.0)
+  prim.CreateAttribute('mitsuba:emitter:type', Sdf.ValueTypeNames.String).Set(
+      'directional'
+  )
+
+  emitter_dict = light.convert_light(prim)
+  assert emitter_dict['type'] == 'directional'
+  np.testing.assert_allclose(
+      emitter_dict['to_world'] @ mi.ScalarVector3f(0, 0, 1),
+      [0.0, 1.0, 0.0],
+      atol=1e-6,
+  )
+  mi.load_dict(emitter_dict)
+
+
+def test_rect_light_shape_emitter_override_contract():
+  _, prim = _create_stage_with_light(UsdLux.RectLight)
+  UsdLux.RectLight(prim).GetColorAttr().Set(Gf.Vec3f(1.0, 0.0, 0.0))
+  prim.CreateAttribute(
+      'mitsuba:shape:emitter:twosided', Sdf.ValueTypeNames.Bool
+  ).Set(True)
+
+  # Without `mitsuba:shape:emitter:type`, the override is skipped.
+  skipped_dict = light.convert_light(prim)
+  np.testing.assert_allclose(
+      skipped_dict['emitter']['radiance']['value'],
+      mi.ScalarColor3f(1.0, 0.0, 0.0),
+  )
+  assert 'twosided' not in skipped_dict['emitter']
+
+  # With `mitsuba:shape:emitter:type`, the USD emitter is replaced outright.
+  prim.CreateAttribute(
+      'mitsuba:shape:emitter:type', Sdf.ValueTypeNames.String
+  ).Set('area')
+  replaced_dict = light.convert_light(prim)
+  assert replaced_dict['emitter'] == {'type': 'area', 'twosided': True}
+  mi.load_dict(replaced_dict)
+
+
+def test_emissive_material_with_mesh_light_api_and_ies_override():
+  stage = Usd.Stage.CreateInMemory()
+  usd_material = UsdShade.Material.Define(stage, '/Material')
+  shader = UsdShade.Shader.Define(stage, '/Material/Surface')
+  shader.CreateIdAttr('UsdPreviewSurface')
+  shader.CreateInput('emissiveColor', Sdf.ValueTypeNames.Color3f).Set(
+      Gf.Vec3f(1.0, 0.0, 0.0)
+  )
+  usd_material.CreateSurfaceOutput().ConnectToSource(
+      shader.CreateOutput('surface', Sdf.ValueTypeNames.Token)
+  )
+
+  def _define_quad(path: str) -> Usd.Prim:
+    quad = UsdGeom.Mesh.Define(stage, path)
+    quad.GetPointsAttr().Set([(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)])
+    quad.GetFaceVertexCountsAttr().Set([4])
+    quad.GetFaceVertexIndicesAttr().Set([0, 1, 2, 3])
+    UsdShade.MaterialBindingAPI.Apply(quad.GetPrim()).Bind(usd_material)
+    return quad.GetPrim()
+
+  mesh_prim = _define_quad('/Mesh')
+  UsdLux.MeshLightAPI.Apply(mesh_prim)
+  UsdLux.ShapingAPI.Apply(mesh_prim).GetShapingIesFileAttr().Set(
+      Sdf.AssetPath(_IES_PATH)
+  )
+  mesh_prim.CreateAttribute(
+      'mitsuba:emitter:type', Sdf.ValueTypeNames.String
+  ).Set('ies')
+  mesh_prim.CreateAttribute(
+      'mitsuba:emitter:angle_scale', Sdf.ValueTypeNames.Float
+  ).Set(0.5)
+
+  cube_prim = UsdGeom.Cube.Define(stage, '/Cube').GetPrim()
+  UsdShade.MaterialBindingAPI.Apply(cube_prim).Bind(usd_material)
+  UsdLux.MeshLightAPI.Apply(cube_prim)
+  UsdLux.ShapingAPI.Apply(cube_prim).GetShapingIesFileAttr().Set(
+      Sdf.AssetPath(_IES_PATH)
+  )
+  cube_prim.CreateAttribute(
+      'mitsuba:emitter:type', Sdf.ValueTypeNames.String
+  ).Set('ies')
+
+  proto_prim = _define_quad('/Prototypes/Proto/Mesh')
+  proto_prim.CreateAttribute(
+      'mitsuba:emitter:type', Sdf.ValueTypeNames.String
+  ).Set('ies')
+  instancer = UsdGeom.PointInstancer.Define(stage, '/Instancer')
+  instancer.GetPrototypesRel().SetTargets([Sdf.Path('/Prototypes/Proto')])
+  instancer.GetPositionsAttr().Set([Gf.Vec3f(2.0, 0.0, 0.0)])
+  instancer.GetProtoIndicesAttr().Set([0])
+
+  scene_dict = translator.convert_to_mitsuba(stage)
+  mi.load_dict(scene_dict)

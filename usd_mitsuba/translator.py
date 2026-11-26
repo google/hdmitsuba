@@ -44,83 +44,95 @@ from usd_mitsuba import render_settings as render_settings_lib
 from usd_mitsuba import util
 
 
-def _wrap_shape_if_animated(
+def _apply_shape_overrides(
     prim: Usd.Prim,
     shape_dict: dict[str, Any],
     time: Usd.TimeCode,
-    motion_interval: tuple[float, float],
-) -> dict[str, Any]:
-  """Applies `prim`'s world transform, wrapping in an instance if animated.
+    emitter_overrides: dict[str, Any],
+    shape_overrides: dict[str, Any],
+    *,
+    bsdf: mi.BSDF | None,
+) -> None:
+  """Merges `mitsuba:emitter:*` and `mitsuba:shape:*` onto `shape_dict`."""
+  if prim.HasAPI(UsdLux.MeshLightAPI):
+    shape_dict['emitter'] = light.convert_mesh_light(
+        prim,
+        time,
+        UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time),
+        emitter_overrides,
+    )
+  elif 'emitter' not in shape_dict and emitter_overrides.get('type'):
+    shape_dict['emitter'] = dict(emitter_overrides)
 
-  Emissive shapes are never wrapped since Mitsuba does not support emitters on
-  instances; like area lights, they render with their static transform.
-  """
-  prim_id = util.get_mitsuba_id(prim)
-  to_world = (
-      util.get_world_transform(prim, time)
-      if 'emitter' in shape_dict
-      else motion.sample_world_transform(
-          prim, time, motion_interval, uniform=True
-      )
+  util.merge_shape_overrides(shape_dict, shape_overrides)
+
+  if 'bsdf' not in shape_dict:
+    if bsdf is not None:
+      shape_dict['bsdf'] = bsdf
+    elif 'interior' in shape_dict or 'exterior' in shape_dict:
+      shape_dict['bsdf'] = {'type': 'null'}
+    elif 'emitter' in shape_dict:
+      shape_dict['bsdf'] = {'type': 'diffuse', 'reflectance': 0.0}
+
+
+def _convert_simple_shape(
+    prim: Usd.Prim,
+    time: Usd.TimeCode,
+    motion_interval: tuple[float, float],
+    sensor_bindings: Mapping[Sdf.Path, Usd.Prim],
+) -> dict[str, Any]:
+  """Handles a cube or plane prim and returns the Mitsuba shape dictionary."""
+  is_plane = prim.IsA(UsdGeom.Plane)
+  # Unlike the other implicit shapes, planes carry `doubleSided` through Hydra.
+  double_sided = (
+      UsdGeom.Plane(prim).GetDoubleSidedAttr().Get(time) if is_plane else False
   )
+  emitter_overrides = util.extract_nested_dict(prim, 'mitsuba:emitter:', time)
+  has_mesh_light = prim.HasAPI(UsdLux.MeshLightAPI)
+  bsdf, emitter, displacement, interior_medium = material.convert_material(
+      prim,
+      double_sided,
+      time,
+      emitter_overrides=None if has_mesh_light else emitter_overrides,
+  )
+  if displacement is not None:
+    shape_label = 'planes' if is_plane else 'cubes'
+    raise ValueError(
+        f'Displacement is not supported for {shape_label}. Please use a mesh.'
+    )
+
+  shape_dict = util.get_implicit_surface_parts(prim, time)['']
+  shape_dict['visibility'] = util.get_ray_visibility(prim, time)
+  if interior_medium is not None:
+    shape_dict['interior'] = interior_medium
+  if not has_mesh_light and emitter is not None:
+    shape_dict['emitter'] = emitter
+  if sensor_prim := sensor_bindings.get(prim.GetPath()):
+    shape_dict['sensor'] = camera.usd_to_mitsuba(
+        UsdGeom.Camera(sensor_prim), time=time
+    )
+
+  shape_overrides = util.extract_nested_dict(prim, 'mitsuba:shape:', time)
+  extra_to_world = shape_overrides.pop('to_world', None)
+  _apply_shape_overrides(
+      prim, shape_dict, time, emitter_overrides, shape_overrides, bsdf=bsdf
+  )
+  prim_id = shape_dict.pop('id', None) or util.get_mitsuba_id(prim)
+  if extra_to_world is not None:
+    shape_dict['to_world'] = extra_to_world @ shape_dict['to_world']
+  # Emissive shapes and shapes with an attached surface sensor are never wrapped
+  # since Mitsuba does not support emitters or sensors on instances; like area
+  # lights, they render with their static transform.
+  if 'emitter' in shape_dict or 'sensor' in shape_dict:
+    to_world = util.get_world_transform(prim, time)
+  else:
+    to_world = motion.sample_world_transform(
+        prim, time, motion_interval, uniform=True
+    )
   if isinstance(to_world, mi.AnimatedTransform4f):
     return motion.wrap_in_instance(prim_id, [shape_dict], to_world)
   shape_dict['to_world'] = to_world @ shape_dict['to_world']
   return {prim_id: shape_dict}
-
-
-def _convert_cube(
-    prim: Usd.Prim,
-    time: Usd.TimeCode = Usd.TimeCode.Default(),
-    motion_interval: tuple[float, float] = (0.0, 0.0),
-) -> dict[str, Any]:
-  """Handles a cube prim and returns the Mitsuba shape dictionary."""
-  bsdf, emitter, displacement, interior_medium = material.convert_material(
-      prim, time=time
-  )
-
-  if displacement is not None:
-    raise ValueError(
-        'Displacement is not supported for cubes. Please use a mesh.'
-    )
-
-  mi_cube = util.get_implicit_surface_parts(prim, time)['']
-  mi_cube['visibility'] = util.get_ray_visibility(prim, time)
-  if bsdf is not None:
-    mi_cube['bsdf'] = bsdf
-  if interior_medium is not None:
-    mi_cube['interior'] = interior_medium
-  if emitter is not None:
-    mi_cube['emitter'] = emitter
-
-  return _wrap_shape_if_animated(prim, mi_cube, time, motion_interval)
-
-
-def _convert_plane(
-    prim: Usd.Prim,
-    time: Usd.TimeCode = Usd.TimeCode.Default(),
-    motion_interval: tuple[float, float] = (0.0, 0.0),
-) -> dict[str, Any]:
-  """Handles a plane prim and returns the Mitsuba shape dictionary."""
-  plane_prim = UsdGeom.Plane(prim)
-  # Unlike the other implicit shapes, planes carry `doubleSided` through Hydra.
-  bsdf, emitter, displacement, interior_medium = material.convert_material(
-      prim, plane_prim.GetDoubleSidedAttr().Get(time), time
-  )
-  if displacement is not None:
-    raise ValueError(
-        'Displacement is not supported for planes. Please use a mesh.'
-    )
-
-  mi_plane = util.get_implicit_surface_parts(prim, time)['']
-  mi_plane['visibility'] = util.get_ray_visibility(prim, time)
-  if bsdf is not None:
-    mi_plane['bsdf'] = bsdf
-  if interior_medium is not None:
-    mi_plane['interior'] = interior_medium
-  if emitter is not None:
-    mi_plane['emitter'] = emitter
-  return _wrap_shape_if_animated(prim, mi_plane, time, motion_interval)
 
 
 def _supports_transform(
@@ -150,39 +162,77 @@ def _convert_implicit_surface(
   """Converts a sphere or cylinder prim to native Mitsuba shapes."""
   parts = util.get_implicit_surface_parts(prim, time)
 
+  emitter_overrides = util.extract_nested_dict(prim, 'mitsuba:emitter:', time)
+  shape_overrides = util.extract_nested_dict(prim, 'mitsuba:shape:', time)
+  custom_id = shape_overrides.pop('id', None)
+  extra_to_world = shape_overrides.pop('to_world', None)
+
+  has_mesh_light = prim.HasAPI(UsdLux.MeshLightAPI)
   bsdf, emitter, displacement, interior_medium = material.convert_material(
-      prim, time=time
+      prim,
+      time=time,
+      emitter_overrides=None if has_mesh_light else emitter_overrides,
   )
   if displacement is not None:
     raise ValueError(
         'Displacement is not supported for implicit surfaces. Please use a'
         ' mesh.'
     )
-  for i, part in enumerate(parts.values()):
-    part['visibility'] = util.get_ray_visibility(prim, time)
-    if bsdf is not None:
-      part['bsdf'] = bsdf
-    if interior_medium is not None:
-      part['interior'] = interior_medium
-    if emitter is not None:
-      part['emitter'] = (
-          emitter if i == 0 else material.convert_material(prim, time=time)[1]
-      )
 
   first_part = next(iter(parts.values()))
-  if sensor_prim := sensor_bindings.get(prim.GetPath()):
-    if len(parts) > 1:
-      Tf.Warn(
-          f'The surface sensor of {prim.GetPath()} only measures its side, not'
-          ' its caps.'
-      )
+  sensor_prim = sensor_bindings.get(prim.GetPath())
+  has_shape_sensor = isinstance(shape_overrides.get('sensor'), dict) and bool(
+      shape_overrides['sensor'].get('type')
+  )
+  if len(parts) > 1 and (sensor_prim is not None or has_shape_sensor):
+    Tf.Warn(
+        f'The surface sensor of {prim.GetPath()} only measures its side, not'
+        ' its caps.'
+    )
+  if sensor_prim is not None:
     first_part['sensor'] = camera.usd_to_mitsuba(
         UsdGeom.Camera(sensor_prim), time=time
     )
 
-  prim_id = util.get_mitsuba_id(prim)
-  if emitter is not None or sensor_prim is not None:
-    to_world = util.get_world_transform(prim, time)
+  mesh_light_transform = (
+      UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
+      if has_mesh_light
+      else None
+  )
+  part_emitter_overrides = emitter_overrides
+  for part_index, part in enumerate(parts.values()):
+    if part_index == 1:
+      part_emitter_overrides = util.strip_nested_ids(emitter_overrides)
+    if mesh_light_transform is not None:
+      part['emitter'] = light.convert_mesh_light(
+          prim, time, mesh_light_transform, part_emitter_overrides
+      )
+    elif emitter is not None:
+      if part_index == 0:
+        part['emitter'] = emitter
+      else:
+        part['emitter'] = material.convert_material(
+            prim, time=time, emitter_overrides=part_emitter_overrides
+        )[1]
+    elif part_emitter_overrides.get('type'):
+      part['emitter'] = dict(part_emitter_overrides)
+
+  util.apply_implicit_surface_overrides(
+      prim, parts, time, shape_overrides, bsdf, interior_medium
+  )
+
+  prim_id = (
+      custom_id if len(parts) == 1 and custom_id else util.get_mitsuba_id(prim)
+  )
+  to_world_fn = (
+      (lambda matrix: util.to_mitsuba_transform(matrix) @ extra_to_world)
+      if extra_to_world is not None
+      else util.to_mitsuba_transform
+  )
+  if 'emitter' in first_part or 'sensor' in first_part:
+    to_world = to_world_fn(
+        UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
+    )
     if not _supports_transform(first_part, to_world):
       Tf.Warn(
           f'{prim.GetPath()} has a transform with non-uniform scaling or'
@@ -192,18 +242,18 @@ def _convert_implicit_surface(
       )
   else:
     to_world = motion.sample_world_transform(
-        prim, time, motion_interval, uniform=True
+        prim, time, motion_interval, to_world_fn, uniform=True
     )
     if isinstance(to_world, mi.AnimatedTransform4f) or not _supports_transform(
         first_part, to_world
     ):
       return motion.wrap_in_instance(prim_id, parts.values(), to_world)
   return {
-      (f'{prim_id}_{s}' if s else prim_id): {
+      (f'{prim_id}_{suffix}' if suffix else prim_id): {
           **part,
           'to_world': to_world @ part['to_world'],
       }
-      for s, part in parts.items()
+      for suffix, part in parts.items()
   }
 
 
@@ -231,31 +281,17 @@ def _convert_points(
   return {prim_id: shape}
 
 
-def _create_empty_mitsuba_curve(
-    curve_type: str, bsdf: Any, visibility: str
-) -> mi.Object:
-  """Creates an empty Mitsuba curve object.
-
-  Mitsuba's curve plugins (linearcurve, bsplinecurve) require a filename
-  containing control points for initialization. Since we want to define the
-  points dynamically from USD, we create a temporary file with dummy points,
-  load it, and then we can overwrite the parameters in memory.
-  """
-  # 4 points is the minimum required for B-splines.
+def _create_empty_mitsuba_curve(curve_dict: dict[str, Any]) -> mi.Object:
+  """Creates an empty Mitsuba curve object from `curve_dict`."""
+  # Mitsuba's curve plugins (linearcurve, bsplinecurve) require a filename
+  # containing at least 4 control points before overwriting buffers in memory.
   dummy_data = (
       '-1.0 0.0 0.0 0.5\n-0.5 0.0 0.0 0.5\n 0.5 0.0 0.0 0.5\n 1.5 0.0 0.0 0.5\n'
   )
   with tempfile.NamedTemporaryFile(mode='w', suffix='.txt') as f:
     f.write(dummy_data)
     f.flush()
-    curve_dict: dict[str, Any] = {
-        'type': curve_type,
-        'filename': f.name,
-        'visibility': visibility,
-    }
-    if bsdf is not None:
-      curve_dict['bsdf'] = bsdf
-    return mi.load_dict(curve_dict)
+    return mi.load_dict({'filename': f.name} | curve_dict)
 
 
 # M_bspline^-1 @ M_catmullRom (tension 0.5).
@@ -295,9 +331,10 @@ def _catmull_rom_to_bspline(
 
 def _convert_curves(
     prim: Usd.Prim,
-    time: Usd.TimeCode = Usd.TimeCode.Default(),
-) -> mi.Object:
-  """Handles a curves prim and returns the Mitsuba curve object."""
+    time: Usd.TimeCode,
+    sensor_bindings: Mapping[Sdf.Path, Usd.Prim],
+) -> dict[str, mi.Object]:
+  """Handles a curves prim and returns a map of ID to Mitsuba curve object."""
   curve_prim = UsdGeom.Curves(prim)
   widths = curve_prim.GetWidthsAttr().Get(time)
   if widths is None or len(widths) == 0:
@@ -305,17 +342,57 @@ def _convert_curves(
         f"Curves prim '{prim.GetPath()}' is missing widths attribute."
     )
 
+  emitter_overrides = util.extract_nested_dict(prim, 'mitsuba:emitter:', time)
+  has_mesh_light = prim.HasAPI(UsdLux.MeshLightAPI)
+  bsdf, emitter, _, interior_medium = material.convert_material(
+      prim,
+      time=time,
+      emitter_overrides=None if has_mesh_light else emitter_overrides,
+  )
+
+  curve_type = 'linearcurve'
+  is_catmull_rom = False
+  if prim.IsA(UsdGeom.BasisCurves):
+    basis_curves = UsdGeom.BasisCurves(prim)
+    if basis_curves.GetTypeAttr().Get(time) == UsdGeom.Tokens.cubic:
+      basis = basis_curves.GetBasisAttr().Get(time)
+      is_catmull_rom = basis == UsdGeom.Tokens.catmullRom
+      if is_catmull_rom or basis == UsdGeom.Tokens.bspline:
+        curve_type = 'bsplinecurve'
+  elif prim.IsA(UsdGeom.NurbsCurves):
+    curve_type = 'bsplinecurve'
+
+  curve_dict: dict[str, Any] = {
+      'type': curve_type,
+      'visibility': util.get_ray_visibility(prim, time),
+  }
+  if interior_medium is not None:
+    curve_dict['interior'] = interior_medium
+  if not has_mesh_light and emitter is not None:
+    curve_dict['emitter'] = emitter
+  if sensor_prim := sensor_bindings.get(prim.GetPath()):
+    curve_dict['sensor'] = camera.usd_to_mitsuba(
+        UsdGeom.Camera(sensor_prim), time=time
+    )
+
+  shape_overrides = util.extract_nested_dict(prim, 'mitsuba:shape:', time)
+  extra_to_world = shape_overrides.pop('to_world', None)
+  _apply_shape_overrides(
+      prim, curve_dict, time, emitter_overrides, shape_overrides, bsdf=bsdf
+  )
+  prim_id = curve_dict.pop('id', None) or util.get_mitsuba_id(prim)
+
   curve_points = np.array(
       geom_lib.extract_curve_points(prim, time), dtype=np.float32
   )
-  world_mat = np.array(
-      curve_prim.ComputeLocalToWorldTransform(time), dtype=np.float32
-  )
+  world_transform = util.get_world_transform(prim, time)
+  if extra_to_world is not None:
+    world_transform = world_transform @ extra_to_world
+  world_mat = np.asarray(world_transform.matrix, dtype=np.float32).T
   ones = np.ones((curve_points.shape[0], 1), dtype=np.float32)
   pts_homog = np.hstack([curve_points, ones])
   pts_world_homog = pts_homog @ world_mat
   curve_points = pts_world_homog[:, :3] / pts_world_homog[:, 3:4]
-  bsdf, _, _, _ = material.convert_material(prim, time=time)
 
   world_scale = float(np.mean(np.linalg.norm(world_mat[:3, :3], axis=1)))
   widths = np.array(widths, dtype=np.float32) * world_scale
@@ -340,23 +417,15 @@ def _convert_curves(
     )
 
   curve_points = mi.Float(curve_points.ravel())
-  curve_type = 'linearcurve'
-  if prim.IsA(UsdGeom.BasisCurves):
-    basis_curves = UsdGeom.BasisCurves(prim)
-    if basis_curves.GetTypeAttr().Get(time) == UsdGeom.Tokens.cubic:
-      basis = basis_curves.GetBasisAttr().Get(time)
-      if basis in (UsdGeom.Tokens.bspline, UsdGeom.Tokens.catmullRom):
-        curve_type = 'bsplinecurve'
-      if basis == UsdGeom.Tokens.catmullRom:
-        curve_points = _catmull_rom_to_bspline(
-            curve_points,
-            curve_point_counts,
-            basis_curves.GetWrapAttr().Get(time) == UsdGeom.Tokens.pinned,
-        )
-        curve_point_counts = np.full(len(curve_points) // 16, 4)
-  elif prim.IsA(UsdGeom.NurbsCurves):
-    curve_type = 'bsplinecurve'
-  degree = 3 if curve_type == 'bsplinecurve' else 1
+  if is_catmull_rom:
+    curve_points = _catmull_rom_to_bspline(
+        curve_points,
+        curve_point_counts,
+        UsdGeom.BasisCurves(prim).GetWrapAttr().Get(time)
+        == UsdGeom.Tokens.pinned,
+    )
+    curve_point_counts = np.full(len(curve_points) // 16, 4)
+  degree = 3 if curve_dict['type'] == 'bsplinecurve' else 1
   # Mitsuba expects the segment_indices to be an array of point indices,
   # skipping the last "degree" points for each segment.
   repeats = np.maximum(0, curve_point_counts - degree)
@@ -370,15 +439,14 @@ def _convert_curves(
       np.cumsum(skipped) - skipped, repeats
   )
 
-  curve_obj = _create_empty_mitsuba_curve(
-      curve_type, bsdf, util.get_ray_visibility(prim, time)
-  )
+  curve_obj = _create_empty_mitsuba_curve(curve_dict)
+  curve_obj.set_id(prim_id)
   params = mi.traverse(curve_obj)
   params['control_point_count'] = len(curve_points) // 4
   params['segment_indices'] = mi.Int32(curve_indices)
   params['control_points'] = curve_points
   params.update()
-  return curve_obj
+  return {prim_id: curve_obj}
 
 
 def _strip_deprecated_hide_emitters(spec: dict[str, Any]) -> bool:
@@ -476,7 +544,7 @@ def convert_to_mitsuba(
   )
 
   prototype_paths = instancing.get_prototype_paths(stage)
-  sensor_bindings = camera.get_surface_sensor_bindings(stage)
+  sensor_bindings = camera.get_surface_sensor_bindings(stage, time)
   # Shapes and lights are sampled over the union of all camera shutters.
   motion_interval = motion.get_motion_interval(stage, time)
   # Traverse the stage using TraverseInstanceProxies. This flattens native USD
@@ -520,10 +588,10 @@ def convert_to_mitsuba(
               motion_interval=motion_interval,
           )
       )
-    elif prim.IsA(UsdGeom.Cube):
-      mi_scene_dict.update(_convert_cube(prim, time, motion_interval))
-    elif prim.IsA(UsdGeom.Plane):
-      mi_scene_dict.update(_convert_plane(prim, time, motion_interval))
+    elif prim.IsA(UsdGeom.Cube) or prim.IsA(UsdGeom.Plane):
+      mi_scene_dict.update(
+          _convert_simple_shape(prim, time, motion_interval, sensor_bindings)
+      )
     elif (
         prim.IsA(UsdGeom.Sphere)
         or prim.IsA(UsdGeom.Cylinder)
@@ -538,16 +606,21 @@ def convert_to_mitsuba(
       mi_scene_dict.update(_convert_points(prim, time, motion_interval))
     elif prim.IsA(UsdGeom.Camera):
       # A sensor bound to a shape is emitted as part of that shape.
-      if camera.get_target_shape_path(prim) is None:
-        mi_scene_dict[mi_id] = camera.usd_to_mitsuba(
-            UsdGeom.Camera(prim), time=time
-        )
+      if camera.get_target_shape_path(prim, time) is None:
+        sensor_dict = camera.usd_to_mitsuba(UsdGeom.Camera(prim), time=time)
+        if sensor_dict['type'] == 'irradiancemeter':
+          Tf.Warn(
+              f'Camera {prim.GetPath()} has mitsuba:sensor:type ='
+              " 'irradiancemeter' without mitsuba:sensor:shape; skipping."
+          )
+        else:
+          mi_scene_dict[mi_id] = sensor_dict
     elif prim.IsA(UsdLux.NonboundableLightBase) or prim.IsA(
         UsdLux.BoundableLightBase
     ):
       mi_scene_dict[mi_id] = light.convert_light(prim, time, motion_interval)
     elif prim.IsA(UsdGeom.Curves):
-      mi_scene_dict[mi_id] = _convert_curves(prim, time)
+      mi_scene_dict.update(_convert_curves(prim, time, sensor_bindings))
     elif prim.IsA(UsdVol.ParticleField3DGaussianSplat):
       mi_scene_dict.update(
           gaussian_splatting.convert_gaussian_splats(prim, time)

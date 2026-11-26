@@ -23,6 +23,7 @@ import mitsuba as mi
 import numpy as np
 from pxr import Gf
 from pxr import Sdf
+from pxr import Tf
 from pxr import Usd
 from pxr import UsdGeom
 from pxr import UsdLux
@@ -59,11 +60,12 @@ def _to_mitsuba_mesh(
   has_vertex_normals = 'normals' in primvars
   # Without (authored or computed) normals the mesh is flat shaded. Requesting
   # face normals keeps Mitsuba from deriving smooth shading normals of its own.
-  properties['face_normals'] = not has_vertex_normals
+  if 'face_normals' not in properties:
+    properties['face_normals'] = not has_vertex_normals
   texture_coordinates = np.array(primvars['st']) if 'st' in primvars else None
 
   normals = mi.TensorXf()
-  if has_vertex_normals:
+  if has_vertex_normals and not properties['face_normals']:
     normals = mi.TensorXf(np.array(primvars['normals'], dtype=np.float32))
   texcoords = mi.TensorXf()
   if texture_coordinates is not None:
@@ -81,6 +83,30 @@ def _to_mitsuba_mesh(
   )
   geom_lib.add_mesh_attributes(mi_mesh, sub, mesh_attributes)
   return mi_mesh
+
+
+def _set_plugin_properties(
+    properties: mi.Properties, overrides: dict[str, Any]
+) -> None:
+  """Applies scalar parameters and instantiated child plugins onto `properties`."""
+  for key, value in overrides.items():
+    if key == 'type':
+      continue
+    if not isinstance(value, dict):
+      properties[key] = value
+      continue
+    if not value.get('type'):
+      Tf.Warn(
+          f"Missing 'type' attribute for nested Mitsuba plugin '{key}';"
+          ' skipping.'
+      )
+      continue
+    loaded = mi.load_dict(value)
+    if isinstance(loaded, list):
+      for index, item in enumerate(loaded):
+        properties[f'{key}_{index}'] = item
+    else:
+      properties[key] = loaded
 
 
 def convert_mesh(
@@ -120,11 +146,24 @@ def convert_mesh(
       prim if material_id.isEmpty else stage.GetPrimAtPath(material_id)
       for material_id in mesh_data.material_ids
   ]
+  emitter_overrides = util.extract_nested_dict(prim, 'mitsuba:emitter:', time)
+  shape_overrides = util.extract_nested_dict(prim, 'mitsuba:shape:', time)
+  custom_id = shape_overrides.pop('id', None)
+
   # GeomSubsets share the sidedness of their mesh.
   double_sided = UsdGeom.Mesh(prim).GetDoubleSidedAttr().Get(time)
+  material_emitter_overrides = (
+      None
+      if custom_transform is not None or prim.HasAPI(UsdLux.MeshLightAPI)
+      else emitter_overrides
+  )
   materials = [
       material.convert_mesh_material(
-          subprim, double_sided, time, fallback_prim=prim
+          subprim,
+          double_sided,
+          time,
+          fallback_prim=prim,
+          emitter_overrides=material_emitter_overrides,
       )
       for subprim in subprims
   ]
@@ -134,15 +173,26 @@ def convert_mesh(
   # carrying them are not wrapped in an instance for motion blur below (they
   # render with their static transform at frame time, like area lights).
   sensor_prim = sensor_bindings.get(path)
+  has_shape_emitter = isinstance(shape_overrides.get('emitter'), dict) and bool(
+      shape_overrides['emitter'].get('type')
+  )
+  has_shape_sensor = isinstance(shape_overrides.get('sensor'), dict) and bool(
+      shape_overrides['sensor'].get('type')
+  )
   has_emitter_or_sensor = (
       prim.HasAPI(UsdLux.MeshLightAPI)
       or sensor_prim is not None
+      or bool(emitter_overrides.get('type'))
+      or has_shape_emitter
+      or has_shape_sensor
       or any(mat.emitter is not None for mat in materials)
   )
 
   motion_transform = None
   if custom_transform is not None:
     world_transform = custom_transform
+    shape_overrides.pop('emitter', None)
+    shape_overrides.pop('sensor', None)
   elif has_emitter_or_sensor:
     world_transform = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
   else:
@@ -154,6 +204,16 @@ def convert_mesh(
     else:
       world_transform = Gf.Matrix4d(1.0)
       motion_transform = motion.to_mitsuba_transform(samples)
+
+  geom_transform = world_transform
+  if isinstance(
+      extra_to_world := shape_overrides.pop('to_world', None),
+      mi.scalar_rgb.ScalarAffineTransform4f,
+  ):
+    extra_matrix = Gf.Matrix4d(
+        np.array(extra_to_world.matrix, dtype=np.float64).T.tolist()
+    )
+    geom_transform = extra_matrix * world_transform
 
   displacements = [
       (
@@ -170,11 +230,20 @@ def convert_mesh(
   sub_meshes = geom_lib.process_mesh(
       mesh_data,
       subdivision_level,
-      world_transform,
+      geom_transform,
       displacements,
       requested_attrs,
   )
 
+  if (
+      custom_transform is None
+      and (sensor_prim is not None or has_shape_sensor)
+      and len(sub_meshes) > 1
+  ):
+    Tf.Warn(
+        f'The surface sensor of {prim.GetPath()} only measures its first'
+        ' material subset.'
+    )
   materials_by_id = {
       material_id: (subprim, mat)
       for material_id, subprim, mat in zip(
@@ -182,12 +251,10 @@ def convert_mesh(
       )
   }
   converted_meshes = {}
-  for sub in sub_meshes:
+  for i, sub in enumerate(sub_meshes):
     subprim, mat = materials_by_id[sub.material_id]
     props = mi.Properties()
     props['visibility'] = util.get_ray_visibility(prim, time)
-    if mat.bsdf is not None:
-      props['bsdf'] = mat.bsdf
     if mat.interior_medium is not None:
       props['interior'] = mat.interior_medium
 
@@ -195,20 +262,39 @@ def convert_mesh(
       # MeshLightAPI takes precedence over material-driven emission. Each
       # sub-mesh needs its own emitter instance, and the world transform is
       # also the IES light frame of a mesh light.
-      mesh_light_emitter = light.convert_mesh_light(prim, time, world_transform)
+      mesh_light_emitter = light.convert_mesh_light(
+          prim, time, world_transform, emitter_overrides
+      )
       if mesh_light_emitter is not None:
         props['emitter'] = mesh_light_emitter
-        if mat.bsdf is None:
-          props['bsdf'] = mi.load_dict({'type': 'diffuse', 'reflectance': 0.0})
       elif mat.emitter is not None:
         props['emitter'] = mat.emitter
+      elif emitter_overrides.get('type'):
+        props['emitter'] = mi.load_dict(emitter_overrides)
 
-      if sensor_prim is not None:
+      if sensor_prim is not None and i == 0:
         props['sensor'] = mi.load_dict(
             camera.usd_to_mitsuba(UsdGeom.Camera(sensor_prim), time=time)
         )
 
-    converted_meshes[util.get_mitsuba_id(subprim)] = _to_mitsuba_mesh(
+    _set_plugin_properties(props, shape_overrides)
+    shape_overrides.pop('sensor', None)
+
+    if 'bsdf' not in props:
+      if mat.bsdf is not None:
+        props['bsdf'] = mat.bsdf
+      elif 'interior' in props or 'exterior' in props:
+        props['bsdf'] = mi.load_dict({'type': 'null'})
+      elif 'emitter' in props:
+        props['bsdf'] = mi.load_dict({'type': 'diffuse', 'reflectance': 0.0})
+
+    mesh_id = (
+        custom_id
+        if custom_transform is None and len(sub_meshes) == 1 and custom_id
+        else util.get_mitsuba_id(subprim)
+    )
+    props.set_id(mesh_id)
+    converted_meshes[mesh_id] = _to_mitsuba_mesh(
         sub, props, mat.mesh_attributes
     )
 

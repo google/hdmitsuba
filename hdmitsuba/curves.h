@@ -22,6 +22,8 @@
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
 
+#include "hdmitsuba/plugin_builder.h"
+
 PXR_NAMESPACE_OPEN_SCOPE
 
 class SceneManager;
@@ -46,6 +48,8 @@ class HdMitsubaCurves final : public HdBasisCurves {
 
   VtVec3fArray points_;
   VtFloatArray widths_;
+  PluginSpecNode shape_spec_;
+  PluginSpecNode mitsuba_emitter_spec_;
   bool in_scene_ = false;
 };
 

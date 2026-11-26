@@ -29,6 +29,7 @@
 #include <mitsuba/core/properties.h>
 #include <mitsuba/core/transform.h>
 #include <nanothread/nanothread.h>
+#include <pxr/base/gf/half.h>
 #include <pxr/base/gf/matrix3d.h>
 #include <pxr/base/gf/matrix3f.h>
 #include <pxr/base/gf/matrix4d.h>
@@ -37,10 +38,12 @@
 #include <pxr/base/tf/staticTokens.h>
 #include <pxr/base/tf/type.h>
 #include <pxr/base/vt/value.h>
+#include <pxr/imaging/hd/changeTracker.h>
 #include <pxr/imaging/hd/dataSource.h>
 #include <pxr/imaging/hd/renderIndex.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/imaging/hd/sceneIndex.h>
+#include <pxr/imaging/hd/types.h>
 #include <pxr/imaging/hd/visibilitySchema.h>
 #include <pxr/imaging/hd/xformSchema.h>
 #include <pxr/pxr.h>
@@ -51,6 +54,11 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 // Prefix used for Mitsuba mesh vertex attributes created from USD primvars.
 inline constexpr std::string_view kVertexAttributePrefix = "vertex_";
+
+// Custom Hydra rprim dirty bits for mesh lights and `mitsuba:*` attributes.
+inline constexpr HdDirtyBits kDirtyLight = HdChangeTracker::CustomBitsBegin;
+inline constexpr HdDirtyBits kDirtyMitsubaParams =
+    HdChangeTracker::CustomBitsBegin << 1;
 
 // Primvars that a material reads as mesh attributes, paired with the number of
 // channels read (1 or 3). A primvar read with both channel counts appears
@@ -63,7 +71,11 @@ using MeshAttributeRequests = std::set<std::pair<std::string, int>>;
 // capitalized to keep the raw values.
 std::string MeshAttributeName(std::string_view primvar, int channels);
 
-#define HDMITSUBA_UTILS_TOKENS ((visibility, "mitsuba:visibility"))
+// clang-format off
+#define HDMITSUBA_UTILS_TOKENS         \
+  ((mitsuba, "mitsuba"))               \
+  ((visibility, "mitsuba:visibility"))
+// clang-format on
 
 TF_DECLARE_PUBLIC_TOKENS(HdMitsubaUtilsTokens, HDMITSUBA_UTILS_TOKENS);
 
@@ -122,6 +134,13 @@ inline HdContainerDataSourceHandle GetPrimDataSource(
       scene_delegate->GetRenderIndex().GetTerminalSceneIndex();
   if (!TF_VERIFY(scene_index)) return nullptr;
   return scene_index->GetPrim(id).dataSource;
+}
+
+inline HdContainerDataSourceHandle GetMitsubaDataSource(
+    const HdContainerDataSourceHandle& prim_source) {
+  if (!prim_source) return nullptr;
+  return HdContainerDataSource::Cast(
+      prim_source->Get(HdMitsubaUtilsTokens->mitsuba));
 }
 
 inline bool GetPrimVisible(const HdContainerDataSourceHandle& prim_source,
@@ -191,13 +210,20 @@ inline std::optional<ScalarAffineTransform3f> ExtractTransform3f(
   return std::nullopt;
 }
 
-inline std::optional<ScalarAffineTransform4f> ExtractTransform4f(
-    const VtValue& val) {
+inline std::optional<GfMatrix4d> ExtractMatrix4d(const VtValue& val) {
   if (val.IsHolding<GfMatrix4f>()) {
-    return UsdToMitsubaTransform(GfMatrix4d(val.Get<GfMatrix4f>()));
+    return GfMatrix4d(val.Get<GfMatrix4f>());
   }
   if (val.IsHolding<GfMatrix4d>()) {
-    return UsdToMitsubaTransform(val.Get<GfMatrix4d>());
+    return val.Get<GfMatrix4d>();
+  }
+  return std::nullopt;
+}
+
+inline std::optional<ScalarAffineTransform4f> ExtractTransform4f(
+    const VtValue& val) {
+  if (std::optional<GfMatrix4d> m = ExtractMatrix4d(val)) {
+    return UsdToMitsubaTransform(*m);
   }
   return std::nullopt;
 }
@@ -214,6 +240,27 @@ inline std::string ExtractStringOrToken(const VtValue& value) {
     return value.UncheckedGet<TfToken>().GetString();
   }
   return ResolvePathFromValue(value);
+}
+
+inline std::optional<int64_t> ExtractInt64Value(const VtValue& value) {
+  if (value.IsHolding<bool>() || value.IsHolding<float>() ||
+      value.IsHolding<double>() || value.IsHolding<GfHalf>()) {
+    return std::nullopt;
+  }
+  VtValue casted = VtValue::Cast<int64_t>(value);
+  return casted.IsHolding<int64_t>()
+             ? std::optional<int64_t>(casted.UncheckedGet<int64_t>())
+             : std::nullopt;
+}
+
+inline std::optional<double> ExtractDoubleValue(const VtValue& value) {
+  if (value.IsHolding<bool>()) {
+    return std::nullopt;
+  }
+  VtValue casted = VtValue::Cast<double>(value);
+  return casted.IsHolding<double>()
+             ? std::optional<double>(casted.UncheckedGet<double>())
+             : std::nullopt;
 }
 
 // Creates the Mitsuba object of type `type` described by `props`, and returns

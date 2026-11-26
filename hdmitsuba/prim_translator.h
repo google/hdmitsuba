@@ -89,6 +89,9 @@ mitsuba::ref<mitsuba::Object> CreateMaterialEmitter(mitsuba::Properties props,
                                                     bool double_sided,
                                                     std::string_view variant);
 
+// Removes any child `ReconstructionFilter` plugin entries from `film_spec`.
+void StripReconstructionFilters(PluginSpecNode* film_spec);
+
 MI_VARIANT
 class PrimTranslator {
  public:
@@ -122,23 +125,41 @@ class PrimTranslator {
 
   static TranslatedLight BuildLight(const LightSpec& spec);
 
-  // Creates the `area` emitter of `spec`, wrapped in an `ies` emitter if `spec`
-  // has an IES profile.
-  static mitsuba::ref<mitsuba::Object> CreateAreaEmitter(const LightSpec& spec);
+  // Creates the `area` emitter of `spec` (with optional `emitter_override`),
+  // wrapped in an `ies` emitter if `spec` has active shaping.
+  static mitsuba::ref<mitsuba::Object> CreateAreaEmitter(
+      const LightSpec& spec, const PluginSpecNode& emitter_override = {});
 
   // Updates the radiance and IES light frame of an emitter created by
-  // `CreateAreaEmitter`.
+  // `CreateAreaEmitter`, skipping properties explicitly authored in
+  // `emitter_override` (or `spec.emitter_spec`).
   static void UpdateAreaEmitterInPlace(
-      mitsuba::Emitter<Float, Spectrum>* emitter, const LightSpec& spec);
+      mitsuba::Emitter<Float, Spectrum>* emitter, const LightSpec& spec,
+      const PluginSpecNode& emitter_override = {});
 
-  static void UpdateLightInPlace(mitsuba::Object* light_obj,
+  // Updates `light_obj` in place for standard USD light transform and emission
+  // changes, skipping properties explicitly authored in `spec`. Returns false
+  // if the light must be rebuilt instead.
+  static bool UpdateLightInPlace(mitsuba::Object* light_obj,
                                  const LightSpec& spec);
 
-  static mitsuba::ref<mitsuba::Sensor<Float, Spectrum>> BuildSensor(
-      const CameraSpec& spec, bool is_interactive = false,
-      const PluginSpecNode& sampler_spec = {});
+  struct TranslatedSensor {
+    mitsuba::ref<mitsuba::Sensor<Float, Spectrum>> sensor = nullptr;
+    bool has_camera_sampler = false;
+  };
 
-  static void UpdateSensorInPlace(mitsuba::Object* sensor_obj,
+  static TranslatedSensor BuildSensor(const CameraSpec& spec,
+                                      bool use_box_filter = false,
+                                      const PluginSpecNode& sampler_spec = {},
+                                      bool force_independent_sampler = false);
+
+  static void UpdateSensorAspectRatio(mitsuba::Sensor<Float, Spectrum>* sensor,
+                                      const CameraSpec& spec, double aspect);
+
+  // Updates `sensor` in place for standard USD camera transform and intrinsic
+  // parameter changes, skipping properties explicitly authored in
+  // `spec.sensor_spec`. Returns false if `sensor` must be rebuilt instead.
+  static bool UpdateSensorInPlace(mitsuba::Sensor<Float, Spectrum>* sensor,
                                   const CameraSpec& spec);
 
   // Builds a mesh from expanded per-vertex `primvars`. The primvars listed in
@@ -149,8 +170,8 @@ class PrimTranslator {
       const VertexPrimvarMap& primvars,
       const MeshAttributeRequests& mesh_attributes, mitsuba::Object* bsdf,
       mitsuba::Object* emitter_ptr, mitsuba::Object* sensor_ptr,
-      const std::string& visibility,
-      mitsuba::Object* interior_medium = nullptr);
+      const std::string& visibility, mitsuba::Object* interior_medium = nullptr,
+      const PluginSpecNode& shape_spec = {});
 
   static void UpdateMeshInPlace(mitsuba::Object* mesh_obj,
                                 const VtIntArray& face_indices,
@@ -166,7 +187,10 @@ class PrimTranslator {
       const MeshAttributeRequests& mesh_attributes);
 
   static mitsuba::ref<mitsuba::Shape<Float, Spectrum>> BuildCurves(
-      const CurveSpec& spec, mitsuba::Object* bsdf);
+      const CurveSpec& spec, mitsuba::Object* bsdf,
+      mitsuba::Object* emitter_ptr = nullptr,
+      mitsuba::Object* sensor_ptr = nullptr,
+      mitsuba::Object* interior_medium = nullptr);
 
   static mitsuba::ref<mitsuba::Shape<Float, Spectrum>> BuildParticleField(
       const ParticleFieldSpec& spec);

@@ -28,6 +28,7 @@
 
 #include "hdmitsuba/debug_codes.h"
 #include "hdmitsuba/instancer.h"
+#include "hdmitsuba/light.h"
 #include "hdmitsuba/motion.h"
 #include "hdmitsuba/render_param.h"
 #include "hdmitsuba/scene_manager.h"
@@ -41,6 +42,27 @@ namespace {
 float GetValue(const HdDoubleDataSourceHandle& source, float default_value) {
   return source ? static_cast<float>(source->GetTypedValue(0.0f))
                 : default_value;
+}
+
+// Matches `HdsiImplicitSurfaceSceneIndex`'s `axisToTransform` adjustment matrix
+// so object-space `mitsuba:shape:to_world` overrides compose after the spine
+// axis alignment rather than in canonical Z-axis space.
+GfMatrix4d CylinderAxisMatrix(const HdCylinderSchema& cylinder) {
+  const TfToken axis =
+      cylinder.GetAxis() ? cylinder.GetAxis()->GetTypedValue(0.0f) : TfToken();
+  if (axis == HdCylinderSchemaTokens->X) {
+    return GfMatrix4d(0.0, 1.0, 0.0, 0.0,  //
+                      0.0, 0.0, 1.0, 0.0,  //
+                      1.0, 0.0, 0.0, 0.0,  //
+                      0.0, 0.0, 0.0, 1.0);
+  }
+  if (axis == HdCylinderSchemaTokens->Y) {
+    return GfMatrix4d(0.0, 0.0, 1.0, 0.0,  //
+                      1.0, 0.0, 0.0, 0.0,  //
+                      0.0, 1.0, 0.0, 0.0,  //
+                      0.0, 0.0, 0.0, 1.0);
+  }
+  return GfMatrix4d(1.0);
 }
 
 }  // namespace
@@ -99,12 +121,14 @@ void HdMitsubaImplicitSurface::Sync(HdSceneDelegate* sceneDelegate,
       GetPrimDataSource(sceneDelegate, id);
   ImplicitSurface surface;
   surface.type = type_;
+  GfMatrix4d axis_matrix(1.0);
   if (type_ == HdPrimTypeTokens->sphere) {
     surface.radius =
         GetValue(HdSphereSchema::GetFromParent(prim_source).GetRadius(), 1.0f);
   } else if (type_ == HdPrimTypeTokens->cylinder) {
     const HdCylinderSchema cylinder =
         HdCylinderSchema::GetFromParent(prim_source);
+    axis_matrix = CylinderAxisMatrix(cylinder);
     surface.height = GetValue(cylinder.GetHeight(), 2.0f);
     // UsdGeomCylinder's `radius` is deprecated in favor of the radii of
     // UsdGeomCylinder_1, which UsdImaging also populates for the former.
@@ -157,12 +181,38 @@ void HdMitsubaImplicitSurface::Sync(HdSceneDelegate* sceneDelegate,
   spec.geometry.material_ids = {sceneDelegate->GetMaterialId(id)};
   spec.double_sided = sceneDelegate->GetDoubleSided(id);
   spec.visibility = GetShapeVisibility(prim_source);
+  spec.emitter_spec =
+      GetMeshEmitterSpec(prim_source, id, axis_matrix.GetTranspose());
+  GfMatrix4d local_extra(1.0);
+  if (type_ != HdPrimTypeTokens->points) {
+    if ((!in_scene_ || (*dirtyBits & kDirtyMitsubaParams) != 0) &&
+        SyncPrimPluginSpecs(prim_source,
+                            static_cast<HdMitsubaRenderParam*>(renderParam),
+                            &shape_spec_, &mitsuba_emitter_spec_)) {
+      spec.needs_rebuild = true;
+    }
+    if ((*dirtyBits & (HdChangeTracker::DirtyTransform |
+                       HdChangeTracker::DirtyPrimvar)) != 0 &&
+        HasShapeGeometryOverride(shape_spec_)) {
+      spec.needs_rebuild = true;
+    }
+    spec.shape_spec = shape_spec_;
+    spec.mitsuba_emitter_spec = mitsuba_emitter_spec_;
+    if (auto xform_it = spec.shape_spec.params.find("to_world");
+        xform_it != spec.shape_spec.params.end()) {
+      if (const auto extra = ExtractMatrix4d(xform_it->second)) {
+        local_extra = axis_matrix * (*extra) * axis_matrix.GetTranspose();
+      }
+      spec.shape_spec.params.erase(xform_it);
+    }
+  }
   for (const HdPrimvarDescriptor& descriptor :
        GetPrimvarDescriptors(sceneDelegate, HdInterpolationConstant)) {
     spec.geometry.primvars[descriptor.name] = {
         GetPrimvar(sceneDelegate, descriptor.name), HdInterpolationConstant};
   }
 
+  const GfMatrix4d prim_transform = GetPrimTransform(prim_source);
   const SdfPath& instancer_id = GetInstancerId();
   if (!instancer_id.IsEmpty()) {
     // Build the prototype in object space, and fold its transform into the
@@ -171,7 +221,7 @@ void HdMitsubaImplicitSurface::Sync(HdSceneDelegate* sceneDelegate,
     auto* instancer = static_cast<HdMitsubaInstancer*>(
         sceneDelegate->GetRenderIndex().GetInstancer(instancer_id));
     const ScalarAffineTransform4f prototype_transform =
-        UsdToMitsubaTransform(sceneDelegate->GetTransform(id));
+        UsdToMitsubaTransform(local_extra * prim_transform);
     for (const MotionTransform& transform :
          instancer->ComputeInstanceTransforms(id)) {
       spec.instance_transforms.push_back(
@@ -188,8 +238,10 @@ void HdMitsubaImplicitSurface::Sync(HdSceneDelegate* sceneDelegate,
     MotionTransform transform =
         SampleTransform(prim_source, GetMotionInterval(sceneDelegate),
                         /*uniform=*/true)
-            .Map([](const GfMatrix4d& m) { return UsdToMitsubaTransform(m); });
-    spec.transform = sceneDelegate->GetTransform(id);
+            .Map([&](const GfMatrix4d& m) {
+              return UsdToMitsubaTransform(local_extra * m);
+            });
+    spec.transform = local_extra * prim_transform;
     // Animated transforms, as well as transforms that the native shape does
     // not support, require wrapping the shape in a Mitsuba instance.
     if (transform.IsAnimated() ||
@@ -200,7 +252,7 @@ void HdMitsubaImplicitSurface::Sync(HdSceneDelegate* sceneDelegate,
   }
   spec.dirty_bits = *dirtyBits;
   // The `ellipsoids` shape of points bakes their geometry and transform.
-  spec.needs_rebuild =
+  spec.needs_rebuild |=
       type_ == HdPrimTypeTokens->points &&
       (*dirtyBits &
        (HdChangeTracker::DirtyPoints | HdChangeTracker::DirtyWidths |
@@ -218,6 +270,8 @@ void HdMitsubaImplicitSurface::Finalize(HdRenderParam* renderParam) {
 void HdMitsubaImplicitSurface::RemoveFromScene(SceneManager* scene) {
   if (std::exchange(in_scene_, false)) {
     scene->RemoveShape(GetId());
+    shape_spec_ = {};
+    mitsuba_emitter_spec_ = {};
   }
 }
 

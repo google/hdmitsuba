@@ -142,22 +142,28 @@ def convert_point_instancer(
           group_dict[f'shape_{shape_idx}'] = mesh_obj
           shape_idx += 1
       elif parts := util.get_implicit_surface_parts(child_prim, time):
+        shape_overrides = util.extract_nested_dict(
+            child_prim, 'mitsuba:shape:', time
+        )
+        for key in ('id', 'emitter', 'sensor'):
+          shape_overrides.pop(key, None)
+        extra_to_world = shape_overrides.pop('to_world', None)
         child_to_prototype = util.to_mitsuba_transform(
             UsdGeom.Xformable(child_prim).ComputeLocalToWorldTransform(time)
             * proto_to_local_transform
         )
+        if extra_to_world is not None:
+          child_to_prototype = child_to_prototype @ extra_to_world
         # Like mesh prototypes, these carry no emitter, which Mitsuba does not
         # support on instances.
         bsdf, _, _, interior_medium = material.convert_material(
             child_prim, time=time
         )
+        util.apply_implicit_surface_overrides(
+            child_prim, parts, time, shape_overrides, bsdf, interior_medium
+        )
         for part in parts.values():
           part['to_world'] = child_to_prototype @ part['to_world']
-          part['visibility'] = util.get_ray_visibility(child_prim, time)
-          if bsdf is not None:
-            part['bsdf'] = bsdf
-          if interior_medium is not None:
-            part['interior'] = interior_medium
           group_dict[f'shape_{shape_idx}'] = part
           shape_idx += 1
       elif child_prim.IsA(UsdGeom.Points):
