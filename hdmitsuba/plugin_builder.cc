@@ -14,6 +14,7 @@
 
 #include "hdmitsuba/plugin_builder.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -334,7 +335,19 @@ void MergePluginProperties(mitsuba::Properties& props,
                                 /*invert_float=*/false,
                                 /*raise_if_exists=*/false);
   }
-  for (const auto& [child_name, child_spec] : spec.children) {
+  // Sort child keys so positional Mitsuba plugins (e.g. blendbsdf, blendphase)
+  // match usd_mitsuba order.
+  std::vector<const decltype(spec.children)::value_type*> ordered_children;
+  ordered_children.reserve(spec.children.size());
+  for (const auto& entry : spec.children) {
+    ordered_children.push_back(&entry);
+  }
+  std::sort(ordered_children.begin(), ordered_children.end(),
+            [](const auto* left, const auto* right) {
+              return left->first < right->first;
+            });
+  for (const auto* entry : ordered_children) {
+    const auto& [child_name, child_spec] = *entry;
     if (child_spec.Empty()) {
       continue;
     }

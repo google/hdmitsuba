@@ -14,9 +14,13 @@
 
 #include "hdmitsuba/mesh.h"
 
+#include <string>
+#include <vector>
+
 #include <gtest/gtest.h>
 #include <mitsuba/core/fwd.h>
 #include <mitsuba/core/object.h>
+#include <mitsuba/core/properties.h>
 #include <mitsuba/render/fwd.h>
 #include <mitsuba/render/scene.h>
 #include <pxr/base/gf/vec3f.h>
@@ -38,6 +42,7 @@
 #include <pxr/usd/usdShade/tokens.h>
 #include <pxr/usdImaging/usdImaging/delegate.h>
 
+#include "hdmitsuba/plugin_builder.h"
 #include "hdmitsuba/tests/test_util.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -90,6 +95,24 @@ TEST(HdMitsubaMeshTest, GeomSubsetsSkipUnusedBaseMaterialSlot) {
   scene_delegate.reset();
   render_index.reset();
   render_delegate.reset();
+}
+
+TEST(PluginBuilderTest, MergePluginPropertiesSortsChildrenDeterministically) {
+  PluginSpecNode spec("blendbsdf");
+  for (const char* key :
+       {"bsdf_5", "bsdf_2", "bsdf_4", "bsdf_0", "bsdf_3", "bsdf_1"}) {
+    spec.children.emplace(key, PluginSpecNode("diffuse"));
+  }
+  mitsuba::Properties props("blendbsdf");
+  MergePluginProperties(props, spec, "scalar_rgb");
+
+  std::vector<std::string> child_names;
+  for (const auto& prop : props.objects()) {
+    child_names.emplace_back(prop.name());
+  }
+  EXPECT_EQ(child_names,
+            (std::vector<std::string>{"bsdf_0", "bsdf_1", "bsdf_2", "bsdf_3",
+                                      "bsdf_4", "bsdf_5"}));
 }
 
 }  // namespace
