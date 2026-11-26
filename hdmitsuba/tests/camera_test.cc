@@ -14,12 +14,17 @@
 
 #include "hdmitsuba/camera.h"
 
+#include <array>
+#include <cstddef>
+#include <vector>
+
 #include <drjit/matrix.h>
 #include <gtest/gtest.h>
 #include <mitsuba/core/fwd.h>
 #include <mitsuba/core/spectrum.h>
 #include <mitsuba/core/vector.h>
 #include <mitsuba/render/scene.h>
+#include <pxr/base/gf/vec3i.h>
 #include <pxr/imaging/hd/camera.h>
 #include <pxr/imaging/hd/changeTracker.h>
 #include <pxr/imaging/hd/types.h>
@@ -31,6 +36,8 @@
 #include <pxr/usd/usdGeom/tokens.h>
 #include <pxr/usdImaging/usdImaging/delegate.h>
 
+#include "hdmitsuba/framebuffer.h"
+#include "hdmitsuba/render_buffer.h"
 #include "hdmitsuba/scene_manager.h"
 #include "hdmitsuba/tests/test_util.h"
 #include "hdmitsuba/traversal.h"
@@ -112,6 +119,43 @@ TEST(HdMitsubaCameraTest, Sync) {
   scene_delegate.reset();
   render_index.reset();
   render_delegate.reset();
+}
+
+struct ShapeOnlyTensor {
+  std::array<size_t, 3> dims;
+  const std::array<size_t, 3>& shape() const { return dims; }
+};
+
+TEST(FramebufferCopyTest, BroadcastsLuminanceAndLuminanceAlphaToColor) {
+  // 1x2 source buffers (height=2, width=1) also verify vertical flip.
+  const float y_src[] = {0.25f, 0.75f};
+  const float ya_src[] = {0.2f, 0.4f, 0.8f, 0.6f};
+  const ShapeOnlyTensor y_tensor{{2, 1, 1}};
+  const ShapeOnlyTensor ya_tensor{{2, 1, 2}};
+
+  auto copy_and_read = [](const float* src, const ShapeOnlyTensor& tensor,
+                          int channels, HdFormat format) {
+    HdMitsubaRenderBuffer buffer(SdfPath("/color"));
+    EXPECT_TRUE(
+        buffer.Allocate(GfVec3i(1, 2, 1), format, /*multiSampled=*/false));
+    CopyFromHostToRenderBuffer(&buffer, src, tensor, /*src_offset=*/0, channels,
+                               /*is_int=*/false);
+    const auto* mapped = static_cast<const float*>(buffer.Map());
+    std::vector<float> out(mapped, mapped + 2 * HdGetComponentCount(format));
+    buffer.Unmap();
+    return out;
+  };
+
+  EXPECT_EQ(copy_and_read(y_src, y_tensor, 1, HdFormatFloat32Vec3),
+            (std::vector<float>{0.75f, 0.75f, 0.75f, 0.25f, 0.25f, 0.25f}));
+  EXPECT_EQ(copy_and_read(y_src, y_tensor, 1, HdFormatFloat32Vec4),
+            (std::vector<float>{0.75f, 0.75f, 0.75f, 1.0f, 0.25f, 0.25f, 0.25f,
+                                1.0f}));
+  EXPECT_EQ(copy_and_read(ya_src, ya_tensor, 2, HdFormatFloat32Vec3),
+            (std::vector<float>{0.8f, 0.8f, 0.8f, 0.2f, 0.2f, 0.2f}));
+  EXPECT_EQ(
+      copy_and_read(ya_src, ya_tensor, 2, HdFormatFloat32Vec4),
+      (std::vector<float>{0.8f, 0.8f, 0.8f, 0.6f, 0.2f, 0.2f, 0.2f, 0.4f}));
 }
 
 }  // namespace
