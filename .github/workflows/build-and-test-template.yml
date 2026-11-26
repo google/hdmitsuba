@@ -55,16 +55,14 @@ jobs:
 
     - name: Install Conda Dependencies
       env:
-        # hdmitsuba targets the OpenUSD 26.x scene-index pipeline; keep this in
-        # sync with HDMITSUBA_MIN_PXR_VERSION in CMakeLists.txt.
-        OPENUSD_SPEC: "openusd>=26.05,<27"
+        # hdmitsuba targets the OpenUSD 26.x scene-index pipeline; keep the
+        # lower bound in sync with HDMITSUBA_MIN_PXR_VERSION in CMakeLists.txt.
+        # Pin <26.08 on all platforms to avoid conda-forge openusd 26.08 build 2,
+        # where binary prefix replacement pads `PXR_MATERIALX_STDLIB_DIR` with
+        # embedded NULs and triggers infinite recursion in `Tf_WalkDirsRec`
+        # during `SdrRegistry` discovery.
+        OPENUSD_SPEC: "openusd>=26.05,<26.08"
       run: |
-        # Work around conda-forge openusd 26.08 Linux build where binary prefix
-        # replacement pads `PXR_MATERIALX_STDLIB_DIR` with embedded NULs, causing
-        # infinite recursion in `Tf_WalkDirsRec` during `SdrRegistry` discovery.
-        if [ "$RUNNER_OS" = "Linux" ]; then
-          OPENUSD_SPEC="openusd>=26.05,<26.08"
-        fi
         # Note: conda-forge publishes `libmaterialx` for linux-64 and win-64,
         # but not yet for osx-arm64 (built and cached below on macOS).
         EXTRA_PKGS=()
