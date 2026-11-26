@@ -333,6 +333,11 @@ MtlxEvaluator<Float, Spectrum>::eval_code(absl::Span<const Inst> code,
   Val* stack_base = mem.data() + local_tmps;
   Val* sp = stack_base;
   std::optional<SurfaceInteraction3f> si_uv;
+  struct CachedAttr {
+    Mask has;
+    Val val;
+  };
+  absl::InlinedVector<std::optional<CachedAttr>, 4> attr_cache;
 
   auto pop = [&](int n) {
     sp -= n;
@@ -380,15 +385,24 @@ MtlxEvaluator<Float, Spectrum>::eval_code(absl::Span<const Inst> code,
         if constexpr (!dr::is_jit_v<Float>) {
           if (!active || !si.shape) break;
         }
-        const std::string& attr = m_prog.attr_names[imm];
-        Mask has = si.shape->has_attribute(attr, active) & active;
-        if (dr::none_or<false>(has)) break;
+        if (attr_cache.empty()) attr_cache.resize(m_prog.attr_names.size());
+        std::optional<CachedAttr>& cached = attr_cache[imm];
+        if (!cached) {
+          const std::string& attr = m_prog.attr_names[imm];
+          Mask has = si.shape->has_attribute(attr, active) & active;
+          Val val =
+              dr::none_or<false>(has)
+                  ? Val(0.0f)
+                  : (inst.channels == 1
+                         ? Val(si.shape->eval_attribute_1(attr, si, has))
+                         : val3(si.shape->eval_attribute_3(attr, si, has)));
+          cached.emplace(CachedAttr{has, val});
+        }
+        if (dr::none_or<false>(cached->has)) break;
         // A fourth channel is that of the default.
         sp[-1] = dr::select(
-            has,
-            inst.channels == 1
-                ? Val(si.shape->eval_attribute_1(attr, si, has))
-                : val3(si.shape->eval_attribute_3(attr, si, has), sp[-1].w()),
+            cached->has,
+            inst.channels == 1 ? cached->val : val3(cached->val, sp[-1].w()),
             sp[-1]);
         break;
       }
