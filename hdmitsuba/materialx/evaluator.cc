@@ -168,13 +168,10 @@ class MtlxExprTexture final : public Texture<Float, Spectrum> {
       return eval_3(si, active);
     } else {
       Color3f c = eval_3(si, active);
-      const MtlxProgram& prog = m_eval.program();
-      if (prog.result_uniform) {
-        return UnpolarizedSpectrum(prog.unbounded
-                                       ? dr::maximum(c.x(), 0.0f)
-                                       : dr::clip(c.x(), 0.0f, 1.0f));
+      if (m_eval.program().result_uniform) {
+        return UnpolarizedSpectrum(dr::maximum(c.x(), 0.0f));
       }
-      return m_eval.upsample_rgb(c, si.wavelengths, prog.unbounded);
+      return m_eval.upsample_rgb(c, si.wavelengths, /*unbounded=*/true);
     }
   }
 
@@ -372,19 +369,13 @@ typename MtlxEvaluator<Float, Spectrum>::Val
 MtlxEvaluator<Float, Spectrum>::eval(const SurfaceInteraction3f& si,
                                      Mask active, Val* out_tmps,
                                      int stop_after_tmp) const {
-  bool run_full = stop_after_tmp >= 0 &&
-                  (out_tmps || stop_after_tmp != m_prog.opacity_slot);
   if constexpr (dr::is_diff_v<Float>) {
     for (const Float& p : m_opaques) {
       if (dr::grad_enabled(p)) {
-        run_full = true;
-        break;
+        return eval_code(m_prog.code, m_prog.tmp_channels, m_prog.stack_size,
+                         si, active, out_tmps, stop_after_tmp);
       }
     }
-  }
-  if (run_full) {
-    return eval_code(m_prog.code, m_prog.tmp_channels, m_prog.stack_size, si,
-                     active, out_tmps, stop_after_tmp);
   }
   if (!out_tmps && stop_after_tmp >= 0 &&
       m_prog.main_part.tmp_kind[stop_after_tmp] != TmpKind::Varying) {
