@@ -166,7 +166,8 @@ class PrimTranslator {
       const MeshAttributeRequests& mesh_attributes);
 
   static mitsuba::ref<mitsuba::Shape<Float, Spectrum>> BuildCurves(
-      const CurveSpec& spec, mitsuba::Object* bsdf);
+      const CurveSpec& spec, mitsuba::Object* bsdf,
+      mitsuba::Object* sensor_ptr = nullptr);
 
   static mitsuba::ref<mitsuba::Shape<Float, Spectrum>> BuildParticleField(
       const ParticleFieldSpec& spec);

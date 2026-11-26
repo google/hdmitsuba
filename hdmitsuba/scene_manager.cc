@@ -996,6 +996,9 @@ class SceneModel final : public SceneManager {
         }
       } else if constexpr (std::is_same_v<SpecType, CurveSpec>) {
         apply_material_dirty(spec.material_id, spec, needs_bsdf_update);
+        if (sensor_binding_dirty_.contains(spec.id)) {
+          spec.needs_rebuild = true;
+        }
       }
       bool has_in_place_update = false;
       if constexpr (std::is_same_v<SpecType, ParticleFieldSpec>) {
@@ -1139,16 +1142,28 @@ class SceneModel final : public SceneManager {
     return rebuild;
   }
 
+  mitsuba::ref<Sensor> ResolveShapeSensor(const SdfPath& shape_id) {
+    auto sens_it = shape_sensors_.find(shape_id);
+    if (sens_it == shape_sensors_.end()) {
+      return nullptr;
+    }
+    const PluginSpecNode effective_sampler =
+        progressive_rendering_ ? PluginSpecNode("independent") : sampler_spec_;
+    return PrimTranslator::BuildSensor(camera_specs_.at(sens_it->second),
+                                       progressive_rendering_ || denoise_,
+                                       effective_sampler);
+  }
+
   struct EmitterSensorPair {
     mitsuba::ref<Object> mesh_emitter = nullptr;
     Object* emitter_ptr = nullptr;
-    mitsuba::ref<Object> mesh_sensor = nullptr;
+    mitsuba::ref<Sensor> mesh_sensor = nullptr;
     Object* sensor_ptr = nullptr;
   };
 
   EmitterSensorPair ResolveEmitterAndSensor(
       const std::optional<LightSpec>& emitter_spec, const SdfPath& material_id,
-      const SdfPath& shape_id, bool double_sided) {
+      const SdfPath& shape_id, bool double_sided, bool attach_sensor = true) {
     EmitterSensorPair pair;
     if (emitter_spec.has_value()) {
       pair.mesh_emitter = PrimTranslator::CreateAreaEmitter(*emitter_spec);
@@ -1165,14 +1180,8 @@ class SceneModel final : public SceneManager {
     }
     // A Mitsuba sensor can only be attached to one shape, so like the area
     // emitter above, every (re)built mesh gets a fresh one.
-    auto sens_it = shape_sensors_.find(shape_id);
-    if (sens_it != shape_sensors_.end()) {
-      const PluginSpecNode effective_sampler =
-          progressive_rendering_ ? PluginSpecNode("independent")
-                                 : sampler_spec_;
-      pair.mesh_sensor = PrimTranslator::BuildSensor(
-          camera_specs_.at(sens_it->second), progressive_rendering_ || denoise_,
-          effective_sampler);
+    if (attach_sensor) {
+      pair.mesh_sensor = ResolveShapeSensor(shape_id);
       pair.sensor_ptr = pair.mesh_sensor.get();
     }
     return pair;
@@ -1313,11 +1322,11 @@ class SceneModel final : public SceneManager {
       if (interior_medium) props.set("interior", interior_medium);
       if (bsdf) props.set("bsdf", bsdf.get());
       // Every part needs an emitter of its own, whereas the sensor can only be
-      // attached to the first one (the empty path matches no sensor).
+      // attached to the first one.
       if (!is_prototype) {
         auto env = ResolveEmitterAndSensor(spec.emitter_spec, material_id,
-                                           i == 0 ? spec.id : SdfPath(),
-                                           spec.double_sided);
+                                           spec.id, spec.double_sided,
+                                           /*attach_sensor=*/i == 0);
         if (env.emitter_ptr) props.set("emitter", env.emitter_ptr);
         if (env.sensor_ptr) props.set("sensor", env.sensor_ptr);
       }
@@ -1375,12 +1384,21 @@ class SceneModel final : public SceneManager {
     }
     if (spec.needs_rebuild) {
       auto sub_meshes = ProcessGeometry(*work);
+      const bool is_prototype = !key_prefix.empty();
+      if (!is_prototype && sub_meshes.size() > 1 &&
+          shape_sensors_.contains(spec.id)) {
+        TF_WARN(
+            "The surface sensor of %s only measures its first material subset.",
+            spec.id.GetText());
+      }
       res.meshes.reserve(sub_meshes.size());
-      for (const auto& sub_mesh : sub_meshes) {
+      for (size_t i = 0; i < sub_meshes.size(); ++i) {
+        const auto& sub_mesh = sub_meshes[i];
         EmitterSensorPair env;
-        if (key_prefix.empty()) {
+        if (!is_prototype) {
           env = ResolveEmitterAndSensor(spec.emitter_spec, sub_mesh.material_id,
-                                        spec.id, spec.double_sided);
+                                        spec.id, spec.double_sided,
+                                        /*attach_sensor=*/i == 0);
         }
         ref<BSDF> bsdf = ResolveBsdf(sub_mesh.material_id, sub_mesh.primvars,
                                      env.emitter_ptr != nullptr);
@@ -1588,7 +1606,9 @@ class SceneModel final : public SceneManager {
               bsdf_it != bsdfs_.end() ? bsdf_it->second : DefaultBsdf();
 
           if (spec->needs_rebuild) {
-            res = PrimTranslator::BuildCurves(*spec, bsdf.get());
+            mitsuba::ref<Sensor> curve_sensor = ResolveShapeSensor(spec->id);
+            res = PrimTranslator::BuildCurves(*spec, bsdf.get(),
+                                              curve_sensor.get());
           } else {
             auto it = shapes_.find(spec->id.GetAsString());
             if (!TF_VERIFY(it != shapes_.end(), "Curve not found: %s",

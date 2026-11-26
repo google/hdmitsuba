@@ -238,15 +238,42 @@ def test_camera_update_focal_length():
   assert image2.shape[2] == 3
 
 
-def test_irradiancemeter_render():
-  stage = Usd.Stage.Open(
-      f'{test_helpers.TEST_ASSETS_PATH}/shapes/irradiancemeter.usda'
+def _sublayer_shape_scene(scene_name: str) -> Usd.Stage:
+  stage = Usd.Stage.CreateInMemory()
+  stage.GetRootLayer().subLayerPaths.append(
+      f'{test_helpers.TEST_ASSETS_PATH}/shapes/{scene_name}.usda'
   )
-  test_helpers.create_render_settings(stage, resolution=(128, 128))
+  return stage
 
-  test_helpers.assert_hydra_equal_to_offline(
-      stage, '/root/Camera/Camera', 'test_irradiancemeter_render', atol=0.05
+
+@pytest.mark.parametrize(
+    ('scene_name', 'camera_path', 'expected_irradiance'),
+    [
+        ('irradiancemeter', '/root/Camera/Camera', None),
+        ('irradiancemeter_subsets', '/root/Camera/Camera', 0.5 * np.pi),
+        ('irradiancemeter_subsets', '/root/PlaneMeter', 0.5 * np.pi),
+    ],
+)
+def test_irradiancemeter_render(
+    scene_name: str, camera_path: str, expected_irradiance: float | None
+):
+  stage = _sublayer_shape_scene(scene_name)
+  target_camera = Sdf.Path(camera_path)
+  for prim in stage.Traverse():
+    if prim.IsA(UsdGeom.Camera) and prim.GetPath() != target_camera:
+      prim.SetActive(False)
+  test_helpers.create_render_settings(stage, resolution=(64, 64))
+
+  image_hd, _ = test_helpers.assert_hydra_equal_to_offline(
+      stage,
+      camera_path,
+      f'test_{scene_name}_{target_camera.name}_render',
+      atol=0.05,
   )
+  if expected_irradiance is not None:
+    np.testing.assert_allclose(
+        image_hd[..., :3], expected_irradiance, atol=0.02
+    )
 
 
 def test_irradiancemeter_rebind():

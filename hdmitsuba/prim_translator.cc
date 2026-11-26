@@ -1572,7 +1572,8 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::AttachMeshAttributes(
 
 MI_VARIANT mitsuba::ref<mitsuba::Shape<Float, Spectrum>>
 PrimTranslator<Float, Spectrum>::BuildCurves(const CurveSpec& spec,
-                                             mitsuba::Object* bsdf) {
+                                             mitsuba::Object* bsdf,
+                                             mitsuba::Object* sensor_ptr) {
   static const absl::NoDestructor<std::string> kCurveResourcePath([]() {
     if (auto plugin =
             PlugRegistry::GetInstance().GetPluginWithName("hdMitsuba")) {
@@ -1590,6 +1591,9 @@ PrimTranslator<Float, Spectrum>::BuildCurves(const CurveSpec& spec,
   }
   if (bsdf != nullptr) {
     props.set("bsdf", bsdf);
+  }
+  if (sensor_ptr != nullptr) {
+    props.set("sensor", sensor_ptr);
   }
   props.set("visibility", spec.visibility);
 
