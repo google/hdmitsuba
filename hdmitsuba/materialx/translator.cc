@@ -40,7 +40,6 @@
 #include <absl/strings/strip.h>
 #include <absl/synchronization/mutex.h>
 #include <mitsuba/core/config.h>
-#include <mitsuba/core/logger.h>
 #include <mitsuba/core/properties.h>
 #include <mitsuba/core/spectrum.h>
 #include <pxr/base/gf/matrix3d.h>

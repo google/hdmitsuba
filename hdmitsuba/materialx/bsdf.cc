@@ -108,13 +108,11 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
           case ClosureOp::OrenNayarDiffuse:
           case ClosureOp::BurleyDiffuse:
           case ClosureOp::Sheen:
+          case ClosureOp::Translucent:
             leaf.spec[0] = add_spec(c.diffuse.color);
             if (c.op == ClosureOp::Sheen && c.diffuse.mode == kSheenZeltner) {
               surf_flags |= +BSDFFlags::NonSymmetric;
             }
-            break;
-          case ClosureOp::Translucent:
-            leaf.spec[0] = add_spec(c.translucent.color);
             break;
           case ClosureOp::Dielectric:
             leaf.spec[0] = add_spec(c.microfacet.p[0]);
@@ -432,9 +430,8 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
       case ClosureOp::OrenNayarDiffuse:
       case ClosureOp::BurleyDiffuse:
       case ClosureOp::Sheen:
-        return {c.diffuse.normal, -1};
       case ClosureOp::Translucent:
-        return {c.translucent.normal, -1};
+        return {c.diffuse.normal, -1};
       case ClosureOp::Dielectric:
       case ClosureOp::Conductor:
       case ClosureOp::GeneralizedSchlick:
@@ -453,9 +450,8 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
       case ClosureOp::OrenNayarDiffuse:
       case ClosureOp::BurleyDiffuse:
       case ClosureOp::Sheen:
-        return c.diffuse.weight;
       case ClosureOp::Translucent:
-        return c.translucent.weight;
+        return c.diffuse.weight;
       case ClosureOp::Dielectric:
       case ClosureOp::Conductor:
       case ClosureOp::GeneralizedSchlick:

@@ -202,44 +202,9 @@ constexpr int elementwise_arity(Op op) {
     case Op::Clip:
     case Op::Fma:
       return 3;
-    case Op::Const:
-    case Op::Opaque:
-    case Op::LoadTmp:
-    case Op::StoreTmp:
-    case Op::SampleInput:
-    case Op::SampleInputUV:
-    case Op::Attr:
-    case Op::GeomUV:
-    case Op::GeomPosWorld:
-    case Op::GeomNormalWorld:
-    case Op::GeomTangentWorld:
-    case Op::GeomBitangentWorld:
-    case Op::GeomIncidentDir:
-    case Op::Chan:
-    case Op::Dot:
-    case Op::Vec2:
-    case Op::Rotate2D:
-    case Op::Normalize:
-    case Op::Rgb:
-    case Op::Cross:
-    case Op::Rotate3D:
-    case Op::NormalMap:
-    case Op::HeightToNormal:
-    case Op::RgbToHsv:
-    case Op::HsvToRgb:
-    case Op::Blackbody:
-    case Op::Vec4:
-    case Op::CellNoise:
-    case Op::Noise:
-    case Op::Worley:
-    case Op::Fractal:
-    case Op::MatDet:
-    case Op::MatTranspose:
-    case Op::MatInverse:
-    case Op::MatMul:
+    default:
       return 0;
   }
-  return 0;
 }
 
 // Returns the active channel count (1 to 4) of non-elementwise ops.
@@ -264,59 +229,9 @@ constexpr uint8_t result_channels(Op op, uint16_t imm = 0) {
     case Op::Worley:
     case Op::Fractal:
       return noise_is_vec3(imm) ? 3 : 1;
-    case Op::LoadTmp:
-    case Op::StoreTmp:
-    case Op::SampleInput:
-    case Op::SampleInputUV:
-    case Op::Attr:
-    case Op::GeomPosWorld:
-    case Op::GeomNormalWorld:
-    case Op::GeomTangentWorld:
-    case Op::GeomBitangentWorld:
-    case Op::GeomIncidentDir:
-    case Op::Neg:
-    case Op::Abs:
-    case Op::Sin:
-    case Op::Cos:
-    case Op::Tan:
-    case Op::Exp:
-    case Op::Round:
-    case Op::Floor:
-    case Op::Ceil:
-    case Op::Sqrt:
-    case Op::Log:
-    case Op::Asin:
-    case Op::Acos:
-    case Op::Fract:
-    case Op::Add:
-    case Op::Sub:
-    case Op::Mul:
-    case Op::Div:
-    case Op::Lt:
-    case Op::Le:
-    case Op::Eq:
-    case Op::Min:
-    case Op::Max:
-    case Op::Pow:
-    case Op::Atan2:
-    case Op::Select:
-    case Op::Mix:
-    case Op::Clip:
-    case Op::Fma:
-    case Op::Rgb:
-    case Op::Cross:
-    case Op::Rotate3D:
-    case Op::NormalMap:
-    case Op::HeightToNormal:
-    case Op::RgbToHsv:
-    case Op::HsvToRgb:
-    case Op::Blackbody:
-    case Op::MatTranspose:
-    case Op::MatInverse:
-    case Op::MatMul:
+    default:
       return 3;
   }
-  return 3;
 }
 
 // Returns true if `op` unconditionally depends on the surface interaction.
@@ -334,63 +249,9 @@ constexpr bool is_spatially_varying_op(Op op) {
     case Op::NormalMap:
     case Op::HeightToNormal:
       return true;
-    case Op::Const:
-    case Op::Opaque:
-    case Op::LoadTmp:
-    case Op::StoreTmp:
-    case Op::SampleInput:
-    case Op::Neg:
-    case Op::Abs:
-    case Op::Sin:
-    case Op::Cos:
-    case Op::Tan:
-    case Op::Exp:
-    case Op::Round:
-    case Op::Floor:
-    case Op::Ceil:
-    case Op::Sqrt:
-    case Op::Log:
-    case Op::Asin:
-    case Op::Acos:
-    case Op::Fract:
-    case Op::Add:
-    case Op::Sub:
-    case Op::Mul:
-    case Op::Div:
-    case Op::Lt:
-    case Op::Le:
-    case Op::Eq:
-    case Op::Min:
-    case Op::Max:
-    case Op::Pow:
-    case Op::Atan2:
-    case Op::Select:
-    case Op::Mix:
-    case Op::Clip:
-    case Op::Fma:
-    case Op::Chan:
-    case Op::Dot:
-    case Op::Vec2:
-    case Op::Rotate2D:
-    case Op::Normalize:
-    case Op::Rgb:
-    case Op::Cross:
-    case Op::Rotate3D:
-    case Op::RgbToHsv:
-    case Op::HsvToRgb:
-    case Op::Blackbody:
-    case Op::Vec4:
-    case Op::CellNoise:
-    case Op::Noise:
-    case Op::Worley:
-    case Op::Fractal:
-    case Op::MatDet:
-    case Op::MatTranspose:
-    case Op::MatInverse:
-    case Op::MatMul:
+    default:
       return false;
   }
-  return false;
 }
 
 constexpr bool is_stmt_terminator(Op op) {
@@ -431,15 +292,11 @@ constexpr bool is_combinator(ClosureOp op) { return op >= ClosureOp::Layer; }
 // Tagged POD closure node stored in `MtlxProgram::closures`. Unless noted as a
 // literal or closure index, each field is a VM temporary slot (-1 if absent).
 struct ClosureNode {
-  // Shared by `OrenNayarDiffuse` (`mode = energy_comp`), `BurleyDiffuse`, and
-  // `Sheen` (`mode = kSheen*`).
+  // Shared by `OrenNayarDiffuse` (`mode = energy_comp`), `BurleyDiffuse`,
+  // `Sheen` (`mode = kSheen*`), and `Translucent` (`roughness = -1`).
   struct Diffuse {
     int weight, color, roughness, mode, normal;
     int _pad[6] = {};
-  };
-  struct Translucent {
-    int weight, color, normal;
-    int _pad[8] = {};
   };
   // Shared by `Dielectric` (`p = {tint, ior}`), `Conductor` (`p = {ior, ext}`),
   // and `GeneralizedSchlick` (`p = {color0, color82, color90, exponent}`).
@@ -463,7 +320,6 @@ struct ClosureNode {
   union {
     int raw[11] = {};
     Diffuse diffuse;
-    Translucent translucent;
     Microfacet microfacet;
     ChiangHair hair;
     Comb comb;
@@ -500,7 +356,7 @@ struct ClosureNode {
 
   static ClosureNode MakeTranslucent(int weight, int color, int normal) {
     ClosureNode n(ClosureOp::Translucent);
-    n.translucent = {weight, color, normal};
+    n.diffuse = {weight, color, -1, 0, normal};
     return n;
   }
 
@@ -575,14 +431,9 @@ void for_each_closure_tmp_slot(const ClosureNode& c, Fn&& fn) {
     case ClosureOp::OrenNayarDiffuse:
     case ClosureOp::BurleyDiffuse:
     case ClosureOp::Sheen:
+    case ClosureOp::Translucent:
       for (int s : {c.diffuse.weight, c.diffuse.color, c.diffuse.roughness,
                     c.diffuse.normal}) {
-        visit(s);
-      }
-      break;
-    case ClosureOp::Translucent:
-      for (int s :
-           {c.translucent.weight, c.translucent.color, c.translucent.normal}) {
         visit(s);
       }
       break;
@@ -666,7 +517,6 @@ struct MtlxProgram {
   std::vector<uint8_t> tmp_channels;
   int opacity_slot = -1;
   bool result_uniform = false;
-  bool unbounded = false;
   uint32_t stack_size = 1;
 
   bool is_tmp_uniform(int k) const { return tmp_channels[k] == 1; }
@@ -695,7 +545,6 @@ struct MtlxProgram {
     put_span(tmp_channels, "tmp_channels");
     DR_TRAVERSE_STATE(opacity_slot)
     DR_TRAVERSE_STATE(result_uniform)
-    DR_TRAVERSE_STATE(unbounded)
   }
 };
 

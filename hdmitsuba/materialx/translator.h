@@ -37,8 +37,8 @@ struct PreparedMaterialX;
 
 // Builds a Hydra MaterialX shading network and invokes `callback` with the
 // `TextureKey` of every bitmap texture it consumes for parallel preloading.
-// Returns nullptr if MaterialX is disabled or `network` has no valid MaterialX
-// surface or displacement shader.
+// Returns nullptr if `network` has no valid MaterialX surface or displacement
+// shader.
 std::shared_ptr<const PreparedMaterialX> PrepareMaterialXNetwork(
     const SdfPath& id, const HdMaterialNetwork2& network,
     const std::function<void(const TextureKey&)>& callback);
@@ -56,8 +56,8 @@ TranslatedMaterial TranslateMaterialXNetwork(
 // --- Offline translation (usd_mitsuba, via geometry_ext) ---
 
 // Translates a `UsdShadeMaterial` prim for `variant`, returning
-// `{material, has_displacement}`, or `std::nullopt` if MaterialX is disabled
-// or `prim` has no valid MaterialX surface or displacement shader.
+// `{material, has_displacement}`, or `std::nullopt` if `prim` has no valid
+// MaterialX surface or displacement shader.
 std::optional<std::pair<TranslatedMaterial, bool>> TranslateUsdMaterialX(
     const UsdPrim& prim, UsdTimeCode time, std::string_view variant);
 

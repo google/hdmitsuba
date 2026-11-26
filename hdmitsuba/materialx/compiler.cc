@@ -268,33 +268,6 @@ struct Frame {
   ScopedNode call;
 };
 
-// Returns true if `pred` holds for an instruction of `root` or a live
-// instruction of `body`, which stores the `tmp_count` temporaries read by
-// `root`. `body` may also end with root instructions after its last
-// `StoreTmp`.
-template <typename Pred>
-bool AnyLiveInst(absl::Span<const mtlx::Inst> body,
-                 absl::Span<const mtlx::Inst> root, size_t tmp_count,
-                 const Pred& pred) {
-  std::vector<bool> live(tmp_count);
-  bool active = true;
-  auto visit = [&](const mtlx::Inst& inst) {
-    if (inst.op == mtlx::Op::StoreTmp) {
-      active = live[inst.imm];
-    } else if (mtlx::is_stmt_terminator(inst.op)) {
-      active = std::any_of(live.begin() + inst.imm,
-                           live.begin() + inst.imm + inst.channels,
-                           [](bool b) { return b; });
-    } else if (active) {
-      if (pred(inst)) return true;
-      if (inst.op == mtlx::Op::LoadTmp) live[inst.imm] = true;
-    }
-    return false;
-  };
-  return std::any_of(root.rbegin(), root.rend(), visit) ||
-         std::any_of(body.rbegin(), body.rend(), visit);
-}
-
 // Resolves MaterialX ports, inputs, and lazy `NodeGraph` call frames without
 // allocating a `MtlxProgram`.
 class MtlxGraphResolver {
@@ -387,14 +360,14 @@ class MtlxExprCompiler : private MtlxGraphResolver {
   void CompileBsdf(const mx::NodePtr& shader_node,
                    std::string_view output_name);
 
-  bool ProgramUsesUv(const Expr& expr) const;
+  void FinalizeExpr(const Expr& expr);
+  bool ProgramUsesUv() const;
 
   const std::vector<std::pair<std::string, int>>& attr_requests() const {
     return attr_requests_;
   }
 
-  ref<Object> CreateExprTexture(const Expr& expr, bool unbounded,
-                                std::string_view variant);
+  ref<Object> CreateExprTexture(std::string_view variant);
 
   ref<Object> CreateBsdf(std::string_view variant);
 
@@ -467,7 +440,6 @@ class MtlxExprCompiler : private MtlxGraphResolver {
   int FrameSlot(const ScopedNode& node, const std::string& name,
                 const Expr& def);
   int CompileDiffuseClosure(const ScopedNode& node, const std::string& cat);
-  int CompileTranslucentClosure(const ScopedNode& node);
   int CompileMicrofacetClosure(const ScopedNode& node, const std::string& cat);
   int CompileChiangHairClosure(const ScopedNode& node);
   void CompileVdfWarning(const ScopedNode& node, const std::string& cat);
@@ -947,10 +919,7 @@ Expr MtlxExprCompiler::SafeDiv(const Expr& a, const Expr& b) {
     if (IsVaryingExpr(a)) {
       return Affine(a, Expr::one() / b, Expr::zero());
     }
-    Expr folded = FoldExpr(a / b);
-    if (folded.is_const()) return folded;
-    if (Expr inv = FoldExpr(Expr::one() / b); inv.is_const()) return a * inv;
-    return folded;
+    return FoldExpr(a / b);
   }
   return a / b;
 }
@@ -2479,8 +2448,14 @@ int MtlxExprCompiler::CompileDiffuseClosure(const ScopedNode& node,
   if (w_expr.is_zero()) return cat == "sheen_bsdf" ? -1 : EmitOpaqueBlocker();
   int w_slot = EmitTmp(w_expr);
   int color_slot = EmitTmp(CompileInputExpr(node, "color", Expr::one()));
-  int rough_slot = EmitTmp(CompileInputExpr(node, "roughness"));
+  int rough_slot = cat == "translucent_bsdf"
+                       ? -1
+                       : EmitTmp(CompileInputExpr(node, "roughness"));
   int n_slot = FrameSlot(node, "normal", Expr::n_world());
+  if (cat == "translucent_bsdf") {
+    return EmitClosure(
+        mtlx::ClosureNode::MakeTranslucent(w_slot, color_slot, n_slot));
+  }
   if (cat == "burley_diffuse_bsdf") {
     return EmitClosure(mtlx::ClosureNode::MakeBurleyDiffuse(
         w_slot, color_slot, rough_slot, n_slot));
@@ -2496,16 +2471,6 @@ int MtlxExprCompiler::CompileDiffuseClosure(const ScopedNode& node,
                     !CompileInputExpr(node, "energy_compensation").is_zero();
   return EmitClosure(mtlx::ClosureNode::MakeDiffuse(
       w_slot, color_slot, rough_slot, energy_comp, n_slot));
-}
-
-int MtlxExprCompiler::CompileTranslucentClosure(const ScopedNode& node) {
-  Expr w_expr = CompileInputExpr(node, "weight", Expr::one());
-  if (w_expr.is_zero()) return EmitOpaqueBlocker();
-  int w_slot = EmitTmp(w_expr);
-  int color_slot = EmitTmp(CompileInputExpr(node, "color", Expr::one()));
-  int n_slot = FrameSlot(node, "normal", Expr::n_world());
-  return EmitClosure(
-      mtlx::ClosureNode::MakeTranslucent(w_slot, color_slot, n_slot));
 }
 
 int MtlxExprCompiler::CompileMicrofacetClosure(const ScopedNode& node,
@@ -2612,10 +2577,9 @@ int MtlxExprCompiler::CompileBsdfClosure(const ScopedNode& node) {
 
   int idx = -1;
   if (cat == "oren_nayar_diffuse_bsdf" || cat == "subsurface_bsdf" ||
-      cat == "burley_diffuse_bsdf" || cat == "sheen_bsdf") {
+      cat == "burley_diffuse_bsdf" || cat == "sheen_bsdf" ||
+      cat == "translucent_bsdf") {
     idx = CompileDiffuseClosure(node, cat);
-  } else if (cat == "translucent_bsdf") {
-    idx = CompileTranslucentClosure(node);
   } else if (cat == "dielectric_bsdf" || cat == "conductor_bsdf" ||
              cat == "generalized_schlick_bsdf") {
     idx = CompileMicrofacetClosure(node, cat);
@@ -2762,29 +2726,27 @@ MtlxExprCompiler::DisplacementExpr MtlxExprCompiler::CompileDisplacement(
   return res;
 }
 
-bool MtlxExprCompiler::ProgramUsesUv(const Expr& expr) const {
-  auto inst_uses_uv = [&](auto& self, const mtlx::Inst& inst) -> bool {
-    if (inst.op == mtlx::Op::GeomUV || inst.op == mtlx::Op::SampleInput) {
-      return true;
-    }
-    if (inst.op != mtlx::Op::HeightToNormal) return false;
-    const mtlx::SubProgram& sub = prog_.sub_programs[inst.imm];
-    return !sub.has_texcoord ||
-           AnyLiveInst(
-               absl::MakeConstSpan(prog_.sub_code)
-                   .subspan(sub.code_begin, sub.code_end - sub.code_begin),
-               {}, sub.tmp_count,
-               [&](const mtlx::Inst& i) { return self(self, i); });
+void MtlxExprCompiler::FinalizeExpr(const Expr& expr) {
+  prog_.code.insert(prog_.code.end(), expr.code.begin(), expr.code.end());
+  prog_.stack_size = std::max(prog_.stack_size, expr.max_depth);
+  prog_.result_uniform = expr.uniform();
+  mtlx::OptimizeProgram(prog_);
+}
+
+bool MtlxExprCompiler::ProgramUsesUv() const {
+  auto has_uv = [&](absl::Span<const mtlx::Inst> code) {
+    return std::any_of(code.begin(), code.end(), [&](mtlx::Inst i) {
+      return i.op == mtlx::Op::GeomUV || i.op == mtlx::Op::SampleInput ||
+             (i.op == mtlx::Op::HeightToNormal &&
+              !prog_.sub_programs[i.imm].has_texcoord);
+    });
   };
-  return AnyLiveInst(
-      prog_.code, expr.code, prog_.tmp_channels.size(),
-      [&](const mtlx::Inst& i) { return inst_uses_uv(inst_uses_uv, i); });
+  return has_uv(prog_.code) || has_uv(prog_.sub_code);
 }
 
 ref<Object> MtlxExprCompiler::CreatePlugin(std::string_view name,
                                            ObjectType type,
                                            std::string_view variant) {
-  mtlx::OptimizeProgram(prog_);
   Properties props(name);
   for (size_t i = 0; i < inputs_.size(); ++i) {
     props.set("in" + std::to_string(i), std::move(inputs_[i]));
@@ -2793,19 +2755,14 @@ ref<Object> MtlxExprCompiler::CreatePlugin(std::string_view name,
   return PluginManager::instance()->create_object(props, variant, type);
 }
 
-ref<Object> MtlxExprCompiler::CreateExprTexture(const Expr& expr,
-                                                bool unbounded,
-                                                std::string_view variant) {
+ref<Object> MtlxExprCompiler::CreateExprTexture(std::string_view variant) {
   mtlx::RegisterMaterialXExprTexture();
-  prog_.code.insert(prog_.code.end(), expr.code.begin(), expr.code.end());
-  prog_.stack_size = std::max(prog_.stack_size, expr.max_depth);
-  prog_.result_uniform = expr.uniform();
-  prog_.unbounded = unbounded;
   return CreatePlugin("materialx_expr", ObjectType::Texture, variant);
 }
 
 ref<Object> MtlxExprCompiler::CreateBsdf(std::string_view variant) {
   mtlx::RegisterMaterialXBsdf();
+  mtlx::OptimizeProgram(prog_);
   return CreatePlugin("materialx_bsdf", ObjectType::BSDF, variant);
 }
 
@@ -2831,8 +2788,8 @@ CompiledSurfaceShader CompileSurfaceShader(
                               warned);
     Expr radiance = compiler.CompileEdf(shader_node, output_name);
     if (!radiance.is_zero()) {
-      out.radiance_texture =
-          compiler.CreateExprTexture(radiance, /*unbounded=*/true, variant);
+      compiler.FinalizeExpr(radiance);
+      out.radiance_texture = compiler.CreateExprTexture(variant);
       out.mesh_attributes.insert(compiler.attr_requests().begin(),
                                  compiler.attr_requests().end());
     }
@@ -2866,9 +2823,9 @@ MaterialDisplacement CompileDisplacementShader(
   MtlxExprCompiler::DisplacementExpr disp =
       compiler.CompileDisplacement(shader_node, output_name);
   if (disp.expr.is_zero()) return {};
-  bool requires_uv = compiler.ProgramUsesUv(disp.expr);
-  return {compiler.CreateExprTexture(disp.expr, /*unbounded=*/true, variant),
-          requires_uv, disp.is_vector,
+  compiler.FinalizeExpr(disp.expr);
+  bool requires_uv = compiler.ProgramUsesUv();
+  return {compiler.CreateExprTexture(variant), requires_uv, disp.is_vector,
           MeshAttributeRequests(compiler.attr_requests().begin(),
                                 compiler.attr_requests().end())};
 }
