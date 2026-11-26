@@ -52,6 +52,7 @@
 
 #include "hdmitsuba/debug_codes.h"
 #include "hdmitsuba/materialx/math.h"
+#include "hdmitsuba/materialx/optimizer.h"
 #include "hdmitsuba/materialx/program.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -273,11 +274,6 @@ struct Frame {
   ScopedNode call;
 };
 
-constexpr bool IsStmtTerminator(mtlx::Op op) {
-  return op == mtlx::Op::StoreTmp || op == mtlx::Op::MatTranspose ||
-         op == mtlx::Op::MatInverse || op == mtlx::Op::MatMul;
-}
-
 // Returns true if `pred` holds for an instruction of `root` or a live
 // instruction of `body`, which stores the `tmp_count` temporaries read by
 // `root`. `body` may also end with root instructions after its last
@@ -291,7 +287,7 @@ bool AnyLiveInst(absl::Span<const mtlx::Inst> body,
   auto visit = [&](const mtlx::Inst& inst) {
     if (inst.op == mtlx::Op::StoreTmp) {
       active = live[inst.imm];
-    } else if (IsStmtTerminator(inst.op)) {
+    } else if (mtlx::is_stmt_terminator(inst.op)) {
       active = std::any_of(live.begin() + inst.imm,
                            live.begin() + inst.imm + inst.channels,
                            [](bool b) { return b; });
@@ -468,8 +464,6 @@ class MtlxExprCompiler : private MtlxGraphResolver {
   void CompileVdfWarning(const ScopedNode& node, const std::string& cat);
   void MarkTwoSidedDielectrics(size_t start);
   int EmitClosure(mtlx::ClosureNode node);
-  void CompactLiveOpaques();
-  void PartitionCode();
   ref<Object> CreatePlugin(std::string_view name, ObjectType type,
                            std::string_view variant);
 
@@ -2505,116 +2499,10 @@ bool MtlxExprCompiler::ProgramUsesUv(const Expr& expr) const {
       [&](const mtlx::Inst& i) { return inst_uses_uv(inst_uses_uv, i); });
 }
 
-void MtlxExprCompiler::CompactLiveOpaques() {
-  if (prog_.opaques.empty()) return;
-  std::vector<uint16_t> remap(prog_.opaques.size(), mtlx::kMaxImm);
-  for (const auto* code : {&prog_.code, &prog_.sub_code}) {
-    for (mtlx::Inst in : *code) {
-      if (in.op == mtlx::Op::Opaque) remap[in.imm] = 0;
-    }
-  }
-  size_t n = 0;
-  for (size_t i = 0; i < prog_.opaques.size(); ++i) {
-    if (remap[i] == mtlx::kMaxImm) continue;
-    remap[i] = static_cast<uint16_t>(n);
-    prog_.opaques[n++] = prog_.opaques[i];
-  }
-  if (n == prog_.opaques.size()) return;
-  prog_.opaques.resize(n);
-  for (auto* code : {&prog_.code, &prog_.sub_code}) {
-    for (mtlx::Inst& in : *code) {
-      if (in.op == mtlx::Op::Opaque) in.imm = remap[in.imm];
-    }
-  }
-}
-
-void MtlxExprCompiler::PartitionCode() {
-  size_t n_tmps = prog_.tmp_channels.size();
-  prog_.invariant_code.clear();
-  prog_.varying_code.clear();
-  prog_.tmp_kind.assign(n_tmps, mtlx::TmpKind::Varying);
-  prog_.uniform_offset.assign(n_tmps, 0);
-
-  size_t stmt_begin = 0;
-  for (size_t i = 0; i < prog_.code.size(); ++i) {
-    mtlx::Inst inst = prog_.code[i];
-    if (!IsStmtTerminator(inst.op)) continue;
-
-    size_t stmt_end = i + 1;
-    absl::Span<const mtlx::Inst> stmt(prog_.code.data() + stmt_begin,
-                                      stmt_end - stmt_begin);
-    stmt_begin = stmt_end;
-
-    bool varying = false;
-    for (mtlx::Inst s : stmt) {
-      if (mtlx::is_spatially_varying_op(s.op) ||
-          s.op == mtlx::Op::SampleInput ||
-          (s.op == mtlx::Op::LoadTmp &&
-           prog_.tmp_kind[s.imm] == mtlx::TmpKind::Varying)) {
-        varying = true;
-        break;
-      }
-    }
-    if (varying) {
-      prog_.varying_code.insert(prog_.varying_code.end(), stmt.begin(),
-                                stmt.end());
-      continue;
-    }
-
-    if (inst.op == mtlx::Op::StoreTmp) {
-      if (stmt.size() == 2 &&
-          (stmt[0].op == mtlx::Op::Const || stmt[0].op == mtlx::Op::Opaque)) {
-        prog_.tmp_kind[inst.imm] = stmt[0].op == mtlx::Op::Const
-                                       ? mtlx::TmpKind::Const
-                                       : mtlx::TmpKind::Opaque;
-        prog_.uniform_offset[inst.imm] = stmt[0].imm;
-      } else {
-        prog_.tmp_kind[inst.imm] = mtlx::TmpKind::Uniform;
-      }
-    } else {
-      for (uint8_t r = 0; r < inst.channels; ++r) {
-        prog_.tmp_kind[inst.imm + r] = mtlx::TmpKind::Uniform;
-      }
-    }
-    prog_.invariant_code.insert(prog_.invariant_code.end(), stmt.begin(),
-                                stmt.end());
-  }
-
-  if (stmt_begin < prog_.code.size()) {
-    prog_.varying_code.insert(prog_.varying_code.end(),
-                              prog_.code.begin() + stmt_begin,
-                              prog_.code.end());
-  }
-
-  // Prune intermediate uniform temporaries never read outside
-  // `invariant_code` so they do not materialize unused hoisted buffers.
-  std::vector<bool> live_out(n_tmps, false);
-  for (mtlx::Inst inst : prog_.varying_code) {
-    if (inst.op == mtlx::Op::LoadTmp) live_out[inst.imm] = true;
-  }
-  if (prog_.opacity_slot >= 0) live_out[prog_.opacity_slot] = true;
-  for (const mtlx::ClosureNode& c : prog_.closures) {
-    mtlx::for_each_closure_tmp_slot(c,
-                                    [&](int slot) { live_out[slot] = true; });
-  }
-  uint32_t uniform_scalars = 0;
-  for (size_t k = 0; k < n_tmps; ++k) {
-    if (!live_out[k]) {
-      prog_.tmp_kind[k] = mtlx::TmpKind::Varying;
-    } else if (prog_.tmp_kind[k] == mtlx::TmpKind::Uniform) {
-      prog_.uniform_offset[k] = uniform_scalars;
-      uniform_scalars += prog_.tmp_channels[k];
-    }
-  }
-  prog_.uniform_scalar_count = uniform_scalars;
-  if (uniform_scalars == 0) prog_.invariant_code.clear();
-}
-
 ref<Object> MtlxExprCompiler::CreatePlugin(std::string_view name,
                                            ObjectType type,
                                            std::string_view variant) {
-  CompactLiveOpaques();
-  PartitionCode();
+  mtlx::OptimizeProgram(prog_);
   Properties props(name);
   for (size_t i = 0; i < inputs_.size(); ++i) {
     props.set("in" + std::to_string(i), std::move(inputs_[i]));

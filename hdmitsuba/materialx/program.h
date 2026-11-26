@@ -22,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include <drjit/array.h>
 #include <drjit/traversable_base.h>
 
 namespace mitsuba::mtlx {
@@ -386,6 +387,11 @@ constexpr bool is_spatially_varying_op(Op op) {
       return false;
   }
   return false;
+}
+
+constexpr bool is_stmt_terminator(Op op) {
+  return op == Op::StoreTmp || op == Op::MatTranspose || op == Op::MatInverse ||
+         op == Op::MatMul;
 }
 
 // Microfacet `ClosureNode::Microfacet::mode` scatter mode values
