@@ -254,6 +254,48 @@ void MtlxEvaluator<Float, Spectrum>::compile(const Properties& props) {
   for (double v : m_prog.opaques) {
     m_opaques.push_back(dr::opaque<Float>(static_cast<ScalarFloat>(v)));
   }
+  update_uniform_tmps();
+}
+
+template <typename Float, typename Spectrum>
+void MtlxEvaluator<Float, Spectrum>::update_uniform_tmps() {
+  m_uniform_scalars.clear();
+  if (m_prog.invariant_code.empty()) return;
+
+  size_t n_tmps = m_prog.tmp_channels.size();
+  absl::InlinedVector<Val, 64> tmps(n_tmps);
+  eval_code(m_prog.invariant_code, n_tmps, m_prog.stack_size,
+            dr::zeros<SurfaceInteraction3f>(), Mask(true), tmps.data());
+  m_uniform_scalars.reserve(m_prog.uniform_scalar_count);
+  for (size_t k = 0; k < n_tmps; ++k) {
+    if (m_prog.tmp_kind[k] != TmpKind::Uniform) continue;
+    for (uint8_t c = 0; c < m_prog.tmp_channels[k]; ++c) {
+      m_uniform_scalars.push_back(dr::detach(tmps[k][c]));
+    }
+  }
+  if constexpr (dr::is_jit_v<Float>) {
+    bool scheduled = false;
+    for (Float& s : m_uniform_scalars) {
+      scheduled |= dr::detail::schedule_force(s);
+    }
+    if (scheduled) dr::eval();
+  }
+}
+
+template <typename Float, typename Spectrum>
+typename MtlxEvaluator<Float, Spectrum>::Val
+MtlxEvaluator<Float, Spectrum>::load_uniform_tmp(int slot) const {
+  TmpKind kind = m_prog.tmp_kind[slot];
+  uint32_t off = m_prog.uniform_offset[slot];
+  if (kind == TmpKind::Const) {
+    return Val(static_cast<ScalarFloat>(m_prog.consts[off]));
+  }
+  if (kind == TmpKind::Opaque) return Val(m_opaques[off]);
+  uint8_t n = m_prog.tmp_channels[slot];
+  if (n == 1) return Val(m_uniform_scalars[off]);
+  Val out(0.0f);
+  for (uint8_t c = 0; c < n; ++c) out[c] = m_uniform_scalars[off + c];
+  return out;
 }
 
 template <typename Float, typename Spectrum>
@@ -284,6 +326,7 @@ void MtlxEvaluator<Float, Spectrum>::parameters_changed() {
     }
     if (scheduled) dr::eval();
   }
+  update_uniform_tmps();
 }
 
 template <typename Float, typename Spectrum>
@@ -313,8 +356,27 @@ typename MtlxEvaluator<Float, Spectrum>::Val
 MtlxEvaluator<Float, Spectrum>::eval(const SurfaceInteraction3f& si,
                                      Mask active, Val* out_tmps,
                                      int stop_after_tmp) const {
-  return eval_code(m_prog.code, m_prog.tmp_channels.size(), m_prog.stack_size,
-                   si, active, out_tmps, stop_after_tmp);
+  bool run_full = stop_after_tmp >= 0 &&
+                  (out_tmps || stop_after_tmp != m_prog.opacity_slot);
+  if constexpr (dr::is_diff_v<Float>) {
+    for (const Float& p : m_opaques) {
+      if (dr::grad_enabled(p)) {
+        run_full = true;
+        break;
+      }
+    }
+  }
+  if (run_full) {
+    return eval_code(m_prog.code, m_prog.tmp_channels.size(), m_prog.stack_size,
+                     si, active, out_tmps, stop_after_tmp);
+  }
+  if (!out_tmps && stop_after_tmp >= 0 &&
+      m_prog.tmp_kind[stop_after_tmp] != TmpKind::Varying) {
+    return load_uniform_tmp(stop_after_tmp);
+  }
+  return eval_code(m_prog.varying_code, m_prog.tmp_channels.size(),
+                   m_prog.stack_size, si, active, out_tmps, stop_after_tmp,
+                   /*use_uniforms=*/true);
 }
 
 template <typename Float, typename Spectrum>
@@ -323,7 +385,8 @@ MtlxEvaluator<Float, Spectrum>::eval_code(absl::Span<const Inst> code,
                                           size_t tmp_count, uint32_t stack_size,
                                           const SurfaceInteraction3f& si,
                                           Mask active, Val* out_tmps,
-                                          int stop_after_tmp) const {
+                                          int stop_after_tmp,
+                                          bool use_uniforms) const {
   size_t local_tmps =
       out_tmps ? 0
                : (stop_after_tmp >= 0 ? static_cast<size_t>(stop_after_tmp) + 1
@@ -338,6 +401,13 @@ MtlxEvaluator<Float, Spectrum>::eval_code(absl::Span<const Inst> code,
     Val val;
   };
   absl::InlinedVector<std::optional<CachedAttr>, 4> attr_cache;
+  if (use_uniforms && out_tmps) {
+    for (size_t k = 0; k < tmp_count; ++k) {
+      if (m_prog.tmp_kind[k] != TmpKind::Varying) {
+        tmps[k] = load_uniform_tmp(static_cast<int>(k));
+      }
+    }
+  }
 
   auto pop = [&](int n) {
     sp -= n;
@@ -365,7 +435,10 @@ MtlxEvaluator<Float, Spectrum>::eval_code(absl::Span<const Inst> code,
         *sp++ = Val(m_opaques[imm]);
         break;
       case Op::LoadTmp:
-        *sp++ = tmps[imm];
+        *sp++ = (!out_tmps && use_uniforms &&
+                 m_prog.tmp_kind[imm] != TmpKind::Varying)
+                    ? load_uniform_tmp(imm)
+                    : tmps[imm];
         break;
       case Op::StoreTmp:
         tmps[imm] = *--sp;
@@ -578,6 +651,7 @@ void MtlxEvaluator<Float, Spectrum>::traverse_cb(
     void* payload, const drjit::TraverseVisitor& cb) {
   DR_TRAVERSE_MEMBER(m_inputs)
   DR_TRAVERSE_MEMBER(m_opaques)
+  DR_TRAVERSE_MEMBER(m_uniform_scalars)
   m_srgb->traverse_cb(payload, cb);
   m_prog.traverse_state(payload, cb);
 }
