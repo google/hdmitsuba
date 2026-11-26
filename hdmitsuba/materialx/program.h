@@ -555,6 +555,59 @@ constexpr bool leaf_has_layer_throughput(const ClosureNode& c) {
           (c.microfacet.mode & kScatterModeMask) == kScatterR);
 }
 
+// Invokes `fn(slot)` for each non-negative VM temporary slot referenced by `c`.
+template <typename Fn>
+void for_each_closure_tmp_slot(const ClosureNode& c, Fn&& fn) {
+  auto visit = [&](int slot) {
+    if (slot >= 0) fn(slot);
+  };
+  switch (c.op) {
+    case ClosureOp::OrenNayarDiffuse:
+    case ClosureOp::BurleyDiffuse:
+    case ClosureOp::Sheen:
+      for (int s : {c.diffuse.weight, c.diffuse.color, c.diffuse.roughness,
+                    c.diffuse.normal}) {
+        visit(s);
+      }
+      break;
+    case ClosureOp::Translucent:
+      for (int s :
+           {c.translucent.weight, c.translucent.color, c.translucent.normal}) {
+        visit(s);
+      }
+      break;
+    case ClosureOp::Dielectric:
+    case ClosureOp::Conductor:
+    case ClosureOp::GeneralizedSchlick:
+      for (int s :
+           {c.microfacet.weight, c.microfacet.roughness, c.microfacet.normal,
+            c.microfacet.tangent, c.microfacet.tf_thickness,
+            c.microfacet.tf_ior, c.microfacet.p[0], c.microfacet.p[1],
+            c.microfacet.p[2], c.microfacet.p[3]}) {
+        visit(s);
+      }
+      break;
+    case ClosureOp::ChiangHair:
+      for (int s :
+           {c.hair.tint_r, c.hair.tint_tt, c.hair.tint_trt, c.hair.roughness_r,
+            c.hair.roughness_tt, c.hair.roughness_trt, c.hair.ior,
+            c.hair.absorption, c.hair.cuticle_angle, c.hair.normal,
+            c.hair.curve_direction}) {
+        visit(s);
+      }
+      break;
+    case ClosureOp::Mix:
+    case ClosureOp::Multiply:
+      visit(c.comb.weight);
+      break;
+    case ClosureOp::Null:
+    case ClosureOp::OpaqueBlocker:
+    case ClosureOp::Layer:
+    case ClosureOp::Add:
+      break;
+  }
+}
+
 // Self-contained bytecode slice evaluated at perturbed surface interactions by
 // `Op::HeightToNormal`. Uses the enclosing program's `consts`, `opaques`,
 // `attr_names`, and texture inputs with its own temporaries `0..tmp_count - 1`.
@@ -569,12 +622,23 @@ struct SubProgram {
 static_assert(sizeof(SubProgram) == 20);
 static_assert(std::has_unique_object_representations_v<SubProgram>);
 
+enum class TmpKind : uint8_t { Varying, Const, Opaque, Uniform };
+
 // Variant-independent compiled MaterialX program passed via `Properties`.
 //
 // A program has at most `kMaxImm` constants, opaque values and temporaries
 // each, and `stack_size` bounds the evaluation stack depth.
 struct MtlxProgram {
   std::vector<Inst> code;
+  // Pre-partitioned spatially-invariant vs spatially-varying bytecode and
+  // per-temporary classification. `uniform_offset` indexes `consts` (`Const`),
+  // `opaques` (`Opaque`), or the evaluator's packed uniform scalar buffer
+  // (`Uniform`).
+  std::vector<Inst> invariant_code;
+  std::vector<Inst> varying_code;
+  std::vector<TmpKind> tmp_kind;
+  std::vector<uint32_t> uniform_offset;
+  uint32_t uniform_scalar_count = 0;
   std::vector<Inst> sub_code;
   std::vector<SubProgram> sub_programs;
   std::vector<double> consts = {0.0, 1.0};

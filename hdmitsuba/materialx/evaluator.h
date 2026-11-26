@@ -85,16 +85,20 @@ class MtlxEvaluator {
   void traverse_cb(void* payload, const drjit::TraverseVisitor& cb);
 
  private:
+  void update_uniform_tmps();
+  Val load_uniform_tmp(int slot) const;
   Val eval_code(absl::Span<const Inst> code, size_t tmp_count,
                 uint32_t stack_size, const SurfaceInteraction3f& si,
-                Mask active, Val* out_tmps = nullptr,
-                int stop_after_tmp = -1) const;
+                Mask active, Val* out_tmps = nullptr, int stop_after_tmp = -1,
+                bool use_uniforms = false) const;
 
   MtlxProgram m_prog;
   std::vector<ref<Texture>> m_inputs;
   // Opaque scalars (`dr::opaque`), passed as kernel inputs rather than
   // literals.
   std::vector<Float> m_opaques;
+  // Hoisted size-1 evaluated spatially-invariant temporaries.
+  std::vector<Float> m_uniform_scalars;
   std::unique_ptr<detail::SrgbUpsampler<Float, Spectrum>> m_srgb;
 };
 

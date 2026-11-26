@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import math
 import pathlib
 from typing import Any
 
@@ -1560,3 +1561,104 @@ def test_constant_folding_and_opaque_compaction() -> None:
   )
   assert em_ovf is not None
   np.testing.assert_allclose(em_ovf.eval(si), mi.Color3f(1.0), atol=1e-5)
+
+
+def test_invariant_hoisting_freeze_and_ad() -> None:
+  """Verifies parameter updates, `@dr.freeze`, and AD through hoisted temporaries."""
+
+  def check(
+      expr: tuple[str, dict[str, Any]],
+      si: mi.SurfaceInteraction3f,
+      param_init: float,
+      param_new: float,
+      expected0: mi.Color3f,
+      expected1: mi.Color3f,
+      expected_grad: float,
+  ) -> None:
+    _, em = mtlx.compile_mtlx_material('ND_surface_unlit', emission_color=expr)
+    assert em is not None
+    np.testing.assert_allclose(em.eval(si), expected0, atol=1e-5)
+
+    @dr.freeze
+    def eval_frozen(s: mi.SurfaceInteraction3f) -> mi.Color3f:
+      return em.eval(s)
+
+    np.testing.assert_allclose(eval_frozen(si), expected0, atol=1e-5)
+    np.testing.assert_allclose(eval_frozen(si), expected0, atol=1e-5)
+
+    params = mi.traverse(em)
+    key = next(
+        k
+        for k in params.keys()
+        if k.startswith('radiance.param') and np.allclose(params[k], param_init)
+    )
+    params[key] = mi.Float(param_new)
+    params.update()
+    np.testing.assert_allclose(eval_frozen(si), expected1, atol=1e-5)
+
+    dr.enable_grad(params[key])
+    params.update()
+    dr.backward(dr.sum(em.eval(si).x))
+    np.testing.assert_allclose(dr.grad(params[key]), expected_grad, rtol=1e-5)
+
+  u = [0.15, 0.55, 0.85]
+  si_uv = dr.zeros(mi.SurfaceInteraction3f, len(u))
+  si_uv.wi = mi.Vector3f(0.0, 0.0, 1.0)
+  si_uv.uv = mi.Point2f(u, 0.0)
+  base_rgb = mi.Color3f(u, 0.2, 0.4)
+  check(
+      (
+          'ND_colorcorrect_color3',
+          {
+              'in_': (
+                  'ND_combine3_color3',
+                  {
+                      'in1': (
+                          'ND_extract_vector2',
+                          {'in_': ('ND_texcoord_vector2', {}), 'index': 0},
+                      ),
+                      'in2': 0.2,
+                      'in3': 0.4,
+                  },
+              ),
+              'exposure': 1.5,
+          },
+      ),
+      si_uv,
+      1.5,
+      2.0,
+      base_rgb * 2.0**1.5,
+      base_rgb * 4.0,
+      sum(u) * 4.0 * math.log(2.0),
+  )
+
+  si_p = dr.zeros(mi.SurfaceInteraction3f, 2)
+  si_p.wi = mi.Vector3f(0.0, 0.0, 1.0)
+  si_p.p = mi.Point3f([2.0, 4.0], [3.0, 6.0], [4.0, 8.0])
+  check(
+      (
+          'ND_convert_vector3_color3',
+          {
+              'in_': (
+                  'ND_transformmatrix_vector3',
+                  {
+                      'in_': ('ND_position_vector3', {'space': 'world'}),
+                      'mat': (
+                          'ND_invertmatrix_matrix33',
+                          {
+                              'in_': Gf.Matrix3d(
+                                  2.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 4.0
+                              )
+                          },
+                      ),
+                  },
+              )
+          },
+      ),
+      si_p,
+      2.0,
+      4.0,
+      mi.Color3f([1.0, 2.0], [1.0, 2.0], [1.0, 2.0]),
+      mi.Color3f([0.5, 1.0], [1.0, 2.0], [1.0, 2.0]),
+      -0.375,
+  )
