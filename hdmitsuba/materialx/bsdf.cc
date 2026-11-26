@@ -50,8 +50,8 @@ MaterialX BSDF (:monosp:`materialx_bsdf`)
 
  * - program
    - |any|
-   - Compiled ``mitsuba::mtlx::MtlxProgram`` bytecode, closure table, and
-     constant/opaque tables.
+   - Compiled ``mitsuba::mtlx::MtlxBsdfProgram`` SSA value program, closure
+     DAG, and constant/opaque tables.
 
  * - in0, in1, ...
    - |texture|
@@ -75,30 +75,35 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
   MI_IMPORT_TYPES()
   using Val = typename MtlxEvaluator<Float, Spectrum>::Val;
 
+  using EvalState = typename MtlxEvaluator<Float, Spectrum>::EvalState;
+
   explicit MtlxBsdf(const Properties& props) : Base(props) {
-    m_eval.compile(props);
-    const std::vector<ClosureNode>& closures = prog().closures;
-    m_comb_spec.assign(closures.size(), -1);
+    MtlxBsdfProgram bsdf_prog = props.get_any<MtlxBsdfProgram>("program");
+    m_eval.compile(props, std::move(bsdf_prog.values));
+    m_closures = std::move(bsdf_prog.closures);
+    m_opacity_root = bsdf_prog.opacity_root;
+    m_thin_walled = bsdf_prog.thin_walled;
+    m_comb_spec.assign(m_closures.size(), -1);
 
     bool need_lut = false;
-    auto add_spec = [&](int tmp_slot, bool unbounded = false) -> int {
-      SpecSlot key{tmp_slot, unbounded};
+    auto add_spec = [&](ValueId value_id, bool unbounded = false) -> int {
+      SpecSlot key{value_id, unbounded};
       auto it = std::find(m_spec_slots.begin(), m_spec_slots.end(), key);
       if (it != m_spec_slots.end()) {
         return static_cast<int>(it - m_spec_slots.begin());
       }
       m_spec_slots.push_back(key);
       if constexpr (is_spectral_v<Spectrum>) {
-        need_lut |= !prog().is_tmp_uniform(tmp_slot);
+        need_lut |= !values().is_value_scalar(value_id);
       }
       return static_cast<int>(m_spec_slots.size() - 1);
     };
 
     uint32_t surf_flags = 0u;
-    for (size_t i = 0; i < closures.size(); ++i) {
-      const ClosureNode& c = closures[i];
+    for (size_t i = 0; i < m_closures.size(); ++i) {
+      const ClosureNode& c = m_closures[i];
       if (is_leaf(c.op)) {
-        std::pair<int, int> key = leaf_frame_slots(c);
+        FrameKey key = leaf_frame_key(c);
         auto it =
             std::find(m_unique_frames.begin(), m_unique_frames.end(), key);
         size_t f_idx = static_cast<size_t>(it - m_unique_frames.begin());
@@ -142,7 +147,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
         }
         m_leaves.push_back(leaf);
         m_surface_types |= leaf_type(c);
-        if (key.first >= 0) surf_flags |= +BSDFFlags::NormalMapped;
+        if (key.normal != kInvalidValue) surf_flags |= +BSDFFlags::NormalMapped;
       } else if (c.op == ClosureOp::Layer) {
         m_has_layers = true;
         surf_flags |= +BSDFFlags::NonSymmetric;
@@ -158,7 +163,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
       m_components.push_back(m_surface_types | surf_flags |
                              BSDFFlags::FrontSide | BSDFFlags::BackSide | sv);
     }
-    if (prog().opacity_slot >= 0) {
+    if (m_opacity_root != kInvalidValue) {
       m_null_component = static_cast<uint32_t>(m_components.size());
       m_components.push_back(BSDFFlags::Null | BSDFFlags::FrontSide |
                              BSDFFlags::BackSide | sv);
@@ -229,10 +234,11 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
   Spectrum eval_null(const SurfaceInteraction3f& si,
                      Mask active) const override {
     MI_MASKED_FUNCTION(ProfilerPhase::BSDFEvaluate, active);
-    int op_slot = prog().opacity_slot;
-    if (op_slot < 0 || unlikely(dr::none_or<false>(active))) return 0.0f;
-    return Spectrum(1.0f -
-                    clip_opacity(m_eval.eval(si, active, nullptr, op_slot))) &
+    if (m_opacity_root == kInvalidValue || unlikely(dr::none_or<false>(active)))
+      return 0.0f;
+    EvalState state;
+    return Spectrum(1.0f - clip_opacity(m_eval.eval_opacity(m_opacity_root, si,
+                                                            active, state))) &
            active;
   }
 
@@ -256,12 +262,12 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
       UnpolarizedSpectrum surf_transmittance(0.0f);
       for (size_t k = 0; k < m_leaves.size(); ++k) {
         const Leaf& leaf = m_leaves[k];
-        const ClosureNode& c = prog().closures[leaf.node];
+        const ClosureNode& c = m_closures[leaf.node];
         UnpolarizedSpectrum contrib = s.leaf_weight[k] * leaf_albedo(k, s);
         if (c.op == ClosureOp::Conductor || c.op == ClosureOp::Dielectric ||
             c.op == ClosureOp::GeneralizedSchlick) {
           Float sw;
-          Vector2f alpha = get_ggx_alpha(c, s.tmps.data());
+          Vector2f alpha = get_ggx_alpha(c, s);
           if (scatter_mode(c) == kScatterR) {
             specular_reflectance += contrib;
             sw = selection_weight(contrib);
@@ -312,7 +318,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
           Float sw = selection_weight(contrib);
           spec_roughness = dr::select(
               sw > best_spec_w,
-              dr::clip(dr::max(dr::head<2>(s.tmps[c.hair.roughness_r])), 1e-3f,
+              dr::clip(dr::max(dr::head<2>(val(c.hair.roughness_r, s))), 1e-3f,
                        1.0f),
               spec_roughness);
           best_spec_w = dr::maximum(best_spec_w, sw);
@@ -344,8 +350,11 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
   std::string to_string() const override {
     std::ostringstream oss;
     oss << "MtlxBsdf[\n"
-        << "  closures = " << prog().closures.size() << ",\n"
-        << "  opacity_slot = " << prog().opacity_slot << ",\n"
+        << "  closures = " << m_closures.size() << ",\n"
+        << "  opacity_root = "
+        << (m_opacity_root == kInvalidValue ? -1
+                                            : static_cast<int>(m_opacity_root))
+        << ",\n"
         << m_eval.to_string() << "]";
     return oss.str();
   }
@@ -357,16 +366,36 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
     }
     Base::traverse_cb(payload, cb);
     m_eval.traverse_cb(payload, cb);
+    if (cb.state) {
+      size_t n = m_closures.size();
+      drjit::detail::traverse_state(payload, cb, &n, sizeof(n), "closures");
+      if (n > 0) {
+        drjit::detail::traverse_state(payload, cb, m_closures.data(),
+                                      n * sizeof(m_closures[0]), "closures");
+      }
+      DR_TRAVERSE_STATE(m_opacity_root)
+      DR_TRAVERSE_STATE(m_thin_walled)
+    }
   }
 
   MI_DECLARE_CLASS(MtlxBsdf)
 
  private:
   struct SpecSlot {
-    int tmp_slot;
+    ValueId value;
     bool unbounded;
     bool operator==(const SpecSlot& o) const {
-      return tmp_slot == o.tmp_slot && unbounded == o.unbounded;
+      return value == o.value && unbounded == o.unbounded;
+    }
+  };
+
+  struct FrameKey {
+    ValueId normal;
+    ValueId tangent;
+    bool is_curve;
+    bool operator==(const FrameKey& o) const {
+      return normal == o.normal && tangent == o.tangent &&
+             is_curve == o.is_curve;
     }
   };
 
@@ -380,7 +409,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
 
   // Per-query material state shared by all BSDF entry points.
   struct State {
-    absl::InlinedVector<Val, 32> tmps;
+    EvalState eval;
     // Deduplicated local shading frames and incident directions (relative to
     // `si.sh_frame`).
     absl::InlinedVector<Frame3f, 4> frames;
@@ -408,9 +437,12 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
     Mask valid = Mask(false);
   };
 
-  const MtlxProgram& prog() const { return m_eval.program(); }
+  const MtlxValueProgram& values() const { return m_eval.program(); }
+  Val val(ValueId id, const State& s) const {
+    return m_eval.read_val(id, s.eval);
+  }
   static Vector3f xyz(const Val& v) { return dr::head<3>(v); }
-  static int scatter_mode(const ClosureNode& c) {
+  static uint16_t scatter_mode(const ClosureNode& c) {
     return c.microfacet.mode & kScatterModeMask;
   }
   static bool is_thin_walled(const ClosureNode& c) {
@@ -423,41 +455,22 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
     return (c.microfacet.mode & kScatterRetroreflective) != 0;
   }
 
-  static constexpr int kDefaultCurveDir = -2;
-
-  static std::pair<int, int> leaf_frame_slots(const ClosureNode& c) {
+  static FrameKey leaf_frame_key(const ClosureNode& c) {
     switch (c.op) {
       case ClosureOp::OrenNayarDiffuse:
       case ClosureOp::BurleyDiffuse:
       case ClosureOp::Sheen:
       case ClosureOp::Translucent:
-        return {c.diffuse.normal, -1};
+        return {c.diffuse.normal, kInvalidValue, false};
       case ClosureOp::Dielectric:
       case ClosureOp::Conductor:
       case ClosureOp::GeneralizedSchlick:
-        return {c.microfacet.normal, c.microfacet.tangent};
+        return {c.microfacet.normal, c.microfacet.tangent, false};
       case ClosureOp::ChiangHair:
-        return {c.hair.normal, c.hair.curve_direction >= 0
-                                   ? c.hair.curve_direction
-                                   : kDefaultCurveDir};
+        return {c.hair.normal, c.hair.curve_direction,
+                c.hair.curve_direction == kInvalidValue};
       default:
-        return {-1, -1};
-    }
-  }
-
-  static int leaf_weight_slot(const ClosureNode& c) {
-    switch (c.op) {
-      case ClosureOp::OrenNayarDiffuse:
-      case ClosureOp::BurleyDiffuse:
-      case ClosureOp::Sheen:
-      case ClosureOp::Translucent:
-        return c.diffuse.weight;
-      case ClosureOp::Dielectric:
-      case ClosureOp::Conductor:
-      case ClosureOp::GeneralizedSchlick:
-        return c.microfacet.weight;
-      default:
-        return -1;
+        return {kInvalidValue, kInvalidValue, false};
     }
   }
 
@@ -499,21 +512,21 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
     return (leaf_type(c) & ctx.type_mask) != 0u;
   }
 
-  static Vector2f get_ggx_alpha(const ClosureNode& c, const Val* tmps) {
-    return dr::clip(dr::head<2>(tmps[c.microfacet.roughness]), 1e-3f, 1.0f);
+  Vector2f get_ggx_alpha(const ClosureNode& c, const State& s) const {
+    return dr::clip(dr::head<2>(val(c.microfacet.roughness, s)), 1e-3f, 1.0f);
   }
 
   Float specular_ior(const ClosureNode& c, const State& s) const {
     if (c.op == ClosureOp::Dielectric) {
       return detail::safe_dielectric_ior(
-          s.tmps[c.microfacet.p[1]].x(),
+          val(c.microfacet.p[1], s).x(),
           !is_thin_walled(c) && scatter_mode(c) != kScatterR);
     }
-    int slot = c.microfacet.p[0];
-    return detail::f0_to_ior(
-        prog().is_tmp_uniform(slot)
-            ? s.tmps[slot].x()
-            : dr::mean(dr::clip(xyz(s.tmps[slot]), 0.0f, 1.0f)));
+    ValueId id = c.microfacet.p[0];
+    Val v = val(id, s);
+    return detail::f0_to_ior(values().is_value_scalar(id)
+                                 ? v.x()
+                                 : dr::mean(dr::clip(xyz(v), 0.0f, 1.0f)));
   }
 
   UnpolarizedSpectrum eval_thinfilm_fresnel(const UnpolarizedSpectrum& f_base,
@@ -521,9 +534,9 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
                                             const ClosureNode& c,
                                             const Leaf& leaf,
                                             const State& s) const {
-    if (c.microfacet.tf_thickness < 0) return f_base;
-    Float thickness_nm = s.tmps[c.microfacet.tf_thickness].x();
-    Float eta2 = dr::maximum(s.tmps[c.microfacet.tf_ior].x(), 1.0f);
+    if (c.microfacet.tf_thickness == kInvalidValue) return f_base;
+    Float thickness_nm = val(c.microfacet.tf_thickness, s).x();
+    Float eta2 = dr::maximum(val(c.microfacet.tf_ior, s).x(), 1.0f);
     auto [a12_s, a12_p, cos_t2, _e1, _e2] =
         fresnel_polarized(dr::clip(cos_theta, 0.0f, 1.0f), eta2);
     Float ct2 = dr::abs(cos_t2);
@@ -531,7 +544,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
     if (c.op == ClosureOp::GeneralizedSchlick) {
       r23_p = r23_s = detail::fresnel_hoffman_schlick(
           ct2, s.spectra[leaf.spec[0]], s.spectra[leaf.spec[1]],
-          s.spectra[leaf.spec[2]], s.tmps[c.microfacet.p[3]].x());
+          s.spectra[leaf.spec[2]], val(c.microfacet.p[3], s).x());
       phi23_p = phi23_s = dr::select(
           s.spectra[leaf.spec[0]] < dr::square((eta2 - 1.0f) / (eta2 + 1.0f)),
           UnpolarizedSpectrum(dr::Pi<Float>), UnpolarizedSpectrum(0.0f));
@@ -559,7 +572,8 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
                                        const Float& cos_im, const Float& f_d,
                                        const Float& cos_theta_t,
                                        const State& s) const {
-    if (c.op == ClosureOp::Dielectric && c.microfacet.tf_thickness < 0) {
+    if (c.op == ClosureOp::Dielectric &&
+        c.microfacet.tf_thickness == kInvalidValue) {
       return UnpolarizedSpectrum(f_d);
     }
     bool two_sided = is_two_sided(c);
@@ -575,7 +589,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
                                                     s.spectra[leaf.spec[1]]))
             : detail::fresnel_hoffman_schlick(
                   cos_tf, s.spectra[leaf.spec[0]], s.spectra[leaf.spec[1]],
-                  s.spectra[leaf.spec[2]], s.tmps[c.microfacet.p[3]].x());
+                  s.spectra[leaf.spec[2]], val(c.microfacet.p[3], s).x());
     UnpolarizedSpectrum f_tf =
         eval_thinfilm_fresnel(f_base, cos_tf, c, leaf, s);
     return two_sided ? f_tf
@@ -585,7 +599,8 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
 
   static Float specular_refl_prob(const ClosureNode& c, const Float& f_d,
                                   const UnpolarizedSpectrum& f_c) {
-    return (c.op == ClosureOp::Dielectric && c.microfacet.tf_thickness < 0)
+    return (c.op == ClosureOp::Dielectric &&
+            c.microfacet.tf_thickness == kInvalidValue)
                ? f_d
                : selection_weight(f_c);
   }
@@ -595,10 +610,10 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
                                            const State& s) const {
     Float cos_i = Frame3f::cos_theta(s.wi_local[leaf.frame]);
     Float ndv = dr::abs(cos_i);
-    Float alpha_eff = dr::sqrt(dr::prod(get_ggx_alpha(c, s.tmps.data())));
-    bool has_tf = c.microfacet.tf_thickness >= 0;
-    Mask tf_active = has_tf ? ((s.tmps[c.microfacet.tf_thickness].x() > 0.0f) &&
-                               (s.tmps[c.microfacet.tf_ior].x() > 1.0f))
+    Float alpha_eff = dr::sqrt(dr::prod(get_ggx_alpha(c, s)));
+    bool has_tf = c.microfacet.tf_thickness != kInvalidValue;
+    Mask tf_active = has_tf ? ((val(c.microfacet.tf_thickness, s).x() > 0.0f) &&
+                               (val(c.microfacet.tf_ior, s).x() > 1.0f))
                             : Mask(false);
     UnpolarizedSpectrum f_nv, f0, f90(1.0f);
     Mask index_matched(false);
@@ -635,34 +650,32 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
                                          : res;
   }
 
-  static Float sheen_dir_albedo(const ClosureNode& c, const Vector3f& wi_l,
-                                const Val* tmps) {
+  Float sheen_dir_albedo(const ClosureNode& c, const Vector3f& wi_l,
+                         const State& s) const {
     return detail::sheen_dir_albedo(dr::abs(Frame3f::cos_theta(wi_l)),
-                                    tmps[c.diffuse.roughness].x(),
+                                    val(c.diffuse.roughness, s).x(),
                                     c.diffuse.mode == kSheenZeltner);
   }
 
   UnpolarizedSpectrum leaf_albedo(size_t k, const State& s) const {
     const Leaf& leaf = m_leaves[k];
-    const ClosureNode& c = prog().closures[leaf.node];
+    const ClosureNode& c = m_closures[leaf.node];
+    bool cached_tp = (c.flags & kClosureNeedsTp) != 0;
     switch (c.op) {
       case ClosureOp::Dielectric: {
         const UnpolarizedSpectrum& tint = s.spectra[leaf.spec[0]];
         if (scatter_mode(c) != kScatterR) return tint;
-        return tint * (!s.layer_albedo.empty()
-                           ? s.layer_albedo[k]
-                           : specular_refl_albedo(c, leaf, s));
+        return tint * (cached_tp ? s.layer_albedo[k]
+                                 : specular_refl_albedo(c, leaf, s));
       }
       case ClosureOp::GeneralizedSchlick:
         if (scatter_mode(c) != kScatterR) return UnpolarizedSpectrum(1.0f);
-        return !s.layer_albedo.empty() ? s.layer_albedo[k]
-                                       : specular_refl_albedo(c, leaf, s);
+        return cached_tp ? s.layer_albedo[k] : specular_refl_albedo(c, leaf, s);
       case ClosureOp::Sheen:
         return s.spectra[leaf.spec[0]] *
-               (!s.layer_albedo.empty()
-                    ? s.layer_albedo[k]
-                    : UnpolarizedSpectrum(sheen_dir_albedo(
-                          c, s.wi_local[leaf.frame], s.tmps.data())));
+               (cached_tp ? s.layer_albedo[k]
+                          : UnpolarizedSpectrum(sheen_dir_albedo(
+                                c, s.wi_local[leaf.frame], s)));
       case ClosureOp::Conductor:
         return specular_refl_albedo(c, leaf, s);
       case ClosureOp::ChiangHair: {
@@ -674,10 +687,10 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
     }
   }
 
-  UnpolarizedSpectrum eval_color(int slot, const SurfaceInteraction3f& si,
-                                 const Val* tmps, bool unbounded) const {
-    const Val& v = tmps[slot];
-    if (prog().is_tmp_uniform(slot)) {
+  UnpolarizedSpectrum eval_color(ValueId id, const SurfaceInteraction3f& si,
+                                 const State& s, bool unbounded) const {
+    Val v = val(id, s);
+    if (values().is_value_scalar(id)) {
       return UnpolarizedSpectrum(unbounded ? dr::maximum(v.x(), 0.0f)
                                            : dr::clip(v.x(), 0.0f, 1.0f));
     }
@@ -688,11 +701,9 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
 
   // Flattens the closure DAG into per-leaf effective linear weights
   // (combinators * leaf weight), computing layer throughputs and caching
-  // transmissive layer albedos when layered.
+  // transmissive layer albedos only for closures marked `kClosureNeedsTp`.
   void flatten_closures(State& s) const {
-    const std::vector<ClosureNode>& closures = prog().closures;
-    size_t n = closures.size();
-    const Val* tmps = s.tmps.data();
+    size_t n = m_closures.size();
 
     absl::InlinedVector<UnpolarizedSpectrum, 16> tp;
     if (m_has_layers) {
@@ -700,7 +711,11 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
       s.layer_albedo.resize(m_leaves.size(), 0.0f);
       size_t leaf_k = 0;
       for (size_t i = 0; i + 1 < n; ++i) {
-        const ClosureNode& c = closures[i];
+        const ClosureNode& c = m_closures[i];
+        if (!(c.flags & kClosureNeedsTp)) {
+          if (is_leaf(c.op)) ++leaf_k;
+          continue;
+        }
         if (c.op == ClosureOp::Null) {
           tp[i] = 1.0f;
         } else if (c.op == ClosureOp::OpaqueBlocker) {
@@ -710,11 +725,11 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
           if (leaf_has_layer_throughput(c)) {
             UnpolarizedSpectrum albedo =
                 c.op == ClosureOp::Sheen
-                    ? UnpolarizedSpectrum(sheen_dir_albedo(
-                          c, s.wi_local[m_leaves[k].frame], tmps))
+                    ? UnpolarizedSpectrum(
+                          sheen_dir_albedo(c, s.wi_local[m_leaves[k].frame], s))
                     : specular_refl_albedo(c, m_leaves[k], s);
             s.layer_albedo[k] = albedo;
-            Float w_leaf = dr::maximum(tmps[leaf_weight_slot(c)].x(), 0.0f);
+            Float w_leaf = dr::maximum(val(leaf_weight_id(c), s).x(), 0.0f);
             tp[i] = dr::maximum(0.0f, 1.0f - w_leaf * albedo);
           } else {
             tp[i] = 0.0f;
@@ -737,7 +752,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
     absl::InlinedVector<UnpolarizedSpectrum, 16> w(n, 0.0f);
     w[n - 1] = 1.0f;
     for (int i = static_cast<int>(n) - 1; i >= 0; --i) {
-      const ClosureNode& c = closures[i];
+      const ClosureNode& c = m_closures[i];
       if (!is_combinator(c.op)) continue;
       int c0 = c.comb.first, c1 = c.comb.second;
       if (c.op == ClosureOp::Layer) {
@@ -757,27 +772,32 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
 
     s.leaf_weight.resize(m_leaves.size());
     for (size_t k = 0; k < m_leaves.size(); ++k) {
-      const ClosureNode& c = closures[m_leaves[k].node];
-      int w_slot = leaf_weight_slot(c);
-      s.leaf_weight[k] = w_slot >= 0 ? w[m_leaves[k].node] *
-                                           dr::maximum(tmps[w_slot].x(), 0.0f)
-                                     : w[m_leaves[k].node];
+      const ClosureNode& c = m_closures[m_leaves[k].node];
+      ValueId w_id = leaf_weight_id(c);
+      s.leaf_weight[k] =
+          w_id != kInvalidValue
+              ? w[m_leaves[k].node] * dr::maximum(val(w_id, s).x(), 0.0f)
+              : w[m_leaves[k].node];
     }
   }
 
   State eval_state(const BSDFContext& ctx, const SurfaceInteraction3f& si,
                    Mask active) const {
-    int op_slot = prog().opacity_slot;
-
     State s;
-    s.tmps.resize(prog().tmp_channels.size());
-    m_eval.eval(si, active, s.tmps.data());
-    s.opacity = op_slot < 0 ? Float(1.0f) : clip_opacity(s.tmps[op_slot]);
-    s.surf_active = (op_slot < 0 || dr::grad_enabled(s.opacity))
-                        ? active
-                        : (active && (s.opacity > 0.0f));
+    if (m_opacity_root == kInvalidValue) {
+      s.opacity = Float(1.0f);
+    } else {
+      s.opacity =
+          clip_opacity(m_eval.eval_opacity(m_opacity_root, si, active, s.eval));
+    }
+    s.surf_active =
+        (m_opacity_root == kInvalidValue || dr::grad_enabled(s.opacity))
+            ? active
+            : (active && (s.opacity > 0.0f));
     s.has_surface = has_surface_enabled(ctx) && dr::any_or<true>(s.surf_active);
     if (!s.has_surface) return s;
+
+    m_eval.eval_surface(si, active, s.eval);
 
     s.n_geom =
         detail::safe_normalize(si.to_local(si.n), Vector3f(0.0f, 0.0f, 1.0f),
@@ -787,44 +807,43 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
     s.frames.resize(m_unique_frames.size());
     s.wi_local.resize(m_unique_frames.size());
     for (size_t f = 0; f < m_unique_frames.size(); ++f) {
-      auto [normal_slot, tangent_slot] = m_unique_frames[f];
-      Vector3f nl = normal_slot >= 0
+      const FrameKey& key = m_unique_frames[f];
+      Vector3f nl = key.normal != kInvalidValue
                         ? si.to_local(detail::safe_normalize(
-                              xyz(s.tmps[normal_slot]), Vector3f(si.sh_frame.n),
+                              xyz(val(key.normal, s)), Vector3f(si.sh_frame.n),
                               detail::kMinLen2<ScalarFloat>))
                         : Vector3f(0.0f, 0.0f, 1.0f);
       Vector3f t_world =
-          tangent_slot >= 0
-              ? detail::safe_normalize(xyz(s.tmps[tangent_slot]), si.sh_frame.s,
+          key.tangent != kInvalidValue
+              ? detail::safe_normalize(xyz(val(key.tangent, s)), si.sh_frame.s,
                                        detail::kMinLen2<ScalarFloat>)
-              : (tangent_slot == kDefaultCurveDir
-                     ? detail::geom_curve_tangent_world(si)
-                     : detail::geom_tangent_world(si));
+              : (key.is_curve ? detail::geom_curve_tangent_world(si)
+                              : detail::geom_tangent_world(si));
       s.frames[f] = detail::build_shading_frame(si, s.n_geom, nl, t_world);
       s.wi_local[f] = s.frames[f].to_local(si.wi);
     }
 
     s.spectra.resize(m_spec_slots.size());
     for (size_t j = 0; j < m_spec_slots.size(); ++j) {
-      s.spectra[j] = eval_color(m_spec_slots[j].tmp_slot, si, s.tmps.data(),
-                                m_spec_slots[j].unbounded);
+      s.spectra[j] =
+          eval_color(m_spec_slots[j].value, si, s, m_spec_slots[j].unbounded);
     }
     if (m_num_hair > 0 &&
         (ctx.type_mask & (+BSDFFlags::GlossyReflection |
                           +BSDFFlags::GlossyTransmission)) != 0u) {
       s.hair.reserve(m_num_hair);
-      auto hair_r = [&](int slot) {
-        return dr::maximum(dr::head<2>(s.tmps[slot]), 1e-3f);
+      auto hair_r = [&](ValueId id) {
+        return dr::maximum(dr::head<2>(val(id, s)), 1e-3f);
       };
       for (const Leaf& leaf : m_leaves) {
         if (leaf.hair_idx < 0) continue;
-        const ClosureNode& c = prog().closures[leaf.node];
+        const ClosureNode& c = m_closures[leaf.node];
         s.hair.push_back(detail::build_chiang_hair_params<Float, Spectrum>(
             s.wi_local[leaf.frame], s.spectra[leaf.spec[0]],
             s.spectra[leaf.spec[1]], s.spectra[leaf.spec[2]],
             hair_r(c.hair.roughness_r), hair_r(c.hair.roughness_tt),
-            hair_r(c.hair.roughness_trt), s.tmps[c.hair.ior].x(),
-            s.spectra[leaf.spec[3]], s.tmps[c.hair.cuticle_angle].x()));
+            hair_r(c.hair.roughness_trt), val(c.hair.ior, s).x(),
+            s.spectra[leaf.spec[3]], val(c.hair.cuticle_angle, s).x()));
       }
     }
     flatten_closures(s);
@@ -840,7 +859,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
     }
     Float w_sum(0.0f);
     for (size_t k = 0; k < num_leaves; ++k) {
-      const ClosureNode& c = prog().closures[m_leaves[k].node];
+      const ClosureNode& c = m_closures[m_leaves[k].node];
       if (!leaf_enabled(ctx, c)) {
         s.leaf_prob[k] = 0.0f;
       } else {
@@ -897,7 +916,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
     Float xi = dr::clip(sample1, 0.0f, dr::OneMinusEpsilon<Float>) * total_p;
     Float cdf(0.0f);
     for (size_t k = 0; k < m_leaves.size(); ++k) {
-      if (!leaf_enabled(ctx, prog().closures[m_leaves[k].node])) continue;
+      if (!leaf_enabled(ctx, m_closures[m_leaves[k].node])) continue;
       Float cdf_prev = cdf;
       cdf += s.leaf_prob[k];
       Mask pick = remaining && (xi < cdf);
@@ -981,7 +1000,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
                                                         const Point2f& sample2,
                                                         const State& s) const {
     const Leaf& leaf = m_leaves[k];
-    const ClosureNode& c = prog().closures[leaf.node];
+    const ClosureNode& c = m_closures[leaf.node];
     const Vector3f& wi_l = s.wi_local[leaf.frame];
     Vector3f wo_l(0.0f, 0.0f, 1.0f);
     UInt32 sampled_type(leaf_type(c));
@@ -996,7 +1015,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
                         ? specular_ior(c, s)
                         : Float(1.0f);
         auto ds = detail::ggx_microfacet_sample(
-            wi_l, get_ggx_alpha(c, s.tmps.data()), ior, opts, sample1, sample2,
+            wi_l, get_ggx_alpha(c, s), ior, opts, sample1, sample2,
             [&](const Float& cos_im, const Float& f_d, const Float& cos_t) {
               return specular_refl_prob(
                   c, f_d, specular_fresnel(c, leaf, cos_im, f_d, cos_t, s));
@@ -1017,7 +1036,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
         break;
       case ClosureOp::Sheen:
         std::tie(wo_l, valid) =
-            detail::sheen_sample(wi_l, s.tmps[c.diffuse.roughness].x(),
+            detail::sheen_sample(wi_l, val(c.diffuse.roughness, s).x(),
                                  c.diffuse.mode == kSheenZeltner, sample2);
         break;
       case ClosureOp::Translucent:
@@ -1036,7 +1055,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
       const BSDFContext& ctx, size_t k, const Vector3f& wo,
       const State& s) const {
     const Leaf& leaf = m_leaves[k];
-    const ClosureNode& c = prog().closures[leaf.node];
+    const ClosureNode& c = m_closures[leaf.node];
     const Vector3f& wi_l = s.wi_local[leaf.frame];
     Vector3f wo_l = s.frames[leaf.frame].to_local(wo);
     Mask same_side = dr::dot(s.n_geom, wo) * Frame3f::cos_theta(wo_l) > 0.0f;
@@ -1051,8 +1070,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
         Float ior = opts.need_ior_fresnel ? specular_ior(c, s) : Float(1.0f);
         std::tie(f, pdf) =
             detail::ggx_microfacet_eval_pdf<Float, UnpolarizedSpectrum>(
-                wi_l, wo_l, get_ggx_alpha(c, s.tmps.data()), ior, opts,
-                ctx.mode,
+                wi_l, wo_l, get_ggx_alpha(c, s), ior, opts, ctx.mode,
                 [&](const Float& cos_im, const Float& f_d, const Float& cos_t) {
                   return specular_fresnel(c, leaf, cos_im, f_d, cos_t, s);
                 },
@@ -1075,17 +1093,17 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
       case ClosureOp::Sheen:
         std::tie(f, pdf) = detail::sheen_eval_pdf(
             wi_l, wo_l, s.spectra[leaf.spec[0]],
-            s.tmps[c.diffuse.roughness].x(), c.diffuse.mode == kSheenZeltner);
+            val(c.diffuse.roughness, s).x(), c.diffuse.mode == kSheenZeltner);
         break;
       case ClosureOp::BurleyDiffuse:
         std::tie(f, pdf) = detail::burley_diffuse_eval_pdf(
             wi_l, wo_l, s.spectra[leaf.spec[0]],
-            dr::clip(s.tmps[c.diffuse.roughness].x(), 0.0f, 1.0f));
+            dr::clip(val(c.diffuse.roughness, s).x(), 0.0f, 1.0f));
         break;
       default:
         std::tie(f, pdf) = detail::oren_nayar_eval_pdf(
             wi_l, wo_l, s.spectra[leaf.spec[0]],
-            dr::clip(s.tmps[c.diffuse.roughness].x(), 0.0f, 1.0f),
+            dr::clip(val(c.diffuse.roughness, s).x(), 0.0f, 1.0f),
             c.diffuse.mode != 0);
         break;
     }
@@ -1097,7 +1115,7 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
     UnpolarizedSpectrum f(0.0f);
     Float pdf(0.0f);
     for (size_t k = 0; k < m_leaves.size(); ++k) {
-      if (!leaf_enabled(ctx, prog().closures[m_leaves[k].node])) continue;
+      if (!leaf_enabled(ctx, m_closures[m_leaves[k].node])) continue;
       auto [f_k, pdf_k] = eval_and_pdf_leaf(ctx, k, wo, s);
       f = dr::fmadd(s.leaf_weight[k], f_k, f);
       pdf = dr::fmadd(s.leaf_prob[k], pdf_k, pdf);
@@ -1106,6 +1124,9 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
   }
 
   MtlxEvaluator<Float, Spectrum> m_eval;
+  std::vector<ClosureNode> m_closures;
+  ValueId m_opacity_root = kInvalidValue;
+  bool m_thin_walled = false;
   bool m_has_layers = false;
   int m_num_hair = 0;
   uint32_t m_surface_types = 0u;
@@ -1116,8 +1137,8 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
   std::vector<int> m_comb_spec;
   // Leaf closures paired with their deduplicated frame and spectral slots.
   std::vector<Leaf> m_leaves;
-  // Deduplicated `(normal_slot, tangent_slot)` pairs.
-  std::vector<std::pair<int, int>> m_unique_frames;
+  // Deduplicated shading frame descriptors.
+  std::vector<FrameKey> m_unique_frames;
 };
 
 }  // namespace

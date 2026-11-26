@@ -271,12 +271,9 @@ Vector<Float, 4> eval_elementwise(Op op, int channels,
 }
 
 template <typename Float>
-bool eval_pure_op(Inst inst, Vector<Float, 4>*& sp) {
+bool eval_pure_op(const Node& node, const Vector<Float, 4>* a,
+                  Vector<Float, 4>& out) {
   using Val = Vector<Float, 4>;
-  auto pop = [&](int n) {
-    sp -= n;
-    return sp;
-  };
   auto xy = [](const Val& v) -> Vector<Float, 2> { return dr::head<2>(v); };
   auto xyz = [](const Val& v) -> Vector<Float, 3> { return dr::head<3>(v); };
   auto val2 = [](const auto& v) { return Val(v.x(), v.y(), 0.0f, 0.0f); };
@@ -284,67 +281,52 @@ bool eval_pure_op(Inst inst, Vector<Float, 4>*& sp) {
     return Val(v.x(), v.y(), v.z(), w);
   };
 
-  if (int n = elementwise_arity(inst.op)) {
-    Val* a = pop(n);
-    *sp++ = eval_elementwise<Float>(inst.op, inst.channels, a);
+  if (elementwise_arity(node.op) != 0) {
+    out = eval_elementwise<Float>(node.op, node.channels, a);
     return true;
   }
-  uint16_t imm = inst.imm;
-  switch (inst.op) {
-    case Op::Rgb: {
-      Val* a = pop(3);
-      *sp++ = Val(a[0].x(), a[1].x(), a[2].x(), 0.0f);
+  uint16_t imm = node.imm;
+  switch (node.op) {
+    case Op::Rgb:
+      out = Val(a[0].x(), a[1].x(), a[2].x(), 0.0f);
       return true;
-    }
-    case Op::Vec2: {
-      Val* a = pop(2);
-      *sp++ = Val(a[0].x(), a[1].x(), 0.0f, 0.0f);
+    case Op::Vec2:
+      out = Val(a[0].x(), a[1].x(), 0.0f, 0.0f);
       return true;
-    }
-    case Op::Vec4: {
-      Val* a = pop(2);
-      *sp++ = val3(a[0], a[1].x());
+    case Op::Vec4:
+      out = val3(a[0], a[1].x());
       return true;
-    }
     case Op::Chan:
-      sp[-1] = Val(sp[-1].entry(imm));
+      out = Val(a[0].entry(imm));
       return true;
-    case Op::Dot: {
-      Val* a = pop(2);
-      *sp++ = Val(imm == 2   ? dr::dot(xy(a[0]), xy(a[1]))
-                  : imm == 4 ? dr::dot(a[0], a[1])
-                             : dr::dot(xyz(a[0]), xyz(a[1])));
+    case Op::Dot:
+      out = Val(imm == 2   ? dr::dot(xy(a[0]), xy(a[1]))
+                : imm == 4 ? dr::dot(a[0], a[1])
+                           : dr::dot(xyz(a[0]), xyz(a[1])));
       return true;
-    }
-    case Op::Cross: {
-      Val* a = pop(2);
-      *sp++ = val3(dr::cross(xyz(a[0]), xyz(a[1])));
+    case Op::Cross:
+      out = val3(dr::cross(xyz(a[0]), xyz(a[1])));
       return true;
-    }
     case Op::Normalize:
-      sp[-1] = imm == 2   ? val2(safe_normalize(xy(sp[-1])))
-               : imm == 4 ? safe_normalize(sp[-1])
-                          : val3(safe_normalize(xyz(sp[-1])));
+      out = imm == 2   ? val2(safe_normalize(xy(a[0])))
+            : imm == 4 ? safe_normalize(a[0])
+                       : val3(safe_normalize(xyz(a[0])));
       return true;
-    case Op::Rotate2D: {
-      Val* a = pop(2);
-      *sp++ = val2(mx_rotate2d(xy(a[0]), a[1].x()));
+    case Op::Rotate2D:
+      out = val2(mx_rotate2d(xy(a[0]), a[1].x()));
       return true;
-    }
-    case Op::Rotate3D: {
-      Val* a = pop(3);
-      *sp++ = val3(mx_rotate3d(xyz(a[0]), a[1].x(), xyz(a[2])));
+    case Op::Rotate3D:
+      out = val3(mx_rotate3d(xyz(a[0]), a[1].x(), xyz(a[2])));
       return true;
-    }
     // The color conversions preserve the fourth (alpha) channel natively.
     case Op::RgbToHsv:
-      sp[-1] = dr::rgb_to_hsv(sp[-1]);
+      out = dr::rgb_to_hsv(a[0]);
       return true;
     case Op::HsvToRgb:
-      sp[-1] = dr::hsv_to_rgb(sp[-1]);
+      out = dr::hsv_to_rgb(a[0]);
       return true;
     case Op::Blackbody:
-      sp[-1] = val3(mx_blackbody(sp[-1].x()));
+      out = val3(mx_blackbody(a[0].x()));
       return true;
     default:
       return false;

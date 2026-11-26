@@ -17,25 +17,32 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
+#include <absl/types/span.h>
 #include <drjit/array.h>
 #include <drjit/traversable_base.h>
 
 namespace mitsuba::mtlx {
 
+using ValueId = uint16_t;
+inline constexpr ValueId kInvalidValue = std::numeric_limits<ValueId>::max();
 inline constexpr size_t kMaxImm = std::numeric_limits<uint16_t>::max();
+inline constexpr uint32_t kNoUniformScalar =
+    std::numeric_limits<uint32_t>::max();
+
 // Matches MaterialX's `M_FLOAT_EPS`.
 inline constexpr double kMtlxFloatEps = 1e-8;
 
-// `Inst::imm` flag for `Op::NormalMap`: pops 2 operands `(in, scale)` and
+// `Node::imm` flag for `Op::NormalMap`: takes 2 operands `(in, scale)` and
 // evaluates against the shading frame's default world basis.
 inline constexpr uint16_t kNormalMapDefaultFrame = 1;
 
-// Bit flags in `Inst::imm` for `CellNoise`, `Noise`, `Worley` and `Fractal`.
+// Bit flags in `Node::imm` for `CellNoise`, `Noise`, `Worley` and `Fractal`.
 // For `Fractal`, the bits from `kFractalOctavesShift` hold the constant octave
 // count, or `kFractalDynamicOctaves` when octaves are passed as the last
 // operand.
@@ -60,14 +67,12 @@ enum class Op : uint8_t {
   Const,
   // Opaque scalar (`dr::opaque`), not baked as a literal into compiled kernels.
   Opaque,
-  LoadTmp,
-  StoreTmp,
   SampleInput,
 
   // Spatially varying ops: re-parameterized input sampling, named shape
-  // attributes (`Attr`, evaluating to a default expression on shapes lacking
-  // the attribute), and geometric intrinsics (object space is passed via mesh
-  // attributes).
+  // attributes (`Attr`, taking a default operand used on shapes lacking the
+  // attribute; `flags` holds the read channel count 1 or 3), geometric
+  // intrinsics, and normal perturbation.
   SampleInputUV,
   Attr,
   GeomUV,
@@ -76,8 +81,10 @@ enum class Op : uint8_t {
   GeomTangentWorld,
   GeomBitangentWorld,
   GeomIncidentDir,
+  NormalMap,
+  HeightToNormal,
 
-  // 1-ary element-wise ops.
+  // 1-ary pure element-wise ops.
   Neg,
   Abs,
   Sin,
@@ -93,28 +100,29 @@ enum class Op : uint8_t {
   Acos,
   Fract,
 
-  // 2-ary element-wise ops.
+  // 2-ary commutative pure element-wise ops.
   Add,
-  Sub,
   Mul,
-  Div,
-  Lt,
-  Le,
   Eq,
   Min,
   Max,
+
+  // 2-ary non-commutative pure element-wise ops.
+  Sub,
+  Div,
+  Lt,
+  Le,
   Pow,
   Atan2,
 
-  // 3-ary element-wise ops.
+  // 3-ary pure element-wise ops.
   Select,
   Mix,
   Clip,
   Fma,
 
-  // Color & vector ops (`Dot` and `Normalize` take `imm = 2` for 2D and
-  // `imm = 4` for 4D; `NormalMap` takes `imm = kNormalMapDefaultFrame` for the
-  // 2-operand default-frame form; `Vec4` appends a fourth channel to a
+  // Non-element-wise pure color & vector ops (`Dot` and `Normalize` take
+  // `imm = 2` for 2D and `imm = 4` for 4D; `Vec4` appends a fourth channel to a
   // 3-channel value).
   Chan,
   Dot,
@@ -124,8 +132,6 @@ enum class Op : uint8_t {
   Rgb,
   Cross,
   Rotate3D,
-  NormalMap,
-  HeightToNormal,
   RgbToHsv,
   HsvToRgb,
   Blackbody,
@@ -137,137 +143,186 @@ enum class Op : uint8_t {
   Worley,
   Fractal,
 
-  // Matrix ops on 3x3 or 4x4 matrices (`channels` is the size), which are
-  // passed as rows. `MatTranspose`, `MatInverse` and `MatMul` store the rows of
-  // their result in consecutive temporaries, starting at `imm`.
+  // Matrix ops on 3x3 or 4x4 matrices (`channels` is the matrix dimension for
+  // producers and `MatRow`; rows are passed as operands). `MatTranspose`,
+  // `MatInverse`, and `MatMul` write rows to slot `imm`, read via `MatRow`.
   MatDet,
   MatTranspose,
   MatInverse,
-  MatMul
+  MatMul,
+  MatRow
 };
 
-struct Inst {
-  Op op;
-  // For element-wise ops: active channel count (1 to 4). For `SampleInput`,
-  // `SampleInputUV`, and `Attr`: 1 for single-channel reads, 3 otherwise. For
-  // matrix ops: the matrix size. 0 for all other ops.
-  uint8_t channels = 0;
-  uint16_t imm = 0;
-
-  bool operator==(const Inst& o) const {
-    return op == o.op && channels == o.channels && imm == o.imm;
-  }
-
-  template <typename H>
-  friend H AbslHashValue(H h, Inst i) {
-    return H::combine(std::move(h), i.op, i.channels, i.imm);
-  }
-};
-static_assert(sizeof(Inst) == 4);
-static_assert(std::has_unique_object_representations_v<Inst>);
-
-// Returns the operand count of ops that act independently on each channel, and
-// 0 for all other ops.
 constexpr int elementwise_arity(Op op) {
-  switch (op) {
-    case Op::Neg:
-    case Op::Abs:
-    case Op::Sin:
-    case Op::Cos:
-    case Op::Tan:
-    case Op::Exp:
-    case Op::Round:
-    case Op::Floor:
-    case Op::Ceil:
-    case Op::Sqrt:
-    case Op::Log:
-    case Op::Asin:
-    case Op::Acos:
-    case Op::Fract:
-      return 1;
-    case Op::Add:
-    case Op::Sub:
-    case Op::Mul:
-    case Op::Div:
-    case Op::Lt:
-    case Op::Le:
-    case Op::Eq:
-    case Op::Min:
-    case Op::Max:
-    case Op::Pow:
-    case Op::Atan2:
-      return 2;
-    case Op::Select:
-    case Op::Mix:
-    case Op::Clip:
-    case Op::Fma:
-      return 3;
-    default:
-      return 0;
-  }
+  if (op >= Op::Neg && op <= Op::Fract) return 1;
+  if (op >= Op::Add && op <= Op::Atan2) return 2;
+  if (op >= Op::Select && op <= Op::Fma) return 3;
+  return 0;
 }
-
-// Returns the active channel count (1 to 4) of non-elementwise ops.
-constexpr uint8_t result_channels(Op op, uint16_t imm = 0) {
-  switch (op) {
-    case Op::Const:
-    case Op::Opaque:
-    case Op::Chan:
-    case Op::Dot:
-    case Op::MatDet:
-      return 1;
-    case Op::GeomUV:
-    case Op::Vec2:
-    case Op::Rotate2D:
-      return 2;
-    case Op::Vec4:
-      return 4;
-    case Op::Normalize:
-      return imm == 4 ? 4 : (imm == 2 ? 2 : 3);
-    case Op::CellNoise:
-    case Op::Noise:
-    case Op::Worley:
-    case Op::Fractal:
-      return noise_is_vec3(imm) ? 3 : 1;
-    default:
-      return 3;
-  }
-}
-
-// Returns true if `op` unconditionally depends on the surface interaction.
-// (`SampleInput` depends on whether its texture input is spatially varying.)
 constexpr bool is_spatially_varying_op(Op op) {
-  switch (op) {
-    case Op::SampleInputUV:
-    case Op::Attr:
-    case Op::GeomUV:
-    case Op::GeomPosWorld:
-    case Op::GeomNormalWorld:
-    case Op::GeomTangentWorld:
-    case Op::GeomBitangentWorld:
-    case Op::GeomIncidentDir:
-    case Op::NormalMap:
-    case Op::HeightToNormal:
-      return true;
-    default:
-      return false;
-  }
+  return op >= Op::SampleInputUV && op <= Op::HeightToNormal;
+}
+constexpr bool is_pure_op(Op op) { return op >= Op::Neg && op <= Op::Vec4; }
+constexpr bool is_commutative_op(Op op) {
+  return op >= Op::Add && op <= Op::Max;
+}
+constexpr bool is_matrix_producer(Op op) {
+  return op >= Op::MatTranspose && op <= Op::MatMul;
 }
 
-constexpr bool is_stmt_terminator(Op op) {
-  return op == Op::StoreTmp || op == Op::MatTranspose || op == Op::MatInverse ||
-         op == Op::MatMul;
+// Flat SSA IR node stored in `MtlxValueProgram::nodes`.
+//
+// Operands are stored inline in `args[0..arity-1]` when `arity <= 3`, or as a
+// slice `extra_args[args[0] .. args[0] + arity)` when `arity > 3`.
+struct Node {
+  Op op = Op::Const;
+  // Output active channel count (1..4); for matrix producers, matrix dimension.
+  uint8_t channels = 1;
+  uint8_t arity = 0;
+  // Per-op flags: read channel count (1 or 3) for `SampleInput`,
+  // `SampleInputUV`, and `Attr`; 0 for all other ops.
+  uint8_t flags = 0;
+  uint16_t imm = 0;
+  uint16_t args[3] = {};
+};
+static_assert(sizeof(Node) == 12);
+static_assert(std::has_unique_object_representations_v<Node>);
+
+inline absl::Span<const ValueId> node_args(
+    const Node& n, absl::Span<const ValueId> extra_args) {
+  return n.arity <= 3 ? absl::MakeConstSpan(n.args, n.arity)
+                      : extra_args.subspan(n.args[0], n.arity);
 }
+
+// Self-contained SSA slice in `MtlxValueProgram::nodes[begin .. end)` evaluated
+// at perturbed surface interactions by `Op::HeightToNormal`. Nodes in a region
+// may reference uniform values (`< uniform_end`) or earlier nodes in the same
+// region (`[begin .. i)`). Evaluates `root` to `h` when `has_texcoord == 0`, or
+// `(h, tc.x, tc.y)` otherwise.
+struct Region {
+  uint32_t begin = 0;
+  uint32_t end = 0;
+  ValueId root = kInvalidValue;
+  uint16_t mat_count = 0;
+  uint16_t has_texcoord = 0;
+  uint16_t _pad = 0;
+};
+static_assert(sizeof(Region) == 16);
+static_assert(std::has_unique_object_representations_v<Region>);
+
+// Pure flat SSA value program owned by `MtlxEvaluator` and used standalone by
+// `MtlxExprTexture` (emission and displacement) with no BSDF knowledge.
+//
+// After `OptimizeValueProgram` / `OptimizeBsdfProgram`, `nodes` is laid out as:
+//   [0 .. uniform_end)          : spatially-invariant nodes (main + regions)
+//   [uniform_end .. opacity_end): varying nodes for the early opacity prefix
+//   [opacity_end .. main_end)   : remaining varying main nodes
+//   [r.begin .. r.end)          : varying nodes of each `HeightToNormal` region
+struct MtlxValueProgram {
+  std::vector<Node> nodes;
+  std::vector<ValueId> extra_args;
+  std::vector<Region> regions;
+  std::vector<double> consts = {0.0, 1.0};
+  std::vector<double> opaques;
+  std::vector<std::string> attr_names;
+
+  // For each `id < uniform_end`, the offset into
+  // `MtlxEvaluator::m_uniform_scalars` if `id` is a computed uniform read
+  // outside `[0 .. uniform_end)`, or `kNoUniformScalar` otherwise (`Const`,
+  // `Opaque`, or internal-only uniform).
+  std::vector<uint32_t> uniform_offsets;
+  uint32_t uniform_scalar_count = 0;
+
+  uint32_t uniform_end = 0;
+  uint32_t opacity_end = 0;
+  uint32_t main_end = 0;
+  uint32_t uniform_mat_count = 0;
+  uint32_t main_mat_count = 0;
+  // Root expression for `MtlxExprTexture`, or `kInvalidValue` for BSDFs.
+  ValueId result_root = kInvalidValue;
+
+  bool is_value_scalar(ValueId id) const { return nodes[id].channels == 1; }
+  bool result_scalar() const {
+    return result_root != kInvalidValue && is_value_scalar(result_root);
+  }
+
+  // Appends a self-contained region node buffer (with 0-based local ValueIds)
+  // as a contiguous `Region` slice after `main_end`.
+  void append_region(absl::Span<const Node> reg_nodes,
+                     absl::Span<const ValueId> reg_extra_args, ValueId reg_root,
+                     uint16_t has_texcoord) {
+    uint32_t base = static_cast<uint32_t>(nodes.size());
+    uint32_t extra_base = static_cast<uint32_t>(extra_args.size());
+    if (base + reg_nodes.size() >= kMaxImm) {
+      throw std::runtime_error("materialx_expr: too many SSA nodes");
+    }
+    if (extra_base + reg_extra_args.size() > kMaxImm) {
+      throw std::runtime_error("materialx_expr: too many SSA operands");
+    }
+    for (ValueId a : reg_extra_args) {
+      extra_args.push_back(static_cast<ValueId>(a + base));
+    }
+    for (Node n : reg_nodes) {
+      if (n.arity <= 3) {
+        for (uint8_t j = 0; j < n.arity; ++j) {
+          n.args[j] = static_cast<ValueId>(n.args[j] + base);
+        }
+      } else {
+        n.args[0] = static_cast<uint16_t>(n.args[0] + extra_base);
+      }
+      nodes.push_back(n);
+    }
+    Region r;
+    r.begin = base;
+    r.end = static_cast<uint32_t>(nodes.size());
+    r.root = static_cast<ValueId>(base + reg_root);
+    r.has_texcoord = has_texcoord;
+    regions.push_back(r);
+  }
+
+  void traverse_state(void* payload, const drjit::TraverseVisitor& cb) const {
+    if (!cb.state) return;
+    auto put_span = [&](const auto& vec, const char* name) {
+      size_t n = vec.size();
+      drjit::detail::traverse_state(payload, cb, &n, sizeof(n), name);
+      if (n > 0) {
+        drjit::detail::traverse_state(payload, cb, vec.data(),
+                                      n * sizeof(vec[0]), name);
+      }
+    };
+    put_span(nodes, "nodes");
+    put_span(extra_args, "extra_args");
+    put_span(regions, "regions");
+    put_span(consts, "consts");
+    put_span(uniform_offsets, "uniform_offsets");
+    size_t n_attrs = attr_names.size();
+    DR_TRAVERSE_STATE(n_attrs)
+    for (const std::string& s : attr_names) {
+      put_span(s, "attr_names");
+    }
+    DR_TRAVERSE_STATE(uniform_end)
+    DR_TRAVERSE_STATE(opacity_end)
+    DR_TRAVERSE_STATE(main_end)
+    DR_TRAVERSE_STATE(result_root)
+  }
+};
 
 // Microfacet `ClosureNode::Microfacet::mode` scatter mode values
 // (`kScatterModeMask`) and flags.
-inline constexpr int kScatterR = 0, kScatterT = 1, kScatterRT = 2;
-inline constexpr int kScatterModeMask = 3, kScatterThinWalled = 4,
-                     kScatterTwoSided = 8, kScatterRetroreflective = 16;
+inline constexpr uint16_t kScatterR = 0, kScatterT = 1, kScatterRT = 2;
+inline constexpr uint16_t kScatterModeMask = 3, kScatterThinWalled = 4,
+                          kScatterTwoSided = 8, kScatterRetroreflective = 16;
 
-inline constexpr int kSheenContyKulla = 0, kSheenZeltner = 1;
+inline constexpr uint16_t kSheenContyKulla = 0, kSheenZeltner = 1;
 
-enum class ClosureOp : int32_t {
+enum ClosureFlag : uint8_t {
+  kClosureNone = 0,
+  // Set by `SimplifyClosures` on closures whose throughput contributes to a
+  // `Layer.top` above a scattering base.
+  kClosureNeedsTp = 1 << 0,
+};
+
+enum class ClosureOp : uint16_t {
   Null,
   OpaqueBlocker,
   OrenNayarDiffuse,
@@ -289,36 +344,46 @@ constexpr bool is_leaf(ClosureOp op) {
 }
 constexpr bool is_combinator(ClosureOp op) { return op >= ClosureOp::Layer; }
 
-// Tagged POD closure node stored in `MtlxProgram::closures`. Unless noted as a
-// literal or closure index, each field is a VM temporary slot (-1 if absent).
+// Tagged POD closure node stored in `MtlxBsdfProgram::closures`. Unless noted
+// as a literal or closure index, each field is a `ValueId` (`kInvalidValue` if
+// absent).
 struct ClosureNode {
   // Shared by `OrenNayarDiffuse` (`mode = energy_comp`), `BurleyDiffuse`,
-  // `Sheen` (`mode = kSheen*`), and `Translucent` (`roughness = -1`).
+  // `Sheen` (`mode = kSheen*`), and `Translucent` (`roughness =
+  // kInvalidValue`).
   struct Diffuse {
-    int weight, color, roughness, mode, normal;
-    int _pad[6] = {};
+    ValueId weight, color, roughness, normal;
+    uint16_t mode;
+    uint16_t _pad[7] = {};
   };
   // Shared by `Dielectric` (`p = {tint, ior}`), `Conductor` (`p = {ior, ext}`),
   // and `GeneralizedSchlick` (`p = {color0, color82, color90, exponent}`).
   struct Microfacet {
-    int weight, roughness, mode, normal, tangent, tf_thickness, tf_ior;
-    int p[4];
+    ValueId weight, roughness, normal, tangent, tf_thickness, tf_ior;
+    ValueId p[4];
+    uint16_t mode;
+    uint16_t _pad = 0;
   };
   struct ChiangHair {
-    int tint_r, tint_tt, tint_trt, roughness_r, roughness_tt, roughness_trt,
+    ValueId tint_r, tint_tt, tint_trt, roughness_r, roughness_tt, roughness_trt,
         ior, absorption, cuticle_angle, normal, curve_direction;
+    uint16_t _pad = 0;
   };
-  // Combinator args: `first`/`second` index `MtlxProgram::closures` — Layer
+  // Combinator args: `first`/`second` index `MtlxBsdfProgram::closures` — Layer
   // (top, base), Mix (fg, bg), Add (in1, in2), Multiply (in1, -1); `weight` is
-  // the VM temporary slot of the Mix weight or Multiply factor (-1 otherwise).
+  // the `ValueId` of the Mix weight or Multiply factor (`kInvalidValue`
+  // otherwise).
   struct Comb {
-    int first, second, weight;
-    int _pad[8] = {};
+    int32_t first, second;
+    ValueId weight;
+    uint16_t _pad[7] = {};
   };
 
   ClosureOp op = ClosureOp::Null;
+  uint8_t flags = 0;
+  uint8_t _pad = 0;
   union {
-    int raw[11] = {};
+    uint16_t raw[12] = {};
     Diffuse diffuse;
     Microfacet microfacet;
     ChiangHair hair;
@@ -333,48 +398,54 @@ struct ClosureNode {
     return ClosureNode(ClosureOp::OpaqueBlocker);
   }
 
-  static ClosureNode MakeDiffuse(int weight, int color, int roughness,
-                                 int energy_comp, int normal) {
+  static ClosureNode MakeDiffuse(ValueId weight, ValueId color,
+                                 ValueId roughness, uint16_t energy_comp,
+                                 ValueId normal) {
     ClosureNode n(ClosureOp::OrenNayarDiffuse);
-    n.diffuse = {weight, color, roughness, energy_comp, normal};
+    n.diffuse = {weight, color, roughness, normal, energy_comp};
     return n;
   }
 
-  static ClosureNode MakeBurleyDiffuse(int weight, int color, int roughness,
-                                       int normal) {
+  static ClosureNode MakeBurleyDiffuse(ValueId weight, ValueId color,
+                                       ValueId roughness, ValueId normal) {
     ClosureNode n(ClosureOp::BurleyDiffuse);
-    n.diffuse = {weight, color, roughness, 0, normal};
+    n.diffuse = {weight, color, roughness, normal, 0};
     return n;
   }
 
-  static ClosureNode MakeSheen(int weight, int color, int roughness, int mode,
-                               int normal) {
+  static ClosureNode MakeSheen(ValueId weight, ValueId color, ValueId roughness,
+                               uint16_t mode, ValueId normal) {
     ClosureNode n(ClosureOp::Sheen);
-    n.diffuse = {weight, color, roughness, mode, normal};
+    n.diffuse = {weight, color, roughness, normal, mode};
     return n;
   }
 
-  static ClosureNode MakeTranslucent(int weight, int color, int normal) {
+  static ClosureNode MakeTranslucent(ValueId weight, ValueId color,
+                                     ValueId normal) {
     ClosureNode n(ClosureOp::Translucent);
-    n.diffuse = {weight, color, -1, 0, normal};
+    n.diffuse = {weight, color, kInvalidValue, normal, 0};
     return n;
   }
 
-  static ClosureNode MakeMicrofacet(ClosureOp op, int weight, int roughness,
-                                    int mode, int normal, int tangent,
-                                    int tf_thickness, int tf_ior, int p0,
-                                    int p1, int p2 = -1, int p3 = -1) {
+  static ClosureNode MakeMicrofacet(ClosureOp op, ValueId weight,
+                                    ValueId roughness, uint16_t mode,
+                                    ValueId normal, ValueId tangent,
+                                    ValueId tf_thickness, ValueId tf_ior,
+                                    ValueId p0, ValueId p1,
+                                    ValueId p2 = kInvalidValue,
+                                    ValueId p3 = kInvalidValue) {
     ClosureNode n(op);
-    n.microfacet = {weight,  roughness,    mode,   normal,
-                    tangent, tf_thickness, tf_ior, {p0, p1, p2, p3}};
+    n.microfacet = {weight,       roughness, normal,           tangent,
+                    tf_thickness, tf_ior,    {p0, p1, p2, p3}, mode};
     return n;
   }
 
-  static ClosureNode MakeChiangHair(int tint_r, int tint_tt, int tint_trt,
-                                    int roughness_r, int roughness_tt,
-                                    int roughness_trt, int ior, int absorption,
-                                    int cuticle_angle, int normal,
-                                    int curve_direction) {
+  static ClosureNode MakeChiangHair(ValueId tint_r, ValueId tint_tt,
+                                    ValueId tint_trt, ValueId roughness_r,
+                                    ValueId roughness_tt, ValueId roughness_trt,
+                                    ValueId ior, ValueId absorption,
+                                    ValueId cuticle_angle, ValueId normal,
+                                    ValueId curve_direction) {
     ClosureNode n(ClosureOp::ChiangHair);
     n.hair = {tint_r,         tint_tt, tint_trt,   roughness_r,   roughness_tt,
               roughness_trt,  ior,     absorption, cuticle_angle, normal,
@@ -382,25 +453,25 @@ struct ClosureNode {
     return n;
   }
 
-  static ClosureNode MakeLayer(int top, int base) {
+  static ClosureNode MakeLayer(int32_t top, int32_t base) {
     ClosureNode n(ClosureOp::Layer);
-    n.comb = {top, base, -1};
+    n.comb = {top, base, kInvalidValue};
     return n;
   }
 
-  static ClosureNode MakeMix(int fg, int bg, int weight) {
+  static ClosureNode MakeMix(int32_t fg, int32_t bg, ValueId weight) {
     ClosureNode n(ClosureOp::Mix);
     n.comb = {fg, bg, weight};
     return n;
   }
 
-  static ClosureNode MakeAdd(int in1, int in2) {
+  static ClosureNode MakeAdd(int32_t in1, int32_t in2) {
     ClosureNode n(ClosureOp::Add);
-    n.comb = {in1, in2, -1};
+    n.comb = {in1, in2, kInvalidValue};
     return n;
   }
 
-  static ClosureNode MakeMultiply(int in1, int factor) {
+  static ClosureNode MakeMultiply(int32_t in1, ValueId factor) {
     ClosureNode n(ClosureOp::Multiply);
     n.comb = {in1, -1, factor};
     return n;
@@ -409,7 +480,7 @@ struct ClosureNode {
  private:
   explicit ClosureNode(ClosureOp op) : op(op) {}
 };
-static_assert(sizeof(ClosureNode) == 48);
+static_assert(sizeof(ClosureNode) == 28);
 static_assert(std::has_unique_object_representations_v<ClosureNode>);
 
 // Returns true if a leaf BSDF closure transmits energy to an underlying `layer`
@@ -421,131 +492,50 @@ constexpr bool leaf_has_layer_throughput(const ClosureNode& c) {
           (c.microfacet.mode & kScatterModeMask) == kScatterR);
 }
 
-// Invokes `fn(slot)` for each non-negative VM temporary slot referenced by `c`.
-template <typename Fn>
-void for_each_closure_tmp_slot(const ClosureNode& c, Fn&& fn) {
-  auto visit = [&](int slot) {
-    if (slot >= 0) fn(slot);
+constexpr ValueId leaf_weight_id(const ClosureNode& c) {
+  if (c.op >= ClosureOp::OrenNayarDiffuse && c.op <= ClosureOp::Translucent) {
+    return c.diffuse.weight;
+  }
+  if (c.op >= ClosureOp::Dielectric && c.op <= ClosureOp::GeneralizedSchlick) {
+    return c.microfacet.weight;
+  }
+  return kInvalidValue;
+}
+
+// Invokes `fn(id)` for every valid (`!= kInvalidValue`) `ValueId` referenced by
+// `c`.
+template <typename ClosureT, typename Fn>
+void for_each_closure_value_id(ClosureT& c, Fn&& fn) {
+  auto visit = [&](auto&... ids) {
+    ((ids != kInvalidValue ? (void)fn(ids) : (void)0), ...);
   };
-  switch (c.op) {
-    case ClosureOp::OrenNayarDiffuse:
-    case ClosureOp::BurleyDiffuse:
-    case ClosureOp::Sheen:
-    case ClosureOp::Translucent:
-      for (int s : {c.diffuse.weight, c.diffuse.color, c.diffuse.roughness,
-                    c.diffuse.normal}) {
-        visit(s);
-      }
-      break;
-    case ClosureOp::Dielectric:
-    case ClosureOp::Conductor:
-    case ClosureOp::GeneralizedSchlick:
-      for (int s :
-           {c.microfacet.weight, c.microfacet.roughness, c.microfacet.normal,
-            c.microfacet.tangent, c.microfacet.tf_thickness,
-            c.microfacet.tf_ior, c.microfacet.p[0], c.microfacet.p[1],
-            c.microfacet.p[2], c.microfacet.p[3]}) {
-        visit(s);
-      }
-      break;
-    case ClosureOp::ChiangHair:
-      for (int s :
-           {c.hair.tint_r, c.hair.tint_tt, c.hair.tint_trt, c.hair.roughness_r,
-            c.hair.roughness_tt, c.hair.roughness_trt, c.hair.ior,
-            c.hair.absorption, c.hair.cuticle_angle, c.hair.normal,
-            c.hair.curve_direction}) {
-        visit(s);
-      }
-      break;
-    case ClosureOp::Mix:
-    case ClosureOp::Multiply:
-      visit(c.comb.weight);
-      break;
-    case ClosureOp::Null:
-    case ClosureOp::OpaqueBlocker:
-    case ClosureOp::Layer:
-    case ClosureOp::Add:
-      break;
+  if (c.op >= ClosureOp::OrenNayarDiffuse && c.op <= ClosureOp::Translucent) {
+    visit(c.diffuse.weight, c.diffuse.color, c.diffuse.roughness,
+          c.diffuse.normal);
+  } else if (c.op >= ClosureOp::Dielectric &&
+             c.op <= ClosureOp::GeneralizedSchlick) {
+    visit(c.microfacet.weight, c.microfacet.roughness, c.microfacet.normal,
+          c.microfacet.tangent, c.microfacet.tf_thickness, c.microfacet.tf_ior,
+          c.microfacet.p[0], c.microfacet.p[1], c.microfacet.p[2],
+          c.microfacet.p[3]);
+  } else if (c.op == ClosureOp::ChiangHair) {
+    visit(c.hair.tint_r, c.hair.tint_tt, c.hair.tint_trt, c.hair.roughness_r,
+          c.hair.roughness_tt, c.hair.roughness_trt, c.hair.ior,
+          c.hair.absorption, c.hair.cuticle_angle, c.hair.normal,
+          c.hair.curve_direction);
+  } else if (c.op == ClosureOp::Mix || c.op == ClosureOp::Multiply) {
+    visit(c.comb.weight);
   }
 }
 
-// Self-contained bytecode slice evaluated at perturbed surface interactions by
-// `Op::HeightToNormal`. Uses the enclosing program's `consts`, `opaques`,
-// `attr_names`, and texture inputs with its own temporaries `0..tmp_count - 1`.
-// Evaluates to `h` when `has_texcoord == 0`, or `(h, tc.x, tc.y)` otherwise.
-struct SubProgram {
-  uint32_t code_begin = 0;
-  uint32_t code_end = 0;
-  uint32_t tmp_channels_begin = 0;
-  uint32_t tmp_count = 0;
-  uint32_t stack_size = 1;
-  uint32_t has_texcoord = 0;
-};
-static_assert(sizeof(SubProgram) == 24);
-static_assert(std::has_unique_object_representations_v<SubProgram>);
-
-enum class TmpKind : uint8_t { Varying, Const, Opaque, Uniform };
-
-// Pre-partitioned spatially-invariant vs spatially-varying bytecode and
-// per-temporary classification. `uniform_offset` indexes `consts` (`Const`),
-// `opaques` (`Opaque`), or the evaluator's packed uniform scalar buffer
-// (`Uniform`).
-struct CodePartition {
-  std::vector<Inst> invariant_code;
-  std::vector<Inst> varying_code;
-  std::vector<TmpKind> tmp_kind;
-  std::vector<uint32_t> uniform_offset;
-};
-
-// Variant-independent compiled MaterialX program passed via `Properties`.
-//
-// A program has at most `kMaxImm` constants, opaque values and temporaries
-// each, and `stack_size` bounds the evaluation stack depth.
-struct MtlxProgram {
-  std::vector<Inst> code;
-  CodePartition main_part;
-  std::vector<CodePartition> sub_parts;
-  uint32_t uniform_scalar_count = 0;
-  std::vector<Inst> sub_code;
-  std::vector<SubProgram> sub_programs;
-  std::vector<uint8_t> sub_tmp_channels;
-  std::vector<double> consts = {0.0, 1.0};
-  std::vector<double> opaques;
-  std::vector<std::string> attr_names;
+// Compiled MaterialX BSDF program embedding a value program plus a closure DAG,
+// optional cutout opacity root, and material-wide thin-walled flag.
+struct MtlxBsdfProgram {
+  MtlxValueProgram values;
   // Topological post-order closure DAG; non-empty with root at `back()`.
   std::vector<ClosureNode> closures;
-  std::vector<uint8_t> tmp_channels;
-  int opacity_slot = -1;
-  bool result_uniform = false;
-  uint32_t stack_size = 1;
-
-  bool is_tmp_uniform(int k) const { return tmp_channels[k] == 1; }
-
-  void traverse_state(void* payload, const drjit::TraverseVisitor& cb) const {
-    if (!cb.state) return;
-    auto put_span = [&](const auto& vec, const char* name) {
-      size_t n = vec.size();
-      drjit::detail::traverse_state(payload, cb, &n, sizeof(n), name);
-      if (n > 0) {
-        drjit::detail::traverse_state(payload, cb, vec.data(),
-                                      n * sizeof(vec[0]), name);
-      }
-    };
-    put_span(code, "code");
-    put_span(sub_code, "sub_code");
-    put_span(sub_programs, "sub_programs");
-    put_span(sub_tmp_channels, "sub_tmp_channels");
-    put_span(consts, "consts");
-    size_t n_attrs = attr_names.size();
-    DR_TRAVERSE_STATE(n_attrs)
-    for (const std::string& s : attr_names) {
-      put_span(s, "attr_names");
-    }
-    put_span(closures, "closures");
-    put_span(tmp_channels, "tmp_channels");
-    DR_TRAVERSE_STATE(opacity_slot)
-    DR_TRAVERSE_STATE(result_uniform)
-  }
+  ValueId opacity_root = kInvalidValue;
+  bool thin_walled = false;
 };
 
 // Register the `materialx_expr` texture and `materialx_bsdf` BSDF with

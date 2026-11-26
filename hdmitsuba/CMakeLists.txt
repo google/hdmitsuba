@@ -211,6 +211,7 @@ if(HDMITSUBA_BUILD_TESTS)
   add_hdmitsuba_test(camera_test tests/camera_test.cc)
   add_hdmitsuba_test(mesh_test tests/mesh_test.cc)
   add_hdmitsuba_test(geometry_processor_test mesh/tests/geometry_processor_test.cc)
+  add_hdmitsuba_test(materialx_optimizer_test tests/materialx_optimizer_test.cc)
 endif()
 
 # --- Installation Rules ---
