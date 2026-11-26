@@ -23,6 +23,7 @@ import mitsuba as mi
 import numpy as np
 from pxr import Gf
 from pxr import Sdf
+from pxr import Tf
 from pxr import Usd
 from pxr import UsdGeom
 from pxr import UsdLux
@@ -175,6 +176,16 @@ def convert_mesh(
       requested_attrs,
   )
 
+  if (
+      custom_transform is None
+      and sensor_prim is not None
+      and len(sub_meshes) > 1
+  ):
+    Tf.Warn(
+        f'The surface sensor of {prim.GetPath()} only measures its first'
+        ' material subset.'
+    )
+
   materials_by_id = {
       material_id: (subprim, mat)
       for material_id, subprim, mat in zip(
@@ -182,7 +193,7 @@ def convert_mesh(
       )
   }
   converted_meshes = {}
-  for sub in sub_meshes:
+  for i, sub in enumerate(sub_meshes):
     subprim, mat = materials_by_id[sub.material_id]
     props = mi.Properties()
     props['visibility'] = util.get_ray_visibility(prim, time)
@@ -203,7 +214,7 @@ def convert_mesh(
       elif mat.emitter is not None:
         props['emitter'] = mat.emitter
 
-      if sensor_prim is not None:
+      if sensor_prim is not None and i == 0:
         props['sensor'] = mi.load_dict(
             camera.usd_to_mitsuba(UsdGeom.Camera(sensor_prim), time=time)
         )
