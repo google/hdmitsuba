@@ -414,10 +414,18 @@ MtlxEvaluator<Float, Spectrum>::eval_code(absl::Span<const Inst> code,
         break;
 
       case Op::NormalMap: {
-        Val* a = pop(5);
-        *sp++ = val3(detail::mx_normal_map(
-            xyz(a[0]), Vector2f(dr::head<2>(a[1])), xyz(a[2]), xyz(a[3]),
-            xyz(a[4]), Vector3f(si.sh_frame.n)));
+        if (imm == kNormalMapDefaultFrame) {
+          Val* a = pop(2);
+          Vector3f t = detail::geom_tangent_world(si);
+          *sp++ = val3(detail::mx_normal_map_frame(
+              xyz(a[0]), Vector2f(dr::head<2>(a[1])),
+              Frame3f(t, detail::geom_bitangent_world(si, t), si.sh_frame.n)));
+        } else {
+          Val* a = pop(5);
+          *sp++ = val3(detail::mx_normal_map(
+              xyz(a[0]), Vector2f(dr::head<2>(a[1])), xyz(a[2]), xyz(a[3]),
+              xyz(a[4]), Vector3f(si.sh_frame.n)));
+        }
         break;
       }
       case Op::HeightToNormal: {

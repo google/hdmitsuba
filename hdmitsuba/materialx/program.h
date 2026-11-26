@@ -30,6 +30,10 @@ inline constexpr size_t kMaxImm = std::numeric_limits<uint16_t>::max();
 // Matches MaterialX's `M_FLOAT_EPS`.
 inline constexpr double kMtlxFloatEps = 1e-8;
 
+// `Inst::imm` flag for `Op::NormalMap`: pops 2 operands `(in, scale)` and
+// evaluates against the shading frame's default world basis.
+inline constexpr uint16_t kNormalMapDefaultFrame = 1;
+
 // Bit flags in `Inst::imm` for `CellNoise`, `Noise`, `Worley` and `Fractal`.
 // For `Fractal`, the bits from `kFractalOctavesShift` hold the constant octave
 // count, or `kFractalDynamicOctaves` when octaves are passed as the last
@@ -107,7 +111,9 @@ enum class Op : uint8_t {
   Clip,
 
   // Color & vector ops (`Dot` and `Normalize` take `imm = 2` for 2D and
-  // `imm = 4` for 4D; `Vec4` appends a fourth channel to a 3-channel value).
+  // `imm = 4` for 4D; `NormalMap` takes `imm = kNormalMapDefaultFrame` for the
+  // 2-operand default-frame form; `Vec4` appends a fourth channel to a
+  // 3-channel value).
   Chan,
   Dot,
   Vec2,
@@ -321,6 +327,7 @@ constexpr bool is_spatially_varying_op(Op op) {
     case Op::GeomTangentWorld:
     case Op::GeomBitangentWorld:
     case Op::GeomIncidentDir:
+    case Op::NormalMap:
     case Op::HeightToNormal:
       return true;
     case Op::Const:
@@ -364,7 +371,6 @@ constexpr bool is_spatially_varying_op(Op op) {
     case Op::Rgb:
     case Op::Cross:
     case Op::Rotate3D:
-    case Op::NormalMap:
     case Op::RgbToHsv:
     case Op::HsvToRgb:
     case Op::Blackbody:

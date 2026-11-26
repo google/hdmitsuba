@@ -1418,3 +1418,42 @@ def test_heighttonormal_shared_authored_inputs() -> None:
       9,
       _h2n_expected(0.125, 0.0) + (2.0, 3.0, 4.0),
   )
+
+
+def test_default_frame_normalmap() -> None:
+  """Verifies default-frame `normalmap` matches explicit world-frame inputs."""
+  si = dr.zeros(mi.SurfaceInteraction3f, 3)
+  si.wi = mi.Vector3f(0.0, 0.0, 1.0)
+  n0 = dr.normalize(mi.Vector3f(0.2, -0.3, 0.9))
+  si.sh_frame = mi.Frame3f(n0)
+  # Lane 0: right-handed UV, lane 1: mirrored V (`dot(n x t, dp_dv) > 0`),
+  # lane 2: degenerate `dp_du = 0` falling back to `si.sh_frame.s`.
+  si.dp_du = mi.Vector3f([1.0, -1.0, 0.0], [0.2, 0.1, 0.0], [0.0, 0.0, 0.0])
+  si.dp_dv = mi.Vector3f([0.0, 0.1, 0.0], [-1.0, -1.0, 0.0], [0.0, 0.0, 0.0])
+
+  base = {'in_': Gf.Vec3f(0.65, 0.3, 0.85), 'scale': 0.7}
+  nm_def = mtlx.eval_emission_expr(('ND_normalmap_float', base), si=si)
+  # Wrap `normal` in `ND_normalize_vector3` so the reference takes the 5-arg path.
+  nm_exp = mtlx.eval_emission_expr(
+      (
+          'ND_normalmap_float',
+          {
+              **base,
+              'normal': (
+                  'ND_normalize_vector3',
+                  {'in_': ('ND_normal_vector3', {'space': 'world'})},
+              ),
+              'tangent': ('ND_tangent_vector3', {'space': 'world'}),
+              'bitangent': ('ND_bitangent_vector3', {'space': 'world'}),
+          },
+      ),
+      si=si,
+  )
+  np.testing.assert_allclose(nm_def, nm_exp, atol=1e-5)
+  np.testing.assert_allclose(
+      mtlx.eval_emission_expr(
+          ('ND_normalmap_float', {'in_': Gf.Vec3f(0.0, 0.0, 0.0)}), si=si
+      ),
+      np.broadcast_to(np.asarray(n0).T, (3, 3)),
+      atol=1e-5,
+  )

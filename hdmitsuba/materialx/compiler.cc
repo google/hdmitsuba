@@ -1501,6 +1501,10 @@ std::optional<Expr> MtlxExprCompiler::CompileVectorNode(
                     : in("in");
     Expr n = in("normal", Expr::n_world()), t = in("tangent", Expr::t_world()),
          b = in("bitangent", Expr::b_world());
+    if (n == Expr::n_world() && t == Expr::t_world() && b == Expr::b_world()) {
+      return call(mtlx::Op::NormalMap, mtlx::kNormalMapDefaultFrame, in_e,
+                  scale);
+    }
     return call(mtlx::Op::NormalMap, in_e, scale, n, t, b);
   }
   if (cat == "heighttonormal") return CompileHeightToNormal(node);

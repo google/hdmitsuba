@@ -42,9 +42,9 @@ Vec safe_normalize(const Vec& v, const Vec& fallback = Vec(0.0f),
 template <typename SurfaceInteraction>
 auto geom_tangent_world(const SurfaceInteraction& si) {
   using Vec3 = std::decay_t<decltype(si.sh_frame.s)>;
-  return safe_normalize(
-      Vec3(si.dp_du - si.sh_frame.n * dr::dot(si.sh_frame.n, si.dp_du)),
-      si.sh_frame.s, dr::scalar_t<Vec3>(1e-20f));
+  return safe_normalize(dr::fnmadd(Vec3(si.sh_frame.n),
+                                   dr::dot(si.sh_frame.n, si.dp_du), si.dp_du),
+                        si.sh_frame.s, dr::scalar_t<Vec3>(1e-20f));
 }
 
 template <typename SurfaceInteraction, typename Vec3>
@@ -117,6 +117,21 @@ Vector<Float, 3> mx_rotate3d(const Vector<Float, 3>& v, const Float& amount_deg,
   return v * c + dr::cross(axis, v) * s + axis * dr::dot(axis, v) * (1.0f - c);
 }
 
+// Evaluates tangent-space normal mapping against an orthonormal `frame`
+// `(tangent, bitangent, normal)`.
+template <typename Float>
+Vector<Float, 3> mx_normal_map_frame(const Vector<Float, 3>& val,
+                                     const Vector<Float, 2>& scale,
+                                     const Frame<Float>& frame) {
+  using Vector3f = Vector<Float, 3>;
+  Vector3f v =
+      dr::select(dr::squared_norm(val) == 0.0f, Vector3f(0.0f, 0.0f, 1.0f),
+                 dr::fmadd(val, 2.0f, -1.0f));
+  return safe_normalize(
+      frame.to_world(Vector3f(v.x() * scale.x(), v.y() * scale.y(), v.z())),
+      Vector3f(frame.n));
+}
+
 template <typename Float>
 Vector<Float, 3> mx_normal_map(const Vector<Float, 3>& val,
                                const Vector<Float, 2>& scale,
@@ -126,14 +141,12 @@ Vector<Float, 3> mx_normal_map(const Vector<Float, 3>& val,
                                const Vector<Float, 3>& fallback_n) {
   using Vector3f = Vector<Float, 3>;
   Vector3f N = safe_normalize(n, fallback_n);
-  Vector3f T = safe_normalize(tangent - N * dr::dot(N, tangent),
+  Vector3f T = safe_normalize(dr::fnmadd(N, dr::dot(N, tangent), tangent),
                               coordinate_system(N).first);
   Vector3f B = dr::cross(N, T);
   B = dr::select(dr::dot(bitangent, B) < 0.0f, -B, B);
-  Vector3f v = dr::select(dr::squared_norm(val) == 0.0f,
-                          Vector3f(0.0f, 0.0f, 1.0f), val * 2.0f - 1.0f);
-  return safe_normalize(
-      T * (v.x() * scale.x()) + B * (v.y() * scale.y()) + N * v.z(), N);
+  return mx_normal_map_frame(val, scale,
+                             Frame<Float>(T, B, Normal<Float, 3>(N)));
 }
 
 // Port of MaterialX `mx_blackbody.glsl` (Apache-2.0, Contributors to the
