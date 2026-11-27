@@ -1,0 +1,291 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+/// Render Settings LOP parameter definitions for the HdMitsuba Hydra render delegate.
+/// Parameter names with colons are encoded via `hou.text.encodeParm()`.
+
+#include "$HFS/houdini/soho/parameters/CommonMacros.ds"
+
+{
+    name    "Mitsuba"
+    label   "Mitsuba"
+    parmtag { spare_opfilter  "!!SHOP/PROPERTIES!!" }
+    parmtag { spare_classtags "render" }
+
+    groupcollapsible {
+        name    "MitsubaRenderSettings_Rendering"
+        label   "Rendering"
+        grouptag { "group_default" "1" }
+
+        parm {
+            name    "xn__mitsubadenoise_control_xcb"
+            label   "Enable Denoising"
+            type    string
+            default { "none" }
+            menujoin {
+                [ "import loputils" ]
+                [ "return loputils.createEditPropertiesControlMenu(kwargs, 'bool')" ]
+                language python
+            }
+            parmtag { "sidefx::look" "icon" }
+        }
+        parm {
+            name    "xn__mitsubadenoise_wya"
+            label   "Enable Denoising"
+            type    toggle
+            size    1
+            default { 0 }
+            parmtag { "spare_category" "Rendering" }
+            parmtag { "uiscope"        "viewport toolbar" }
+            parmtag { "usdvaluetype"   "bool" }
+            disablewhen R"({ xn__mitsubadenoise_control_xcb == block } { xn__mitsubadenoise_control_xcb == none })"
+            help    "Denoise the rendered image using OptiX on CUDA or OpenImageDenoise on Metal/CPU."
+        }
+
+        parm {
+            name    "xn__mitsubaintegratortype_control_cobk"
+            label   "Integrator Type"
+            type    string
+            default { "none" }
+            menujoin {
+                [ "import loputils" ]
+                [ "return loputils.createEditPropertiesControlMenu(kwargs, 'string')" ]
+                language python
+            }
+            parmtag { "sidefx::look" "icon" }
+        }
+        parm {
+            name    "xn__mitsubaintegratortype_bbbk"
+            label   "Integrator Type"
+            type    string
+            size    1
+            default { "path" }
+            parmtag { "spare_category" "Rendering" }
+            parmtag { "uiscope"        "viewport" }
+            parmtag { "usdvaluetype"   "string" }
+            disablewhen R"({ xn__mitsubaintegratortype_control_cobk == block } { xn__mitsubaintegratortype_control_cobk == none })"
+            help    "Mitsuba integrator plugin type."
+            menureplace {
+                "path"    "Path Tracer (path)"
+                "volpath" "Volumetric Path Tracer (volpath)"
+                "direct"  "Direct Illumination (direct)"
+                "ptracer" "Particle Tracer (ptracer)"
+                "ao"      "Ambient Occlusion (ao)"
+            }
+        }
+
+        parm {
+            name    "xn__mitsubaintegratormax_depth_control_hwbk"
+            label   "Max Path Depth"
+            type    string
+            default { "none" }
+            menujoin {
+                [ "import loputils" ]
+                [ "return loputils.createEditPropertiesControlMenu(kwargs, 'int')" ]
+                language python
+            }
+            parmtag { "sidefx::look" "icon" }
+        }
+        parm {
+            name    "xn__mitsubaintegratormax_depth_gjbk"
+            label   "Max Path Depth"
+            type    int
+            size    1
+            default { -1 }
+            range   { -1! 64 }
+            parmtag { "spare_category" "Rendering" }
+            parmtag { "uiscope"        "None" }
+            parmtag { "usdvaluetype"   "int" }
+            disablewhen R"({ xn__mitsubaintegratormax_depth_control_hwbk == block } { xn__mitsubaintegratormax_depth_control_hwbk == none })"
+            help    "Maximum path length for path/volpath integrators (-1 for unlimited)."
+        }
+
+        parm {
+            name    "xn__mitsubavariant_control_xcb"
+            label   "Variant"
+            type    string
+            default { "none" }
+            menujoin {
+                [ "import loputils" ]
+                [ "return loputils.createEditPropertiesControlMenu(kwargs, 'string')" ]
+                language python
+            }
+            parmtag { "sidefx::look" "icon" }
+        }
+        parm {
+            name    "xn__mitsubavariant_wya"
+            label   "Variant"
+            type    string
+            size    1
+            default { "" }
+            parmtag { "spare_category" "Rendering" }
+            parmtag { "uiscope"        "viewport" }
+            parmtag { "usdvaluetype"   "string" }
+            disablewhen R"({ xn__mitsubavariant_control_xcb == block } { xn__mitsubavariant_control_xcb == none })"
+            help    "Mitsuba backend variant."
+            menureplace {
+                ""                  "Default (Auto)"
+                "metal_ad_rgb"      "metal_ad_rgb"
+                "cuda_ad_rgb"       "cuda_ad_rgb"
+                "llvm_ad_rgb"       "llvm_ad_rgb"
+                "scalar_rgb"        "scalar_rgb"
+                "metal_ad_spectral" "metal_ad_spectral"
+                "cuda_ad_spectral"  "cuda_ad_spectral"
+                "llvm_ad_spectral"  "llvm_ad_spectral"
+                "scalar_spectral"   "scalar_spectral"
+            }
+        }
+
+        parm {
+            name    "xn__mitsubause_kernel_freezing_control_hwb"
+            label   "Enable Kernel Freezing"
+            type    string
+            default { "none" }
+            menujoin {
+                [ "import loputils" ]
+                [ "return loputils.createEditPropertiesControlMenu(kwargs, 'bool')" ]
+                language python
+            }
+            parmtag { "sidefx::look" "icon" }
+        }
+        parm {
+            name    "xn__mitsubause_kernel_freezing_gjb"
+            label   "Enable Kernel Freezing"
+            type    toggle
+            size    1
+            default { 1 }
+            parmtag { "spare_category" "Rendering" }
+            parmtag { "uiscope"        "viewport" }
+            parmtag { "usdvaluetype"   "bool" }
+            disablewhen R"({ xn__mitsubause_kernel_freezing_control_hwb == block } { xn__mitsubause_kernel_freezing_control_hwb == none })"
+            help    "Enable Dr.Jit kernel freezing to reduce per-pass tracing overhead."
+        }
+    }
+
+    groupcollapsible {
+        name    "MitsubaRenderSettings_Sampling"
+        label   "Sampling"
+        grouptag { "group_default" "1" }
+
+        parm {
+            name    "xn__mitsubasamplersample_count_control_hwbh"
+            label   "Samples Per Pixel"
+            type    string
+            default { "none" }
+            menujoin {
+                [ "import loputils" ]
+                [ "return loputils.createEditPropertiesControlMenu(kwargs, 'int')" ]
+                language python
+            }
+            parmtag { "sidefx::look" "icon" }
+        }
+        parm {
+            name    "xn__mitsubasamplersample_count_gjbh"
+            label   "Samples Per Pixel"
+            type    int
+            size    1
+            default { 128 }
+            range   { 1! 1024 }
+            parmtag { "spare_category" "Sampling" }
+            parmtag { "uiscope"        "viewport" }
+            parmtag { "usdvaluetype"   "int" }
+            disablewhen R"({ xn__mitsubasamplersample_count_control_hwbh == block } { xn__mitsubasamplersample_count_control_hwbh == none })"
+            help    "Target number of samples per pixel."
+        }
+
+        parm {
+            name    "xn__mitsubainteractive_samples_per_pass_control_4bc"
+            label   "Interactive Samples Per Pass"
+            type    string
+            default { "none" }
+            menujoin {
+                [ "import loputils" ]
+                [ "return loputils.createEditPropertiesControlMenu(kwargs, 'int')" ]
+                language python
+            }
+            parmtag { "sidefx::look" "icon" }
+        }
+        parm {
+            name    "xn__mitsubainteractive_samples_per_pass_3xb"
+            label   "Interactive Samples Per Pass"
+            type    int
+            size    1
+            default { 1 }
+            range   { 1! 64 }
+            parmtag { "spare_category" "Sampling" }
+            parmtag { "uiscope"        "viewport" }
+            parmtag { "usdvaluetype"   "int" }
+            disablewhen R"({ xn__mitsubainteractive_samples_per_pass_control_4bc == block } { xn__mitsubainteractive_samples_per_pass_control_4bc == none })"
+            help    "Number of samples per pixel rendered in each interactive progressive pass."
+        }
+
+        parm {
+            name    "xn__mitsubaseed_control_16a"
+            label   "Seed"
+            type    string
+            default { "none" }
+            menujoin {
+                [ "import loputils" ]
+                [ "return loputils.createEditPropertiesControlMenu(kwargs, 'int')" ]
+                language python
+            }
+            parmtag { "sidefx::look" "icon" }
+        }
+        parm {
+            name    "xn__mitsubaseed_0ta"
+            label   "Seed"
+            type    int
+            size    1
+            default { 0 }
+            range   { 0! 1000 }
+            parmtag { "spare_category" "Sampling" }
+            parmtag { "uiscope"        "viewport" }
+            parmtag { "usdvaluetype"   "int" }
+            disablewhen R"({ xn__mitsubaseed_control_16a == block } { xn__mitsubaseed_control_16a == none })"
+            help    "Random number generator seed offset."
+        }
+
+        parm {
+            name    "xn__mitsubasamplertype_control_gjbh"
+            label   "Sampler Type"
+            type    string
+            default { "none" }
+            menujoin {
+                [ "import loputils" ]
+                [ "return loputils.createEditPropertiesControlMenu(kwargs, 'string')" ]
+                language python
+            }
+            parmtag { "sidefx::look" "icon" }
+        }
+        parm {
+            name    "xn__mitsubasamplertype_f5ah"
+            label   "Sampler Type"
+            type    string
+            size    1
+            default { "independent" }
+            parmtag { "spare_category" "Sampling" }
+            parmtag { "uiscope"        "viewport" }
+            parmtag { "usdvaluetype"   "string" }
+            disablewhen R"({ xn__mitsubasamplertype_control_gjbh == block } { xn__mitsubasamplertype_control_gjbh == none })"
+            help    "Mitsuba sampler plugin type (used in non-interactive batch mode)."
+            menureplace {
+                "independent" "Independent"
+                "stratified"  "Stratified"
+                "multijitter" "Correlated Multi-Jittered"
+                "orthogonal"  "Orthogonal Array"
+                "ldsampler"   "Low Discrepancy"
+            }
+        }
+    }
+}

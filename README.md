@@ -150,7 +150,7 @@ cp build/hdmitsuba.json ~/Library/Preferences/houdini/22.0/packages/
 ```
 
 Once installed:
-*   **Solaris Viewport**: Launch Houdini, switch to the Solaris (**Stage**) context, and select **Mitsuba** from the viewport renderer menu. Interactive settings are exposed in Display Options (**D** $\rightarrow$ **Mitsuba**), or can be authored as `mitsuba:*` attributes on a `RenderSettings` prim.
+*   **Solaris Viewport**: Launch Houdini, switch to the Solaris (**Stage**) context, and select **Mitsuba** from the viewport renderer menu. Interactive settings are exposed in Display Options (**D** $\rightarrow$ **Renderer**) and denoising on the viewport sidebar toolbar, or can be authored via the **Mitsuba** tab on a **Render Settings LOP** (`mitsuba:*` attributes).
 *   **Husk CLI**: Render USD stages from the command line via `husk --renderer HdMitsubaRendererPlugin scene.usd -o output.exr`.
 
 ## Static Type Checking (Pyrefly)

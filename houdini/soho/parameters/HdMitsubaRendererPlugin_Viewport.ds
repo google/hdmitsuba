@@ -1,0 +1,162 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+/// Viewport Display Options UI for the HdMitsuba Hydra render delegate.
+/// Parameter names with colons are encoded via `hou.text.encodeParm()`.
+
+#include "$HFS/houdini/soho/parameters/CommonMacros.ds"
+
+{
+    name    "Mitsuba"
+    label   "Mitsuba"
+    parmtag { spare_opfilter  "!!SHOP/PROPERTIES!!" }
+    parmtag { spare_classtags "render" }
+
+    parm {
+        name    "xn__mitsubadenoise_wya"
+        label   "Enable Denoising"
+        type    toggle
+        size    1
+        default { 0 }
+        parmtag { "spare_category" "Rendering" }
+        parmtag { "uiscope"        "viewport toolbar" }
+        parmtag { "uiicon"         VIEW_display_denoise }
+        parmtag { "usdvaluetype"   "bool" }
+        help    "Denoise the rendered image using OptiX on CUDA or OpenImageDenoise on Metal/CPU."
+    }
+
+    parm {
+        name    "xn__mitsubasamplersample_count_gjbh"
+        label   "Samples Per Pixel"
+        type    int
+        size    1
+        default { 128 }
+        range   { 1! 1024 }
+        parmtag { "spare_category" "Sampling" }
+        parmtag { "uiscope"        "viewport" }
+        parmtag { "usdvaluetype"   "int" }
+        help    "Target number of samples per pixel."
+    }
+
+    parm {
+        name    "xn__mitsubainteractive_samples_per_pass_3xb"
+        label   "Interactive Samples Per Pass"
+        type    int
+        size    1
+        default { 1 }
+        range   { 1! 64 }
+        parmtag { "spare_category" "Sampling" }
+        parmtag { "uiscope"        "viewport" }
+        parmtag { "usdvaluetype"   "int" }
+        help    "Number of samples per pixel rendered in each interactive progressive pass."
+    }
+
+    parm {
+        name    "xn__mitsubaseed_0ta"
+        label   "Seed"
+        type    int
+        size    1
+        default { 0 }
+        range   { 0! 1000 }
+        parmtag { "spare_category" "Sampling" }
+        parmtag { "uiscope"        "viewport" }
+        parmtag { "usdvaluetype"   "int" }
+        help    "Random number generator seed offset."
+    }
+
+    parm {
+        name    "xn__mitsubaintegratortype_bbbk"
+        label   "Integrator Type"
+        type    string
+        size    1
+        default { "path" }
+        parmtag { "spare_category" "Rendering" }
+        parmtag { "uiscope"        "viewport" }
+        parmtag { "usdvaluetype"   "string" }
+        help    "Mitsuba integrator plugin type."
+        menureplace {
+            "path"    "Path Tracer (path)"
+            "volpath" "Volumetric Path Tracer (volpath)"
+            "direct"  "Direct Illumination (direct)"
+            "ptracer" "Particle Tracer (ptracer)"
+            "ao"      "Ambient Occlusion (ao)"
+        }
+    }
+
+    parm {
+        name    "xn__mitsubasamplertype_f5ah"
+        label   "Sampler Type"
+        type    string
+        size    1
+        default { "independent" }
+        parmtag { "spare_category" "Sampling" }
+        parmtag { "uiscope"        "viewport" }
+        parmtag { "usdvaluetype"   "string" }
+        help    "Mitsuba sampler plugin type (used in non-interactive batch mode)."
+        menureplace {
+            "independent" "Independent"
+            "stratified"  "Stratified"
+            "multijitter" "Correlated Multi-Jittered"
+            "orthogonal"  "Orthogonal Array"
+            "ldsampler"   "Low Discrepancy"
+        }
+    }
+
+    parm {
+        name    "xn__mitsubavariant_wya"
+        label   "Variant"
+        type    string
+        size    1
+        default { "" }
+        parmtag { "spare_category" "Rendering" }
+        parmtag { "uiscope"        "viewport" }
+        parmtag { "usdvaluetype"   "string" }
+        help    "Mitsuba backend variant. Leave empty to use the default variant."
+        menureplace {
+            ""                  "Default (Auto)"
+            "metal_ad_rgb"      "metal_ad_rgb"
+            "cuda_ad_rgb"       "cuda_ad_rgb"
+            "llvm_ad_rgb"       "llvm_ad_rgb"
+            "scalar_rgb"        "scalar_rgb"
+            "metal_ad_spectral" "metal_ad_spectral"
+            "cuda_ad_spectral"  "cuda_ad_spectral"
+            "llvm_ad_spectral"  "llvm_ad_spectral"
+            "scalar_spectral"   "scalar_spectral"
+        }
+    }
+
+    parm {
+        name    "xn__mitsubause_kernel_freezing_gjb"
+        label   "Enable Kernel Freezing"
+        type    toggle
+        size    1
+        default { 1 }
+        parmtag { "spare_category" "Rendering" }
+        parmtag { "uiscope"        "viewport" }
+        parmtag { "usdvaluetype"   "bool" }
+        help    "Enable Dr.Jit kernel freezing to reduce per-pass tracing overhead."
+    }
+
+    parm {
+        name    "enableInteractive"
+        label   "Enable Interactive Mode"
+        type    toggle
+        size    1
+        default { 1 }
+        parmtag { "spare_category" "Rendering" }
+        parmtag { "uiscope"        "viewport" }
+        parmtag { "usdvaluetype"   "bool" }
+        help    "Render progressively in interactive passes instead of blocking for all samples."
+    }
+}

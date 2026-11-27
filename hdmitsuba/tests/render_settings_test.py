@@ -401,7 +401,7 @@ def test_denoise_render_settings(variant: str):
   )
   engine = usd_render.RenderEngine(stage)
 
-  def render(denoise: bool, width: int | None = None):
+  def render(denoise: bool | int, width: int | None = None):
     engine.configure(
         hydra_delegate_id="HdMitsubaRendererPlugin",
         width=width,
@@ -455,6 +455,14 @@ def test_denoise_render_settings(variant: str):
     np.testing.assert_allclose(
         denoised_results[aov_name], noisy_results[aov_name], atol=1e-5
     )
+
+  # Hosts like Houdini Solaris pass toggle settings as integers (0 / 1).
+  np.testing.assert_allclose(
+      render(denoise=1)["color"][..., :3], denoised_rgb, rtol=1e-5, atol=1e-5
+  )
+  np.testing.assert_allclose(
+      render(denoise=0)["color"][..., :3], noisy_rgb, rtol=1e-5, atol=1e-5
+  )
 
   # Exercise denoiser cache across resolution switches and eviction.
   assert render(denoise=True, width=64)["color"].shape == (64, 64, 4)
