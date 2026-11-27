@@ -231,19 +231,27 @@ void NewJitScope() {
   }
 }
 
-// Runs `fn(i)` for all `i` in [0, n) on worker threads.
+// Runs `fn(i)` for all `i` in [0, n), inline for `n == 1` and on worker
+// threads when `n > 1`.
 //
 // Using Dr.Jit in a multithreaded environment requires a fresh JIT scope
 // whenever variables cross thread boundaries. Like Mitsuba's parallel scene
-// loading (`parser.cpp`), a scope is pre-allocated for every item on the
-// calling thread, which continues in a scope succeeding all item scopes. All
-// work queued by `fn` has finished on return. Worker threads share the
-// calling thread's ArResolver cache.
+// loading (`parser.cpp`), for `n > 1` a scope is pre-allocated for every item
+// on the calling thread, which continues in a scope succeeding all item scopes,
+// and all work queued by worker threads has finished on return. Worker threads
+// share the calling thread's ArResolver cache.
 template <typename Float, typename Fn>
 void JitParallelFor(size_t n, Fn&& fn) {
+  if (n == 0) return;
+  if (n == 1) {
+    fn(0);
+    return;
+  }
   std::vector<uint32_t> scopes(n);
   if constexpr (drjit::is_jit_v<Float>) {
-    jit_eval();  // Flush any pending side effects before multithreaded work.
+    // Flush any work queued on the calling thread before worker threads run.
+    jit_eval();
+    jit_sync_thread();
     for (uint32_t& scope : scopes) {
       scope = jit_new_scope(drjit::backend_v<Float>);
     }

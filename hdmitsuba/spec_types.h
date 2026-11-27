@@ -273,6 +273,26 @@ struct CameraSpec : public BaseSpec {
   float far_clip = 1000.0f;
   std::string pixel_filter_type = "";
   std::optional<SdfPath> target_shape_id = std::nullopt;
+  bool transform_dirty = true;
+  bool params_dirty = true;
+
+  void FoldPendingFrom(const CameraSpec& prev) {
+    transform_dirty = (transform != prev.transform) || prev.transform_dirty;
+    params_dirty =
+        std::tie(fov, horizontal_aperture_offset, vertical_aperture_offset,
+                 aperture_radius, focus_distance, near_clip, far_clip) !=
+            std::tie(prev.fov, prev.horizontal_aperture_offset,
+                     prev.vertical_aperture_offset, prev.aperture_radius,
+                     prev.focus_distance, prev.near_clip, prev.far_clip) ||
+        prev.params_dirty;
+    BaseSpec::FoldPendingFrom(prev);
+  }
+
+  void MarkClean() {
+    BaseSpec::MarkClean();
+    transform_dirty = false;
+    params_dirty = false;
+  }
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

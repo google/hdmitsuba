@@ -425,3 +425,67 @@ def test_kernel_freezing_dynamic_resolution_switching() -> None:
     np.testing.assert_allclose(
         frozen['depth'], reference['depth'], atol=1e-4, rtol=1e-4
     )
+
+
+def test_kernel_freezing_camera_fast_path() -> None:
+  """Tests transform-only, param-only, and combined in-place camera updates."""
+
+  def run_sequence(freeze_enabled: bool) -> list[np.ndarray]:
+    stage, engine = _create_engine(freeze_enabled=freeze_enabled)
+    camera = UsdGeom.Camera.Get(stage, '/camera')
+    translate_op = UsdGeom.Xformable(camera).GetOrderedXformOps()[0]
+    focal_length = camera.GetFocalLengthAttr()
+    focal_length.Set(50.0)
+
+    def render(
+        expect_replay: bool = False,
+        expect_no_scalar_jit: bool = False,
+    ) -> np.ndarray:
+      with dr.kernel_history() as kh:
+        img = engine.render()['color']
+      if freeze_enabled and expect_replay:
+        modes = {entry.recording_mode for entry in kh}
+        assert dr.KernelRecordingMode.Replayed in modes
+        assert dr.KernelRecordingMode.Recorded not in modes
+        # Non-animated camera updates must not trigger device->host matrix
+        # readbacks (`m_to_world = m_to_world.value().update()`).
+        assert not [
+            e
+            for e in kh
+            if e.recording_mode == dr.KernelRecordingMode.Inactive
+            and e.type == dr.KernelType.Memcpy
+            and e.size == 4
+        ]
+        if expect_no_scalar_jit:
+          assert not [
+              e
+              for e in kh
+              if e.recording_mode == dr.KernelRecordingMode.Inactive
+              and e.type == dr.KernelType.JIT
+              and e.size == 1
+          ]
+      return img
+
+    frames = [render()]  # Warm-up.
+    translate_op.Set((0.5, 2.0, 5.0))
+    frames.append(render())  # Records the frozen kernel.
+    # Transform change with a redundant DirtyParams (same focal length): must
+    # take the scalar transform fast path with no projection recomputation.
+    translate_op.Set((1.0, 2.0, 5.0))
+    focal_length.Set(50.0)
+    frames.append(render(expect_replay=True, expect_no_scalar_jit=True))
+    # Intrinsic-only update (zoom).
+    focal_length.Set(35.0)
+    frames.append(render(expect_replay=True))
+    # Simultaneous transform and intrinsic update.
+    translate_op.Set((1.5, 2.0, 5.0))
+    focal_length.Set(60.0)
+    frames.append(render(expect_replay=True))
+    return frames
+
+  frozen_frames = run_sequence(True)
+  ref_frames = run_sequence(False)
+  for prev, curr in zip(frozen_frames, frozen_frames[1:]):
+    assert not np.allclose(prev, curr, atol=1e-3)
+  for frozen, ref in zip(frozen_frames, ref_frames):
+    np.testing.assert_allclose(frozen, ref, atol=1e-4, rtol=1e-4)
