@@ -135,7 +135,10 @@ You can configure the render delegate by authoring a `RenderSettings` prim insid
     `false`) using NVIDIA OptiX on CUDA variants (`cuda_*`) or Intel
     OpenImageDenoise on CPU/LLVM/Metal variants (`scalar_*`, `llvm_*`,
     `metal_*`), optionally guided by the `albedo` and `sh_normal`/`normal` AOVs
-    when requested (normal guidance requires `albedo`). Enabling
+    when requested (normal guidance requires `albedo`). On macOS,
+    OpenImageDenoise automatically uses Metal when supported by the installed
+    OIDN library and GPU (sharing Dr.Jit's Metal command queue and buffers on
+    `metal_*` variants) and falls back to CPU otherwise. Enabling
     `mitsuba:denoise` forces the `box` pixel filter so pixel noise remains
     uncorrelated.
 

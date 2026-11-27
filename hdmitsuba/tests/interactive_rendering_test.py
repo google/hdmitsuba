@@ -256,7 +256,15 @@ def test_seed_change_resets_progressive_rendering(use_kernel_freezing: bool):
   assert not np.allclose(converged_seed_0, converged_seed_2, atol=1e-5)
 
 
-def test_interactive_denoise_preserves_raw_accumulation():
+@pytest.mark.parametrize(
+    'variant', ['llvm_ad_rgb', 'cuda_ad_rgb', 'metal_ad_rgb']
+)
+def test_interactive_denoise_preserves_raw_accumulation(variant: str):
+  try:
+    mi.set_variant(variant)
+  except ImportError as error:
+    pytest.skip(f'Variant {variant} is not available: {error}')
+
   stage = _create_stage()
 
   def configure(
@@ -267,6 +275,7 @@ def test_interactive_denoise_preserves_raw_accumulation():
         render_settings_path='/Render/PrimarySettings',
         width=64,
         overrides={
+            'mitsuba:variant': variant,
             'enableInteractive': True,
             'mitsuba:sampler:sample_count': sample_count,
             'mitsuba:denoise': denoise,

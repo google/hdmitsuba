@@ -382,7 +382,9 @@ def test_unsupported_integrator_setting_is_ignored():
   test_helpers.robust_assert_close(hd_image, mi_image, atol=0.05)
 
 
-@pytest.mark.parametrize("variant", ["llvm_ad_rgb", "cuda_ad_rgb"])
+@pytest.mark.parametrize(
+    "variant", ["llvm_ad_rgb", "cuda_ad_rgb", "metal_ad_rgb"]
+)
 def test_denoise_render_settings(variant: str):
   try:
     mi.set_variant(variant)

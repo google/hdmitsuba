@@ -34,8 +34,11 @@
 #include <mitsuba/core/transform.h>
 #include <mitsuba/core/vector.h>
 #include <mitsuba/render/sensor.h>
+#include <pxr/base/tf/debug.h>
 #include <pxr/base/tf/diagnostic.h>
 #include <pxr/pxr.h>
+
+#include "hdmitsuba/debug_codes.h"
 
 #if defined(HDMITSUBA_ENABLE_OIDN)
 #include <OpenImageDenoise/oidn.hpp>
@@ -45,6 +48,10 @@
 #include <mitsuba/render/optixdenoiser.h>
 #endif
 
+#if defined(MI_ENABLE_METAL)
+#include <drjit-core/metal.h>
+#endif
+
 PXR_NAMESPACE_OPEN_SCOPE
 
 namespace dr = drjit;
@@ -52,85 +59,205 @@ namespace dr = drjit;
 namespace {
 
 #if defined(HDMITSUBA_ENABLE_OIDN)
+#if defined(__APPLE__) && OIDN_VERSION >= 20200
+#define HDMITSUBA_OIDN_METAL 1
+#if defined(MI_ENABLE_METAL)
+#define HDMITSUBA_OIDN_METAL_INTEROP 1
+#endif
+#endif
+
+bool CheckOidnError(oidn::DeviceRef& device, const char* context) {
+  const char* error_message = nullptr;
+  if (device.getError(error_message) == oidn::Error::None) {
+    return true;
+  }
+  TF_RUNTIME_ERROR("%s: %s", context,
+                   error_message ? error_message : "unknown error");
+  return false;
+}
+
 MI_VARIANT
 struct OidnDenoiserBackend {
   MI_IMPORT_TYPES(Sensor);
 
-  void Denoise(TensorXf& display_result, const Sensor* /*sensor*/,
-               size_t /*base_channels*/,
-               const std::optional<size_t>& albedo_offset,
-               const std::optional<size_t>& normal_offset) {
-    const size_t height = display_result.shape()[0];
-    const size_t width = display_result.shape()[1];
-    const size_t total_channels = display_result.shape()[2];
+  bool EnsureDevice() {
+#if defined(HDMITSUBA_OIDN_METAL_INTEROP)
+    if constexpr (dr::is_metal_v<Float>) {
+      if (device && metal_queue != nullptr &&
+          jit_metal_command_queue() != metal_queue) {
+        filter.release();
+        device.release();
+        metal_queue = nullptr;
+      }
+    }
+#endif
+    if (device) {
+      return true;
+    }
+
+#if defined(HDMITSUBA_OIDN_METAL)
+    auto try_metal = [&](oidn::DeviceRef candidate) {
+      if (candidate) {
+        candidate.commit();
+        if (candidate.getError() == oidn::Error::None) {
+          device = std::move(candidate);
+          return true;
+        }
+      }
+      oidn::getError();
+      return false;
+    };
+    if constexpr (dr::is_metal_v<Float>) {
+#if defined(HDMITSUBA_OIDN_METAL_INTEROP)
+      if (void* queue = jit_metal_command_queue();
+          try_metal(oidn::newMetalDevice(queue))) {
+        metal_queue = queue;
+      }
+#endif
+    } else {
+      try_metal(oidn::newDevice(oidn::DeviceType::Metal));
+    }
+#endif
 
     if (!device) {
       device = oidn::newDevice(oidn::DeviceType::CPU);
       if (device) {
         device.commit();
       }
-      const char* error_message = nullptr;
-      if (!device || device.getError(error_message) != oidn::Error::None) {
-        TF_RUNTIME_ERROR("Failed to initialize OpenImageDenoise CPU device: %s",
-                         error_message ? error_message : "unknown error");
+      if (!CheckOidnError(device, "Failed to initialize OpenImageDenoise") ||
+          !device) {
         device.release();
-        return;
+        return false;
       }
+    }
+    TF_DEBUG(HDMITSUBA_LIFECYCLE)
+        .Msg("Initialized OpenImageDenoise %s device\n",
+             device.get<oidn::DeviceType>("type") == oidn::DeviceType::CPU
+                 ? "CPU"
+                 : "Metal");
+    return true;
+  }
+
+  bool RunFilter(const oidn::BufferRef& in_buf, size_t in_offset,
+                 const oidn::BufferRef& out_buf, size_t out_offset,
+                 const TensorXf& tensor,
+                 const std::optional<size_t>& albedo_offset,
+                 const std::optional<size_t>& normal_offset) {
+    if (!in_buf || !out_buf) {
+      CheckOidnError(device, "Failed to prepare OpenImageDenoise buffers");
+      return false;
     }
     if (!filter) {
       filter = device.newFilter("RT");
     }
+    const size_t height = tensor.shape()[0];
+    const size_t width = tensor.shape()[1];
+    const size_t pixel_stride = tensor.shape()[2] * sizeof(float);
+    const size_t row_stride = width * pixel_stride;
+    auto bind = [&](const char* name, std::optional<size_t> ch) {
+      if (ch) {
+        filter.setImage(name, in_buf, oidn::Format::Float3, width, height,
+                        in_offset + *ch * sizeof(float), pixel_stride,
+                        row_stride);
+      } else {
+        filter.unsetImage(name);
+      }
+    };
+    bind("color", 0);
+    bind("albedo", albedo_offset);
+    bind("normal", normal_offset);
+    filter.setImage("output", out_buf, oidn::Format::Float3, width, height,
+                    out_offset, pixel_stride, row_stride);
+    filter.set("hdr", true);
+    filter.commit();
+    filter.execute();
+    return CheckOidnError(device, "OpenImageDenoise filter execution failed");
+  }
+
+  void Denoise(TensorXf& display_result, const Sensor* /*sensor*/,
+               size_t /*base_channels*/,
+               const std::optional<size_t>& albedo_offset,
+               const std::optional<size_t>& normal_offset) {
+    if (!EnsureDevice()) {
+      return;
+    }
+
+#if defined(HDMITSUBA_OIDN_METAL_INTEROP)
+    if constexpr (dr::is_metal_v<Float>) {
+      if (metal_queue != nullptr) {
+        // Write into an unaliased Metal buffer so denoising never mutates a
+        // shared progressive accumulation buffer.
+        float* in_ptr = display_result.array().data();
+        Float out_arr = display_result.shape()[2] == 3
+                            ? dr::empty<Float>(display_result.size())
+                            : display_result.array().copy();
+        float* out_ptr = out_arr.data();
+        jit_flush_thread();
+
+        auto wrap = [&](void* ptr, size_t& offset) -> oidn::BufferRef {
+          void* mtl = jit_metal_lookup_buffer(ptr, &offset);
+          return mtl ? oidnNewSharedBufferFromMetal(device.getHandle(), mtl)
+                     : nullptr;
+        };
+        size_t in_offset = 0;
+        size_t out_offset = 0;
+        oidn::BufferRef in_buf = wrap(in_ptr, in_offset);
+        oidn::BufferRef out_buf = wrap(out_ptr, out_offset);
+        if (RunFilter(in_buf, in_offset, out_buf, out_offset, display_result,
+                      albedo_offset, normal_offset)) {
+          display_result = TensorXf(std::move(out_arr), display_result.shape());
+        }
+        return;
+      }
+    }
+#endif
 
     if constexpr (dr::is_jit_v<Float>) {
       dr::eval(display_result);
       display_result =
           TensorXf(dr::migrate(display_result.array(), JitBackend::None),
-                   {height, width, total_channels});
+                   display_result.shape());
       dr::sync_thread();
     }
     float* host_data = display_result.array().data();
-
-    const size_t pixel_stride = total_channels * sizeof(float);
-    const size_t row_stride = width * pixel_stride;
-    filter.setImage("color", host_data, oidn::Format::Float3, width, height,
-                    /*byteOffset=*/0, pixel_stride, row_stride);
-    if (albedo_offset.has_value()) {
-      filter.setImage("albedo", host_data, oidn::Format::Float3, width, height,
-                      *albedo_offset * sizeof(float), pixel_stride, row_stride);
+    const size_t total_bytes = display_result.size() * sizeof(float);
+    if (device.get<bool>("systemMemorySupported")) {
+      oidn::BufferRef buf = device.newBuffer(host_data, total_bytes);
+      RunFilter(buf, 0, buf, 0, display_result, albedo_offset, normal_offset);
     } else {
-      filter.unsetImage("albedo");
-    }
-    if (normal_offset.has_value()) {
-      filter.setImage("normal", host_data, oidn::Format::Float3, width, height,
-                      *normal_offset * sizeof(float), pixel_stride, row_stride);
-    } else {
-      filter.unsetImage("normal");
-    }
-    filter.setImage("output", host_data, oidn::Format::Float3, width, height,
-                    /*byteOffset=*/0, pixel_stride, row_stride);
-    filter.set("hdr", true);
-    filter.commit();
-    filter.execute();
-
-    const char* error_message = nullptr;
-    if (device.getError(error_message) != oidn::Error::None) {
-      TF_RUNTIME_ERROR("OpenImageDenoise filter execution failed: %s",
-                       error_message ? error_message : "unknown error");
+      if (!staging_buffer || staging_buffer.getSize() < total_bytes) {
+        staging_buffer = device.newBuffer(total_bytes);
+      }
+      if (staging_buffer) {
+        staging_buffer.write(/*byteOffset=*/0, total_bytes, host_data);
+      }
+      if (RunFilter(staging_buffer, 0, staging_buffer, 0, display_result,
+                    albedo_offset, normal_offset)) {
+        staging_buffer.read(/*byteOffset=*/0, total_bytes, host_data);
+      }
     }
 
     if constexpr (dr::is_metal_v<Float>) {
       display_result =
           TensorXf(dr::migrate(display_result.array(), JitBackend::Metal),
-                   {height, width, total_channels});
+                   display_result.shape());
     }
   }
 
+  // `filter` and `staging_buffer` must be destroyed before `device`.
   oidn::DeviceRef device;
+  oidn::BufferRef staging_buffer;
   oidn::FilterRef filter;
+#if defined(HDMITSUBA_OIDN_METAL_INTEROP)
+  void* metal_queue = nullptr;
+#endif
 };
 
+#undef HDMITSUBA_OIDN_METAL
+#undef HDMITSUBA_OIDN_METAL_INTEROP
+
 template <typename Float, typename Spectrum>
-using CpuDenoiserBackend = OidnDenoiserBackend<Float, Spectrum>;
+using NonCudaDenoiserBackend = OidnDenoiserBackend<Float, Spectrum>;
 #else
 MI_VARIANT
 struct UnavailableOidnDenoiserBackend {
@@ -147,7 +274,7 @@ struct UnavailableOidnDenoiserBackend {
 };
 
 template <typename Float, typename Spectrum>
-using CpuDenoiserBackend = UnavailableOidnDenoiserBackend<Float, Spectrum>;
+using NonCudaDenoiserBackend = UnavailableOidnDenoiserBackend<Float, Spectrum>;
 #endif
 
 #if defined(MI_ENABLE_CUDA)
@@ -272,9 +399,9 @@ struct Denoiser<Float, Spectrum>::Impl {
   using DenoiserBackend =
       std::conditional_t<dr::is_cuda_v<Float>,
                          OptixDenoiserBackend<Float, Spectrum>,
-                         CpuDenoiserBackend<Float, Spectrum>>;
+                         NonCudaDenoiserBackend<Float, Spectrum>>;
 #else
-  using DenoiserBackend = CpuDenoiserBackend<Float, Spectrum>;
+  using DenoiserBackend = NonCudaDenoiserBackend<Float, Spectrum>;
 #endif
 
   DenoiserBackend backend;

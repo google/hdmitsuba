@@ -132,7 +132,7 @@ void HdMitsubaRenderDelegate::Initialize() {
       {"Enable Kernel Freezing",
        HdMitsubaRenderSettingsTokens->use_kernel_freezing,
        VtValue(config.use_kernel_freezing != 0)},
-      {"Enable Denoising (OptiX on CUDA, OIDN on CPU)",
+      {"Enable Denoising (OptiX on CUDA, OIDN on Metal/CPU)",
        HdMitsubaRenderSettingsTokens->denoise, VtValue(false)},
   };
   _PopulateDefaultSettings(setting_descriptors_);
