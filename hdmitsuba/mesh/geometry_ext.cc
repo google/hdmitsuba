@@ -66,6 +66,7 @@
 #include "hdmitsuba/mesh/subdivision.h"
 #include "hdmitsuba/motion.h"
 #include "hdmitsuba/prim_translator.h"
+#include "hdmitsuba/texture_cache.h"
 #include "hdmitsuba/utils.h"
 #include "nanobind/usd.h"
 
@@ -524,4 +525,13 @@ NB_MODULE(geometry_ext, m) {
         "or None, with the mesh `attributes` read by `texture`), or "
         "None if the material has no active MaterialX surface or "
         "displacement shader.");
+  m.def(
+      "read_bitmap",
+      [](const std::string& path) {
+        return CastMitsubaObject(ReadBitmap(path).get());
+      },
+      nb::arg("path"),
+      "Loads an image at `path` into a Mitsuba `Bitmap` via USD's asset "
+      "resolver, falling back to OpenUSD's `HioImage` plugins for formats "
+      "unsupported by Mitsuba.");
 }

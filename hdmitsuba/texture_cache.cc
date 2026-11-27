@@ -14,6 +14,7 @@
 
 #include "hdmitsuba/texture_cache.h"
 
+#include <cstdint>
 #include <cstring>
 #include <exception>
 #include <memory>
@@ -47,8 +48,12 @@
 #include <pxr/base/gf/vec2f.h>
 #include <pxr/base/gf/vec4f.h>
 #include <pxr/base/tf/diagnostic.h>
+#include <pxr/base/tf/errorMark.h>
 #include <pxr/base/tf/span.h>
+#include <pxr/base/tf/type.h>
 #include <pxr/imaging/hd/material.h>
+#include <pxr/imaging/hio/image.h>
+#include <pxr/imaging/hio/types.h>
 #include <pxr/usd/ar/asset.h>
 #include <pxr/usd/ar/resolvedPath.h>
 #include <pxr/usd/ar/resolver.h>
@@ -278,6 +283,93 @@ mitsuba::ref<mitsuba::Object> CreateBitmapTexture(const TextureKey& key,
       variant);
 }
 
+struct_jit::Type HioComponentFormat(HioType type) {
+  switch (type) {
+    case HioTypeUnsignedByte:
+    case HioTypeUnsignedByteSRGB:
+      return struct_jit::Type::UInt8;
+    case HioTypeSignedByte:
+      return struct_jit::Type::Int8;
+    case HioTypeUnsignedShort:
+      return struct_jit::Type::UInt16;
+    case HioTypeSignedShort:
+      return struct_jit::Type::Int16;
+    case HioTypeUnsignedInt:
+      return struct_jit::Type::UInt32;
+    case HioTypeInt:
+      return struct_jit::Type::Int32;
+    case HioTypeHalfFloat:
+      return struct_jit::Type::Float16;
+    case HioTypeFloat:
+      return struct_jit::Type::Float32;
+    case HioTypeDouble:
+      return struct_jit::Type::Float64;
+    default:
+      return struct_jit::Type::Invalid;
+  }
+}
+
+mitsuba::ref<mitsuba::Bitmap> ReadBitmapViaHio(const std::string& path) {
+  // Suppress internal Hio diagnostics (e.g. Hio_StbImage calling HioGetFormat
+  // with 0 channels on corrupt files, or HioOIIO_Image on unsupported formats)
+  // when decoding fails.
+  TfErrorMark error_mark;
+  auto fail = [&]() -> mitsuba::ref<mitsuba::Bitmap> {
+    error_mark.Clear();
+    return nullptr;
+  };
+  HioImageSharedPtr image = HioImage::OpenForReading(
+      path, /*subimage=*/0, /*mip=*/0, HioImage::SourceColorSpace::Auto,
+      /*suppressErrors=*/true);
+  if (!image) return fail();
+  int width = image->GetWidth();
+  int height = image->GetHeight();
+  HioFormat format = image->GetFormat();
+  if (!error_mark.IsClean() || width <= 0 || height <= 0 ||
+      format == HioFormatInvalid || HioIsCompressed(format)) {
+    return fail();
+  }
+  struct_jit::Type component_format = HioComponentFormat(HioGetHioType(format));
+  if (component_format == struct_jit::Type::Invalid) return fail();
+
+  constexpr mitsuba::Bitmap::PixelFormat kPixelFormats[] = {
+      mitsuba::Bitmap::PixelFormat::Y,
+      mitsuba::Bitmap::PixelFormat::YA,
+      mitsuba::Bitmap::PixelFormat::RGB,
+      mitsuba::Bitmap::PixelFormat::RGBA,
+  };
+  mitsuba::ref<mitsuba::Bitmap> bitmap = new mitsuba::Bitmap(
+      kPixelFormats[HioGetComponentCount(format) - 1], component_format,
+      {static_cast<uint32_t>(width), static_cast<uint32_t>(height)});
+
+  HioImage::StorageSpec storage;
+  storage.width = width;
+  storage.height = height;
+  storage.depth = 1;
+  storage.format = format;
+  storage.flipped = false;
+  storage.data = bitmap->data();
+  if (!image->Read(storage)) return fail();
+
+  // HioOIIO_Image (OIIO default `unassociatedalpha = 0`) and HioImageIO_Image
+  // (CoreGraphics `kCGImageAlphaPremultipliedLast`) premultiply color channels
+  // by alpha in encoded space. Unpremultiply before enabling `srgb_gamma` so
+  // `Bitmap::convert()` divides in encoded space rather than linearizing first.
+  const std::string& type_name = TfType::Find(*image).GetTypeName();
+  if (bitmap->has_alpha() &&
+      (type_name == "HioOIIO_Image" || type_name == "HioImageIO_Image")) {
+    bitmap->set_srgb_gamma(false);
+    bitmap->set_premultiplied_alpha(true);
+    bitmap = bitmap->convert(bitmap->pixel_format(), component_format,
+                             /*srgb_gamma=*/false,
+                             mitsuba::Bitmap::AlphaTransform::Unpremultiply);
+  }
+  bitmap->set_srgb_gamma(image->IsColorSpaceSRGB() ||
+                         component_format == struct_jit::Type::UInt8);
+  bitmap->set_premultiplied_alpha(type_name == "Hio_OpenEXRImage");
+  return bitmap;
+}
+
 }  // namespace
 
 std::pair<TextureKey::Rgb, TextureKey::Rgb> UsdUVTextureScaleBias(
@@ -424,15 +516,35 @@ std::optional<TextureKey> ExtractTextureKey(const HdMaterialNetwork2& network,
 }
 
 mitsuba::ref<mitsuba::Bitmap> ReadBitmap(const std::string& path) {
-  if (std::shared_ptr<ArAsset> asset =
-          ArGetResolver().OpenAsset(ArResolvedPath(path))) {
-    if (std::shared_ptr<const char> buffer = asset->GetBuffer()) {
-      mitsuba::ref<mitsuba::MemoryStream> stream = new mitsuba::MemoryStream(
-          const_cast<char*>(buffer.get()), asset->GetSize());
-      return new mitsuba::Bitmap(stream.get());
+  try {
+    if (std::shared_ptr<ArAsset> asset =
+            ArGetResolver().OpenAsset(ArResolvedPath(path))) {
+      if (std::shared_ptr<const char> buffer = asset->GetBuffer()) {
+        size_t size = asset->GetSize();
+        // TODO: Fix this upstream in Mitsuba — Bitmap::detect_file_format()
+        // reads 8 bytes and underflows `stream->size() - 18` on MemoryStream
+        // for buffers shorter than 18 bytes.
+        mitsuba::Bitmap::FileFormat format = mitsuba::Bitmap::FileFormat::Auto;
+        if (size < 18) {
+          if (size >= 2 && buffer.get()[0] == 'P' && buffer.get()[1] == '6') {
+            format = mitsuba::Bitmap::FileFormat::PPM;
+          } else if (size >= 2 && buffer.get()[0] == 'P' &&
+                     (buffer.get()[1] == 'F' || buffer.get()[1] == 'f')) {
+            format = mitsuba::Bitmap::FileFormat::PFM;
+          } else {
+            format = mitsuba::Bitmap::FileFormat::Unknown;
+          }
+        }
+        mitsuba::ref<mitsuba::MemoryStream> stream =
+            new mitsuba::MemoryStream(const_cast<char*>(buffer.get()), size);
+        return new mitsuba::Bitmap(stream.get(), format);
+      }
     }
+    return new mitsuba::Bitmap(path);
+  } catch (const std::exception&) {
+    if (auto bitmap = ReadBitmapViaHio(path)) return bitmap;
+    throw;
   }
-  return new mitsuba::Bitmap(path);
 }
 
 MI_VARIANT const CachedTexture* TextureCache<Float, Spectrum>::Find(

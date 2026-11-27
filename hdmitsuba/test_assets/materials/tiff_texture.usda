@@ -1,0 +1,116 @@
+#usda 1.0
+(
+    defaultPrim = "root"
+    upAxis = "Z"
+)
+
+def Xform "root"
+{
+    def Scope "Camera"
+    {
+        def Camera "Camera"
+        {
+            float focalLength = 0.036
+            float horizontalAperture = 0.036
+            float verticalAperture = 0.0252
+            double3 xformOp:translate = (0, 0, 3)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+
+    def DomeLight "Sky"
+    {
+        asset inputs:texture:file = @./textures/uv_quadrants.tif@
+    }
+
+    def RectLight "Area"
+    {
+        double3 xformOp:translate = (0, 0, 2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        asset inputs:texture:file = @./textures/uv_quadrants.tif@
+    }
+
+    def Scope "_materials"
+    {
+        def Material "preview_tiff"
+        {
+            token outputs:surface.connect = </root/_materials/preview_tiff/Shader.outputs:surface>
+            def Shader "Shader"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </root/_materials/preview_tiff/Tex.outputs:rgb>
+                float inputs:opacity.connect = </root/_materials/preview_tiff/Tex.outputs:a>
+                float inputs:opacityThreshold = 0.5
+                token outputs:surface
+            }
+            def Shader "Tex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./textures/uv_quadrants.tif@
+                float3 outputs:rgb
+                float outputs:a
+            }
+        }
+
+        def Material "mitsuba_tiff"
+        {
+            token outputs:mitsuba:surface.connect = </root/_materials/mitsuba_tiff/BSDF.outputs:surface>
+            def Shader "BSDF"
+            {
+                uniform token info:id = "mitsuba_diffuse"
+                color3f inputs:reflectance.connect = </root/_materials/mitsuba_tiff/Tex.outputs:rgb>
+                token outputs:surface
+            }
+            def Shader "Tex"
+            {
+                uniform token info:id = "mitsuba_bitmap"
+                asset inputs:filename = @./textures/uv_quadrants.tif@
+                float3 outputs:rgb
+            }
+        }
+
+        def Material "mtlx_tiff"
+        {
+            token outputs:mtlx:surface.connect = </root/_materials/mtlx_tiff/Surf.outputs:out>
+            def Shader "Surf"
+            {
+                uniform token info:id = "ND_surface_unlit"
+                float inputs:emission = 1
+                color3f inputs:emission_color.connect = </root/_materials/mtlx_tiff/Img.outputs:out>
+                token outputs:out
+            }
+            def Shader "Img"
+            {
+                uniform token info:id = "ND_image_color3"
+                asset inputs:file = @./textures/uv_quadrants.tif@
+                color3f outputs:out
+            }
+        }
+    }
+
+    class Mesh "_Tile" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "faceVarying")
+        uniform token subdivisionScheme = "none"
+    }
+
+    def Mesh "TilePreview" (inherits = </root/_Tile>)
+    {
+        rel material:binding = </root/_materials/preview_tiff>
+        point3f[] points = [(-1.45, -0.45, 0), (-0.55, -0.45, 0), (-0.55, 0.45, 0), (-1.45, 0.45, 0)]
+    }
+
+    def Mesh "TileMitsuba" (inherits = </root/_Tile>)
+    {
+        rel material:binding = </root/_materials/mitsuba_tiff>
+        point3f[] points = [(-0.45, -0.45, 0), (0.45, -0.45, 0), (0.45, 0.45, 0), (-0.45, 0.45, 0)]
+    }
+
+    def Mesh "TileMtlx" (inherits = </root/_Tile>)
+    {
+        rel material:binding = </root/_materials/mtlx_tiff>
+        point3f[] points = [(0.55, -0.45, 0), (1.45, -0.45, 0), (1.45, 0.45, 0), (0.55, 0.45, 0)]
+    }
+}

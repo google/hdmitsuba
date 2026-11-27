@@ -57,7 +57,7 @@ macro(hdmitsuba_setup_houdini)
   find_library(HOUDINI_TBB_LIBRARY NAMES tbb PATHS "${HOUDINI_LIB_DIR}" NO_DEFAULT_PATH REQUIRED)
   find_library(HOUDINI_TCMALLOC_LIBRARY NAMES tcmalloc_minimal PATHS "${HOUDINI_LIB_DIR}" NO_DEFAULT_PATH)
 
-  foreach(_lib ar arch cameraUtil gf hd hdsi hdx pxOsd python sdf sdr tf trace
+  foreach(_lib ar arch cameraUtil gf hd hdsi hdx hio pxOsd python sdf sdr tf trace
                usd usdGeom usdImaging usdLux usdRender usdShade usdSkel usdVol vt)
     find_library(_pxr_${_lib} NAMES "pxr_${_lib}" PATHS "${HOUDINI_LIB_DIR}" NO_DEFAULT_PATH REQUIRED)
     add_library(${_lib} SHARED IMPORTED)

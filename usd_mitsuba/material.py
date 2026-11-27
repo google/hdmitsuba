@@ -80,7 +80,11 @@ _NON_COLOR_INPUTS = (
 
 _CHANNEL_INDICES = {'r': 0, 'g': 1, 'b': 2, 'a': 3}
 
-_SUPPORTED_IMAGE_EXTENSIONS = frozenset({
+# Extensions that Mitsuba's `bitmap` plugin can load directly from disk without
+# pre-decoding through `geom_lib.read_bitmap()` (excludes `.bmp` and `.tga`,
+# since Mitsuba rejects BITMAPV4/BITFIELDS BMPs and TGA v1 files that
+# `HioImage` handles).
+_MITSUBA_IMAGE_EXTENSIONS = frozenset({
     '.exr',
     '.png',
     '.jpg',
@@ -89,8 +93,6 @@ _SUPPORTED_IMAGE_EXTENSIONS = frozenset({
     '.rgbe',
     '.pfm',
     '.ppm',
-    '.tga',
-    '.bmp',
 })
 
 _MI_PREFIX = 'mitsuba_'
@@ -225,23 +227,20 @@ def _extract_usd_transform2d(
   return flip @ xf @ flip
 
 
+def _is_native_disk_bitmap(filename: str) -> bool:
+  """Returns whether Mitsuba's `bitmap` plugin can load `filename` directly."""
+  return (
+      os.path.exists(filename)
+      and os.path.splitext(filename)[1].lower() in _MITSUBA_IMAGE_EXTENSIONS
+  )
+
+
 def _load_uv_texture_image(filename: str, ch_idx: int) -> dict[str, Any] | None:
   """Returns the texture dict for a UsdUVTexture image, or None if unusable."""
-  # Strip the closing bracket of package paths like `a.usdz[tex.png]`.
-  _, ext = os.path.splitext(filename.rstrip(']'))
-  # This check is not identical to hdmitsuba's more strict check,
-  # but should be sufficient for the Python conversion.
-  if ext.lower() not in _SUPPORTED_IMAGE_EXTENSIONS:
-    Tf.Warn(
-        f"Texture file '{filename}' has unsupported extension '{ext}'."
-        ' Using fallback.'
-    )
-    return None
-  if os.path.exists(filename) and ch_idx < 0:
+  if ch_idx < 0 and _is_native_disk_bitmap(filename):
     return {'type': 'bitmap', 'filename': filename}
   try:
-    stream = None if os.path.exists(filename) else _open_asset_stream(filename)
-    bmp = mi.Bitmap(stream or filename)
+    bmp = geom_lib.read_bitmap(filename)
   except RuntimeError as e:
     Tf.Warn(f"Failed to load texture '{filename}': {e}. Using fallback.")
     return None
@@ -463,6 +462,13 @@ def usd_mitsuba_material_to_dict(
             result[name] = resolved if resolved else value.path
           else:
             result[name] = value
+
+    if (
+        result['type'] == 'bitmap'
+        and 'filename' in result
+        and not _is_native_disk_bitmap(result['filename'])
+    ):
+      result['bitmap'] = geom_lib.read_bitmap(result.pop('filename'))
 
     if (
         result['type'] == 'gridvolume'

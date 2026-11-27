@@ -28,6 +28,7 @@ from pxr import Tf
 from pxr import Usd
 from pxr import UsdLux
 
+from hdmitsuba import geometry_ext as geom_lib
 from usd_mitsuba import motion
 from usd_mitsuba import util
 
@@ -121,7 +122,7 @@ def _area_emitter(
         'expr': 'in[0] * in[1]',
         'in0': {
             'type': 'bitmap',
-            'bitmap': mi.Bitmap(texture_file.resolvedPath),
+            'bitmap': geom_lib.read_bitmap(texture_file.resolvedPath),
         },
         'in1': {'type': 'srgb', 'color': radiance, 'unbounded': True},
     }
@@ -143,7 +144,7 @@ def _convert_dome_light(
   dome_light = UsdLux.DomeLight(prim)
   texture_file_attr = dome_light.GetTextureFileAttr().Get(time)
   if texture_file_attr:
-    bitmap = mi.Bitmap(texture_file_attr.resolvedPath)
+    bitmap = geom_lib.read_bitmap(texture_file_attr.resolvedPath)
     # Mitsuba's `envmap` only has a scalar `scale` (the mean of `color`), so
     # the per-channel tint is baked into its texture.
     mean = dr.mean(color)

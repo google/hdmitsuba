@@ -19,6 +19,7 @@ from __future__ import annotations
 import mitsuba as mi
 import numpy as np
 from pxr import Gf
+from pxr import Plug
 from pxr import Sdf
 from pxr import Usd
 from pxr import UsdShade
@@ -263,3 +264,50 @@ def test_unused_texture_not_loaded(capfd):
   engine.render()
   err = capfd.readouterr().err
   assert 'no_roughness' in err and 'no_occlusion' not in err
+
+
+_HAS_HIO_TIFF = any(
+    'tif' in td.get('imageTypes', ())
+    for p in Plug.Registry().GetAllPlugins()
+    for td in p.metadata.get('Types', {}).values()
+)
+
+
+@pytest.mark.parametrize(
+    'texture_name',
+    [
+        pytest.param(
+            'uv_quadrants.tif',
+            marks=pytest.mark.skipif(
+                not _HAS_HIO_TIFF,
+                reason='Requires an OpenUSD HioImage plugin with TIFF support.',
+            ),
+        ),
+        'uv_quadrants_v1.tga',
+    ],
+)
+def test_render_hio_texture(texture_name: str) -> None:
+  """Verifies HioImage fallback loading across materials and lights."""
+  stage = Usd.Stage.Open(
+      f'{test_helpers.TEST_ASSETS_PATH}/materials/tiff_texture.usda'
+  )
+  if texture_name != 'uv_quadrants.tif':
+    tex_path = (
+        f'{test_helpers.TEST_ASSETS_PATH}/materials/textures/{texture_name}'
+    )
+    for prim in stage.Traverse():
+      for attr in prim.GetAttributes():
+        if isinstance(attr.Get(), Sdf.AssetPath):
+          attr.Set(Sdf.AssetPath(tex_path))
+  test_helpers.create_render_settings(stage)
+  img_hd, _ = test_helpers.assert_hydra_equal_to_offline(
+      stage, '/root/Camera/Camera', f'test_render_hio_texture_{texture_name}'
+  )
+  # Check top-left and bottom-left quadrants of the unlit MaterialX tile to
+  # ensure the pixels were decoded (not a fallback color).
+  np.testing.assert_allclose(
+      img_hd[55, 152, :3], np.array([200.0, 40.0, 80.0]) / 255.0, atol=2e-2
+  )
+  np.testing.assert_allclose(
+      img_hd[85, 152, :3], np.array([60.0, 80.0, 220.0]) / 255.0, atol=2e-2
+  )

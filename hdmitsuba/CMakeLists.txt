@@ -90,6 +90,7 @@ target_link_libraries(hdMitsuba
     absl::check
     absl::str_format
     absl::synchronization
+    hio
     sdr
     ${MITSUBA_LIBRARY}
     ${DRJIT_CORE_LIBRARY}

@@ -117,7 +117,8 @@ std::optional<TextureKey> ExtractTextureKey(const HdMaterialNetwork2& network,
 
 // Loads a bitmap through USD's asset resolver so textures embedded in .usdz
 // packages (or served by custom resolvers) can be read from memory. Falls back
-// to reading directly from the filesystem. Throws on loading error.
+// to reading directly from the filesystem, and then to OpenUSD's `HioImage`
+// plugins for formats unsupported by Mitsuba. Throws on loading error.
 mitsuba::ref<mitsuba::Bitmap> ReadBitmap(const std::string& path);
 
 // Owns the Mitsuba bitmap textures shared between materials, keyed by
