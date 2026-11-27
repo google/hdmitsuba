@@ -115,6 +115,9 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
           case ClosureOp::GeneralizedSchlick:
             if (c.op == ClosureOp::Dielectric) {
               leaf.spec[0] = eval_.AddSpectrum(c.microfacet.p[0]);
+              if (c.microfacet.p[2] != kInvalidValue) {
+                leaf.spec[1] = eval_.AddSpectrum(c.microfacet.p[2]);
+              }
             } else if (c.op == ClosureOp::Conductor) {
               leaf.spec[0] =
                   eval_.AddSpectrum(c.microfacet.p[0], /*unbounded=*/true);
@@ -273,8 +276,9 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
         UnpolarizedSpectrum contrib = s.leaf_weight[k] * LeafAlbedo(k, s);
         if (leaf.mf_idx >= 0) {
           const auto& m = s.microfacet[leaf.mf_idx];
-          auto mf = detail::MicrofacetEvalFeatures(m, s.wi_local[leaf.frame],
-                                                   contrib);
+          auto mf = detail::MicrofacetEvalFeatures(
+              m, s.wi_local[leaf.frame],
+              m.has_trans_tint ? s.leaf_weight[k] : contrib);
           specular_reflectance += mf.refl;
           if (mf.has_trans) {
             update_trans(
@@ -477,6 +481,10 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
       m.ior = detail::SafeDielectricIor(ReadVal(c.microfacet.p[1], s).x(),
                                         !m.thin_walled && !m.refl_only);
       m.spec0 = s.spectra[leaf.spec[0]];
+      if (leaf.spec[1] >= 0) {
+        m.has_trans_tint = true;
+        m.spec1 = s.spectra[leaf.spec[1]];
+      }
     } else if (c.op == ClosureOp::Conductor) {
       m.spec0 = s.spectra[leaf.spec[0]];
       m.spec1 = s.spectra[leaf.spec[1]];
@@ -524,7 +532,10 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
               : (cached_tp
                      ? s.layer_albedo[k]
                      : detail::MicrofacetReflAlbedo(m, s.wi_local[leaf.frame]));
-      return m.kind == detail::MicrofacetKind::Dielectric ? m.spec0 * a : a;
+      if (m.kind == detail::MicrofacetKind::Dielectric) {
+        return (m.has_trans_tint ? dr::maximum(m.spec0, m.spec1) : m.spec0) * a;
+      }
+      return a;
     }
     if (c.op == ClosureOp::Sheen) {
       return s.spectra[leaf.spec[0]] *
@@ -599,7 +610,9 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
       int c0 = c.comb.first, c1 = c.comb.second;
       if (c.op == ClosureOp::Layer) {
         w[c0] += w[i];
-        w[c1] = dr::fmadd(w[i], tp[c0], w[c1]);
+        if (closures_[c0].flags & kClosureNeedsTp) {
+          w[c1] = dr::fmadd(w[i], tp[c0], w[c1]);
+        }
       } else if (c.op == ClosureOp::Mix) {
         const UnpolarizedSpectrum& m = s.spectra[comb_spec_[i]];
         w[c0] = dr::fmadd(w[i], m, w[c0]);

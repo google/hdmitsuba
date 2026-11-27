@@ -234,23 +234,6 @@ int32_t EmitOpaqueBlocker(BsdfLowerState& st) {
   return st.opaque_blocker;
 }
 
-void MarkTwoSidedDielectrics(BsdfLowerState& st, size_t start) {
-  for (size_t i = start; i < st.closures.size(); ++i) {
-    const mtlx::ClosureNode& c = st.closures[i];
-    if ((c.op == mtlx::ClosureOp::Dielectric ||
-         c.op == mtlx::ClosureOp::GeneralizedSchlick) &&
-        (c.microfacet.mode & mtlx::kScatterModeMask) != mtlx::kScatterR) {
-      return;
-    }
-  }
-  for (size_t i = start; i < st.closures.size(); ++i) {
-    mtlx::ClosureNode& c = st.closures[i];
-    if (c.op == mtlx::ClosureOp::Dielectric) {
-      c.microfacet.mode |= mtlx::kScatterTwoSided;
-    }
-  }
-}
-
 ValueId FrameValue(LowerCtx& ctx, const ScopedNode& node,
                    const std::string& name, ValueId def) {
   ValueId e = LowerInputExpr(ctx, node, name, def);
@@ -459,14 +442,8 @@ int32_t LowerBsdfClosure(LowerCtx& ctx, BsdfLowerState& st,
       if (!b.IsZero(LowerInputExpr(ctx, node, "thin_walled"))) {
         st.thin_walled = true;
       }
-      // Scope BSDF deduplication to this surface so `MarkTwoSidedDielectrics`
-      // cannot mutate a closure shared with another mixed surface.
-      auto saved = std::exchange(st.bsdf_closure, {});
-      size_t start = st.closures.size();
       int32_t bsdf_idx = LowerBsdfClosure(
           ctx, st, ResolveConnected(ctx.resolver, node, "bsdf"));
-      MarkTwoSidedDielectrics(st, start);
-      st.bsdf_closure = std::move(saved);
       idx = scale(bsdf_idx, op);
     }
   } else if (cat == "surface_unlit") {
@@ -869,9 +846,6 @@ std::shared_ptr<const PreparedMaterialX> LowerMaterialXShaders(
       ValueId opacity_root = ctx.b->IsOne(op_val) ? kInvalidValue : op_val;
       if (ctx.b->IsZero(op_val) || LowerBsdfClosure(ctx, st, surf_root) < 0) {
         st.closures = {mtlx::ClosureNode::MakeNull()};
-      } else if (!st.thin_walled &&
-                 surf_root.node->getType() != mx::SURFACE_SHADER_TYPE_STRING) {
-        MarkTwoSidedDielectrics(st, 0);
       }
       AppendPendingRegions(ctx.val_prog, ctx.pending_regions);
       SymbolicBsdf bsdf;

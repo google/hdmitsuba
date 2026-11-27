@@ -1232,7 +1232,7 @@ std::optional<ValueId> LowerColorPbrNode(LowerCtx& ctx, const ScopedNode& node,
     return b.Emit(mtlx::Op::Blackbody, {in("temperature", b.Const(5000.0))});
   }
   if (cat == "roughness_anisotropy") {
-    ValueId r = in("roughness");
+    ValueId r = b.Emit(mtlx::Op::Clip, {in("roughness"), b.Zero(), b.One()});
     ValueId r2 = b.Emit(mtlx::Op::Clip,
                         {b.Mul(r, r), b.Const(mtlx::kMtlxFloatEps), b.One()});
     ValueId aspect = b.Emit(

@@ -109,6 +109,36 @@ ClosureAnalysis AnalyzeClosures(absl::Span<const ClosureNode> closures,
   return a;
 }
 
+// Merges a matching `Layer(Dielectric(R), Dielectric(T))` pair into a single
+// `Dielectric(RT)` closure so reflection and transmission share per-microfacet
+// Fresnel instead of macrosurface layer throughput.
+bool TryMergeDielectricRT(const MtlxValueProgram& values,
+                          const ClosureNode& top, const ClosureNode& base,
+                          ClosureNode& out) {
+  if (top.op != ClosureOp::Dielectric || base.op != ClosureOp::Dielectric) {
+    return false;
+  }
+  const auto& tm = top.microfacet;
+  const auto& bm = base.microfacet;
+  if ((tm.mode & kScatterModeMask) != kScatterR ||
+      (bm.mode & kScatterModeMask) != kScatterT) {
+    return false;
+  }
+  constexpr uint16_t kMatchFlags = kScatterThinWalled | kScatterRetroreflective;
+  if (!IsConstOne(values, tm.weight) || !IsConstOne(values, bm.weight) ||
+      tm.p[1] != bm.p[1] || tm.roughness != bm.roughness ||
+      tm.normal != bm.normal || tm.tangent != bm.tangent ||
+      (tm.mode & kMatchFlags) != (bm.mode & kMatchFlags)) {
+    return false;
+  }
+  out = top;
+  out.microfacet.mode = static_cast<uint16_t>(
+      (tm.mode & ~(kScatterModeMask | kScatterTwoSided)) | kScatterRT |
+      ((tm.mode & kScatterThinWalled) ? kScatterTwoSided : 0));
+  out.microfacet.p[2] = bm.p[0] == tm.p[0] ? kInvalidValue : bm.p[0];
+  return true;
+}
+
 void SimplifyClosures(MtlxBsdfProgram& prog) {
   auto clear_if_op = [&](ValueId& id, Op op) {
     if (id != kInvalidValue && prog.values.nodes[id].op == op) {
@@ -151,15 +181,18 @@ void SimplifyClosures(MtlxBsdfProgram& prog) {
   size_t n = prog.closures.size();
   std::vector<ClosureNode> simp;
   simp.reserve(n);
+  std::vector<uint8_t> paired_simp;
+  paired_simp.reserve(n);
   std::vector<int32_t> remap(n, -1);
   int32_t null_idx = -1, blocker_idx = -1;
-  auto emit_node = [&](ClosureNode node) -> int32_t {
+  auto emit_node = [&](ClosureNode node, uint8_t paired = 0) -> int32_t {
     int32_t* cached = node.op == ClosureOp::Null            ? &null_idx
                       : node.op == ClosureOp::OpaqueBlocker ? &blocker_idx
                                                             : nullptr;
     if (cached && *cached >= 0) return *cached;
     int32_t idx = static_cast<int32_t>(simp.size());
     simp.push_back(node);
+    paired_simp.push_back(paired);
     if (cached) *cached = idx;
     return idx;
   };
@@ -168,11 +201,11 @@ void SimplifyClosures(MtlxBsdfProgram& prog) {
   for (size_t i = 0; i < n; ++i) {
     ClosureNode c = prog.closures[i];
     if (!IsCombinator(c.op)) {
-      remap[i] = emit_node((IsLeaf(c.op) && !info.has_scat[i])
-                               ? (info.is_opaque[i] && info.needs_tp[i]
-                                      ? ClosureNode::MakeOpaqueBlocker()
-                                      : ClosureNode::MakeNull())
-                               : c);
+      remap[i] =
+          emit_node(!info.has_scat[i] ? (info.is_opaque[i] && info.needs_tp[i]
+                                             ? ClosureNode::MakeOpaqueBlocker()
+                                             : ClosureNode::MakeNull())
+                                      : c);
       continue;
     }
     int32_t old0 = c.comb.first, old1 = c.comb.second;
@@ -185,6 +218,66 @@ void SimplifyClosures(MtlxBsdfProgram& prog) {
         folded = c0;
       } else if (is_null(c0)) {
         folded = c1;
+      } else {
+        // Merge matching `Layer(Dielectric(R), Dielectric(T))` into a single
+        // `Dielectric(RT)` (handling `Mix` on `top` for thin-film blends and
+        // `Mix` on `base` for partial transmission in OpenPBR/StandardSurface).
+        auto try_merge_with_t = [&](int32_t top_idx,
+                                    ClosureNode t_node) -> int32_t {
+          ClosureNode rt;
+          if (TryMergeDielectricRT(prog.values, simp[top_idx], t_node, rt)) {
+            return emit_node(rt);
+          }
+          if (simp[top_idx].op == ClosureOp::Mix) {
+            ClosureNode rt0, rt1;
+            int32_t f0 = simp[top_idx].comb.first;
+            int32_t f1 = simp[top_idx].comb.second;
+            ValueId mw = simp[top_idx].comb.weight;
+            if (TryMergeDielectricRT(prog.values, simp[f0], t_node, rt0) &&
+                TryMergeDielectricRT(prog.values, simp[f1], t_node, rt1)) {
+              int32_t m0 = emit_node(rt0);
+              int32_t m1 = emit_node(rt1);
+              return emit_node(ClosureNode::MakeMix(m0, m1, mw));
+            }
+          }
+          return -1;
+        };
+
+        if (int32_t merged = try_merge_with_t(c0, simp[c1]); merged >= 0) {
+          folded = merged;
+        } else if (simp[c1].op == ClosureOp::Mix) {
+          int32_t fg = simp[c1].comb.first, bg = simp[c1].comb.second;
+          ValueId mw = simp[c1].comb.weight;
+          // Clone `c0` with `paired = 1` so the distributed `(1 - mw)`
+          // `Dielectric(R)` keeps the same one-sided TIR as its `Dielectric(T)`
+          // sibling without affecting unrelated shared uses of `c0`.
+          auto emit_paired_top = [&]() -> int32_t {
+            if (simp[c0].op == ClosureOp::Mix) {
+              int32_t p0 = emit_node(simp[simp[c0].comb.first], /*paired=*/1);
+              int32_t p1 = emit_node(simp[simp[c0].comb.second], /*paired=*/1);
+              return emit_node(
+                  ClosureNode::MakeMix(p0, p1, simp[c0].comb.weight));
+            }
+            return emit_node(simp[c0], /*paired=*/1);
+          };
+          auto layer_other = [&](int32_t other) {
+            int32_t ptop = emit_paired_top();
+            return is_null(other) ||
+                           (simp[other].op == ClosureOp::OpaqueBlocker &&
+                            !info.needs_tp[i])
+                       ? ptop
+                       : emit_node(ClosureNode::MakeLayer(ptop, other));
+          };
+          if (int32_t merged_fg = try_merge_with_t(c0, simp[fg]);
+              merged_fg >= 0) {
+            folded =
+                emit_node(ClosureNode::MakeMix(merged_fg, layer_other(bg), mw));
+          } else if (int32_t merged_bg = try_merge_with_t(c0, simp[bg]);
+                     merged_bg >= 0) {
+            folded =
+                emit_node(ClosureNode::MakeMix(layer_other(fg), merged_bg, mw));
+          }
+        }
       }
     } else if (c.op == ClosureOp::Add) {
       if (is_null(c0) || (!info.has_scat[old0] &&
@@ -236,6 +329,7 @@ void SimplifyClosures(MtlxBsdfProgram& prog) {
   }
 
   std::vector<ClosureNode> compact;
+  std::vector<uint8_t> paired_refl;
   std::vector<int32_t> cremap(simp.size(), -1);
   for (int32_t i = 0; i <= root; ++i) {
     if (!live[i]) continue;
@@ -247,6 +341,58 @@ void SimplifyClosures(MtlxBsdfProgram& prog) {
     }
     cremap[i] = static_cast<int32_t>(compact.size());
     compact.push_back(c);
+    paired_refl.push_back(paired_simp[i]);
+  }
+
+  // Mark every reflection-only `Dielectric` two-sided unless it sits in a
+  // `Layer` directly paired above an unmerged solid `Dielectric(T)` sharing
+  // the same IOR (e.g., `standard_surface` with
+  // `transmission_extra_roughness`), or was split off from such a pair when
+  // distributing over a partial-transmission `Mix`. Exterior coats (such as
+  // `coat_bsdf` over solid glass) stay two-sided so exiting rays never trap in
+  // bogus back-face TIR.
+  if (!prog.thin_walled) {
+    auto mark_matching_r = [&](int32_t top_root, ValueId ior_id) {
+      std::vector<uint8_t> vis(compact.size(), 0);
+      vis[top_root] = 1;
+      for (int32_t j = top_root; j >= 0; --j) {
+        if (!vis[j]) continue;
+        const ClosureNode& cj = compact[j];
+        if (IsCombinator(cj.op)) {
+          vis[cj.comb.first] = 1;
+          if (cj.comb.second >= 0) vis[cj.comb.second] = 1;
+        } else if (cj.op == ClosureOp::Dielectric &&
+                   (cj.microfacet.mode & kScatterModeMask) == kScatterR &&
+                   cj.microfacet.p[1] == ior_id) {
+          paired_refl[j] = 1;
+        }
+      }
+    };
+    for (size_t i = 0; i < compact.size(); ++i) {
+      if (compact[i].op != ClosureOp::Layer) continue;
+      int32_t top = compact[i].comb.first, base = compact[i].comb.second;
+      std::vector<uint8_t> vis(compact.size(), 0);
+      vis[base] = 1;
+      for (int32_t j = base; j >= 0; --j) {
+        if (!vis[j]) continue;
+        const ClosureNode& cj = compact[j];
+        if (IsCombinator(cj.op) && cj.op != ClosureOp::Layer) {
+          vis[cj.comb.first] = 1;
+          if (cj.comb.second >= 0) vis[cj.comb.second] = 1;
+        } else if (cj.op == ClosureOp::Dielectric &&
+                   (cj.microfacet.mode & kScatterModeMask) == kScatterT) {
+          mark_matching_r(top, cj.microfacet.p[1]);
+        }
+      }
+    }
+    for (size_t i = 0; i < compact.size(); ++i) {
+      ClosureNode& c = compact[i];
+      if (c.op == ClosureOp::Dielectric &&
+          (c.microfacet.mode & kScatterModeMask) == kScatterR &&
+          !paired_refl[i]) {
+        c.microfacet.mode |= kScatterTwoSided;
+      }
+    }
   }
 
   ClosureAnalysis final_info = AnalyzeClosures(compact, prog.values);

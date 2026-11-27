@@ -44,6 +44,15 @@ ClosureNode Sheen(IrBuilder& b, ValueId col) {
                                 kInvalidValue);
 }
 
+ClosureNode Dielectric(IrBuilder& b, uint16_t mode, ValueId ior, ValueId rough,
+                       ValueId tint = kInvalidValue,
+                       ValueId tf_thick = kInvalidValue,
+                       ValueId tf_ior = kInvalidValue) {
+  return ClosureNode::MakeMicrofacet(
+      ClosureOp::Dielectric, b.One(), rough, mode, kInvalidValue, kInvalidValue,
+      tf_thick, tf_ior, tint == kInvalidValue ? b.One() : tint, ior);
+}
+
 void SetMainEnd(MtlxValueProgram& p) {
   p.main_end = static_cast<uint32_t>(p.nodes.size());
 }
@@ -385,6 +394,123 @@ TEST(MaterialXOptimizerTest, SimplifyClosuresPrunesZeroWeightLeaf) {
   EXPECT_EQ(p.closures[0].op, ClosureOp::Null);
   EXPECT_TRUE(res.live_inputs.empty());
   EXPECT_TRUE(p.values.opaques.empty());
+}
+
+TEST(MaterialXOptimizerTest, SimplifyClosuresMergesMatchingDielectricRT) {
+  // Matching `Layer(Dielectric(R), Dielectric(T))` merges into `Dielectric(RT)`
+  // with `p[2] == kInvalidValue` when tints match, or `p[2] == trans_tint`
+  // when distinct.
+  for (bool distinct_tints : {false, true}) {
+    MtlxBsdfProgram p;
+    IrBuilder b(p.values);
+    ValueId ior = b.Const(1.5), rough = b.Const(0.2);
+    ValueId refl_tint = b.ConstRgb(1.0, 0.5, 0.2);
+    ValueId trans_tint = distinct_tints ? b.ConstRgb(0.2, 0.8, 1.0) : refl_tint;
+    p.closures = {Dielectric(b, kScatterR, ior, rough, refl_tint),
+                  Dielectric(b, kScatterT, ior, rough, trans_tint),
+                  ClosureNode::MakeLayer(0, 1)};
+    SetMainEnd(p.values);
+    OptimizeBsdfProgram(p);
+    ASSERT_EQ(p.closures.size(), 1u);
+    EXPECT_EQ(p.closures[0].op, ClosureOp::Dielectric);
+    EXPECT_EQ(p.closures[0].microfacet.mode & kScatterModeMask, kScatterRT);
+    EXPECT_EQ(p.closures[0].microfacet.mode & kScatterTwoSided, 0u);
+    if (distinct_tints) {
+      EXPECT_NE(p.closures[0].microfacet.p[2], kInvalidValue);
+    } else {
+      EXPECT_EQ(p.closures[0].microfacet.p[2], kInvalidValue);
+    }
+  }
+
+  // `Layer(Dielectric(R), Mix(w, Dielectric(T), Diffuse))` distributes to
+  // `Mix(w, Dielectric(RT), Layer(Dielectric(R, one-sided), Diffuse))` so the
+  // `(1 - w)` branch preserves matching back-face TIR.
+  {
+    MtlxBsdfProgram p;
+    IrBuilder b(p.values);
+    ValueId ior = b.Const(1.5), rough = b.Const(0.3), mw = b.Opaque(0.5);
+    p.closures = {Dielectric(b, kScatterR, ior, rough),
+                  Dielectric(b, kScatterT, ior, rough), Diffuse(b, b.One()),
+                  ClosureNode::MakeMix(1, 2, mw), ClosureNode::MakeLayer(0, 3)};
+    SetMainEnd(p.values);
+    OptimizeBsdfProgram(p);
+    ASSERT_EQ(p.closures.back().op, ClosureOp::Mix);
+    const ClosureNode& fg = p.closures[p.closures.back().comb.first];
+    const ClosureNode& bg = p.closures[p.closures.back().comb.second];
+    EXPECT_EQ(fg.op, ClosureOp::Dielectric);
+    EXPECT_EQ(fg.microfacet.mode & kScatterModeMask, kScatterRT);
+    EXPECT_EQ(fg.microfacet.mode & kScatterTwoSided, 0u);
+    ASSERT_EQ(bg.op, ClosureOp::Layer);
+    const ClosureNode& bg_top = p.closures[bg.comb.first];
+    EXPECT_EQ(bg_top.op, ClosureOp::Dielectric);
+    EXPECT_EQ(bg_top.microfacet.mode & kScatterModeMask, kScatterR);
+    EXPECT_EQ(bg_top.microfacet.mode & kScatterTwoSided, 0u);
+  }
+
+  // `Layer(Dielectric(R), Mix(w, Dielectric(T), OpaqueBlocker))` at root prunes
+  // the unneeded blocker and folds to `Mix(w, Dielectric(RT), Dielectric(R))`
+  // with `Dielectric(R)` kept one-sided for exact back-face TIR.
+  {
+    MtlxBsdfProgram p;
+    IrBuilder b(p.values);
+    ValueId ior = b.Const(1.7), rough = b.Const(0.01), mw = b.Opaque(0.94);
+    p.closures = {Dielectric(b, kScatterR, ior, rough),
+                  Dielectric(b, kScatterT, ior, rough),
+                  ClosureNode::MakeOpaqueBlocker(),
+                  ClosureNode::MakeMix(1, 2, mw), ClosureNode::MakeLayer(0, 3)};
+    SetMainEnd(p.values);
+    OptimizeBsdfProgram(p);
+    ASSERT_EQ(p.closures.size(), 3u);
+    EXPECT_EQ(p.closures[2].op, ClosureOp::Mix);
+    const ClosureNode& fg = p.closures[p.closures[2].comb.first];
+    const ClosureNode& bg = p.closures[p.closures[2].comb.second];
+    EXPECT_EQ(fg.microfacet.mode & kScatterModeMask, kScatterRT);
+    EXPECT_EQ(bg.microfacet.mode & kScatterModeMask, kScatterR);
+    EXPECT_EQ(bg.microfacet.mode & kScatterTwoSided, 0u);
+  }
+
+  // `Layer(Mix(w, Dielectric(R, tf), Dielectric(R)), Dielectric(T))` merges
+  // both top branches into `Mix(w, Dielectric(RT, tf), Dielectric(RT))`.
+  {
+    MtlxBsdfProgram p;
+    IrBuilder b(p.values);
+    ValueId ior = b.Const(1.5), rough = b.Const(0.2), mw = b.Opaque(0.5);
+    p.closures = {
+        Dielectric(b, kScatterR, ior, rough, b.One(), b.Const(400.0),
+                   b.Const(1.4)),
+        Dielectric(b, kScatterR, ior, rough), ClosureNode::MakeMix(0, 1, mw),
+        Dielectric(b, kScatterT, ior, rough), ClosureNode::MakeLayer(2, 3)};
+    SetMainEnd(p.values);
+    OptimizeBsdfProgram(p);
+    ASSERT_EQ(p.closures.size(), 3u);
+    EXPECT_EQ(p.closures[2].op, ClosureOp::Mix);
+    EXPECT_EQ(p.closures[0].microfacet.mode & kScatterModeMask, kScatterRT);
+    EXPECT_NE(p.closures[0].microfacet.tf_thickness, kInvalidValue);
+    EXPECT_EQ(p.closures[1].microfacet.mode & kScatterModeMask, kScatterRT);
+    EXPECT_EQ(p.closures[1].microfacet.tf_thickness, kInvalidValue);
+  }
+}
+
+TEST(MaterialXOptimizerTest, SimplifyClosuresTwoSidedDielectricClassification) {
+  // Unmerged `Layer(spec_R(ior_g, r1), trans_T(ior_g, r2))` keeps `spec_R`
+  // one-sided, while an exterior `coat_R` layered over it (even sharing IOR)
+  // is marked two-sided so exiting rays never trap in back-face TIR.
+  MtlxBsdfProgram p;
+  IrBuilder b(p.values);
+  ValueId ior_g = b.Const(1.5), ior_c = b.Const(1.8);
+  p.closures = {Dielectric(b, kScatterR, ior_c, b.Const(0.05)),
+                Dielectric(b, kScatterR, ior_g, b.Const(0.1)),
+                Dielectric(b, kScatterT, ior_g, b.Const(0.3)),
+                ClosureNode::MakeLayer(1, 2), ClosureNode::MakeLayer(0, 3)};
+  SetMainEnd(p.values);
+  OptimizeBsdfProgram(p);
+  ASSERT_EQ(p.closures.size(), 5u);
+  const ClosureNode& coat = p.closures[p.closures.back().comb.first];
+  const ClosureNode& inner = p.closures[p.closures.back().comb.second];
+  ASSERT_EQ(inner.op, ClosureOp::Layer);
+  const ClosureNode& spec_r = p.closures[inner.comb.first];
+  EXPECT_NE(coat.microfacet.mode & kScatterTwoSided, 0u);
+  EXPECT_EQ(spec_r.microfacet.mode & kScatterTwoSided, 0u);
 }
 
 TEST(MaterialXOptimizerTest, DumpProgramFormatsBandsRegionsAndClosures) {
