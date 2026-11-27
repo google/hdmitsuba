@@ -30,6 +30,10 @@
 NAMESPACE_BEGIN(mitsuba)
 namespace mtlx::detail {
 
+template <typename ScalarFloat>
+inline constexpr ScalarFloat kMinLen2 =
+    dr::Epsilon<ScalarFloat> * dr::Epsilon<ScalarFloat>;
+
 template <typename Vec>
 Vec safe_normalize(const Vec& v, const Vec& fallback = Vec(0.0f),
                    dr::scalar_t<Vec> min_len2 = 0.0f) {
@@ -39,12 +43,17 @@ Vec safe_normalize(const Vec& v, const Vec& fallback = Vec(0.0f),
                     fallback);
 }
 
+template <typename Vec3>
+Vec3 orthogonalize_tangent(
+    const Vec3& n, const Vec3& t, const Vec3& fallback,
+    dr::scalar_t<Vec3> min_len2 = kMinLen2<dr::scalar_t<Vec3>>) {
+  return safe_normalize(dr::fnmadd(n, dr::dot(n, t), t), fallback, min_len2);
+}
+
 template <typename SurfaceInteraction>
 auto geom_tangent_world(const SurfaceInteraction& si) {
   using Vec3 = std::decay_t<decltype(si.sh_frame.s)>;
-  return safe_normalize(dr::fnmadd(Vec3(si.sh_frame.n),
-                                   dr::dot(si.sh_frame.n, si.dp_du), si.dp_du),
-                        si.sh_frame.s, dr::scalar_t<Vec3>(1e-20f));
+  return orthogonalize_tangent(Vec3(si.sh_frame.n), si.dp_du, si.sh_frame.s);
 }
 
 template <typename SurfaceInteraction, typename Vec3>
@@ -141,8 +150,8 @@ Vector<Float, 3> mx_normal_map(const Vector<Float, 3>& val,
                                const Vector<Float, 3>& fallback_n) {
   using Vector3f = Vector<Float, 3>;
   Vector3f N = safe_normalize(n, fallback_n);
-  Vector3f T = safe_normalize(dr::fnmadd(N, dr::dot(N, tangent), tangent),
-                              coordinate_system(N).first);
+  Vector3f T = orthogonalize_tangent(N, tangent, coordinate_system(N).first,
+                                     dr::scalar_t<Float>(0.0f));
   Vector3f B = dr::cross(N, T);
   B = dr::select(dr::dot(bitangent, B) < 0.0f, -B, B);
   return mx_normal_map_frame(val, scale,

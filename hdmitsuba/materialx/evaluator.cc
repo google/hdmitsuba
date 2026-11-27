@@ -104,6 +104,11 @@ Vector<Float, 4> eval_noise_op(const Node& node, const Vector<Float, 4>* a) {
   }
 }
 
+template <typename Color3f>
+Color3f clamp_color(const Color3f& c, bool unbounded) {
+  return unbounded ? dr::maximum(c, 0.0f) : dr::clip(c, 0.0f, 1.0f);
+}
+
 /**!
 
 .. _texture-materialx_expr:
@@ -141,7 +146,12 @@ class MtlxExprTexture final : public Texture<Float, Spectrum> {
 
   explicit MtlxExprTexture(const Properties& props) : Texture(props) {
     m_eval.compile(props);
-    if (!m_eval.program().result_scalar()) m_eval.load_srgb_lut();
+    if constexpr (is_spectral_v<Spectrum>) {
+      if (m_eval.program().result_root != kInvalidValue) {
+        m_eval.add_spectrum(m_eval.program().result_root, /*unbounded=*/true);
+      }
+    }
+    m_eval.finalize_uniforms();
   }
 
   void traverse(TraversalCallback* cb) override { m_eval.traverse(cb); }
@@ -157,11 +167,11 @@ class MtlxExprTexture final : public Texture<Float, Spectrum> {
     } else if constexpr (is_rgb_v<Spectrum>) {
       return eval_3(si, active);
     } else {
-      Color3f c = eval_3(si, active);
-      if (m_eval.program().result_scalar()) {
-        return UnpolarizedSpectrum(dr::maximum(c.x(), 0.0f));
-      }
-      return m_eval.upsample_rgb(c, si.wavelengths, /*unbounded=*/true);
+      MI_MASKED_FUNCTION(ProfilerPhase::TextureEvaluate, active);
+      if (m_eval.program().result_root == kInvalidValue) return 0.0f;
+      typename MtlxEvaluator<Float, Spectrum>::EvalState state;
+      m_eval.eval_surface(si, active, state);
+      return m_eval.eval_spectrum(0, si.wavelengths, state);
     }
   }
 
@@ -243,11 +253,38 @@ void MtlxEvaluator<Float, Spectrum>::compile(const Properties& props,
   }
 
   m_prog = std::move(prog);
+  m_spec_slots.clear();
+  m_uniform_specs.clear();
   m_opaques.clear();
   m_opaques.reserve(m_prog.opaques.size());
   for (double v : m_prog.opaques) {
     m_opaques.push_back(dr::opaque<Float>(static_cast<ScalarFloat>(v)));
   }
+}
+
+template <typename Float, typename Spectrum>
+int MtlxEvaluator<Float, Spectrum>::add_spectrum(ValueId id, bool unbounded) {
+  for (size_t i = 0; i < m_spec_slots.size(); ++i) {
+    if (m_spec_slots[i].value == id && m_spec_slots[i].unbounded == unbounded) {
+      return static_cast<int>(i);
+    }
+  }
+  int uniform_spec_idx = -1;
+  if constexpr (is_spectral_v<Spectrum>) {
+    if (!m_prog.is_value_scalar(id)) {
+      m_srgb->load();
+      if (id < m_prog.uniform_end) {
+        uniform_spec_idx = static_cast<int>(m_uniform_specs.size());
+        m_uniform_specs.emplace_back();
+      }
+    }
+  }
+  m_spec_slots.push_back({id, unbounded, uniform_spec_idx});
+  return static_cast<int>(m_spec_slots.size() - 1);
+}
+
+template <typename Float, typename Spectrum>
+void MtlxEvaluator<Float, Spectrum>::finalize_uniforms() {
   update_uniform_state();
 }
 
@@ -285,24 +322,43 @@ void MtlxEvaluator<Float, Spectrum>::update_uniform_state() {
   }
 
   m_uniform_scalars.clear();
-  if (m_prog.uniform_scalar_count == 0) return;
+  if (m_prog.uniform_scalar_count == 0 && m_uniform_specs.empty()) return;
 
   absl::InlinedVector<Val, 32> uvals;
   eval_uniform_nodes(uvals);
 
-  m_uniform_scalars.reserve(m_prog.uniform_scalar_count);
-  for (uint32_t u = 0; u < m_prog.uniform_end; ++u) {
-    if (m_prog.uniform_offsets[u] == kNoUniformScalar) continue;
-    uint8_t ch = m_prog.nodes[u].channels;
-    for (uint8_t c = 0; c < ch; ++c) {
-      m_uniform_scalars.push_back(dr::detach(uvals[u][c]));
+  bool scheduled = false;
+  if (m_prog.uniform_scalar_count > 0) {
+    m_uniform_scalars.reserve(m_prog.uniform_scalar_count);
+    for (uint32_t u = 0; u < m_prog.uniform_end; ++u) {
+      if (m_prog.uniform_offsets[u] == kNoUniformScalar) continue;
+      uint8_t ch = m_prog.nodes[u].channels;
+      for (uint8_t c = 0; c < ch; ++c) {
+        m_uniform_scalars.push_back(dr::detach(uvals[u][c]));
+      }
+    }
+    if constexpr (dr::is_jit_v<Float>) {
+      for (Float& s : m_uniform_scalars) {
+        scheduled |= dr::detail::schedule_force(s);
+      }
+    }
+  }
+  if constexpr (is_spectral_v<Spectrum>) {
+    for (const SpecSlot& slot : m_spec_slots) {
+      if (slot.uniform_spec_idx < 0) continue;
+      Color3f c =
+          clamp_color(Color3f(dr::head<3>(uvals[slot.value])), slot.unbounded);
+      auto [coeff, scale] = m_srgb->fetch_coeffs(c, slot.unbounded);
+      UniformSpec& dst = m_uniform_specs[slot.uniform_spec_idx];
+      dst.coeff = dr::detach(coeff);
+      dst.scale = dr::detach(scale);
+      if constexpr (dr::is_jit_v<Float>) {
+        scheduled |= dr::detail::schedule_force(dst.coeff);
+        if (slot.unbounded) scheduled |= dr::detail::schedule_force(dst.scale);
+      }
     }
   }
   if constexpr (dr::is_jit_v<Float>) {
-    bool scheduled = false;
-    for (Float& s : m_uniform_scalars) {
-      scheduled |= dr::detail::schedule_force(s);
-    }
     if (scheduled) dr::eval();
   }
 }
@@ -358,11 +414,6 @@ void MtlxEvaluator<Float, Spectrum>::eval_until(uint32_t end,
              state.mat_rows.data(), uptr, si, active, state.attr_cache,
              state.si_uv);
   state.evaluated_end = end;
-}
-
-template <typename Float, typename Spectrum>
-void MtlxEvaluator<Float, Spectrum>::load_srgb_lut() {
-  m_srgb->load();
 }
 
 template <typename Float, typename Spectrum>
@@ -688,10 +739,24 @@ MtlxEvaluator<Float, Spectrum>::eval_3(const SurfaceInteraction3f& si,
 
 template <typename Float, typename Spectrum>
 typename MtlxEvaluator<Float, Spectrum>::UnpolarizedSpectrum
-MtlxEvaluator<Float, Spectrum>::upsample_rgb(const Color3f& c,
-                                             const Wavelength& wavelengths,
-                                             bool unbounded) const {
-  return m_srgb->upsample(c, wavelengths, unbounded);
+MtlxEvaluator<Float, Spectrum>::eval_spectrum(size_t slot_idx,
+                                              const Wavelength& wavelengths,
+                                              const EvalState& state) const {
+  const SpecSlot& slot = m_spec_slots[slot_idx];
+  if constexpr (is_spectral_v<Spectrum>) {
+    if (slot.uniform_spec_idx >= 0 && !has_opaque_grad()) {
+      const UniformSpec& u = m_uniform_specs[slot.uniform_spec_idx];
+      return detail::SrgbUpsampler<Float, Spectrum>::eval_coeffs(
+          u.coeff, u.scale, wavelengths, slot.unbounded);
+    }
+  }
+  Val v = read_val(slot.value, state);
+  if (m_prog.is_value_scalar(slot.value)) {
+    return UnpolarizedSpectrum(slot.unbounded ? dr::maximum(v.x(), 0.0f)
+                                              : dr::clip(v.x(), 0.0f, 1.0f));
+  }
+  return m_srgb->upsample(clamp_color(Color3f(dr::head<3>(v)), slot.unbounded),
+                          wavelengths, slot.unbounded);
 }
 
 template <typename Float, typename Spectrum>
@@ -700,6 +765,9 @@ void MtlxEvaluator<Float, Spectrum>::traverse_cb(
   DR_TRAVERSE_MEMBER(m_inputs)
   DR_TRAVERSE_MEMBER(m_opaques)
   DR_TRAVERSE_MEMBER(m_uniform_scalars)
+  if constexpr (is_spectral_v<Spectrum>) {
+    DR_TRAVERSE_MEMBER(m_uniform_specs)
+  }
   m_srgb->traverse_cb(payload, cb);
   m_prog.traverse_state(payload, cb);
 }

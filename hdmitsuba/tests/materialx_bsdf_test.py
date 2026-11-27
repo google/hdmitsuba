@@ -1808,3 +1808,135 @@ def test_uber_surface_shaders(
   assert dr.allclose(feat.diffuse_albedo, exp_diffuse, atol=1e-3)
   assert dr.allclose(feat.specular_reflectance, exp_spec, atol=1e-3)
   _check_bsdf_sampling(bsdf)
+
+
+def test_anisotropic_flag_and_isotropic_frame() -> None:
+  """Verifies BSDFFlags.Anisotropic gating and isotropic normal clamping."""
+  std_iso = mtlx.compile_mtlx_material(
+      'ND_standard_surface_surfaceshader',
+      base_color=(0.5, 0.5, 0.5),
+      specular_roughness=0.25,
+  )[0]
+  std_aniso = mtlx.compile_mtlx_material(
+      'ND_standard_surface_surfaceshader',
+      base_color=(0.5, 0.5, 0.5),
+      specular_roughness=0.25,
+      specular_anisotropy=0.5,
+  )[0]
+  for bsdf in (
+      _compile_bsdf('ND_oren_nayar_diffuse_bsdf', color=(0.5, 0.5, 0.5)),
+      std_iso,
+  ):
+    assert bsdf is not None
+    assert not mi.has_flag(bsdf.flags(), mi.BSDFFlags.Anisotropic)
+
+  for bsdf in (
+      std_aniso,
+      _compile_bsdf('ND_dielectric_bsdf', roughness=(0.1, 0.4), ior=1.5),
+      _compile_bsdf(
+          'ND_conductor_bsdf',
+          ior=(0.2, 0.4, 1.3),
+          extinction=(3.0, 2.4, 1.8),
+          tangent=(0.0, 1.0, 0.0),
+      ),
+      _compile_bsdf('ND_chiang_hair_bsdf'),
+  ):
+    assert bsdf is not None
+    assert mi.has_flag(bsdf.flags(), mi.BSDFFlags.Anisotropic)
+
+  # Isotropic shading frames still clamp grazing back-facing normals.
+  si_grazing = mtlx.make_test_si(wi=(0.98, 0.0, 0.1989975))
+  n_back = dr.normalize(mi.Vector3f(-0.6, 0.0, 0.8))
+  bsdf_iso = _compile_bsdf(
+      'ND_oren_nayar_diffuse_bsdf',
+      color=(0.5, 0.5, 0.5),
+      normal=(float(n_back.x[0]), float(n_back.y[0]), float(n_back.z[0])),
+  )
+  feat = bsdf_iso.eval_features(si_grazing)
+  assert dr.all(dr.dot(feat.sh_frame.n, si_grazing.wi) > 0.0)
+
+
+@pytest.mark.parametrize(
+    'variants',
+    [('cuda_ad_rgb', 'llvm_ad_rgb'), ('cuda_ad_spectral', 'llvm_ad_spectral')],
+)
+def test_bsdf_freeze_traverse_and_ad(variants: tuple[str, str]) -> None:
+  """Verifies BSDF @dr.freeze, mi.traverse updates, and AD across RGB/spectral."""
+  mtlx.set_variant_or_skip(*variants)
+  ctx = mi.BSDFContext()
+  si_f = mtlx.make_test_si(wi=(0.35, -0.25, 0.9027735))
+  si_b = mtlx.make_test_si(wi=(0.35, -0.25, -0.9027735))
+  wo_f = dr.normalize(mi.Vector3f(-0.3, 0.2, 0.93))
+  wo_t = dr.normalize(mi.Vector3f(-0.2, 0.15, -0.968))
+
+  def make_bsdf(
+      rough: float, ior: float, tint_r: float, ext_r: float
+  ) -> mi.BSDF:
+    return _compile_bsdf(
+        'ND_mix_bsdf',
+        fg=(
+            'ND_conductor_bsdf',
+            {
+                'ior': (0.25, 0.45, 1.3),
+                'extinction': (ext_r, 2.4, 1.8),
+                'roughness': (rough, rough),
+            },
+        ),
+        bg=(
+            'ND_dielectric_bsdf',
+            _diel_kw('RT', rough, ior=ior, tint=(tint_r, 0.4, 0.2)),
+        ),
+        mix=0.5,
+    )
+
+  bsdf = make_bsdf(0.22, 1.55, 0.8, 3.2)
+
+  @dr.freeze
+  def eval_frozen(
+      b: mi.BSDF, si: mi.SurfaceInteraction3f, wo: mi.Vector3f
+  ) -> mi.Spectrum:
+    return b.eval(ctx, si, wo)
+
+  out_f0 = out_b0 = None
+  for _ in range(2):
+    out_f0 = eval_frozen(bsdf, si_f, wo_f)
+    out_b0 = eval_frozen(bsdf, si_b, wo_t)
+  assert out_f0 is not None and out_b0 is not None
+
+  p = mi.traverse(bsdf)
+  for old_v, new_v in ((0.22, 0.42), (1.55, 1.85), (0.8, 0.35), (3.2, 1.5)):
+    for k in p.keys():
+      if k.startswith('param') and np.allclose(p[k], old_v):
+        p[k] = mi.Float(new_v)
+  p.update()
+
+  ref = make_bsdf(0.42, 1.85, 0.35, 1.5)
+  out_f1 = eval_frozen(bsdf, si_f, wo_f)
+  out_b1 = eval_frozen(bsdf, si_b, wo_t)
+  assert dr.allclose(out_f1, ref.eval(ctx, si_f, wo_f), rtol=1e-5, atol=1e-6)
+  assert dr.allclose(out_b1, ref.eval(ctx, si_b, wo_t), rtol=1e-5, atol=1e-6)
+  assert not dr.allclose(out_f1, out_f0, rtol=1e-2)
+  assert not dr.allclose(out_b1, out_b0, rtol=1e-2)
+
+  eps = 1e-3
+  for val_cur, make_delta in (
+      (0.35, lambda d: make_bsdf(0.42, 1.85, 0.35 + d, 1.5)),
+      (1.5, lambda d: make_bsdf(0.42, 1.85, 0.35, 1.5 + d)),
+  ):
+    key = next(
+        k
+        for k in p.keys()
+        if k.startswith('param') and np.allclose(p[k], val_cur)
+    )
+    dr.enable_grad(p[key])
+    p.update()
+    dr.backward(dr.sum(bsdf.eval(ctx, si_f, wo_f)))
+    grad = dr.grad(p[key])
+    dr.disable_grad(p[key])
+    p.update()
+    fd = dr.sum(
+        make_delta(eps).eval(ctx, si_f, wo_f)
+        - make_delta(-eps).eval(ctx, si_f, wo_f)
+    ) / (2.0 * eps)
+    assert dr.allclose(grad, fd, rtol=5e-3, atol=1e-4)
+    assert dr.all(dr.abs(grad) > 1e-4)
