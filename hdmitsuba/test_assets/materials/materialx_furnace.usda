@@ -1,0 +1,299 @@
+#usda 1.0
+(
+    defaultPrim = "root"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "root"
+{
+    def Xform "Camera"
+    {
+        float3 xformOp:rotateXYZ = (90, 0, 0)
+        double3 xformOp:translate = (0, -5.2, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+
+        def Camera "Camera"
+        {
+            float2 clippingRange = (0.1, 100)
+            float focalLength = 0.035
+            float horizontalAperture = 0.036
+            token projection = "perspective"
+            float verticalAperture = 0.036
+        }
+    }
+
+    def DomeLight "Furnace"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+
+    def Scope "_materials"
+    {
+        def Material "openpbr_metal_aniso"
+        {
+            token outputs:mtlx:surface.connect = </root/_materials/openpbr_metal_aniso/Surface.outputs:out>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+                color3f inputs:base_color = (1, 1, 1)
+                float inputs:base_metalness = 1.0
+                float inputs:specular_roughness = 0.5
+                float inputs:specular_roughness_anisotropy = 0.9
+                token outputs:out
+            }
+        }
+
+        def Material "openpbr_thinfilm_metal"
+        {
+            token outputs:mtlx:surface.connect = </root/_materials/openpbr_thinfilm_metal/Surface.outputs:out>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+                color3f inputs:base_color = (1, 1, 1)
+                float inputs:base_metalness = 1.0
+                float inputs:specular_roughness = 0.3
+                float inputs:thin_film_ior = 1.8
+                float inputs:thin_film_thickness = 0.4
+                float inputs:thin_film_weight = 1.0
+                token outputs:out
+            }
+        }
+
+        def Material "openpbr_coat_dark_fuzz"
+        {
+            token outputs:mtlx:surface.connect = </root/_materials/openpbr_coat_dark_fuzz/Surface.outputs:out>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+                color3f inputs:base_color = (1, 1, 1)
+                float inputs:base_diffuse_roughness = 0.5
+                float inputs:coat_darkening = 1.0
+                float inputs:coat_roughness = 0.3
+                float inputs:coat_weight = 1.0
+                float inputs:fuzz_roughness = 0.5
+                float inputs:fuzz_weight = 1.0
+                float inputs:specular_roughness = 0.4
+                token outputs:out
+            }
+        }
+
+        def Material "openpbr_glass_solid"
+        {
+            token outputs:mtlx:surface.connect = </root/_materials/openpbr_glass_solid/Surface.outputs:out>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+                float inputs:specular_ior = 1.5
+                float inputs:specular_roughness = 0.0
+                float inputs:transmission_weight = 1.0
+                token outputs:out
+            }
+        }
+
+        def Material "openpbr_glass_thin"
+        {
+            token outputs:mtlx:surface.connect = </root/_materials/openpbr_glass_thin/Surface.outputs:out>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+                bool inputs:geometry_thin_walled = 1
+                float inputs:specular_ior = 1.5
+                float inputs:specular_roughness = 0.0
+                float inputs:transmission_weight = 1.0
+                token outputs:out
+            }
+        }
+
+        def Material "openpbr_glass_coated_solid"
+        {
+            token outputs:mtlx:surface.connect = </root/_materials/openpbr_glass_coated_solid/Surface.outputs:out>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+                color3f inputs:base_color = (1, 1, 1)
+                float inputs:coat_darkening = 0.0
+                float inputs:coat_roughness = 0.05
+                float inputs:coat_weight = 1.0
+                float inputs:specular_ior = 1.5
+                float inputs:specular_roughness = 0.0
+                float inputs:transmission_weight = 1.0
+                token outputs:out
+            }
+        }
+
+        def Material "openpbr_uv_varying"
+        {
+            token outputs:mtlx:surface.connect = </root/_materials/openpbr_uv_varying/Surface.outputs:out>
+
+            def Shader "UV"
+            {
+                uniform token info:id = "ND_texcoord_vector2"
+                float2 outputs:out
+            }
+
+            def Shader "U"
+            {
+                uniform token info:id = "ND_extract_vector2"
+                float2 inputs:in.connect = </root/_materials/openpbr_uv_varying/UV.outputs:out>
+                int inputs:index = 0
+                float outputs:out
+            }
+
+            def Shader "V"
+            {
+                uniform token info:id = "ND_extract_vector2"
+                float2 inputs:in.connect = </root/_materials/openpbr_uv_varying/UV.outputs:out>
+                int inputs:index = 1
+                float outputs:out
+            }
+
+            def Shader "Rough"
+            {
+                uniform token info:id = "ND_mix_float"
+                float inputs:bg = 0.35
+                float inputs:fg = 0.9
+                float inputs:mix.connect = </root/_materials/openpbr_uv_varying/U.outputs:out>
+                float outputs:out
+            }
+
+            def Shader "Opacity"
+            {
+                uniform token info:id = "ND_mix_float"
+                float inputs:bg = 0.25
+                float inputs:fg = 1.0
+                float inputs:mix.connect = </root/_materials/openpbr_uv_varying/V.outputs:out>
+                float outputs:out
+            }
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+                color3f inputs:base_color = (1, 1, 1)
+                float inputs:base_metalness.connect = </root/_materials/openpbr_uv_varying/U.outputs:out>
+                float inputs:fuzz_weight.connect = </root/_materials/openpbr_uv_varying/V.outputs:out>
+                float inputs:geometry_opacity.connect = </root/_materials/openpbr_uv_varying/Opacity.outputs:out>
+                float inputs:specular_roughness.connect = </root/_materials/openpbr_uv_varying/Rough.outputs:out>
+                token outputs:out
+            }
+        }
+
+        def Material "openpbr_normalmap"
+        {
+            token outputs:mtlx:surface.connect = </root/_materials/openpbr_normalmap/Surface.outputs:out>
+
+            def Shader "NormalMap"
+            {
+                uniform token info:id = "ND_normalmap"
+                float3 inputs:in = (0.7, 0.5, 0.9)
+                float inputs:scale = 1.0
+                float3 outputs:out
+            }
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+                color3f inputs:base_color = (1, 1, 1)
+                float3 inputs:geometry_normal.connect = </root/_materials/openpbr_normalmap/NormalMap.outputs:out>
+                float inputs:specular_roughness = 0.3
+                token outputs:out
+            }
+        }
+
+        def Material "std_surface_glass_high_coat"
+        {
+            token outputs:mtlx:surface.connect = </root/_materials/std_surface_glass_high_coat/Surface.outputs:out>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_standard_surface_surfaceshader"
+                float inputs:coat = 1.0
+                float inputs:coat_IOR = 1.8
+                float inputs:coat_roughness = 0.05
+                float inputs:specular_IOR = 1.5
+                float inputs:specular_roughness = 0.0
+                float inputs:transmission = 1.0
+                token outputs:out
+            }
+        }
+    }
+
+    def Sphere "openpbr_metal_aniso" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        rel material:binding = </root/_materials/openpbr_metal_aniso>
+        double radius = 0.45
+        double3 xformOp:translate = (-1.35, 0, 1.35)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "openpbr_thinfilm_metal" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        rel material:binding = </root/_materials/openpbr_thinfilm_metal>
+        double radius = 0.45
+        double3 xformOp:translate = (0, 0, 1.35)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "openpbr_coat_dark_fuzz" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        rel material:binding = </root/_materials/openpbr_coat_dark_fuzz>
+        double radius = 0.45
+        double3 xformOp:translate = (1.35, 0, 1.35)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "openpbr_glass_solid" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        rel material:binding = </root/_materials/openpbr_glass_solid>
+        double radius = 0.45
+        double3 xformOp:translate = (-1.35, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "openpbr_glass_thin" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        rel material:binding = </root/_materials/openpbr_glass_thin>
+        double radius = 0.45
+        double3 xformOp:translate = (0, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "openpbr_glass_coated_solid" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        rel material:binding = </root/_materials/openpbr_glass_coated_solid>
+        double radius = 0.45
+        double3 xformOp:translate = (1.35, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "openpbr_uv_varying" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        rel material:binding = </root/_materials/openpbr_uv_varying>
+        double radius = 0.45
+        double3 xformOp:translate = (-1.35, 0, -1.35)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "openpbr_normalmap" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        rel material:binding = </root/_materials/openpbr_normalmap>
+        double radius = 0.45
+        double3 xformOp:translate = (0, 0, -1.35)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "std_surface_glass_high_coat" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        rel material:binding = </root/_materials/std_surface_glass_high_coat>
+        double radius = 0.45
+        double3 xformOp:translate = (1.35, 0, -1.35)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
