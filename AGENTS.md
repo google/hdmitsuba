@@ -21,17 +21,36 @@ contributors). See [README.md](README.md) for build and test instructions and
 *   No process-global state.
 *   Avoid defensive programming: only handle conditions that can actually
     occur.
+*   **Follow Google C++ style everywhere:** `UpperCamelCase` functions and
+    methods, `snake_case` locals, `foo_` private members on classes, and plain
+    structs with public fields without trailing underscores (keeping Mitsuba
+    virtual override names and inherited `m_*` members only where required by
+    Mitsuba base classes).
 *   Prefer returning values over mutating out-parameters unless measured
     performance requires it.
+*   Prefer plain context structs and anonymous-namespace free functions over
+    in-file private class hierarchies.
 *   **Match Mitsuba and Dr.Jit conventions in custom plugins.** Follow Mitsuba's
     built-in plugin style (`UnpolarizedSpectrum` internally with
-    `depolarizer<Spectrum>` at the boundary, `snake_case` locals, plain float
-    literals like `1.0f`), use `dr::any_or`/`dr::none_or` instead of Dr.Jit
-    internals, and reuse Dr.Jit/Mitsuba math, frame, and epsilon helpers
-    (`dr::Epsilon<Float>`, `Frame3f`). Detaching at sampling/PDF boundaries
-    (`dr::detach`) is idiomatic—don't add complexity just to avoid discarded AD
-    graphs—and skip statically disabled branches explicitly since
-    `dr::none_or<false>` does not short-circuit in JIT variants.
+    `depolarizer<Spectrum>` at the boundary, plain float literals like `1.0f`),
+    use `dr::any_or`/`dr::none_or` instead of Dr.Jit internals, and reuse
+    Dr.Jit/Mitsuba math, frame, and epsilon helpers (`dr::Epsilon<Float>`,
+    `Frame3f`). Detaching at sampling/PDF boundaries (`dr::detach`) is
+    idiomatic—don't add complexity just to avoid discarded AD graphs—and skip
+    statically disabled branches explicitly since `dr::none_or<false>` does not
+    short-circuit in JIT variants.
+*   **MaterialX (`hdmitsuba/materialx/`):**
+    *   Use `namespace mitsuba::mtlx` (or `::detail`) for runtime/IR files and
+        `PXR_NAMESPACE_OPEN_SCOPE` for USD-facing files (`compiler.*`,
+        `translator.*`).
+    *   Keep `MtlxValueProgram` single-output flat SSA (`Node -> Val`),
+        separated from `MtlxBsdfProgram` (`closures[]`); bottom-up rewrites live
+        in `IrBuilder::Emit`, whole-graph passes (`SimplifyClosures`,
+        `PruneAndSchedule`, `Verify*`, `Dump*`) live in `optimizer.cc`.
+    *   All BSDF lobe kernels in `bsdf_detail.h` are free functions
+        (`detail::<Lobe>*`); only lobes with cached per-hit precomputation
+        define a plain `<Lobe>Params` data struct (no methods), and `>2`-field
+        sample returns use `detail::LobeSample<Float>`.
 
 ## Tests
 

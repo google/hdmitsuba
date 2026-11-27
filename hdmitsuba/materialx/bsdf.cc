@@ -488,9 +488,12 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
       if (detail::MicrofacetNeedIorFresnel(m)) {
         ValueId id = c.microfacet.p[0];
         Val v = ReadVal(id, s);
-        m.ior = detail::F0ToIor(Values().IsValueScalar(id)
-                                    ? v.x()
-                                    : dr::mean(dr::clip(Xyz(v), 0.0f, 1.0f)));
+        m.ior =
+            detail::F0ToIor(Values().IsValueScalar(id)
+                                ? v.x()
+                                : dr::mean(Values().IsValueClipped01(id)
+                                               ? Xyz(v)
+                                               : dr::clip(Xyz(v), 0.0f, 1.0f)));
       }
     }
     if (c.microfacet.tf_thickness != kInvalidValue) {
@@ -647,22 +650,29 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
     s.wi_local.resize(unique_frames_.size());
     for (size_t f = 0; f < unique_frames_.size(); ++f) {
       const FrameKey& key = unique_frames_[f];
-      Vector3f nl =
-          key.normal != kInvalidValue
-              ? si.to_local(detail::SafeNormalize(
-                    Xyz(ReadVal(key.normal, s)), Vector3f(si.sh_frame.n),
-                    detail::kMinLen2<ScalarFloat>))
-              : Vector3f(0.0f, 0.0f, 1.0f);
+      Vector3f nl(0.0f, 0.0f, 1.0f);
+      if (key.normal != kInvalidValue) {
+        Vector3f nw = Xyz(ReadVal(key.normal, s));
+        if (!Values().IsValueUnitNormal(key.normal)) {
+          nw = detail::SafeNormalize(nw, Vector3f(si.sh_frame.n),
+                                     detail::kMinLen2<ScalarFloat>);
+        }
+        nl = si.to_local(nw);
+      }
       if (!key.need_tangent) {
         s.frames[f] = Frame3f(detail::ClampShadingNormal(si, s.n_geom, nl));
       } else {
-        Vector3f t_world =
-            key.tangent != kInvalidValue
-                ? detail::SafeNormalize(Xyz(ReadVal(key.tangent, s)),
-                                        si.sh_frame.s,
-                                        detail::kMinLen2<ScalarFloat>)
-                : (key.is_curve ? detail::GeomCurveTangentWorld(si)
-                                : detail::GeomTangentWorld(si));
+        Vector3f t_world;
+        if (key.tangent != kInvalidValue) {
+          t_world = Xyz(ReadVal(key.tangent, s));
+          if (!Values().IsValueUnitNormal(key.tangent)) {
+            t_world = detail::SafeNormalize(t_world, si.sh_frame.s,
+                                            detail::kMinLen2<ScalarFloat>);
+          }
+        } else {
+          t_world = key.is_curve ? detail::GeomCurveTangentWorld(si)
+                                 : detail::GeomTangentWorld(si);
+        }
         s.frames[f] = detail::BuildShadingFrame(si, s.n_geom, nl, t_world);
       }
       s.wi_local[f] = s.frames[f].to_local(si.wi);
@@ -730,8 +740,15 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
     for (Float& p : s.leaf_prob) p = dr::detach(p * inv_sum);
   }
 
-  static Float ClipOpacity(const Val& op) {
-    return dr::clip(op.x(), 0.0f, 1.0f);
+  Float ClipOpacity(const Val& op) const {
+    return Values().IsValueClipped01(opacity_root_)
+               ? op.x()
+               : dr::clip(op.x(), 0.0f, 1.0f);
+  }
+
+  Float ReadClipped01(ValueId id, const State& s) const {
+    Float v = ReadVal(id, s).x();
+    return Values().IsValueClipped01(id) ? v : dr::clip(v, 0.0f, 1.0f);
   }
 
   static Float SelectionWeight(const UnpolarizedSpectrum& c) {
@@ -908,14 +925,13 @@ class MtlxBsdf final : public BSDF<Float, Spectrum> {
           wi_l, wo_l, s.spectra[leaf.spec[0]],
           ReadVal(c.diffuse.roughness, s).x(), c.diffuse.mode == kSheenZeltner);
     } else if (c.op == ClosureOp::BurleyDiffuse) {
-      std::tie(f, pdf) = detail::BurleyDiffuseEvalPdf(
-          wi_l, wo_l, s.spectra[leaf.spec[0]],
-          dr::clip(ReadVal(c.diffuse.roughness, s).x(), 0.0f, 1.0f));
+      std::tie(f, pdf) =
+          detail::BurleyDiffuseEvalPdf(wi_l, wo_l, s.spectra[leaf.spec[0]],
+                                       ReadClipped01(c.diffuse.roughness, s));
     } else {
       std::tie(f, pdf) = detail::OrenNayarEvalPdf(
           wi_l, wo_l, s.spectra[leaf.spec[0]],
-          dr::clip(ReadVal(c.diffuse.roughness, s).x(), 0.0f, 1.0f),
-          c.diffuse.mode != 0);
+          ReadClipped01(c.diffuse.roughness, s), c.diffuse.mode != 0);
     }
     return {dr::select(same_side, f, 0.0f), dr::select(same_side, pdf, 0.0f)};
   }

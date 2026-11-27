@@ -39,11 +39,6 @@ namespace mitsuba::mtlx {
 // bottom-up algebraic/affine/Clip01 rewrites on construction (analogous to
 // `drjit-core/src/op.cpp`). Shared by `compiler.cc` and `optimizer.cc`.
 class IrBuilder {
-  enum MetaFlag : uint8_t {
-    kMetaVarying = 1 << 0,
-    kMetaClipped01 = 1 << 1,
-  };
-
   struct GvnKey {
     Op op;
     uint8_t channels;
@@ -77,8 +72,8 @@ class IrBuilder {
     for (size_t i = 0; i < consts_.size(); ++i) {
       const_map_.try_emplace(ConstKey(consts_[i]), static_cast<uint16_t>(i));
     }
-    meta_.reserve(nodes_.size());
-    for (const Node& n : nodes_) meta_.push_back(ComputeMeta(n));
+    varying_.reserve(nodes_.size());
+    for (const Node& n : nodes_) varying_.push_back(ComputeVarying(n));
   }
 
   explicit IrBuilder(MtlxValueProgram& prog)
@@ -121,9 +116,12 @@ class IrBuilder {
   bool IsConstScalar(ValueId id, double* out = nullptr) const {
     return ConstScalar(nodes_, consts_, id, out);
   }
-  bool IsVarying(ValueId id) const { return (meta_[id] & kMetaVarying) != 0; }
+  bool IsVarying(ValueId id) const { return varying_[id] != 0; }
   bool IsClipped01(ValueId id) const {
-    return (meta_[id] & kMetaClipped01) != 0;
+    return (nodes_[id].flags & kNodeClipped01) != 0;
+  }
+  bool IsUnitNormal(ValueId id) const {
+    return (nodes_[id].flags & kNodeUnitNormal) != 0;
   }
 
   std::optional<Vector<double, 4>> ConstValue(ValueId id) const {
@@ -153,13 +151,20 @@ class IrBuilder {
   // deduplication (no algebraic rewrites or constant folding).
   ValueId EmitRaw(Op op, absl::Span<const ValueId> args, uint16_t imm,
                   uint8_t ch, uint8_t flags) {
-    GvnKey key{op, ch, flags, imm, {args.begin(), args.end()}};
+    GvnKey key{op,
+               ch,
+               static_cast<uint8_t>(flags & kNodeReadChannelsMask),
+               imm,
+               {args.begin(), args.end()}};
     if ((IsCommutativeOp(op) && key.args.size() == 2 &&
          key.args[0] > key.args[1]) ||
         (op == Op::Fma && key.args.size() == 3 && key.args[0] > key.args[1])) {
       std::swap(key.args[0], key.args[1]);
     }
-    if (auto it = gvn_.find(key); it != gvn_.end()) return it->second;
+    if (auto it = gvn_.find(key); it != gvn_.end()) {
+      nodes_[it->second].flags |= flags & ~kNodeReadChannelsMask;
+      return it->second;
+    }
     if (nodes_.size() >= kMaxImm) {
       throw std::runtime_error("materialx_expr: too many SSA nodes");
     }
@@ -173,9 +178,10 @@ class IrBuilder {
       n.args[0] = static_cast<uint16_t>(extra_args_.size());
       extra_args_.insert(extra_args_.end(), key.args.begin(), key.args.end());
     }
+    n.flags = ComputeNodeFlags(n);
     ValueId id = static_cast<ValueId>(nodes_.size());
     nodes_.push_back(n);
-    meta_.push_back(ComputeMeta(n));
+    varying_.push_back(ComputeVarying(n));
     gvn_.emplace(std::move(key), id);
     return id;
   }
@@ -379,7 +385,7 @@ class IrBuilder {
       bool mix_clipped = op == Op::Mix && IsClipped01(args[0]) &&
                          IsClipped01(args[1]) && IsClipped01(args[2]);
       ValueId res = EmitAffine(*af, ch);
-      if (mix_clipped) meta_[res] |= kMetaClipped01;
+      if (mix_clipped) nodes_[res].flags |= kNodeClipped01;
       return res;
     }
 
@@ -429,12 +435,18 @@ class IrBuilder {
     return IsConstScalar(id, &v) && v == -1.0;
   }
 
-  uint8_t ComputeMeta(const Node& n) const {
-    auto args = NodeArgs(n, extra_args_);
-    bool vary = IsSpatiallyVaryingOp(n.op) || n.op == Op::SampleInput;
-    for (ValueId a : args) vary |= IsVarying(a);
+  uint8_t ComputeVarying(const Node& n) const {
+    if (IsSpatiallyVaryingOp(n.op) || n.op == Op::SampleInput) return 1;
+    for (ValueId a : NodeArgs(n, extra_args_)) {
+      if (IsVarying(a)) return 1;
+    }
+    return 0;
+  }
 
-    bool clip = false;
+  uint8_t ComputeNodeFlags(const Node& n) const {
+    auto args = NodeArgs(n, extra_args_);
+    bool clip = (n.flags & kNodeClipped01) != 0;
+    bool unit = (n.flags & kNodeUnitNormal) != 0;
     switch (n.op) {
       case Op::Const:
         clip = consts_[n.imm] >= 0.0 && consts_[n.imm] <= 1.0;
@@ -452,6 +464,9 @@ class IrBuilder {
       case Op::Clip:
       case Op::Select:
         clip = IsClipped01(args[1]) && IsClipped01(args[2]);
+        if (n.op == Op::Select) {
+          unit = IsUnitNormal(args[1]) && IsUnitNormal(args[2]);
+        }
         break;
       case Op::Rgb:
       case Op::Vec2:
@@ -463,11 +478,19 @@ class IrBuilder {
         clip = std::all_of(args.begin(), args.end(),
                            [&](ValueId a) { return IsClipped01(a); });
         break;
+      case Op::GeomNormalWorld:
+      case Op::GeomTangentWorld:
+      case Op::GeomBitangentWorld:
+      case Op::GeomIncidentDir:
+      case Op::NormalMap:
+        unit = true;
+        break;
       default:
         break;
     }
-    return static_cast<uint8_t>((vary ? kMetaVarying : 0) |
-                                (clip ? kMetaClipped01 : 0));
+    return static_cast<uint8_t>((n.flags & kNodeReadChannelsMask) |
+                                (clip ? kNodeClipped01 : 0) |
+                                (unit ? kNodeUnitNormal : 0));
   }
 
   std::optional<AffineForm> TryDecomposeAffine(Op op,
@@ -572,7 +595,6 @@ class IrBuilder {
       case Op::Opaque:
       case Op::Chan:
       case Op::Dot:
-      case Op::MatDet:
         return 1;
       case Op::GeomUV:
       case Op::Vec2:
@@ -589,7 +611,6 @@ class IrBuilder {
         return NoiseIsVec3(imm) ? 3 : 1;
       case Op::RgbToHsv:
       case Op::HsvToRgb:
-      case Op::MatRow:
         return nodes_[args[0]].channels;
       default:
         return 3;
@@ -600,7 +621,7 @@ class IrBuilder {
   std::vector<ValueId>& extra_args_;
   std::vector<double>& consts_;
   std::vector<double>& opaques_;
-  std::vector<uint8_t> meta_;
+  std::vector<uint8_t> varying_;
   absl::flat_hash_map<uint64_t, uint16_t> const_map_;
   absl::flat_hash_map<GvnKey, ValueId> gvn_;
 };

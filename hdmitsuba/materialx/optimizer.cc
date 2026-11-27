@@ -326,8 +326,8 @@ OptimizeResult PruneAndSchedule(MtlxValueProgram& prog, MtlxBsdfProgram* bsdf) {
       if (live[i] && varying[i]) remap[i] = emit(i);
     }
     out.regions.push_back({begin, static_cast<uint32_t>(out.nodes.size()),
-                           remap[prog.regions[k].root], 0,
-                           prog.regions[k].has_texcoord, 0});
+                           remap[prog.regions[k].root],
+                           prog.regions[k].has_texcoord});
   }
 
   if (prog.result_root != kInvalidValue) {
@@ -385,21 +385,6 @@ OptimizeResult PruneAndSchedule(MtlxValueProgram& prog, MtlxBsdfProgram* bsdf) {
     }
   }
 
-  auto assign_mats = [&](uint32_t begin, uint32_t end) {
-    uint32_t count = 0;
-    for (uint32_t i = begin; i < end; ++i) {
-      if (IsMatrixProducer(out.nodes[i].op)) {
-        out.nodes[i].imm = static_cast<uint16_t>(count++);
-      }
-    }
-    return count;
-  };
-  out.uniform_mat_count = assign_mats(0, out.uniform_end);
-  out.main_mat_count = assign_mats(out.uniform_end, out.main_end);
-  for (Region& r : out.regions) {
-    r.mat_count = static_cast<uint16_t>(assign_mats(r.begin, r.end));
-  }
-
   // Pack only computed uniform values read outside `[0 .. uniform_end)`.
   std::vector<uint8_t> escaped(out.uniform_end, 0);
   auto mark_esc = [&](ValueId id) {
@@ -418,10 +403,7 @@ OptimizeResult PruneAndSchedule(MtlxValueProgram& prog, MtlxBsdfProgram* bsdf) {
   out.uniform_offsets.assign(out.uniform_end, kNoUniformScalar);
   for (uint32_t u = 0; u < out.uniform_end; ++u) {
     Op op = out.nodes[u].op;
-    if (!escaped[u] || op == Op::Const || op == Op::Opaque ||
-        IsMatrixProducer(op)) {
-      continue;
-    }
+    if (!escaped[u] || op == Op::Const || op == Op::Opaque) continue;
     out.uniform_offsets[u] = out.uniform_scalar_count;
     out.uniform_scalar_count += out.nodes[u].channels;
   }
@@ -431,19 +413,18 @@ OptimizeResult PruneAndSchedule(MtlxValueProgram& prog, MtlxBsdfProgram* bsdf) {
 
 const char* OpName(Op op) {
   static constexpr const char* kNames[] = {
-      "const",     "opaque",  "sample",  "sample_uv", "attr",      "uv",
-      "pos_w",     "n_w",     "t_w",     "b_w",       "wi_w",      "normalmap",
-      "h2n",       "neg",     "abs",     "sin",       "cos",       "tan",
-      "exp",       "round",   "floor",   "ceil",      "sqrt",      "log",
-      "asin",      "acos",    "fract",   "add",       "mul",       "eq",
-      "min",       "max",     "sub",     "div",       "lt",        "le",
-      "pow",       "atan2",   "select",  "mix",       "clip",      "fma",
-      "chan",      "dot",     "vec2",    "rot2d",     "normalize", "rgb",
-      "cross",     "rot3d",   "rgb2hsv", "hsv2rgb",   "blackbody", "vec4",
-      "cellnoise", "noise",   "worley",  "fractal",   "mat_det",   "mat_t",
-      "mat_inv",   "mat_mul", "mat_row",
+      "const",     "opaque", "sample",  "sample_uv", "attr",      "uv",
+      "pos_w",     "n_w",    "t_w",     "b_w",       "wi_w",      "normalmap",
+      "h2n",       "neg",    "abs",     "sin",       "cos",       "tan",
+      "exp",       "round",  "floor",   "ceil",      "sqrt",      "log",
+      "asin",      "acos",   "fract",   "add",       "mul",       "eq",
+      "min",       "max",    "sub",     "div",       "lt",        "le",
+      "pow",       "atan2",  "select",  "mix",       "clip",      "fma",
+      "chan",      "dot",    "vec2",    "rot2d",     "normalize", "rgb",
+      "cross",     "rot3d",  "rgb2hsv", "hsv2rgb",   "blackbody", "vec4",
+      "cellnoise", "noise",  "worley",  "fractal",
   };
-  static_assert(std::size(kNames) == static_cast<size_t>(Op::MatRow) + 1);
+  static_assert(std::size(kNames) == static_cast<size_t>(Op::Fractal) + 1);
   return kNames[static_cast<size_t>(op)];
 }
 
@@ -472,8 +453,7 @@ void DumpBand(std::ostringstream& os, const MtlxValueProgram& prog,
       os << "[" << n.imm << "](" << prog.opaques[n.imm] << ")";
     } else {
       if (n.imm != 0 || n.op == Op::SampleInput || n.op == Op::SampleInputUV ||
-          n.op == Op::Attr || n.op == Op::HeightToNormal || n.op == Op::Chan ||
-          n.op == Op::MatRow) {
+          n.op == Op::Attr || n.op == Op::HeightToNormal || n.op == Op::Chan) {
         os << "[" << n.imm << "]";
       }
       os << "(";
@@ -548,8 +528,7 @@ void VerifyValueProgram(const MtlxValueProgram& prog, bool scheduled) {
   for (size_t k = 0; k < prog.regions.size(); ++k) {
     const Region& r = prog.regions[k];
     Check(r.begin == cursor && r.begin < r.end && r.end <= prog.nodes.size() &&
-              r.root >= r.begin && r.root < r.end &&
-              !IsMatrixProducer(prog.nodes[r.root].op),
+              r.root >= r.begin && r.root < r.end,
           "invalid region bounds or root");
     std::fill(node_region.begin() + r.begin, node_region.begin() + r.end,
               static_cast<int>(k));
@@ -575,10 +554,6 @@ void VerifyValueProgram(const MtlxValueProgram& prog, bool scheduled) {
                               : ((a >= prog.regions[reg].begin && a < i) ||
                                  (scheduled && a < prog.uniform_end));
       Check(order_ok, "operand violates topological order or region isolation");
-      if (n.op != Op::MatRow) {
-        Check(!IsMatrixProducer(prog.nodes[a].op),
-              "non-MatRow operand is matrix producer");
-      }
     }
     if (int ew = ElementwiseArity(n.op)) {
       Check(n.arity == ew, "elementwise arity mismatch");
@@ -590,11 +565,13 @@ void VerifyValueProgram(const MtlxValueProgram& prog, bool scheduled) {
       case Op::Opaque:
         Check(n.arity == 0 && n.imm < prog.opaques.size(), "invalid Opaque");
         break;
-      case Op::Attr:
+      case Op::Attr: {
+        uint8_t read_ch = n.flags & kNodeReadChannelsMask;
         Check(n.arity == 1 && n.imm < prog.attr_names.size() &&
-                  (n.flags == 1 || n.flags == 3),
+                  (read_ch == 1 || read_ch == 3),
               "invalid Attr");
         break;
+      }
       case Op::HeightToNormal:
         Check(n.arity == 1 && n.imm < prog.regions.size() &&
                   (reg < 0 || static_cast<int>(n.imm) < reg),
@@ -604,30 +581,12 @@ void VerifyValueProgram(const MtlxValueProgram& prog, bool scheduled) {
         Check(n.arity == (n.imm == kNormalMapDefaultFrame ? 2 : 5),
               "invalid NormalMap arity");
         break;
-      case Op::MatRow: {
-        const Node& p = prog.nodes[args[0]];
-        Check(n.arity == 1 && IsMatrixProducer(p.op) && n.imm < p.channels &&
-                  n.channels == p.channels,
-              "invalid MatRow");
-        if (scheduled) {
-          bool row_unif = i < prog.uniform_end;
-          uint32_t lim = row_unif  ? prog.uniform_mat_count
-                         : reg < 0 ? prog.main_mat_count
-                                   : prog.regions[reg].mat_count;
-          Check((args[0] < prog.uniform_end) == row_unif &&
-                    node_region[args[0]] == reg && p.imm < lim,
-                "MatRow crosses scope or matrix slot out of bounds");
-        }
-        break;
-      }
       default:
         break;
     }
   }
   if (prog.result_root != kInvalidValue) {
-    Check(prog.result_root < prog.main_end &&
-              !IsMatrixProducer(prog.nodes[prog.result_root].op),
-          "invalid result_root");
+    Check(prog.result_root < prog.main_end, "invalid result_root");
   }
 }
 
@@ -637,16 +596,12 @@ void VerifyBsdfProgram(const MtlxBsdfProgram& prog, bool scheduled) {
         "invalid BSDF program roots");
   if (prog.opacity_root != kInvalidValue) {
     uint32_t lim = scheduled ? prog.values.opacity_end : prog.values.main_end;
-    Check(prog.opacity_root < lim &&
-              !IsMatrixProducer(prog.values.nodes[prog.opacity_root].op),
-          "invalid opacity_root");
+    Check(prog.opacity_root < lim, "invalid opacity_root");
   }
   for (size_t i = 0; i < prog.closures.size(); ++i) {
     const ClosureNode& c = prog.closures[i];
     ForEachClosureValueId(c, [&](ValueId id) {
-      Check(id < prog.values.main_end &&
-                !IsMatrixProducer(prog.values.nodes[id].op),
-            "closure ValueId out of bounds");
+      Check(id < prog.values.main_end, "closure ValueId out of bounds");
     });
     if (IsCombinator(c.op)) {
       Check(

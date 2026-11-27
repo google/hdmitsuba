@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <initializer_list>
 #include <limits>
@@ -30,10 +31,8 @@
 #include <MaterialXCore/Value.h>
 #include <absl/base/no_destructor.h>
 #include <absl/container/flat_hash_map.h>
-#include <absl/container/inlined_vector.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/strip.h>
-#include <absl/types/span.h>
 #include <pxr/base/gf/color.h>
 #include <pxr/base/gf/colorSpace.h>
 #include <pxr/base/gf/vec3f.h>
@@ -534,21 +533,122 @@ ValueId LowerIfCondition(LowerCtx& ctx, const ScopedNode& node,
   return ctx.b->Emit(mtlx::Op::Eq, {v1, v2});
 }
 
-MatVal MatrixOp(LowerCtx& ctx, mtlx::Op op, const MatVal& a,
-                const MatVal* b = nullptr) {
-  absl::InlinedVector<ValueId, 8> args;
-  for (int i = 0; i < a.n; ++i) args.push_back(a.rows[i]);
-  if (b) {
-    for (int i = 0; i < a.n; ++i) args.push_back(b->rows[i]);
+MatVal LowerMatrixTranspose(mtlx::IrBuilder& b, const MatVal& m) {
+  MatVal out;
+  out.n = m.n;
+  for (int i = 0; i < m.n; ++i) {
+    uint16_t c = static_cast<uint16_t>(i);
+    ValueId r =
+        b.Rgb(b.Chan(m.rows[0], c), b.Chan(m.rows[1], c), b.Chan(m.rows[2], c));
+    out.rows[i] = m.n == 4 ? b.Vec4(r, b.Chan(m.rows[3], c)) : r;
   }
-  ValueId mat_id = ctx.b->Emit(op, args, 0, static_cast<uint8_t>(a.n));
+  return out;
+}
+
+MatVal LowerMatrixMul(mtlx::IrBuilder& b, const MatVal& a, const MatVal& bm) {
   MatVal out;
   out.n = a.n;
   for (int i = 0; i < a.n; ++i) {
-    out.rows[i] =
-        ctx.b->Emit(mtlx::Op::MatRow, {mat_id}, static_cast<uint16_t>(i),
-                    static_cast<uint8_t>(a.n));
+    ValueId acc = b.Mul(b.Chan(a.rows[i], 0), bm.rows[0]);
+    for (int k = 1; k < a.n; ++k) {
+      acc = b.Fma(b.Chan(a.rows[i], static_cast<uint16_t>(k)), bm.rows[k], acc);
+    }
+    out.rows[i] = acc;
   }
+  return out;
+}
+
+struct Mat4Minors {
+  ValueId a[4][4];
+  ValueId s[6];
+  ValueId c[6];
+  ValueId det;
+};
+
+Mat4Minors ComputeMat4Minors(mtlx::IrBuilder& b, const MatVal& m) {
+  Mat4Minors r;
+  for (int i = 0; i < 4; ++i) {
+    for (int j = 0; j < 4; ++j) {
+      r.a[i][j] = b.Chan(m.rows[i], static_cast<uint16_t>(j));
+    }
+  }
+  auto det2 = [&](int r0, int r1, int c0, int c1) {
+    return b.Sub(b.Mul(r.a[r0][c0], r.a[r1][c1]),
+                 b.Mul(r.a[r1][c0], r.a[r0][c1]));
+  };
+  r.s[0] = det2(0, 1, 0, 1);
+  r.s[1] = det2(0, 1, 0, 2);
+  r.s[2] = det2(0, 1, 0, 3);
+  r.s[3] = det2(0, 1, 1, 2);
+  r.s[4] = det2(0, 1, 1, 3);
+  r.s[5] = det2(0, 1, 2, 3);
+  r.c[5] = det2(2, 3, 2, 3);
+  r.c[4] = det2(2, 3, 1, 3);
+  r.c[3] = det2(2, 3, 1, 2);
+  r.c[2] = det2(2, 3, 0, 3);
+  r.c[1] = det2(2, 3, 0, 2);
+  r.c[0] = det2(2, 3, 0, 1);
+  r.det = b.Add(b.Sub(b.Add(b.Sub(b.Mul(r.s[0], r.c[5]), b.Mul(r.s[1], r.c[4])),
+                            b.Mul(r.s[2], r.c[3])),
+                      b.Sub(b.Mul(r.s[4], r.c[1]), b.Mul(r.s[3], r.c[2]))),
+                b.Mul(r.s[5], r.c[0]));
+  return r;
+}
+
+ValueId LowerMatrixDet(mtlx::IrBuilder& b, const MatVal& m) {
+  if (m.n == 3) {
+    ValueId c0 = b.Emit(mtlx::Op::Cross, {m.rows[1], m.rows[2]});
+    return b.Emit(mtlx::Op::Dot, {m.rows[0], c0}, 3);
+  }
+  return ComputeMat4Minors(b, m).det;
+}
+
+MatVal LowerMatrixInverse(mtlx::IrBuilder& b, const MatVal& m) {
+  MatVal out;
+  out.n = m.n;
+  if (m.n == 3) {
+    ValueId c0 = b.Emit(mtlx::Op::Cross, {m.rows[1], m.rows[2]});
+    ValueId c1 = b.Emit(mtlx::Op::Cross, {m.rows[2], m.rows[0]});
+    ValueId c2 = b.Emit(mtlx::Op::Cross, {m.rows[0], m.rows[1]});
+    // `Op::Div` uses `MxSafeDiv`, returning 0 for singular matrices (`det ==
+    // 0`).
+    ValueId inv_det = b.Div(b.One(), b.Emit(mtlx::Op::Dot, {m.rows[0], c0}, 3));
+    for (int i = 0; i < 3; ++i) {
+      uint16_t ci = static_cast<uint16_t>(i);
+      out.rows[i] =
+          b.Mul(b.Rgb(b.Chan(c0, ci), b.Chan(c1, ci), b.Chan(c2, ci)), inv_det);
+    }
+    return out;
+  }
+  Mat4Minors d = ComputeMat4Minors(b, m);
+  ValueId inv_det = b.Div(b.One(), d.det);
+  auto cof3 = [&](ValueId x0, ValueId y0, ValueId x1, ValueId y1, ValueId x2,
+                  ValueId y2) {
+    return b.Add(b.Sub(b.Mul(x0, y0), b.Mul(x1, y1)), b.Mul(x2, y2));
+  };
+  auto row = [&](ValueId e0, ValueId e1, ValueId e2, ValueId e3) {
+    return b.Mul(b.Vec4(b.Rgb(e0, e1, e2), e3), inv_det);
+  };
+  out.rows[0] =
+      row(cof3(d.a[1][1], d.c[5], d.a[1][2], d.c[4], d.a[1][3], d.c[3]),
+          b.Neg(cof3(d.a[0][1], d.c[5], d.a[0][2], d.c[4], d.a[0][3], d.c[3])),
+          cof3(d.a[3][1], d.s[5], d.a[3][2], d.s[4], d.a[3][3], d.s[3]),
+          b.Neg(cof3(d.a[2][1], d.s[5], d.a[2][2], d.s[4], d.a[2][3], d.s[3])));
+  out.rows[1] =
+      row(b.Neg(cof3(d.a[1][0], d.c[5], d.a[1][2], d.c[2], d.a[1][3], d.c[1])),
+          cof3(d.a[0][0], d.c[5], d.a[0][2], d.c[2], d.a[0][3], d.c[1]),
+          b.Neg(cof3(d.a[3][0], d.s[5], d.a[3][2], d.s[2], d.a[3][3], d.s[1])),
+          cof3(d.a[2][0], d.s[5], d.a[2][2], d.s[2], d.a[2][3], d.s[1]));
+  out.rows[2] =
+      row(cof3(d.a[1][0], d.c[4], d.a[1][1], d.c[2], d.a[1][3], d.c[0]),
+          b.Neg(cof3(d.a[0][0], d.c[4], d.a[0][1], d.c[2], d.a[0][3], d.c[0])),
+          cof3(d.a[3][0], d.s[4], d.a[3][1], d.s[2], d.a[3][3], d.s[0]),
+          b.Neg(cof3(d.a[2][0], d.s[4], d.a[2][1], d.s[2], d.a[2][3], d.s[0])));
+  out.rows[3] =
+      row(b.Neg(cof3(d.a[1][0], d.c[3], d.a[1][1], d.c[1], d.a[1][2], d.c[0])),
+          cof3(d.a[0][0], d.c[3], d.a[0][1], d.c[1], d.a[0][2], d.c[0]),
+          b.Neg(cof3(d.a[3][0], d.s[3], d.a[3][1], d.s[1], d.a[3][2], d.s[0])),
+          cof3(d.a[2][0], d.s[3], d.a[2][1], d.s[1], d.a[2][2], d.s[0]));
   return out;
 }
 
@@ -630,11 +730,9 @@ MatVal LowerMatrixNode(LowerCtx& ctx, const ScopedNode& node,
                  : row;
     }
   } else if (cat == "transpose") {
-    res = MatrixOp(ctx, mtlx::Op::MatTranspose,
-                   LowerMatrixInput(ctx, node, "in"));
+    res = LowerMatrixTranspose(*ctx.b, LowerMatrixInput(ctx, node, "in"));
   } else if (cat == "invertmatrix") {
-    res =
-        MatrixOp(ctx, mtlx::Op::MatInverse, LowerMatrixInput(ctx, node, "in"));
+    res = LowerMatrixInverse(*ctx.b, LowerMatrixInput(ctx, node, "in"));
   } else if (cat == "add" || cat == "subtract") {
     MatVal m1 = LowerMatrixInput(ctx, node, "in1");
     bool is_add = cat == "add";
@@ -654,8 +752,8 @@ MatVal LowerMatrixNode(LowerCtx& ctx, const ScopedNode& node,
   } else if (cat == "multiply" || cat == "divide") {
     MatVal m1 = LowerMatrixInput(ctx, node, "in1");
     MatVal m2 = LowerMatrixInput(ctx, node, "in2");
-    if (cat == "divide") m2 = MatrixOp(ctx, mtlx::Op::MatInverse, m2);
-    res = MatrixOp(ctx, mtlx::Op::MatMul, m1, &m2);
+    if (cat == "divide") m2 = LowerMatrixInverse(*ctx.b, m2);
+    res = LowerMatrixMul(*ctx.b, m1, m2);
   } else if (cat == "ifgreater" || cat == "ifgreatereq" || cat == "ifequal") {
     ValueId cond = LowerIfCondition(ctx, node, cat);
     if (ctx.b->IsOne(cond) || ctx.b->IsZero(cond)) {
@@ -1019,8 +1117,7 @@ std::optional<ValueId> LowerMatrixValueNode(LowerCtx& ctx,
     return res;
   }
   if (cat == "determinant") {
-    MatVal m = LowerMatrixInput(ctx, node, "in");
-    return b.Emit(mtlx::Op::MatDet, absl::MakeConstSpan(m.rows, m.n), 0, 1);
+    return LowerMatrixDet(b, LowerMatrixInput(ctx, node, "in"));
   }
   return std::nullopt;
 }
@@ -1272,6 +1369,11 @@ std::optional<ValueId> LowerNoiseNode(LowerCtx& ctx, const ScopedNode& node,
   if (noise == "worleynoise") {
     ValueId jitter = in("jitter", b.One()), style = in("style");
     uint8_t ch = type == "vector2" ? 2 : (type == "float" ? 1 : 3);
+    double style_val = 0.0;
+    if (b.IsConstScalar(style, &style_val) && std::round(style_val) != 1.0) {
+      return b.Emit(mtlx::Op::Worley, {coord, jitter},
+                    static_cast<uint16_t>(imm | mtlx::kWorleyDistanceOnly), ch);
+    }
     return b.Emit(mtlx::Op::Worley, {coord, jitter, style}, imm, ch);
   }
   bool is_noise = noise == "noise";

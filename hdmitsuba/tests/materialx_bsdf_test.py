@@ -1904,13 +1904,13 @@ def test_bsdf_freeze_traverse_and_ad(variants: tuple[str, str]) -> None:
   assert out_f0 is not None and out_b0 is not None
 
   p = mi.traverse(bsdf)
-  for old_v, new_v in ((0.22, 0.42), (1.55, 1.85), (0.8, 0.35), (3.2, 1.5)):
+  for old_v, new_v in ((0.22, 0.42), (1.55, 1.85), (0.8, 0.34), (3.2, 1.5)):
     for k in p.keys():
       if k.startswith('param') and np.allclose(p[k], old_v):
         p[k] = mi.Float(new_v)
   p.update()
 
-  ref = make_bsdf(0.42, 1.85, 0.35, 1.5)
+  ref = make_bsdf(0.42, 1.85, 0.34, 1.5)
   out_f1 = eval_frozen(bsdf, si_f, wo_f)
   out_b1 = eval_frozen(bsdf, si_b, wo_t)
   assert dr.allclose(out_f1, ref.eval(ctx, si_f, wo_f), rtol=1e-5, atol=1e-6)
@@ -1918,10 +1918,11 @@ def test_bsdf_freeze_traverse_and_ad(variants: tuple[str, str]) -> None:
   assert not dr.allclose(out_f1, out_f0, rtol=1e-2)
   assert not dr.allclose(out_b1, out_b0, rtol=1e-2)
 
-  eps = 1e-3
-  for val_cur, make_delta in (
-      (0.35, lambda d: make_bsdf(0.42, 1.85, 0.35 + d, 1.5)),
-      (1.5, lambda d: make_bsdf(0.42, 1.85, 0.35, 1.5 + d)),
+  # Keep `tint_r = 0.34 +/- 2e-3` inside one sRGB LUT cell and avoid float32
+  # cancellation in central finite differences on `ext_r = 1.5`.
+  for val_cur, eps, make_delta in (
+      (0.34, 2e-3, lambda d: make_bsdf(0.42, 1.85, 0.34 + d, 1.5)),
+      (1.5, 5e-3, lambda d: make_bsdf(0.42, 1.85, 0.34, 1.5 + d)),
   ):
     key = next(
         k

@@ -48,6 +48,11 @@ class MtlxEvaluator {
     Val val;
   };
 
+  struct EvalScratch {
+    absl::InlinedVector<std::optional<CachedAttr>, 4> attr_cache;
+    std::optional<SurfaceInteraction3f> si_uv;
+  };
+
   // Per-query evaluation buffers shared across the opacity and surface stages
   // of a BSDF query. Only varying nodes (`main_end - uniform_end`) are stored
   // per ray; uniform nodes `[0 .. uniform_end)` live in `uniform_scalars_`
@@ -56,9 +61,7 @@ class MtlxEvaluator {
   struct EvalState {
     absl::InlinedVector<Val, 32> uniform_vals;
     absl::InlinedVector<Val, 64> varying_vals;
-    absl::InlinedVector<Val, 4> mat_rows;
-    absl::InlinedVector<std::optional<CachedAttr>, 4> attr_cache;
-    std::optional<SurfaceInteraction3f> si_uv;
+    EvalScratch scratch;
     uint32_t evaluated_end = 0;
     bool uniform_ready = false;
   };
@@ -109,6 +112,12 @@ class MtlxEvaluator {
     DRJIT_STRUCT(UniformSpec, coeff, scale)
   };
 
+  struct EvalFrame {
+    Val* out_vals;
+    const Val* uniform_vals;
+    EvalScratch& scratch;
+  };
+
   bool HasOpaqueGrad() const;
   Val LoadUniform(ValueId id) const;
   void UpdateUniformState();
@@ -116,10 +125,8 @@ class MtlxEvaluator {
   void EvalUntil(uint32_t end, const SurfaceInteraction3f& si, Mask active,
                  EvalState& state) const;
   void EvalRange(uint32_t begin, uint32_t end, uint32_t base_offset,
-                 Val* out_vals, Val* mat_rows, const Val* uniform_vals,
-                 const SurfaceInteraction3f& si, Mask active,
-                 absl::InlinedVector<std::optional<CachedAttr>, 4>& attr_cache,
-                 std::optional<SurfaceInteraction3f>& si_uv) const;
+                 EvalFrame& frame, const SurfaceInteraction3f& si,
+                 Mask active) const;
 
   MtlxValueProgram prog_;
   std::vector<ref<Texture>> inputs_;

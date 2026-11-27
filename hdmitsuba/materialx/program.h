@@ -42,11 +42,13 @@ inline constexpr double kMtlxFloatEps = 1e-8;
 // evaluates against the shading frame's default world basis.
 inline constexpr uint16_t kNormalMapDefaultFrame = 1;
 
-// Bit flags in `Node::imm` for `CellNoise`, `Noise`, `Worley` and `Fractal`.
-// For `Fractal`, the bits from `kFractalOctavesShift` hold the constant octave
-// count, or `kFractalDynamicOctaves` when octaves are passed as the last
-// operand.
+// Bit flags in `Node::imm` for `CellNoise`, `Noise`, `Worley`, and `Fractal`.
+// For `Worley`, `kWorleyDistanceOnly` specializes constant distance mode
+// (`style != 1`) to 2 operands `(coord, jitter)`. For `Fractal`, bits from
+// `kFractalOctavesShift` hold the constant octave count, or
+// `kFractalDynamicOctaves` when octaves are passed as the last operand.
 inline constexpr uint16_t kNoise3D = 1, kNoiseVec3 = 2;
+inline constexpr uint16_t kWorleyDistanceOnly = 4;
 inline constexpr int kMaxFractalOctaves = 16;
 inline constexpr int kFractalOctavesShift = 2;
 inline constexpr uint16_t kFractalDynamicOctaves = kMaxFractalOctaves + 1;
@@ -59,9 +61,23 @@ constexpr uint16_t PackNoiseImm(bool is_3d, bool is_vec3,
 }
 constexpr bool NoiseIs3D(uint16_t imm) { return (imm & kNoise3D) != 0; }
 constexpr bool NoiseIsVec3(uint16_t imm) { return (imm & kNoiseVec3) != 0; }
+constexpr bool WorleyDistanceOnly(uint16_t imm) {
+  return (imm & kWorleyDistanceOnly) != 0;
+}
 constexpr uint16_t FractalOctaves(uint16_t imm) {
   return static_cast<uint16_t>(imm >> kFractalOctavesShift);
 }
+
+// Per-node flags stored in `Node::flags`: low bits hold the read channel count
+// (1 or 3) for `SampleInput`, `SampleInputUV`, and `Attr`; high bits persist
+// proven value bounds from `IrBuilder`.
+enum NodeFlag : uint8_t {
+  kNodeReadChannelsMask = 0x3,
+  // Value is guaranteed in `[0, 1]` on all active channels.
+  kNodeClipped01 = 1 << 2,
+  // 3-channel vector is guaranteed finite unit length.
+  kNodeUnitNormal = 1 << 3,
+};
 
 enum class Op : uint8_t {
   Const,
@@ -141,16 +157,7 @@ enum class Op : uint8_t {
   CellNoise,
   Noise,
   Worley,
-  Fractal,
-
-  // Matrix ops on 3x3 or 4x4 matrices (`channels` is the matrix dimension for
-  // producers and `MatRow`; rows are passed as operands). `MatTranspose`,
-  // `MatInverse`, and `MatMul` write rows to slot `imm`, read via `MatRow`.
-  MatDet,
-  MatTranspose,
-  MatInverse,
-  MatMul,
-  MatRow
+  Fractal
 };
 
 constexpr int ElementwiseArity(Op op) {
@@ -164,9 +171,6 @@ constexpr bool IsSpatiallyVaryingOp(Op op) {
 }
 constexpr bool IsPureOp(Op op) { return op >= Op::Neg && op <= Op::Vec4; }
 constexpr bool IsCommutativeOp(Op op) { return op >= Op::Add && op <= Op::Max; }
-constexpr bool IsMatrixProducer(Op op) {
-  return op >= Op::MatTranspose && op <= Op::MatMul;
-}
 
 // Flat SSA IR node stored in `MtlxValueProgram::nodes`.
 //
@@ -174,11 +178,10 @@ constexpr bool IsMatrixProducer(Op op) {
 // slice `extra_args[args[0] .. args[0] + arity)` when `arity > 3`.
 struct Node {
   Op op = Op::Const;
-  // Output active channel count (1..4); for matrix producers, matrix dimension.
+  // Output active channel count (1..4).
   uint8_t channels = 1;
   uint8_t arity = 0;
-  // Per-op flags: read channel count (1 or 3) for `SampleInput`,
-  // `SampleInputUV`, and `Attr`; 0 for all other ops.
+  // Bitmask of `NodeFlag` values.
   uint8_t flags = 0;
   uint16_t imm = 0;
   uint16_t args[3] = {};
@@ -215,11 +218,9 @@ struct Region {
   uint32_t begin = 0;
   uint32_t end = 0;
   ValueId root = kInvalidValue;
-  uint16_t mat_count = 0;
   uint16_t has_texcoord = 0;
-  uint16_t _pad = 0;
 };
-static_assert(sizeof(Region) == 16);
+static_assert(sizeof(Region) == 12);
 static_assert(std::has_unique_object_representations_v<Region>);
 
 // Pure flat SSA value program owned by `MtlxEvaluator` and used standalone by
@@ -248,12 +249,16 @@ struct MtlxValueProgram {
   uint32_t uniform_end = 0;
   uint32_t opacity_end = 0;
   uint32_t main_end = 0;
-  uint32_t uniform_mat_count = 0;
-  uint32_t main_mat_count = 0;
   // Root expression for `MtlxExprTexture`, or `kInvalidValue` for BSDFs.
   ValueId result_root = kInvalidValue;
 
   bool IsValueScalar(ValueId id) const { return nodes[id].channels == 1; }
+  bool IsValueClipped01(ValueId id) const {
+    return (nodes[id].flags & kNodeClipped01) != 0;
+  }
+  bool IsValueUnitNormal(ValueId id) const {
+    return (nodes[id].flags & kNodeUnitNormal) != 0;
+  }
   bool ResultScalar() const {
     return result_root != kInvalidValue && IsValueScalar(result_root);
   }

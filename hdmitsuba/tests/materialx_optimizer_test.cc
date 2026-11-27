@@ -91,17 +91,7 @@ TEST(MaterialXOptimizerTest, VerifyValueProgramCatchesInvariantViolations) {
     SetMainEnd(p);
     p.nodes.push_back({Op::Neg, 2, 1, 0, 0, {uv}});
     p.regions.push_back({p.main_end, static_cast<uint32_t>(p.nodes.size()),
-                         static_cast<ValueId>(p.main_end), 0, 0, 0});
-    EXPECT_THROW(VerifyValueProgram(p, false), std::logic_error);
-  }
-  {
-    MtlxValueProgram p;
-    IrBuilder b(p);
-    ValueId mat = b.Emit(
-        Op::MatTranspose,
-        {b.ConstRgb(1, 0, 0), b.ConstRgb(0, 1, 0), b.ConstRgb(0, 0, 1)}, 0, 3);
-    p.result_root = b.Neg(mat);
-    SetMainEnd(p);
+                         static_cast<ValueId>(p.main_end), 0});
     EXPECT_THROW(VerifyValueProgram(p, false), std::logic_error);
   }
 }
@@ -162,6 +152,19 @@ TEST(MaterialXOptimizerTest, IrBuilderGvnCanonicalizationAndConstFold) {
   ValueId luma = b.ConstRgb(0.2722287, 0.6740818, 0.0536895);
   EXPECT_EQ(b.Emit(Op::Dot, {p0, luma}, 3), p0);
   EXPECT_EQ(b.Emit(Op::Dot, {luma, p0}, 3), p0);
+
+  // `kNodeClipped01` and `kNodeUnitNormal` persist through
+  // `OptimizeValueProgram`.
+  ValueId clipped_mix =
+      b.Mix(b.Const(0.8), b.Const(0.2), b.Emit(Op::Fract, {b.Chan(uv, 0)}));
+  EXPECT_TRUE(b.IsClipped01(clipped_mix));
+  ValueId nmap =
+      b.Emit(Op::NormalMap, {tex3, b.Opaque(0.5)}, kNormalMapDefaultFrame);
+  EXPECT_TRUE(b.IsUnitNormal(nmap));
+  p.result_root = b.Select(clipped_mix, nmap, b.Emit(Op::GeomNormalWorld));
+  SetMainEnd(p);
+  OptimizeValueProgram(p);
+  EXPECT_TRUE(p.IsValueUnitNormal(p.result_root));
 }
 
 TEST(MaterialXOptimizerTest, IrBuilderAffineCollapseDivMixAndUniformHoist) {
