@@ -987,32 +987,47 @@ def test_dielectric_bsdf(capfd: pytest.CaptureFixture[str]) -> None:
     assert dr.allclose(bs.eta, exp_eta, atol=1e-5)
     assert dr.allclose(w * dr.square(bs.eta), 1.0, atol=2e-3)
 
-  # Merged `Layer(Dielectric(R), Dielectric(T))` in `open_pbr_surface`
-  # preserves distinct reflection and transmission tints in both
-  # `eval_pdf`/`sample` and `eval_features`.
-  bsdf_tinted_rt, _ = mtlx.compile_mtlx_material(
-      'ND_open_pbr_surface_surfaceshader',
-      transmission_weight=1.0,
-      specular_roughness=0.2,
-      specular_ior=1.5,
-      specular_color=(1.0, 0.5, 0.2),
-      transmission_color=(0.2, 0.8, 1.0),
+  # Merged `Layer(Dielectric(R), Dielectric(T))` preserves distinct tints and
+  # uses multi-bounce slab Fresnel `2F / (1 + F)` when `thin_walled` (while
+  # reflection-only thin-walled `Dielectric(R)` stays single-interface `F`).
+  si_norm = mtlx.make_test_si(wi=(0.0, 0.0, 1.0))
+  for thin, f_exp in ((False, 0.04), (True, 2.0 * 0.04 / 1.04)):
+    bsdf_rt, _ = mtlx.compile_mtlx_material(
+        'ND_open_pbr_surface_surfaceshader',
+        geometry_thin_walled=thin,
+        transmission_weight=1.0,
+        specular_roughness=0.2,
+        specular_ior=1.5,
+        specular_color=(1.0, 0.5, 0.2),
+        transmission_color=(0.2, 0.8, 1.0),
+    )
+    assert bsdf_rt is not None
+    feat_rt = bsdf_rt.eval_features(si_norm)
+    assert dr.allclose(
+        feat_rt.specular_reflectance,
+        [f_exp * c for c in (1.0, 0.5, 0.2)],
+        atol=1e-4,
+    )
+    assert dr.allclose(
+        feat_rt.specular_transmittance,
+        [(1.0 - f_exp) * c for c in (0.2, 0.8, 1.0)],
+        atol=1e-4,
+    )
+    _check_bsdf_sampling(bsdf_rt)
+
+  bsdf_thin_rt = _compile_bsdf(
+      'ND_dielectric_bsdf', thin_walled=True, **_diel_kw('RT', 0.05)
   )
-  assert bsdf_tinted_rt is not None
-  feat_tinted = bsdf_tinted_rt.eval_features(
-      mtlx.make_test_si(wi=(0.0, 0.0, 1.0))
+  vr, pr = bsdf_thin_rt.eval_pdf(ctx, si_norm, mi.Vector3f(0.0, 0.0, 1.0))
+  vt, pt = bsdf_thin_rt.eval_pdf(ctx, si_norm, mi.Vector3f(0.0, 0.0, -1.0))
+  assert dr.allclose(vr / vt, 0.08 / 0.96, rtol=2e-3)
+  assert dr.allclose(pr / pt, 0.08 / 0.96, rtol=1e-4)
+  bsdf_thin_r = _compile_bsdf(
+      'ND_dielectric_bsdf', thin_walled=True, **_diel_kw('R', 0.05)
   )
   assert dr.allclose(
-      feat_tinted.specular_reflectance,
-      [0.04, 0.02, 0.008],
-      atol=1e-4,
+      bsdf_thin_r.eval_features(si_norm).specular_reflectance, 0.04, atol=1e-4
   )
-  assert dr.allclose(
-      feat_tinted.specular_transmittance,
-      [0.192, 0.768, 0.96],
-      atol=1e-4,
-  )
-  _check_bsdf_sampling(bsdf_tinted_rt)
 
   # Partial transmission with `base=0` (zero-weight opaque diffuse ->
   # `OpaqueBlocker`) simplifies cleanly without uninitialized layer throughput.
