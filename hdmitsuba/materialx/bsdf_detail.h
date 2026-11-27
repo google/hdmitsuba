@@ -119,34 +119,48 @@ Spectrum OrenNayarCompensated(const Float& n_dot_v, const Float& n_dot_l,
       0.0f);
 }
 
-// Rational quadratic fit to GGX directional albedo (MaterialX
-// `mx_ggx_dir_albedo_analytic`). Returns `(A, B)` such that the directional
-// albedo is `F0 * A + F90 * B`.
+// Stretched-hemisphere cosine `cos_h = mu / sqrt(mu^2 + alpha^2 * (1 - mu^2))`.
 template <typename Float>
-std::pair<Float, Float> GgxDirAlbedoAb(const Float& n_dot_v,
-                                       const Float& alpha) {
-  using Vec4 = dr::Array<Float, 4>;
-  Float x = dr::clip(n_dot_v, 0.0f, 1.0f), y = dr::clip(alpha, 0.0f, 1.0f);
-  Float x2 = dr::square(x), y2 = dr::square(y);
-  Vec4 r = Vec4(0.1003f, 0.9345f, 1.0f, 1.0f) +
-           Vec4(-0.6303f, -2.323f, -1.765f, 0.2281f) * x +
-           Vec4(9.748f, 2.229f, 8.263f, 15.94f) * y +
-           Vec4(-2.038f, -3.748f, 11.53f, -55.83f) * (x * y) +
-           Vec4(29.34f, 1.424f, 28.96f, 13.08f) * x2 +
-           Vec4(-8.245f, -0.7684f, -7.507f, 41.26f) * y2 +
-           Vec4(-26.44f, 1.436f, -36.11f, 54.9f) * (x2 * y) +
-           Vec4(19.99f, 0.2913f, 15.86f, 300.2f) * (x * y2) +
-           Vec4(-5.448f, 0.6286f, 33.37f, -285.1f) * (x2 * y2);
-  return {dr::clip(r.x() / r.z(), 0.0f, 1.0f),
-          dr::clip(r.y() / r.w(), 0.0f, 1.0f)};
+Float GgxStretchedCos(const Float& mu, const Float& alpha) {
+  Float m2 = dr::square(mu);
+  return mu * dr::safe_rsqrt(dr::fmadd(dr::square(alpha), 1.0f - m2, m2));
 }
 
-// Turquin (2019) GGX multi-scattering energy compensation factor from
-// single-scattering directional albedo `ess = A + B`.
-template <typename Float, typename Spectrum>
-Spectrum GgxEnergyCompensation(const Float& ess, const Spectrum& fss) {
-  Float ess_c = dr::clip(ess, dr::Epsilon<Float>, 1.0f);
-  return dr::fmadd(fss, (1.0f - ess_c) / ess_c, 1.0f);
+// Pole-free rational fit to height-correlated Smith GGX multi-scattering factor
+// `K = (1 - Ess) / Ess` in `(cos_h, alpha)`. Vanishes identically at
+// `alpha = 0` (`Ess = 1`), keeping worst-case furnace error <= 1.2% on [0,1]^2.
+template <typename Float>
+Float GgxEnergyCompFactor(const Float& n_dot_v, const Float& alpha) {
+  Float m = dr::clip(n_dot_v, 0.0f, 1.0f), a = dr::clip(alpha, 0.0f, 1.0f);
+  Float ch = GgxStretchedCos(m, a), om = 1.0f - ch;
+  Float t0 = om * dr::horner(om, 1.551740f, 7.074814f, -3.671078f) /
+             dr::horner(om, 1.0f, 11.156741f, 16.364502f);
+  Float num1 =
+      0.735592f * om + a * (dr::horner(ch, 2.185516f, -3.279385f, 5.596207f) +
+                            a * dr::fmadd(2.367598f, ch, 3.384262f));
+  Float t1 = a * num1 / (1.0f + 2.805622f * ch + 0.739688f * a);
+  return dr::maximum(ch * (t0 + t1), 0.0f);
+}
+
+// Height-correlated Smith GGX directional albedo split `(A, B)` such that
+// `Ess(F0, F90) = F0 * A + F90 * B` and `A + B = 1 / (1 + k)`. Matches
+// `(1 - (1 - mu)^5, (1 - mu)^5)` identically at `alpha = 0`.
+template <typename Float>
+std::pair<Float, Float> GgxDirAlbedoAb(const Float& n_dot_v, const Float& alpha,
+                                       const Float& k) {
+  Float m = dr::clip(n_dot_v, 0.0f, 1.0f), a = dr::clip(alpha, 0.0f, 1.0f);
+  Float ch = GgxStretchedCos(m, a), om = 1.0f - ch, f5 = Pow5(1.0f - m);
+  Float d = dr::maximum(
+      a * (4.638592f + 8.074068f * a + 20.465916f * om - 11.350670f * m) +
+          om * dr::fmadd(-0.147684f, om, 0.440158f),
+      0.0f);
+  Float corr = (a * (0.333570f + 0.594580f * a - 1.328653f * om -
+                     0.882842f * m + 0.119223f * f5) +
+                0.436355f * om) /
+               (1.0f + 5.555219f * a + 1.749208f * m + 1.018869f * om);
+  Float ess = dr::rcp(1.0f + k);
+  Float b = ess * dr::clip(f5 / (1.0f + d) + corr, 0.0f, 1.0f);
+  return {ess - b, b};
 }
 
 // Energy-compensated GGX directional albedo from `(F0, F(n_dot_v), F90)`.
@@ -154,9 +168,16 @@ template <typename Float, typename Spectrum>
 Spectrum GgxReflAlbedo(const Float& n_dot_v, const Float& alpha,
                        const Spectrum& f0, const Spectrum& f_nv,
                        const Spectrum& f90) {
-  auto [a, b] = GgxDirAlbedoAb(n_dot_v, alpha);
-  return dr::minimum(
-      GgxEnergyCompensation(a + b, f_nv) * dr::fmadd(f0, a, f90 * b), 1.0f);
+  Float k = GgxEnergyCompFactor(n_dot_v, alpha);
+  auto [a, b] = GgxDirAlbedoAb(n_dot_v, alpha, k);
+  Float m = dr::clip(n_dot_v, 0.0f, 1.0f), al = dr::clip(alpha, 0.0f, 1.0f);
+  // Decay the Schlick-vs-exact Fresnel residual smoothly with roughness so
+  // smooth coats (`alpha -> 0`) match exact Fresnel `f_nv` identically.
+  Spectrum f_schlick = dr::lerp(f0, f90, Pow5(1.0f - m));
+  Spectrum e_ss = dr::clip(
+      dr::fmadd(f0, a, f90 * b) + (f_nv - f_schlick) * dr::square(1.0f - al),
+      0.0f, a + b);
+  return dr::minimum(dr::fmadd(f_nv, k, 1.0f) * e_ss, 1.0f);
 }
 
 template <typename Float>
@@ -418,7 +439,8 @@ struct MicrofacetParams {
   MicrofacetDistribution<Float, Color<Float, 3>> distr;
 
   // Fresnel / tint spectra:
-  // - `Dielectric`: `spec0 = tint`
+  // - `Dielectric`: `spec0 = refl_tint`, `spec1 = trans_tint` (when
+  //   `has_trans_tint` is set)
   // - `Conductor`: `spec0 = ior`, `spec1 = extinction`
   // - `GeneralizedSchlick`: `spec0 = color0`, `spec1 = color82`,
   //   `spec2 = color90`, `exponent`
@@ -430,6 +452,7 @@ struct MicrofacetParams {
       unpolarized_spectrum_t<Spectrum>(1.0f);
   Float exponent = Float(5.0f);
 
+  bool has_trans_tint = false;
   bool has_thinfilm = false;
   Float tf_thickness = Float(0.0f);
   Float tf_ior = Float(1.5f);
@@ -443,9 +466,22 @@ bool MicrofacetNeedIorFresnel(const MicrofacetParams<Float, Spectrum>& m) {
          (m.kind == MicrofacetKind::GeneralizedSchlick && !m.two_sided);
 }
 
+// Maps a (possibly anisotropic) GGX lobe and incident direction `wi_l` to an
+// equivalent isotropic `(cos_theta_eff, alpha_eff)` pair preserving Smith's
+// masking factor `Lambda(wi_l)` with RMS slope roughness
+// `alpha_rms = sqrt(0.5 * (alpha_x^2 + alpha_y^2))`.
 template <typename Float, typename Spectrum>
-Float MicrofacetAlphaEff(const MicrofacetParams<Float, Spectrum>& m) {
-  return m.distr.is_isotropic() ? m.alpha.x() : dr::sqrt(dr::prod(m.alpha));
+std::pair<Float, Float> MicrofacetIsoParams(
+    const MicrofacetParams<Float, Spectrum>& m, const Vector<Float, 3>& wi_l) {
+  Float ndv = dr::abs(Frame<Float>::cos_theta(wi_l));
+  if (m.distr.is_isotropic()) return {ndv, m.alpha.x()};
+  Float a_rms2 = 0.5f * dr::squared_norm(m.alpha);
+  Float a_rms = dr::sqrt(a_rms2);
+  Float xy_a2 =
+      dr::square(m.alpha.x() * wi_l.x()) + dr::square(m.alpha.y() * wi_l.y());
+  Float ndv_eff =
+      a_rms * ndv * dr::safe_rsqrt(dr::fmadd(a_rms2, dr::square(ndv), xy_a2));
+  return {ndv_eff, a_rms};
 }
 
 template <typename Float, typename Spectrum>
@@ -512,6 +548,12 @@ template <typename Float, typename Spectrum>
 Float MicrofacetReflProb(const MicrofacetParams<Float, Spectrum>& m,
                          const Float& f_d,
                          const unpolarized_spectrum_t<Spectrum>& f_c) {
+  if (m.has_trans_tint) {
+    Float wr = SelectionWeight<Spectrum>(m.spec0 * f_c);
+    Float wt = SelectionWeight<Spectrum>(m.spec1 * (1.0f - f_c));
+    Float sum = wr + wt;
+    return dr::select(sum > 0.0f, wr / dr::select(sum > 0.0f, sum, 1.0f), f_d);
+  }
   return (m.kind == MicrofacetKind::Dielectric && !m.has_thinfilm)
              ? f_d
              : SelectionWeight<Spectrum>(f_c);
@@ -524,7 +566,7 @@ unpolarized_spectrum_t<Spectrum> MicrofacetReflAlbedo(
   using UnpolSpec = unpolarized_spectrum_t<Spectrum>;
   Float cos_i = Frame<Float>::cos_theta(wi_l);
   Float ndv = dr::abs(cos_i);
-  Float ae = MicrofacetAlphaEff(m);
+  auto [ndv_eff, ae] = MicrofacetIsoParams(m, wi_l);
   Mask tf_active = m.has_thinfilm
                        ? ((m.tf_thickness > 0.0f) && (m.tf_ior > 1.0f))
                        : Mask(false);
@@ -549,7 +591,7 @@ unpolarized_spectrum_t<Spectrum> MicrofacetReflAlbedo(
     index_matched = m.ior == 1.0f;
     if (m.has_thinfilm) index_matched = index_matched && !tf_active;
   }
-  UnpolSpec res = GgxReflAlbedo(ndv, ae, f0, f_nv, f90);
+  UnpolSpec res = GgxReflAlbedo(ndv_eff, ae, f0, f_nv, f90);
   if (m.has_thinfilm) {
     res = dr::select(tf_active, dr::lerp(f_nv, res, dr::sqrt(ae)), res);
   }
@@ -660,11 +702,12 @@ std::pair<unpolarized_spectrum_t<Spectrum>, Float> MicrofacetEvalPdf(
   if (m.refl_on) {
     Mask use_refl = valid && is_refl;
     if (dr::any_or<true>(use_refl)) {
-      auto [a, b] = GgxDirAlbedoAb(n_dot_v, MicrofacetAlphaEff(m));
-      val = dr::select(use_refl,
-                       f_c * GgxEnergyCompensation(a + b, f_c) *
-                           (refl_pdf * GgxG2OverG1(g1_i, g1_o)),
-                       val);
+      auto [ndv_eff, ae] = MicrofacetIsoParams(m, wi_l);
+      Float k_ms = GgxEnergyCompFactor(ndv_eff, ae);
+      UnpolSpec rv = f_c * dr::fmadd(f_c, k_ms, 1.0f) *
+                     (refl_pdf * GgxG2OverG1(g1_i, g1_o));
+      if (m.kind == MicrofacetKind::Dielectric) rv *= m.spec0;
+      val = dr::select(use_refl, rv, val);
       pdf = dr::select(use_refl, p_r * refl_pdf, pdf);
     }
   }
@@ -685,13 +728,15 @@ std::pair<unpolarized_spectrum_t<Spectrum>, Float> MicrofacetEvalPdf(
         trans_val = refl_pdf * g1_o;
         trans_pdf = refl_pdf;
       }
-      val = dr::select(
-          use_trans,
-          m.trans_only ? UnpolSpec(trans_val) : (1.0f - f_c) * trans_val, val);
+      UnpolSpec tv =
+          m.trans_only ? UnpolSpec(trans_val) : (1.0f - f_c) * trans_val;
+      if (m.kind == MicrofacetKind::Dielectric) {
+        tv *= m.has_trans_tint ? m.spec1 : m.spec0;
+      }
+      val = dr::select(use_trans, tv, val);
       pdf = dr::select(use_trans, (1.0f - p_r) * trans_pdf, pdf);
     }
   }
-  if (m.kind == MicrofacetKind::Dielectric) val *= m.spec0;
   return {val, pdf};
 }
 
@@ -717,13 +762,14 @@ MicrofacetEvalFeatures(const MicrofacetParams<Float, Spectrum>& m,
   }
   if (!m.trans_only) {
     UnpolSpec f_c = MicrofacetFresnel(m, cos_i, f_d, cos_t);
-    out.refl = contrib * f_c;
-    out.trans = contrib * (1.0f - f_c);
+    out.refl = (m.has_trans_tint ? contrib * m.spec0 : contrib) * f_c;
+    out.trans = (m.has_trans_tint ? contrib * m.spec1 : contrib) * (1.0f - f_c);
   } else {
     out.trans = m.thin_walled ? contrib : (contrib & (f_d < 1.0f));
   }
   out.trans_w = SelectionWeight<Spectrum>(out.trans);
-  out.spec_w = !m.trans_only ? SelectionWeight<Spectrum>(contrib) : out.trans_w;
+  out.spec_w = !m.trans_only ? SelectionWeight<Spectrum>(out.refl + out.trans)
+                             : out.trans_w;
   if (!m.thin_walled) out.wt_local = refract(wi_l, cos_t, eta_ti);
   return out;
 }

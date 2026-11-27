@@ -384,8 +384,10 @@ struct ClosureNode {
     uint16_t mode;
     uint16_t _pad[7] = {};
   };
-  // Shared by `Dielectric` (`p = {tint, ior}`), `Conductor` (`p = {ior, ext}`),
-  // and `GeneralizedSchlick` (`p = {color0, color82, color90, exponent}`).
+  // Shared by `Dielectric` (`p = {refl_tint, ior, trans_tint}`, with
+  // `trans_tint == kInvalidValue` when equal to `refl_tint`), `Conductor`
+  // (`p = {ior, ext}`), and `GeneralizedSchlick`
+  // (`p = {color0, color82, color90, exponent}`).
   struct Microfacet {
     ValueId weight, roughness, normal, tangent, tf_thickness, tf_ior;
     ValueId p[4];
