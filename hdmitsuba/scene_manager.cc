@@ -141,12 +141,17 @@ std::optional<T> GetSetting(const VtDictionary& settings,
     if (it->second.IsHolding<TfToken>()) {
       return it->second.UncheckedGet<TfToken>().GetString();
     }
-  } else if constexpr (std::is_integral_v<T> && !std::is_same_v<T, bool>) {
+  } else if constexpr (std::is_integral_v<T>) {
+    // Hosts such as Houdini Solaris send toggle settings as integer 0/1.
     if (!it->second.IsHolding<bool>() && !it->second.IsHolding<float>() &&
         !it->second.IsHolding<double>() && !it->second.IsHolding<GfHalf>()) {
       if (VtValue casted = VtValue::Cast<int64_t>(it->second);
           casted.IsHolding<int64_t>()) {
-        return static_cast<T>(casted.UncheckedGet<int64_t>());
+        if constexpr (std::is_same_v<T, bool>) {
+          return casted.UncheckedGet<int64_t>() != 0;
+        } else {
+          return static_cast<T>(casted.UncheckedGet<int64_t>());
+        }
       }
     }
   }
