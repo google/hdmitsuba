@@ -14,7 +14,6 @@
 
 #pragma once
 
-#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -29,14 +28,9 @@
 #include <mitsuba/render/texture.h>
 
 #include "hdmitsuba/materialx/program.h"
+#include "hdmitsuba/materialx/srgb_lut.h"
 
-NAMESPACE_BEGIN(mitsuba)
-namespace mtlx {
-
-namespace detail {
-template <typename Float, typename Spectrum>
-class SrgbUpsampler;
-}  // namespace detail
+namespace mitsuba::mtlx {
 
 // Evaluates a flat SSA `MtlxValueProgram` for the variant `Float`/`Spectrum`,
 // given its texture inputs. Used standalone by `MtlxExprTexture` and embedded
@@ -56,8 +50,8 @@ class MtlxEvaluator {
 
   // Per-query evaluation buffers shared across the opacity and surface stages
   // of a BSDF query. Only varying nodes (`main_end - uniform_end`) are stored
-  // per ray; uniform nodes `[0 .. uniform_end)` live in `m_uniform_scalars`
-  // (except under AD on `m_opaques`, where width-1 attached values are stored
+  // per ray; uniform nodes `[0 .. uniform_end)` live in `uniform_scalars_`
+  // (except under AD on `opaques_`, where width-1 attached values are stored
   // in `uniform_vals`).
   struct EvalState {
     absl::InlinedVector<Val, 32> uniform_vals;
@@ -69,45 +63,42 @@ class MtlxEvaluator {
     bool uniform_ready = false;
   };
 
-  MtlxEvaluator();
-  ~MtlxEvaluator();
-
-  void compile(const Properties& props);
-  void compile(const Properties& props, MtlxValueProgram prog);
+  void Compile(const Properties& props);
+  void Compile(const Properties& props, MtlxValueProgram prog);
   // Registers a deduplicated spectrum slot (loading the sRGB LUT and reserving
   // a hoisted uniform slot when spatially invariant on spectral variants).
-  // Call `finalize_uniforms()` once all slots are registered.
-  int add_spectrum(ValueId id, bool unbounded = false);
-  size_t num_spectra() const { return m_spec_slots.size(); }
-  void finalize_uniforms();
+  // Call `FinalizeUniforms()` once all slots are registered.
+  int AddSpectrum(ValueId id, bool unbounded = false);
+  size_t NumSpectra() const { return spec_slots_.size(); }
+  void FinalizeUniforms();
 
-  const MtlxValueProgram& program() const { return m_prog; }
-  void traverse(TraversalCallback* cb);
-  void parameters_changed();
-  std::string to_string() const;
-  bool is_spatially_varying() const;
+  const MtlxValueProgram& Program() const { return prog_; }
+  void Traverse(TraversalCallback* cb);
+  void ParametersChanged();
+  std::string ToString() const;
+  bool IsSpatiallyVarying() const;
 
-  Val read_val(ValueId id, const EvalState& state) const;
-  UnpolarizedSpectrum eval_spectrum(size_t slot_idx,
-                                    const Wavelength& wavelengths,
-                                    const EvalState& state) const;
-  Val eval_opacity(ValueId opacity_root, const SurfaceInteraction3f& si,
-                   Mask active, EvalState& state) const;
-  void eval_surface(const SurfaceInteraction3f& si, Mask active,
-                    EvalState& state) const;
-  Val eval_expr(const SurfaceInteraction3f& si, Mask active) const;
+  Val ReadVal(ValueId id, const EvalState& state) const;
+  UnpolarizedSpectrum EvalSpectrum(size_t slot_idx,
+                                   const Wavelength& wavelengths,
+                                   const EvalState& state) const;
+  Val EvalOpacity(ValueId opacity_root, const SurfaceInteraction3f& si,
+                  Mask active, EvalState& state) const;
+  void EvalSurface(const SurfaceInteraction3f& si, Mask active,
+                   EvalState& state) const;
+  Val EvalExpr(const SurfaceInteraction3f& si, Mask active) const;
 
   // Returns the luminance of 3-channel results, like Mitsuba's `bitmap`.
-  Float eval_1(const SurfaceInteraction3f& si, Mask active) const;
-  Color3f eval_3(const SurfaceInteraction3f& si, Mask active) const;
+  Float Eval1(const SurfaceInteraction3f& si, Mask active) const;
+  Color3f Eval3(const SurfaceInteraction3f& si, Mask active) const;
 
-  void traverse_cb(void* payload, const drjit::TraverseVisitor& cb);
+  void TraverseCb(void* payload, const drjit::TraverseVisitor& cb);
 
  private:
   struct SpecSlot {
     ValueId value;
     bool unbounded;
-    // Index into `m_uniform_specs` for spatially-invariant non-scalar spectral
+    // Index into `uniform_specs_` for spatially-invariant non-scalar spectral
     // slots, or -1 otherwise.
     int uniform_spec_idx = -1;
   };
@@ -118,33 +109,32 @@ class MtlxEvaluator {
     DRJIT_STRUCT(UniformSpec, coeff, scale)
   };
 
-  bool has_opaque_grad() const;
-  Val load_uniform(ValueId id) const;
-  void update_uniform_state();
-  void eval_uniform_nodes(absl::InlinedVector<Val, 32>& uvals) const;
-  void eval_until(uint32_t end, const SurfaceInteraction3f& si, Mask active,
-                  EvalState& state) const;
-  void eval_range(uint32_t begin, uint32_t end, uint32_t base_offset,
-                  Val* out_vals, Val* mat_rows, const Val* uniform_vals,
-                  const SurfaceInteraction3f& si, Mask active,
-                  absl::InlinedVector<std::optional<CachedAttr>, 4>& attr_cache,
-                  std::optional<SurfaceInteraction3f>& si_uv) const;
+  bool HasOpaqueGrad() const;
+  Val LoadUniform(ValueId id) const;
+  void UpdateUniformState();
+  void EvalUniformNodes(absl::InlinedVector<Val, 32>& uvals) const;
+  void EvalUntil(uint32_t end, const SurfaceInteraction3f& si, Mask active,
+                 EvalState& state) const;
+  void EvalRange(uint32_t begin, uint32_t end, uint32_t base_offset,
+                 Val* out_vals, Val* mat_rows, const Val* uniform_vals,
+                 const SurfaceInteraction3f& si, Mask active,
+                 absl::InlinedVector<std::optional<CachedAttr>, 4>& attr_cache,
+                 std::optional<SurfaceInteraction3f>& si_uv) const;
 
-  MtlxValueProgram m_prog;
-  std::vector<ref<Texture>> m_inputs;
+  MtlxValueProgram prog_;
+  std::vector<ref<Texture>> inputs_;
   // Opaque scalars (`dr::opaque`), passed as kernel inputs rather than
   // literals.
-  std::vector<Float> m_opaques;
+  std::vector<Float> opaques_;
   // Hoisted size-1 evaluated spatially-invariant scalars.
-  std::vector<Float> m_uniform_scalars;
+  std::vector<Float> uniform_scalars_;
   // Deduplicated spectral slots and hoisted detached upsampling coefficients
   // (spectral variants only).
-  std::vector<SpecSlot> m_spec_slots;
-  std::vector<UniformSpec> m_uniform_specs;
+  std::vector<SpecSlot> spec_slots_;
+  std::vector<UniformSpec> uniform_specs_;
   // Precomputed finite-difference UV step per `HeightToNormal` region.
-  std::vector<ScalarPoint2f> m_region_eps;
-  std::unique_ptr<detail::SrgbUpsampler<Float, Spectrum>> m_srgb;
+  std::vector<ScalarPoint2f> region_eps_;
+  detail::SrgbUpsampler<Float, Spectrum> srgb_;
 };
 
-}  // namespace mtlx
-NAMESPACE_END(mitsuba)
+}  // namespace mitsuba::mtlx
