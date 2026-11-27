@@ -15,6 +15,7 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 #include <string_view>
 
 #include <MaterialXCore/Node.h>
@@ -27,49 +28,43 @@
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-// The compiled `materialx_bsdf`, optional `materialx_expr` radiance texture,
-// and mesh attributes of a MaterialX surface shader.
-struct CompiledSurfaceShader {
-  // Compiled `materialx_bsdf` BSDF (including cutout opacity).
+// Opaque variant-independent symbolic SSA programs lowered once from a
+// MaterialX document (BSDF, optional emission, and optional displacement).
+struct PreparedMaterialX;
+
+// Instantiated Mitsuba objects and mesh attribute requests produced from a
+// `PreparedMaterialX` for a specific Mitsuba variant.
+struct CompiledMaterialXResult {
+  // Compiled `materialx_bsdf` BSDF (including cutout opacity), or null.
   mitsuba::ref<mitsuba::Object> bsdf;
-  // Emitted radiance, or null if there is no emission.
+  // Emitted radiance `materialx_expr` texture, or null if there is no emission.
   mitsuba::ref<mitsuba::Object> radiance_texture;
-  // Primvars read as mesh attributes by the compiled shader.
+  // Primvars read as mesh attributes by the BSDF and radiance shaders.
   MeshAttributeRequests mesh_attributes;
+  // Compiled displacement texture and metadata (empty if no displacement).
+  MaterialDisplacement displacement;
 };
 
-// Compiles the BSDF closures (including cutout `opacity`) and emission (`edf`,
-// weighted by `opacity`) of a MaterialX surface shader (`surface`,
-// `surface_unlit`, `mix`, `surfacematerial`, or raw BSDF/EDF closures).
-CompiledSurfaceShader CompileSurfaceShader(
-    const MaterialX::NodePtr& shader_node, std::string_view output_name,
-    std::string_view variant,
-    const std::function<const CachedTexture*(const TextureKey&)>&
-        lookup_texture);
-
-// Dry-run compiles the active branches of `shader_node` and invokes `callback`
-// with the `TextureKey` of every bitmap texture it consumes.
-void DiscoverSurfaceShaderTextures(
-    const MaterialX::NodePtr& shader_node, std::string_view output_name,
+// Lowers the MaterialX surface (BSDF + EDF) and displacement shaders once into
+// variant-independent symbolic SSA programs, sharing a single graph resolver,
+// and invokes `callback` with the `TextureKey` of every live bitmap texture
+// consumed by the lowered programs.
+//
+// If `check_surface_displacement` is true and `surface_out` is a material
+// output that unwraps to a `displacementshader` (via `surfacematerial`), lowers
+// that displacement shader as well. Returns nullptr if neither surface nor
+// displacement is present.
+std::shared_ptr<const PreparedMaterialX> LowerMaterialXShaders(
+    const MaterialX::OutputPtr& surface_out,
+    const MaterialX::OutputPtr& displacement_out,
+    bool check_surface_displacement,
     const std::function<void(const TextureKey&)>& callback);
 
-// Returns true if `shader_node` (unwrapping `dot`, `NodeGraph`, and
-// `surfacematerial`) resolves to a connected displacement shader.
-bool HasDisplacementShader(const MaterialX::NodePtr& shader_node,
-                           std::string_view output_name);
-
-// Compiles a MaterialX displacement shader (`displacement` float or vector3,
-// `mix`, `dot`, or `surfacematerial`) into a `materialx_expr` texture.
-MaterialDisplacement CompileDisplacementShader(
-    const MaterialX::NodePtr& shader_node, std::string_view output_name,
-    std::string_view variant,
+// Resolves symbolic image samples against `lookup_texture`, optimizes, and
+// instantiates the Mitsuba plugins for `variant`. Does not mutate `prepared`.
+CompiledMaterialXResult InstantiateMaterialXShaders(
+    const PreparedMaterialX& prepared, std::string_view variant,
     const std::function<const CachedTexture*(const TextureKey&)>&
         lookup_texture);
-
-// Dry-run compiles the active branches of a displacement shader and invokes
-// `callback` with the `TextureKey` of every bitmap texture it consumes.
-void DiscoverDisplacementShaderTextures(
-    const MaterialX::NodePtr& shader_node, std::string_view output_name,
-    const std::function<void(const TextureKey&)>& callback);
 
 PXR_NAMESPACE_CLOSE_SCOPE

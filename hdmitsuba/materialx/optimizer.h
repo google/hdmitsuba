@@ -23,6 +23,15 @@ namespace mitsuba::mtlx {
 struct MtlxValueProgram;
 struct MtlxBsdfProgram;
 
+// Reachability mask over `prog.nodes` and `prog.regions` from program roots.
+struct LiveMask {
+  std::vector<uint8_t> node;
+  std::vector<uint8_t> region;
+};
+
+LiveMask ComputeLiveMask(const MtlxValueProgram& prog,
+                         const MtlxBsdfProgram* bsdf = nullptr);
+
 // Compaction tables returned by `OptimizeValueProgram` / `OptimizeBsdfProgram`
 // so the compiler can compact parallel input textures and mesh attribute
 // requests to only live entries in original order.

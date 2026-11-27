@@ -154,6 +154,14 @@ TEST(MaterialXOptimizerTest, IrBuilderGvnCanonicalizationAndConstFold) {
   EXPECT_EQ(b.Chan(p0, 2), p0);
   EXPECT_FALSE(b.IsVarying(p0));
   EXPECT_TRUE(b.IsClipped01(b.Const(0.5)));
+
+  ValueId tex3 = Tex3(b, 0);
+  EXPECT_EQ(b.Rgb(b.Chan(tex3, 0), b.Chan(tex3, 1), b.Chan(tex3, 2)), tex3);
+  ValueId uv = b.Emit(Op::GeomUV, {}, 0, 2);
+  EXPECT_EQ(b.Vec2(b.Chan(uv, 0), b.Chan(uv, 1)), uv);
+  ValueId luma = b.ConstRgb(0.2722287, 0.6740818, 0.0536895);
+  EXPECT_EQ(b.Emit(Op::Dot, {p0, luma}, 3), p0);
+  EXPECT_EQ(b.Emit(Op::Dot, {luma, p0}, 3), p0);
 }
 
 TEST(MaterialXOptimizerTest, IrBuilderAffineCollapseDivMixAndUniformHoist) {

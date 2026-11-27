@@ -1233,6 +1233,19 @@ def test_heighttonormal_and_bump(
         pytest.param(
             'ND_heighttonormal_vector3', {'in_': 0.75}, id='constant_height'
         ),
+        pytest.param(
+            'ND_heighttonormal_vector3',
+            {
+                'in_': (
+                    'ND_image_float',
+                    {
+                        'file': Sdf.AssetPath('/nonexistent/height.exr'),
+                        'default': 0.5,
+                    },
+                )
+            },
+            id='missing_image_height',
+        ),
     ],
 )
 def test_heighttonormal_unused_height_inputs(
