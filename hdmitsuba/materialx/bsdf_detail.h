@@ -17,6 +17,7 @@
 // Pure local-space MaterialX BSDF optics and lobe physics. Include only from
 // `bsdf.cc`.
 
+#include <cstdint>
 #include <tuple>
 #include <utility>
 
@@ -35,10 +36,6 @@
 
 NAMESPACE_BEGIN(mitsuba)
 namespace mtlx::detail {
-
-template <typename ScalarFloat>
-inline constexpr ScalarFloat kMinLen2 =
-    dr::Epsilon<ScalarFloat> * dr::Epsilon<ScalarFloat>;
 
 template <typename Float>
 Float pow5(const Float& x) {
@@ -67,8 +64,7 @@ auto geom_curve_tangent_world(const SurfaceInteraction& si) {
                    (+ShapeType::BSplineCurve | +ShapeType::LinearCurve)) != 0u;
   Vec3 raw = dr::select(is_curve, si.dp_dv, si.dp_du);
   Vec3 fallback = dr::select(is_curve, si.sh_frame.t, si.sh_frame.s);
-  return safe_normalize(Vec3(raw - si.sh_frame.n * dr::dot(si.sh_frame.n, raw)),
-                        fallback, dr::scalar_t<Vec3>(1e-20f));
+  return orthogonalize_tangent(Vec3(si.sh_frame.n), raw, fallback);
 }
 
 template <typename Float>
@@ -268,29 +264,32 @@ unpolarized_spectrum_t<Spectrum> airy_thinfilm_reflectance(
   Float phi21_p =
       dr::select(dr::real(a12_p) < 0.0f, Float(0.0f), Float(dr::Pi<Float>));
 
-  if constexpr (is_spectral_v<Spectrum>) {
-    UnpolSpec phase =
-        dr::TwoPi<Float> * opd /
-        dr::select(wavelengths > 0.0f, wavelengths, UnpolSpec(550.0f));
-    auto eval_pol = [&](const Float& r12, const UnpolSpec& r23,
-                        const Float& phi21, const UnpolSpec& phi23) {
-      UnpolSpec r123 = dr::safe_sqrt(r12 * r23);
-      UnpolSpec s = dr::sin(0.5f * (phase + phi23 + phi21));
-      UnpolSpec denom = dr::square(1.0f - r123) + 4.0f * r123 * dr::square(s);
-      return 1.0f - mx_safe_div((1.0f - r12) * (1.0f - r23), denom);
-    };
+  auto eval_both = [&](auto&& eval_pol) {
     return dr::clip(
         0.5f * (eval_pol(r12_p, r23_p, phi21_p, phi23_p) +
                 eval_pol(r12_s, r23_s, Float(dr::Pi<Float>), phi23_s)),
         0.0f, 1.0f);
+  };
+
+  if constexpr (is_spectral_v<Spectrum>) {
+    UnpolSpec phase =
+        dr::TwoPi<Float> * opd /
+        dr::select(wavelengths > 0.0f, wavelengths, UnpolSpec(550.0f));
+    return eval_both([&](const Float& r12, const UnpolSpec& r23,
+                         const Float& phi21, const UnpolSpec& phi23) {
+      UnpolSpec r123 = dr::safe_sqrt(r12 * r23);
+      UnpolSpec s = dr::sin(0.5f * (phase + phi23 + phi21));
+      UnpolSpec denom = dr::square(1.0f - r123) + 4.0f * r123 * dr::square(s);
+      return 1.0f - mx_safe_div((1.0f - r12) * (1.0f - r23), denom);
+    });
   } else {
     std::pair<UnpolSpec, UnpolSpec> sens[3];
     for (int m = 1; m <= 3; ++m) {
       sens[m - 1] =
           eval_sensitivity_cs<Float, Spectrum>(Scalar(m * 1e-9) * opd);
     }
-    auto eval_pol = [&](const Float& r12, const UnpolSpec& r23,
-                        const Float& phi21, const UnpolSpec& phi23) {
+    return eval_both([&](const Float& r12, const UnpolSpec& r23,
+                         const Float& phi21, const UnpolSpec& phi23) {
       UnpolSpec r123 = dr::safe_sqrt(r12 * r23), shift = phi23 + phi21;
       Float t121 = 1.0f - r12;
       UnpolSpec rs = (dr::square(t121) * r23) /
@@ -302,11 +301,7 @@ unpolarized_spectrum_t<Spectrum> airy_thinfilm_reflectance(
         out += cm * (sens[m - 1].first * cs - sens[m - 1].second * ss);
       }
       return out;
-    };
-    return dr::clip(
-        0.5f * (eval_pol(r12_p, r23_p, phi21_p, phi23_p) +
-                eval_pol(r12_s, r23_s, Float(dr::Pi<Float>), phi23_s)),
-        0.0f, 1.0f);
+    });
   }
 }
 
@@ -354,147 +349,324 @@ dr::Complex<Spectrum> safe_conductor_eta(const Spectrum& ior,
                                extinction);
 }
 
+// Reflects `nl` into the geometric hemisphere and keeps it on the geometric
+// side of `si.wi` (Schuessler et al. 2017; reduces to `(-nl.x, -nl.y, nl.z)`
+// when `n_geom == (0, 0, 1)`).
 template <typename Float, typename Spectrum>
-Frame<Float> build_shading_frame(const SurfaceInteraction<Float, Spectrum>& si,
-                                 const Vector<Float, 3>& n_geom,
-                                 Vector<Float, 3> nl,
-                                 const Vector<Float, 3>& t_world) {
-  using ScalarFloat = dr::scalar_t<Float>;
-  using Vector3f = Vector<Float, 3>;
+Vector<Float, 3> clamp_shading_normal(
+    const SurfaceInteraction<Float, Spectrum>& si,
+    const Vector<Float, 3>& n_geom, Vector<Float, 3> nl) {
   Float n_dot_g = dr::dot(n_geom, nl);
   nl = dr::select(n_dot_g < 0.0f, nl - 2.0f * n_dot_g * n_geom, nl);
   n_dot_g = dr::abs(n_dot_g);
-  // Keep the shading normal on the geometric side of `si.wi` (Schuessler et
-  // al. 2017; reduces to `(-nl.x, -nl.y, nl.z)` when `n_geom == (0, 0, 1)`).
-  Vector3f n_loc = dr::select(
+  return dr::select(
       dr::mulsign(Float(1.0f), dr::dot(n_geom, si.wi)) * dr::dot(si.wi, nl) <=
           0.0f,
       dr::select(n_dot_g > 0.0f, 2.0f * n_dot_g * n_geom - nl, n_geom), nl);
-  Vector3f t_raw = si.to_local(t_world);
-  Vector3f s_loc =
-      safe_normalize(dr::fnmadd(n_loc, dr::dot(n_loc, t_raw), t_raw),
-                     coordinate_system(n_loc).first, kMinLen2<ScalarFloat>);
+}
+
+template <typename Float, typename Spectrum>
+Frame<Float> build_shading_frame(const SurfaceInteraction<Float, Spectrum>& si,
+                                 const Vector<Float, 3>& n_geom,
+                                 const Vector<Float, 3>& nl,
+                                 const Vector<Float, 3>& t_world) {
+  using Vector3f = Vector<Float, 3>;
+  Vector3f n_loc = clamp_shading_normal(si, n_geom, nl);
+  Vector3f s_loc = orthogonalize_tangent(n_loc, si.to_local(t_world),
+                                         coordinate_system(n_loc).first);
   return Frame<Float>(s_loc, dr::cross(n_loc, s_loc), n_loc);
 }
 
-struct MicrofacetOpts {
-  bool refl_on, trans_on, thin_walled, two_sided, retroreflective, trans_only,
-      need_ior_fresnel;
+enum class MicrofacetKind : uint8_t {
+  Dielectric,
+  Conductor,
+  GeneralizedSchlick,
 };
 
 template <typename Float>
-struct MicrofacetSample {
-  Vector<Float, 3> wo_l;
-  dr::mask_t<Float> is_refl;
-  Float eta;
-  dr::mask_t<Float> valid;
+struct LobeSample {
+  Vector<Float, 3> wo = Vector<Float, 3>(0.0f, 0.0f, 1.0f);
+  dr::uint32_array_t<Float> sampled_type = 0u;
+  Float eta = 1.0f;
+  dr::mask_t<Float> valid = false;
 };
 
-// Follows `roughdielectric`: sample visible normals for `wi` flipped into the
-// upper hemisphere, then reflect/refract the unflipped `wi`. Handles
-// `Dielectric`, `Conductor`, and `GeneralizedSchlick`.
-template <typename Float, typename ProbFn>
-MicrofacetSample<Float> ggx_microfacet_sample(
-    const Vector<Float, 3>& wi_l, const Vector<Float, 2>& alpha,
-    const Float& ior, const MicrofacetOpts& opts, const Float& u1,
-    const Point<Float, 2>& u2, ProbFn&& refl_prob_fn) {
-  using Mask = dr::mask_t<Float>;
-  using Vector3f = Vector<Float, 3>;
-  using Normal3f = Normal<Float, 3>;
-  using Frame3f = Frame<Float>;
-  Float cos_i = Frame3f::cos_theta(wi_l);
-  MicrofacetDistribution<Float, Color<Float, 3>> distr(MicrofacetType::GGX,
-                                                       alpha.x(), alpha.y());
-  Normal3f m = distr.sample(dr::mulsign(wi_l, cos_i), u2).first;
-  Vector3f wo_refl = reflect(wi_l, m);
-  Vector3f wo_l = opts.retroreflective ? reflect(wo_refl) : wo_refl;
-  Mask do_reflect(opts.refl_on);
-  Mask trans_ok(false);
-  Float out_eta(1.0f);
-  if (opts.trans_on) {
-    Float cos_im = dr::dot(wi_l, m);
-    Float fres(0.0f), cos_theta_t(0.0f), eta_it(1.0f), eta_ti(1.0f);
-    if (opts.need_ior_fresnel) {
-      std::tie(fres, cos_theta_t, eta_it, eta_ti) =
-          exact_fresnel(cos_im, ior, opts.two_sided);
-    }
-    trans_ok = opts.thin_walled ? Mask(true) : (fres < 1.0f);
-    if (opts.refl_on) {
-      do_reflect = !trans_ok || (u1 < refl_prob_fn(cos_im, fres, cos_theta_t));
-    }
-    Vector3f wo_trans = opts.thin_walled
-                            ? Vector3f(wo_refl.x(), wo_refl.y(), -wo_refl.z())
-                            : refract(wi_l, m, cos_theta_t, eta_ti);
-    wo_l = dr::select(do_reflect, wo_l, wo_trans);
-    if (!opts.thin_walled)
-      out_eta = dr::select(do_reflect, Float(1.0f), eta_it);
-  }
-  Float cos_o = Frame3f::cos_theta(wo_l);
-  Mask valid = dr::select(do_reflect, cos_i * cos_o > 0.0f,
-                          trans_ok && (cos_i * cos_o < 0.0f));
-  return {wo_l, do_reflect, out_eta, valid};
+template <typename Float, typename UnpolSpec>
+struct MicrofacetFeatures {
+  UnpolSpec refl = UnpolSpec(0.0f);
+  UnpolSpec trans = UnpolSpec(0.0f);
+  Float spec_w = Float(0.0f);
+  Float trans_w = Float(0.0f);
+  Float roughness = Float(1.0f);
+  Vector<Float, 3> wt_local = Vector<Float, 3>(0.0f);
+  bool has_trans = false;
+};
+
+// Typed per-query microfacet lobe parameters for `Dielectric`, `Conductor`, and
+// `GeneralizedSchlick` (constructed once per microfacet leaf in
+// `MtlxBsdf::eval_state`, reusing Mitsuba's `MicrofacetDistribution`).
+template <typename Float, typename Spectrum>
+struct MicrofacetParams {
+  MicrofacetKind kind = MicrofacetKind::Dielectric;
+  bool refl_on = false;
+  bool trans_on = false;
+  bool thin_walled = false;
+  bool two_sided = false;
+  bool retroreflective = false;
+  bool trans_only = false;
+  bool refl_only = false;
+  Vector<Float, 2> alpha = Vector<Float, 2>(1e-3f);
+  Float ior = Float(1.0f);
+  MicrofacetDistribution<Float, Color<Float, 3>> distr;
+
+  // Fresnel / tint spectra:
+  // - `Dielectric`: `spec0 = tint`
+  // - `Conductor`: `spec0 = ior`, `spec1 = extinction`
+  // - `GeneralizedSchlick`: `spec0 = color0`, `spec1 = color82`,
+  //   `spec2 = color90`, `exponent`
+  unpolarized_spectrum_t<Spectrum> spec0 =
+      unpolarized_spectrum_t<Spectrum>(1.0f);
+  unpolarized_spectrum_t<Spectrum> spec1 =
+      unpolarized_spectrum_t<Spectrum>(0.0f);
+  unpolarized_spectrum_t<Spectrum> spec2 =
+      unpolarized_spectrum_t<Spectrum>(1.0f);
+  Float exponent = Float(5.0f);
+
+  bool has_thinfilm = false;
+  Float tf_thickness = Float(0.0f);
+  Float tf_ior = Float(1.5f);
+  wavelength_t<Spectrum> wavelengths = dr::zeros<wavelength_t<Spectrum>>();
+};
+
+template <typename Float, typename Spectrum>
+bool microfacet_need_ior_fresnel(const MicrofacetParams<Float, Spectrum>& m) {
+  return (m.kind == MicrofacetKind::Dielectric &&
+          (!m.thin_walled || !m.trans_only)) ||
+         (m.kind == MicrofacetKind::GeneralizedSchlick && !m.two_sided);
 }
 
-// Follows `roughdielectric::eval()` / `pdf()`, using height-correlated Smith G2
-// for reflection to match MaterialX `pbrlib`. Handles `Dielectric`,
-// `Conductor`, and `GeneralizedSchlick`.
-template <typename Float, typename Spectrum, typename FresnelFn,
-          typename ProbFn>
-std::pair<Spectrum, Float> ggx_microfacet_eval_pdf(
-    const Vector<Float, 3>& wi_l, const Vector<Float, 3>& wo_l,
-    const Vector<Float, 2>& alpha, const Float& ior, const MicrofacetOpts& opts,
-    TransportMode transport_mode, FresnelFn&& fresnel_fn,
-    ProbFn&& refl_prob_fn) {
+template <typename Float, typename Spectrum>
+Float microfacet_alpha_eff(const MicrofacetParams<Float, Spectrum>& m) {
+  return m.distr.is_isotropic() ? m.alpha.x() : dr::sqrt(dr::prod(m.alpha));
+}
+
+template <typename Float, typename Spectrum>
+unpolarized_spectrum_t<Spectrum> microfacet_thinfilm_fresnel(
+    const MicrofacetParams<Float, Spectrum>& m,
+    const unpolarized_spectrum_t<Spectrum>& f_base, const Float& cos_theta) {
+  using UnpolSpec = unpolarized_spectrum_t<Spectrum>;
+  if (!m.has_thinfilm) return f_base;
+  Float eta2 = dr::maximum(m.tf_ior, 1.0f);
+  auto [a12_s, a12_p, cos_t2, _e1, _e2] =
+      fresnel_polarized(dr::clip(cos_theta, 0.0f, 1.0f), eta2);
+  Float ct2 = dr::abs(cos_t2);
+  UnpolSpec r23_p, r23_s, phi23_p, phi23_s;
+  if (m.kind == MicrofacetKind::GeneralizedSchlick) {
+    r23_p = r23_s =
+        fresnel_hoffman_schlick(ct2, m.spec0, m.spec1, m.spec2, m.exponent);
+    phi23_p = phi23_s =
+        dr::select(m.spec0 < dr::square((eta2 - 1.0f) / (eta2 + 1.0f)),
+                   UnpolSpec(dr::Pi<Float>), UnpolSpec(0.0f));
+  } else if (m.kind == MicrofacetKind::Dielectric) {
+    auto [a23_s, a23_p, _c, _e3, _e4] = fresnel_polarized(ct2, m.ior / eta2);
+    std::tie(r23_p, r23_s, phi23_p, phi23_s) =
+        polarized_fresnel_r_phi(a23_s, a23_p);
+  } else {
+    auto [a23_s, a23_p, _c, _e3, _e4] = fresnel_polarized(
+        UnpolSpec(ct2),
+        safe_conductor_eta<Float>(m.spec0 / eta2, m.spec1 / eta2));
+    std::tie(r23_p, r23_s, phi23_p, phi23_s) =
+        polarized_fresnel_r_phi(a23_s, a23_p);
+  }
+  return dr::select(m.tf_thickness > 0.0f,
+                    airy_thinfilm_reflectance<Float, Spectrum>(
+                        a12_s, a12_p, 2.0f * eta2 * ct2 * m.tf_thickness, r23_p,
+                        r23_s, phi23_p, phi23_s, m.wavelengths),
+                    f_base);
+}
+
+template <typename Float, typename Spectrum>
+unpolarized_spectrum_t<Spectrum> microfacet_fresnel(
+    const MicrofacetParams<Float, Spectrum>& m, const Float& cos_im,
+    const Float& f_d, const Float& cos_theta_t) {
+  using UnpolSpec = unpolarized_spectrum_t<Spectrum>;
+  if (m.kind == MicrofacetKind::Dielectric && !m.has_thinfilm) {
+    return UnpolSpec(f_d);
+  }
+  Float cos_tf = m.two_sided
+                     ? dr::abs(cos_im)
+                     : dr::select(cos_im < 0.0f, dr::abs(cos_theta_t), cos_im);
+  UnpolSpec f_base =
+      m.kind == MicrofacetKind::Dielectric ? UnpolSpec(f_d)
+      : m.kind == MicrofacetKind::Conductor
+          ? fresnel_conductor(
+                UnpolSpec(dr::maximum(cos_tf, dr::Epsilon<Float>)),
+                safe_conductor_eta<Float>(m.spec0, m.spec1))
+          : fresnel_hoffman_schlick(cos_tf, m.spec0, m.spec1, m.spec2,
+                                    m.exponent);
+  UnpolSpec f_tf = microfacet_thinfilm_fresnel(m, f_base, cos_tf);
+  return m.two_sided ? f_tf
+                     : dr::select((cos_im < 0.0f) && (cos_theta_t == 0.0f),
+                                  UnpolSpec(1.0f), f_tf);
+}
+
+template <typename Float, typename Spectrum>
+Float microfacet_refl_prob(const MicrofacetParams<Float, Spectrum>& m,
+                           const Float& f_d,
+                           const unpolarized_spectrum_t<Spectrum>& f_c) {
+  return (m.kind == MicrofacetKind::Dielectric && !m.has_thinfilm)
+             ? f_d
+             : selection_weight<Spectrum>(f_c);
+}
+
+template <typename Float, typename Spectrum>
+unpolarized_spectrum_t<Spectrum> microfacet_refl_albedo(
+    const MicrofacetParams<Float, Spectrum>& m, const Vector<Float, 3>& wi_l) {
+  using Mask = dr::mask_t<Float>;
+  using UnpolSpec = unpolarized_spectrum_t<Spectrum>;
+  Float cos_i = Frame<Float>::cos_theta(wi_l);
+  Float ndv = dr::abs(cos_i);
+  Float ae = microfacet_alpha_eff(m);
+  Mask tf_active = m.has_thinfilm
+                       ? ((m.tf_thickness > 0.0f) && (m.tf_ior > 1.0f))
+                       : Mask(false);
+  UnpolSpec f_nv, f0, f90(1.0f);
+  Mask index_matched(false);
+  if (m.kind == MicrofacetKind::Conductor) {
+    f_nv = microfacet_fresnel(m, ndv, Float(0.0f), Float(0.0f));
+    f0 = microfacet_fresnel(m, Float(1.0f), Float(0.0f), Float(0.0f));
+  } else if (m.kind == MicrofacetKind::GeneralizedSchlick) {
+    f_nv = microfacet_fresnel(m, ndv, Float(0.0f), Float(0.0f));
+    f0 = microfacet_thinfilm_fresnel(m, m.spec0, Float(1.0f));
+    f90 = m.has_thinfilm ? dr::select(tf_active, UnpolSpec(1.0f), m.spec2)
+                         : m.spec2;
+  } else {
+    auto [f_d, cos_t, eta_it, eta_ti] =
+        exact_fresnel(cos_i, m.ior, m.two_sided);
+    f_nv = microfacet_fresnel(m, cos_i, f_d, cos_t);
+    f0 = dr::select(
+        eta_it < 1.0f, f_nv,
+        microfacet_thinfilm_fresnel(
+            m, UnpolSpec(dr::square((m.ior - 1.0f) / (m.ior + 1.0f))),
+            Float(1.0f)));
+    index_matched = m.ior == 1.0f;
+    if (m.has_thinfilm) index_matched = index_matched && !tf_active;
+  }
+  UnpolSpec res = ggx_refl_albedo(ndv, ae, f0, f_nv, f90);
+  if (m.has_thinfilm) {
+    res = dr::select(tf_active, dr::lerp(f_nv, res, dr::sqrt(ae)), res);
+  }
+  return m.kind == MicrofacetKind::Dielectric
+             ? dr::select(index_matched, 0.0f, res)
+             : res;
+}
+
+// Follows `roughdielectric`: sample visible normals for `wi` flipped into the
+// upper hemisphere, then reflect/refract the unflipped `wi`.
+template <typename Float, typename Spectrum>
+LobeSample<Float> microfacet_sample(const MicrofacetParams<Float, Spectrum>& m,
+                                    const Vector<Float, 3>& wi_l,
+                                    const Float& u1,
+                                    const Point<Float, 2>& u2) {
+  using Mask = dr::mask_t<Float>;
+  using UInt32 = dr::uint32_array_t<Float>;
+  using Vector3f = Vector<Float, 3>;
+  Float cos_i = Frame<Float>::cos_theta(wi_l);
+  Normal<Float, 3> h = m.distr.sample(dr::mulsign(wi_l, cos_i), u2).first;
+  Vector3f wo_refl = reflect(wi_l, h);
+  Vector3f wo_l = m.retroreflective ? reflect(wo_refl) : wo_refl;
+  Mask do_reflect(m.refl_on);
+  Mask trans_ok(false);
+  Float out_eta(1.0f);
+  if (m.trans_on) {
+    Float cos_ih = dr::dot(wi_l, h);
+    Float fres(0.0f), cos_theta_t(0.0f), eta_it(1.0f), eta_ti(1.0f);
+    if (microfacet_need_ior_fresnel(m)) {
+      std::tie(fres, cos_theta_t, eta_it, eta_ti) =
+          exact_fresnel(cos_ih, m.ior, m.two_sided);
+    }
+    trans_ok = m.thin_walled ? Mask(true) : (fres < 1.0f);
+    if (m.refl_on) {
+      do_reflect =
+          !trans_ok ||
+          (u1 < microfacet_refl_prob(
+                    m, fres, microfacet_fresnel(m, cos_ih, fres, cos_theta_t)));
+    }
+    Vector3f wo_trans = m.thin_walled
+                            ? Vector3f(wo_refl.x(), wo_refl.y(), -wo_refl.z())
+                            : refract(wi_l, h, cos_theta_t, eta_ti);
+    wo_l = dr::select(do_reflect, wo_l, wo_trans);
+    if (!m.thin_walled) {
+      out_eta = dr::select(do_reflect, Float(1.0f), eta_it);
+    }
+  }
+  Float cos_o = Frame<Float>::cos_theta(wo_l);
+  UInt32 sampled_type =
+      dr::select(do_reflect, UInt32(+BSDFFlags::GlossyReflection),
+                 UInt32(+BSDFFlags::GlossyTransmission));
+  Mask valid = dr::select(do_reflect, cos_i * cos_o > 0.0f,
+                          trans_ok && (cos_i * cos_o < 0.0f));
+  return {wo_l, sampled_type, out_eta, valid};
+}
+
+// Follows `roughdielectric::eval()` / `pdf()`, using height-correlated Smith
+// G2 for reflection to match MaterialX `pbrlib`.
+template <typename Float, typename Spectrum>
+std::pair<unpolarized_spectrum_t<Spectrum>, Float> microfacet_eval_pdf(
+    const MicrofacetParams<Float, Spectrum>& m, const Vector<Float, 3>& wi_l,
+    const Vector<Float, 3>& wo_l, TransportMode transport_mode) {
   using ScalarFloat = dr::scalar_t<Float>;
   using Mask = dr::mask_t<Float>;
   using Vector3f = Vector<Float, 3>;
   using Frame3f = Frame<Float>;
+  using UnpolSpec = unpolarized_spectrum_t<Spectrum>;
   Float cos_i = Frame3f::cos_theta(wi_l), cos_o = Frame3f::cos_theta(wo_l);
   Mask is_refl = cos_i * cos_o > 0.0f;
-  if (opts.refl_on != opts.trans_on &&
-      dr::none_or<false>(opts.refl_on ? is_refl : !is_refl)) {
+  if (m.refl_on != m.trans_on &&
+      dr::none_or<false>(m.refl_on ? is_refl : !is_refl)) {
     return {0.0f, 0.0f};
   }
-  bool solid_trans = opts.trans_on && !opts.thin_walled;
+  bool solid_trans = m.trans_on && !m.thin_walled;
   Float n_dot_v = dr::abs(cos_i);
-  MicrofacetDistribution<Float, Color<Float, 3>> distr(MicrofacetType::GGX,
-                                                       alpha.x(), alpha.y());
   Vector3f wo_m =
-      (opts.trans_on && opts.thin_walled)
+      (m.trans_on && m.thin_walled)
           ? Vector3f(wo_l.x(), wo_l.y(), dr::mulsign(dr::abs(cos_o), cos_i))
           : wo_l;
-  if (opts.retroreflective) wo_m = dr::select(is_refl, reflect(wo_m), wo_m);
-  Float eta =
-      solid_trans ? dr::select(cos_i > 0.0f, ior, dr::rcp(ior)) : Float(1.0f);
-  Vector3f m = safe_normalize(
+  if (m.retroreflective) wo_m = dr::select(is_refl, reflect(wo_m), wo_m);
+  Float eta = solid_trans ? dr::select(cos_i > 0.0f, m.ior, dr::rcp(m.ior))
+                          : Float(1.0f);
+  Vector3f h = safe_normalize(
       wi_l +
           (solid_trans ? wo_m * dr::select(is_refl, Float(1.0f), eta) : wo_m),
       Vector3f(0.0f, 0.0f, 1.0f), kMinLen2<ScalarFloat>);
-  m = dr::mulsign(m, Frame3f::cos_theta(m));
-  Float cos_im = dr::dot(wi_l, m), cos_om = dr::dot(wo_m, m);
+  h = dr::mulsign(h, Frame3f::cos_theta(h));
+  Float cos_ih = dr::dot(wi_l, h), cos_oh = dr::dot(wo_m, h);
   Mask valid =
-      (cos_im * cos_i > 0.0f) && (cos_om * Frame3f::cos_theta(wo_m) > 0.0f);
+      (cos_ih * cos_i > 0.0f) && (cos_oh * Frame3f::cos_theta(wo_m) > 0.0f);
 
   Float f_d(0.0f), cos_theta_t(0.0f);
-  if (opts.need_ior_fresnel) {
+  if (microfacet_need_ior_fresnel(m)) {
     std::tie(f_d, cos_theta_t, std::ignore, std::ignore) =
-        exact_fresnel(cos_im, ior, opts.two_sided);
+        exact_fresnel(cos_ih, m.ior, m.two_sided);
   }
-  Spectrum f_c =
-      opts.trans_only ? Spectrum(0.0f) : fresnel_fn(cos_im, f_d, cos_theta_t);
-  Mask trans_ok = opts.thin_walled ? Mask(true) : (f_d < 1.0f);
-  Float p_r = (opts.refl_on && opts.trans_on)
-                  ? dr::select(trans_ok, refl_prob_fn(f_d, f_c), 1.0f)
-                  : Float(opts.refl_on ? 1.0f : 0.0f);
-  Float g1_i = distr.smith_g1(wi_l, m), g1_o = distr.smith_g1(wo_m, m);
-  Float d_g1_over_cos = distr.eval(m) * g1_i / dr::select(valid, n_dot_v, 1.0f);
+  UnpolSpec f_c = m.trans_only
+                      ? UnpolSpec(0.0f)
+                      : microfacet_fresnel(m, cos_ih, f_d, cos_theta_t);
+  Mask trans_ok = m.thin_walled ? Mask(true) : (f_d < 1.0f);
+  Float p_r =
+      (m.refl_on && m.trans_on)
+          ? dr::select(trans_ok, microfacet_refl_prob(m, f_d, f_c), 1.0f)
+          : Float(m.refl_on ? 1.0f : 0.0f);
+  Float g1_i = m.distr.smith_g1(wi_l, h), g1_o = m.distr.smith_g1(wo_m, h);
+  Float d_g1_over_cos =
+      m.distr.eval(h) * g1_i / dr::select(valid, n_dot_v, 1.0f);
   Float refl_pdf = 0.25f * d_g1_over_cos;
-  Spectrum val(0.0f);
+  UnpolSpec val(0.0f);
   Float pdf(0.0f);
-  if (opts.refl_on) {
+  if (m.refl_on) {
     Mask use_refl = valid && is_refl;
     if (dr::any_or<true>(use_refl)) {
-      auto [a, b] = ggx_dir_albedo_ab(n_dot_v, dr::sqrt(dr::prod(alpha)));
+      auto [a, b] = ggx_dir_albedo_ab(n_dot_v, microfacet_alpha_eff(m));
       val = dr::select(use_refl,
                        f_c * ggx_energy_compensation(a + b, f_c) *
                            (refl_pdf * ggx_g2_over_g1(g1_i, g1_o)),
@@ -502,14 +674,14 @@ std::pair<Spectrum, Float> ggx_microfacet_eval_pdf(
       pdf = dr::select(use_refl, p_r * refl_pdf, pdf);
     }
   }
-  if (opts.trans_on) {
+  if (m.trans_on) {
     Mask use_trans = valid && !is_refl && trans_ok;
     if (dr::any_or<true>(use_trans)) {
       Float trans_val, trans_pdf;
       if (solid_trans) {
-        Float denom = dr::square(cos_im + eta * cos_om);
+        Float denom = dr::square(cos_ih + eta * cos_oh);
         use_trans = use_trans && (denom > kMinLen2<ScalarFloat>);
-        Float base = d_g1_over_cos * dr::abs(cos_im * cos_om) /
+        Float base = d_g1_over_cos * dr::abs(cos_ih * cos_oh) /
                      dr::select(use_trans, denom, 1.0f);
         trans_pdf = base * dr::square(eta);
         trans_val =
@@ -521,20 +693,72 @@ std::pair<Spectrum, Float> ggx_microfacet_eval_pdf(
       }
       val = dr::select(
           use_trans,
-          opts.trans_only ? Spectrum(trans_val) : (1.0f - f_c) * trans_val,
-          val);
+          m.trans_only ? UnpolSpec(trans_val) : (1.0f - f_c) * trans_val, val);
       pdf = dr::select(use_trans, (1.0f - p_r) * trans_pdf, pdf);
     }
   }
+  if (m.kind == MicrofacetKind::Dielectric) val *= m.spec0;
   return {val, pdf};
 }
 
+template <typename Float, typename Spectrum>
+MicrofacetFeatures<Float, unpolarized_spectrum_t<Spectrum>> microfacet_features(
+    const MicrofacetParams<Float, Spectrum>& m, const Vector<Float, 3>& wi_l,
+    const unpolarized_spectrum_t<Spectrum>& contrib) {
+  using UnpolSpec = unpolarized_spectrum_t<Spectrum>;
+  MicrofacetFeatures<Float, UnpolSpec> out;
+  out.roughness = m.distr.is_isotropic() ? m.alpha.x() : dr::max(m.alpha);
+  if (m.refl_only) {
+    out.refl = contrib;
+    out.spec_w = selection_weight<Spectrum>(contrib);
+    return out;
+  }
+  out.has_trans = true;
+  Float cos_i = Frame<Float>::cos_theta(wi_l);
+  Float f_d(0.0f), cos_t(0.0f), eta_ti(1.0f);
+  if (microfacet_need_ior_fresnel(m)) {
+    std::tie(f_d, cos_t, std::ignore, eta_ti) =
+        exact_fresnel(cos_i, m.ior, m.two_sided);
+  }
+  if (!m.trans_only) {
+    UnpolSpec f_c = microfacet_fresnel(m, cos_i, f_d, cos_t);
+    out.refl = contrib * f_c;
+    out.trans = contrib * (1.0f - f_c);
+  } else {
+    out.trans = m.thin_walled ? contrib : (contrib & (f_d < 1.0f));
+  }
+  out.trans_w = selection_weight<Spectrum>(out.trans);
+  out.spec_w =
+      !m.trans_only ? selection_weight<Spectrum>(contrib) : out.trans_w;
+  if (!m.thin_walled) out.wt_local = refract(wi_l, cos_t, eta_ti);
+  return out;
+}
+
 template <typename Float>
-std::pair<Vector<Float, 3>, dr::mask_t<Float>> oren_nayar_sample(
-    const Vector<Float, 3>& wi_l, const Point<Float, 2>& u2) {
+struct HemisphereAngles {
+  Float n_dot_v, n_dot_l, pdf;
+  dr::mask_t<Float> valid;
+};
+
+template <typename Float>
+HemisphereAngles<Float> hemisphere_angles(const Vector<Float, 3>& wi_l,
+                                          const Vector<Float, 3>& wo_l,
+                                          bool same_side = true) {
+  Float cos_i = Frame<Float>::cos_theta(wi_l),
+        cos_o = Frame<Float>::cos_theta(wo_l);
+  Float n_dot_v = dr::abs(cos_i);
+  Float n_dot_l = dr::mulsign(cos_o, same_side ? cos_i : -cos_i);
+  return {n_dot_v, n_dot_l, n_dot_l * dr::InvPi<Float>,
+          (n_dot_v > 0.0f) && (n_dot_l > 0.0f)};
+}
+
+template <typename Float>
+std::pair<Vector<Float, 3>, dr::mask_t<Float>> cosine_hemisphere_sample(
+    const Vector<Float, 3>& wi_l, const Point<Float, 2>& u2,
+    bool same_side = true) {
   Float cos_i = Frame<Float>::cos_theta(wi_l);
   Vector<Float, 3> wo_l = warp::square_to_cosine_hemisphere(u2);
-  wo_l.z() = dr::mulsign(wo_l.z(), cos_i);
+  wo_l.z() = dr::mulsign(wo_l.z(), same_side ? cos_i : -cos_i);
   return {wo_l, cos_i != 0.0f};
 }
 
@@ -544,19 +768,15 @@ std::pair<Spectrum, Float> oren_nayar_eval_pdf(const Vector<Float, 3>& wi_l,
                                                const Spectrum& color,
                                                const Float& roughness,
                                                bool energy_comp) {
-  Float cos_i = Frame<Float>::cos_theta(wi_l),
-        cos_o = Frame<Float>::cos_theta(wo_l);
-  Float n_dot_v = dr::abs(cos_i), n_dot_l = dr::mulsign(cos_o, cos_i);
-  auto valid = (n_dot_v > 0.0f) && (n_dot_l > 0.0f);
-  Float pdf_val = n_dot_l * dr::InvPi<Float>;
+  auto h = hemisphere_angles(wi_l, wo_l);
   Float l_dot_v = dr::dot(wi_l, wo_l);
-  Spectrum val =
-      energy_comp ? oren_nayar_compensated(n_dot_v, n_dot_l, l_dot_v, roughness,
-                                           color) *
-                        pdf_val
-                  : color * (pdf_val * oren_nayar_diffuse(n_dot_v, n_dot_l,
-                                                          l_dot_v, roughness));
-  return {dr::select(valid, val, 0.0f), dr::select(valid, pdf_val, 0.0f)};
+  Spectrum val = energy_comp
+                     ? oren_nayar_compensated(h.n_dot_v, h.n_dot_l, l_dot_v,
+                                              roughness, color) *
+                           h.pdf
+                     : color * (h.pdf * oren_nayar_diffuse(h.n_dot_v, h.n_dot_l,
+                                                           l_dot_v, roughness));
+  return {dr::select(h.valid, val, 0.0f), dr::select(h.valid, h.pdf, 0.0f)};
 }
 
 template <typename Float, typename Spectrum>
@@ -564,17 +784,13 @@ std::pair<Spectrum, Float> burley_diffuse_eval_pdf(const Vector<Float, 3>& wi_l,
                                                    const Vector<Float, 3>& wo_l,
                                                    const Spectrum& color,
                                                    const Float& roughness) {
-  Float cos_i = Frame<Float>::cos_theta(wi_l),
-        cos_o = Frame<Float>::cos_theta(wo_l);
-  Float n_dot_v = dr::abs(cos_i), n_dot_l = dr::mulsign(cos_o, cos_i);
-  auto valid = (n_dot_v > 0.0f) && (n_dot_l > 0.0f);
-  Float pdf_val = n_dot_l * dr::InvPi<Float>;
+  auto h = hemisphere_angles(wi_l, wo_l);
   // For unit vectors, `2 * (wo_l . h)^2 = 1 + wi_l . wo_l`.
   Float f90_m1 = dr::fmadd(roughness, 1.0f + dr::dot(wi_l, wo_l), -0.5f);
-  Float burley = dr::fmadd(f90_m1, pow5(1.0f - n_dot_l), 1.0f) *
-                 dr::fmadd(f90_m1, pow5(1.0f - n_dot_v), 1.0f);
-  return {dr::select(valid, color * (pdf_val * burley), 0.0f),
-          dr::select(valid, pdf_val, 0.0f)};
+  Float burley = dr::fmadd(f90_m1, pow5(1.0f - h.n_dot_l), 1.0f) *
+                 dr::fmadd(f90_m1, pow5(1.0f - h.n_dot_v), 1.0f);
+  return {dr::select(h.valid, color * (h.pdf * burley), 0.0f),
+          dr::select(h.valid, h.pdf, 0.0f)};
 }
 
 // Sheen directional albedo: Zeltner et al. (2022) LTC
@@ -629,7 +845,7 @@ template <typename Float>
 std::pair<Vector<Float, 3>, dr::mask_t<Float>> sheen_sample(
     const Vector<Float, 3>& wi_l, const Float& roughness, bool zeltner,
     const Point<Float, 2>& u2) {
-  if (!zeltner) return oren_nayar_sample(wi_l, u2);
+  if (!zeltner) return cosine_hemisphere_sample(wi_l, u2);
   using Vector3f = Vector<Float, 3>;
   Float cos_i = Frame<Float>::cos_theta(wi_l), n_dot_v = dr::abs(cos_i);
   auto [a_inv, b_inv, tx, ty] =
@@ -650,27 +866,23 @@ std::pair<Spectrum, Float> sheen_eval_pdf(const Vector<Float, 3>& wi_l,
                                           bool zeltner) {
   using ScalarFloat = dr::scalar_t<Float>;
   using Vector3f = Vector<Float, 3>;
-  Float cos_i = Frame<Float>::cos_theta(wi_l),
-        cos_o = Frame<Float>::cos_theta(wo_l);
-  Float n_dot_v = dr::abs(cos_i), n_dot_l = dr::mulsign(cos_o, cos_i);
-  auto valid = (n_dot_v > 0.0f) && (n_dot_l > 0.0f);
-  Vector3f wi_pos(wi_l.x(), wi_l.y(), n_dot_v),
-      wo_pos(wo_l.x(), wo_l.y(), n_dot_l);
+  auto ha = hemisphere_angles(wi_l, wo_l);
+  Vector3f wi_pos(wi_l.x(), wi_l.y(), ha.n_dot_v),
+      wo_pos(wo_l.x(), wo_l.y(), ha.n_dot_l);
   if (zeltner) {
     auto [a_inv, b_inv, tx, ty] = zeltner_sheen_ltc(wi_pos, roughness);
     Float x = tx * wo_pos.x() + ty * wo_pos.y(),
           y = tx * wo_pos.y() - ty * wo_pos.x();
-    Vector3f w(a_inv * x + b_inv * n_dot_l, a_inv * y, n_dot_l);
+    Vector3f w(a_inv * x + b_inv * ha.n_dot_l, a_inv * y, ha.n_dot_l);
     Float density = dr::select(
-        valid,
-        n_dot_l * dr::InvPi<Float> *
-            dr::square(a_inv / dr::select(valid, dr::squared_norm(w), 1.0f)),
+        ha.valid,
+        ha.pdf *
+            dr::square(a_inv / dr::select(ha.valid, dr::squared_norm(w), 1.0f)),
         0.0f);
-    return {color * (sheen_dir_albedo(n_dot_v, roughness, /*zeltner=*/true) *
+    return {color * (sheen_dir_albedo(ha.n_dot_v, roughness, /*zeltner=*/true) *
                      density),
             density};
   }
-  Float pdf_val = n_dot_l * dr::InvPi<Float>;
   Float inv_r = dr::rcp(dr::clip(roughness, 0.005f, 1.0f));
   Vector3f h = safe_normalize(wi_pos + wo_pos, Vector3f(0.0f, 0.0f, 1.0f),
                               kMinLen2<ScalarFloat>);
@@ -681,34 +893,21 @@ std::pair<Spectrum, Float> sheen_eval_pdf(const Vector<Float, 3>& wi_l,
       (2.0f + inv_r) * dr::pow(dr::select(pos_sin, sin2, 1.0f), 0.5f * inv_r) *
           0.5f,
       0.0f);
-  Float denom = 4.0f * (n_dot_l + n_dot_v - n_dot_l * n_dot_v);
+  Float denom = 4.0f * (ha.n_dot_l + ha.n_dot_v - ha.n_dot_l * ha.n_dot_v);
   return {dr::select(
-              valid,
-              color * (pdf_val * d_pi / dr::maximum(denom, dr::Epsilon<Float>)),
+              ha.valid,
+              color * (ha.pdf * d_pi / dr::maximum(denom, dr::Epsilon<Float>)),
               0.0f),
-          dr::select(valid, pdf_val, 0.0f)};
-}
-
-template <typename Float>
-std::pair<Vector<Float, 3>, dr::mask_t<Float>> translucent_sample(
-    const Vector<Float, 3>& wi_l, const Point<Float, 2>& u2) {
-  Float cos_i = Frame<Float>::cos_theta(wi_l);
-  Vector<Float, 3> wo_l = warp::square_to_cosine_hemisphere(u2);
-  wo_l.z() = dr::mulsign(wo_l.z(), -cos_i);
-  return {wo_l, cos_i != 0.0f};
+          dr::select(ha.valid, ha.pdf, 0.0f)};
 }
 
 template <typename Float, typename Spectrum>
 std::pair<Spectrum, Float> translucent_eval_pdf(const Vector<Float, 3>& wi_l,
                                                 const Vector<Float, 3>& wo_l,
                                                 const Spectrum& color) {
-  Float cos_i = Frame<Float>::cos_theta(wi_l),
-        cos_o = Frame<Float>::cos_theta(wo_l);
-  Float n_dot_v = dr::abs(cos_i), n_dot_l = dr::mulsign(cos_o, -cos_i);
-  auto valid = (n_dot_v > 0.0f) && (n_dot_l > 0.0f);
-  Float pdf_val = n_dot_l * dr::InvPi<Float>;
-  return {dr::select(valid, color * pdf_val, 0.0f),
-          dr::select(valid, pdf_val, 0.0f)};
+  auto h = hemisphere_angles(wi_l, wo_l, /*same_side=*/false);
+  return {dr::select(h.valid, color * h.pdf, 0.0f),
+          dr::select(h.valid, h.pdf, 0.0f)};
 }
 
 // Longitudinal (`Mp`) and trimmed-logistic azimuthal (`Np`) scattering
@@ -739,7 +938,7 @@ Float hair_trimmed_logistic(const Float& x, const Float& s) {
   Float e = dr::exp(-dr::abs(x) / s);
   Float e_pi = dr::exp(-dr::Pi<Float> / s);
   return e / (s * dr::square(1.0f + e)) * (1.0f + e_pi) /
-         dr::maximum(1.0f - e_pi, 1e-7f);
+         dr::maximum(1.0f - e_pi, dr::Epsilon<Float>);
 }
 
 template <typename Float>
@@ -833,10 +1032,10 @@ ChiangHairParams<Float, UnpolSpec> build_chiang_hair_params(
 }
 
 template <typename Float, typename UnpolSpec>
-std::tuple<Vector<Float, 3>, dr::uint32_array_t<Float>, dr::mask_t<Float>>
-chiang_hair_sample(const ChiangHairParams<Float, UnpolSpec>& hp,
-                   const Vector<Float, 3>& wi_l, bool refl_on, bool trans_on,
-                   const Float& sample1, const Point<Float, 2>& sample2) {
+LobeSample<Float> chiang_hair_sample(
+    const ChiangHairParams<Float, UnpolSpec>& hp, const Vector<Float, 3>& wi_l,
+    bool refl_on, bool trans_on, const Float& sample1,
+    const Point<Float, 2>& sample2) {
   using Mask = dr::mask_t<Float>;
   using UInt32 = dr::uint32_array_t<Float>;
   using Vector3f = Vector<Float, 3>;
@@ -877,7 +1076,7 @@ chiang_hair_sample(const ChiangHairParams<Float, UnpolSpec>& hp,
       dr::select(is_refl, UInt32(+BSDFFlags::GlossyReflection),
                  UInt32(+BSDFFlags::GlossyTransmission));
   Mask dir_ok = dr::select(is_refl, Mask(refl_on), Mask(trans_on));
-  return {wo_l, sampled_type,
+  return {wo_l, sampled_type, Float(1.0f),
           dir_ok && (wi_l.z() != 0.0f) && (wo_h.z() != 0.0f)};
 }
 

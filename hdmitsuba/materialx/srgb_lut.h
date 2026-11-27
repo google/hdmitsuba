@@ -22,6 +22,7 @@
 #include <cstring>
 #include <fstream>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include <absl/base/no_destructor.h>
@@ -88,16 +89,37 @@ class SrgbUpsampler {
 
   void load() {
     if constexpr (is_spectral_v<Spectrum> && dr::is_jit_v<Float>) {
-      m_lut = get_srgb_lut<Float32>();
+      if (!m_lut) m_lut = get_srgb_lut<Float32>();
     }
   }
 
-  // Spectral upsampling of an RGB color computed at render time. `SRGBModel`
-  // upsamples colors in [0, 1], so an unbounded color `c` maps to
+  static UnpolarizedSpectrum eval_coeffs(const dr::Array<Float, 3>& coeff,
+                                         const Float& scale,
+                                         const Wavelength& wavelengths,
+                                         bool unbounded) {
+    UnpolarizedSpectrum spec =
+        srgb_model_eval<UnpolarizedSpectrum>(coeff, wavelengths);
+    return unbounded ? spec * scale : spec;
+  }
+
+  // Returns `(coeff, scale)` such that the upsampled spectrum at `wavelengths`
+  // is `eval_coeffs(coeff, scale, wavelengths, unbounded)`.
+  // `SRGBModel` upsamples colors in [0, 1], so an unbounded color `c` maps to
   // `2 * max(c) * S(c / (2 * max(c)))`, like `D65Spectrum::normalization` for
   // constant colors: the brightest channel sits at 0.5 inside the smooth
   // interior of the model, and the mapping remains homogeneous of degree 1 for
   // unbounded HDR emission and conductor IOR/extinction.
+  std::pair<dr::Array<Float, 3>, Float> fetch_coeffs(const Color3f& c,
+                                                     bool unbounded) const {
+    if (!unbounded) return {fetch(c), Float(1.0f)};
+    Color3f rgb = dr::maximum(c, 0.0f);
+    Float z = dr::max(rgb) * 2.0f;
+    auto active = z > 0.0f;
+    return {fetch(dr::select(active, rgb / dr::select(active, z, 1.0f),
+                             Color3f(0.5f))),
+            z};
+  }
+
   UnpolarizedSpectrum upsample(const Color3f& c, const Wavelength& wavelengths,
                                bool unbounded) const {
     if constexpr (!is_spectral_v<Spectrum>) {
@@ -109,17 +131,8 @@ class SrgbUpsampler {
         return c;
       }
     } else {
-      if (!unbounded) {
-        return srgb_model_eval<UnpolarizedSpectrum>(fetch(c), wavelengths);
-      }
-      Color3f rgb = dr::maximum(c, 0.0f);
-      Float z = dr::max(rgb) * 2.0f;
-      auto active = z > 0.0f;
-      return srgb_model_eval<UnpolarizedSpectrum>(
-                 fetch(dr::select(active, rgb / dr::select(active, z, 1.0f),
-                                  Color3f(0.5f))),
-                 wavelengths) *
-             z;
+      auto [coeff, scale] = fetch_coeffs(c, unbounded);
+      return eval_coeffs(coeff, scale, wavelengths, unbounded);
     }
   }
 

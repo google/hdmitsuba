@@ -17,6 +17,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <absl/container/inlined_vector.h>
@@ -73,7 +74,12 @@ class MtlxEvaluator {
 
   void compile(const Properties& props);
   void compile(const Properties& props, MtlxValueProgram prog);
-  void load_srgb_lut();
+  // Registers a deduplicated spectrum slot (loading the sRGB LUT and reserving
+  // a hoisted uniform slot when spatially invariant on spectral variants).
+  // Call `finalize_uniforms()` once all slots are registered.
+  int add_spectrum(ValueId id, bool unbounded = false);
+  size_t num_spectra() const { return m_spec_slots.size(); }
+  void finalize_uniforms();
 
   const MtlxValueProgram& program() const { return m_prog; }
   void traverse(TraversalCallback* cb);
@@ -82,6 +88,9 @@ class MtlxEvaluator {
   bool is_spatially_varying() const;
 
   Val read_val(ValueId id, const EvalState& state) const;
+  UnpolarizedSpectrum eval_spectrum(size_t slot_idx,
+                                    const Wavelength& wavelengths,
+                                    const EvalState& state) const;
   Val eval_opacity(ValueId opacity_root, const SurfaceInteraction3f& si,
                    Mask active, EvalState& state) const;
   void eval_surface(const SurfaceInteraction3f& si, Mask active,
@@ -91,16 +100,27 @@ class MtlxEvaluator {
   // Returns the luminance of 3-channel results, like Mitsuba's `bitmap`.
   Float eval_1(const SurfaceInteraction3f& si, Mask active) const;
   Color3f eval_3(const SurfaceInteraction3f& si, Mask active) const;
-  UnpolarizedSpectrum upsample_rgb(const Color3f& c,
-                                   const Wavelength& wavelengths,
-                                   bool unbounded) const;
 
   void traverse_cb(void* payload, const drjit::TraverseVisitor& cb);
 
  private:
+  struct SpecSlot {
+    ValueId value;
+    bool unbounded;
+    // Index into `m_uniform_specs` for spatially-invariant non-scalar spectral
+    // slots, or -1 otherwise.
+    int uniform_spec_idx = -1;
+  };
+
+  struct UniformSpec {
+    dr::Array<Float, 3> coeff;
+    Float scale;
+    DRJIT_STRUCT(UniformSpec, coeff, scale)
+  };
+
   bool has_opaque_grad() const;
-  void update_uniform_state();
   Val load_uniform(ValueId id) const;
+  void update_uniform_state();
   void eval_uniform_nodes(absl::InlinedVector<Val, 32>& uvals) const;
   void eval_until(uint32_t end, const SurfaceInteraction3f& si, Mask active,
                   EvalState& state) const;
@@ -117,6 +137,10 @@ class MtlxEvaluator {
   std::vector<Float> m_opaques;
   // Hoisted size-1 evaluated spatially-invariant scalars.
   std::vector<Float> m_uniform_scalars;
+  // Deduplicated spectral slots and hoisted detached upsampling coefficients
+  // (spectral variants only).
+  std::vector<SpecSlot> m_spec_slots;
+  std::vector<UniformSpec> m_uniform_specs;
   // Precomputed finite-difference UV step per `HeightToNormal` region.
   std::vector<ScalarPoint2f> m_region_eps;
   std::unique_ptr<detail::SrgbUpsampler<Float, Spectrum>> m_srgb;
