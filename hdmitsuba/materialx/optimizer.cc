@@ -41,8 +41,8 @@ std::vector<uint8_t> ComputeVarying(const MtlxValueProgram& prog) {
   std::vector<uint8_t> varying(prog.nodes.size(), 0);
   for (size_t i = 0; i < prog.nodes.size(); ++i) {
     const Node& n = prog.nodes[i];
-    bool v = is_spatially_varying_op(n.op) || n.op == Op::SampleInput;
-    for (ValueId a : node_args(n, prog.extra_args)) v |= (varying[a] != 0);
+    bool v = IsSpatiallyVaryingOp(n.op) || n.op == Op::SampleInput;
+    for (ValueId a : NodeArgs(n, prog.extra_args)) v |= (varying[a] != 0);
     varying[i] = v ? 1 : 0;
   }
   return varying;
@@ -54,9 +54,8 @@ struct ClosureAnalysis {
   std::vector<uint8_t> needs_tp;
 };
 
-template <typename IsZeroFn>
 ClosureAnalysis AnalyzeClosures(absl::Span<const ClosureNode> closures,
-                                IsZeroFn&& is_zero) {
+                                const MtlxValueProgram& values) {
   size_t n = closures.size();
   ClosureAnalysis a{std::vector<uint8_t>(n, 0), std::vector<uint8_t>(n, 0),
                     std::vector<uint8_t>(n, 0)};
@@ -81,12 +80,13 @@ ClosureAnalysis AnalyzeClosures(absl::Span<const ClosureNode> closures,
         break;
       case ClosureOp::Multiply:
         a.is_opaque[i] = a.is_opaque[c.comb.first];
-        a.has_scat[i] = a.has_scat[c.comb.first] && !is_zero(c.comb.weight);
+        a.has_scat[i] =
+            a.has_scat[c.comb.first] && !IsConstZero(values, c.comb.weight);
         break;
       default: {
-        ValueId w = leaf_weight_id(c);
-        a.is_opaque[i] = !leaf_has_layer_throughput(c);
-        a.has_scat[i] = (w == kInvalidValue || !is_zero(w)) ? 1 : 0;
+        ValueId w = LeafWeightId(c);
+        a.is_opaque[i] = !LeafHasLayerThroughput(c);
+        a.has_scat[i] = (w == kInvalidValue || !IsConstZero(values, w)) ? 1 : 0;
         break;
       }
     }
@@ -101,7 +101,7 @@ ClosureAnalysis AnalyzeClosures(absl::Span<const ClosureNode> closures,
       if (a.needs_tp[i] && !a.is_opaque[c.comb.first]) {
         a.needs_tp[c.comb.second] = 1;
       }
-    } else if (a.needs_tp[i] && is_combinator(c.op)) {
+    } else if (a.needs_tp[i] && IsCombinator(c.op)) {
       a.needs_tp[c.comb.first] = 1;
       if (c.comb.second >= 0) a.needs_tp[c.comb.second] = 1;
     }
@@ -110,12 +110,6 @@ ClosureAnalysis AnalyzeClosures(absl::Span<const ClosureNode> closures,
 }
 
 void SimplifyClosures(MtlxBsdfProgram& prog) {
-  auto is_const = [&](ValueId id, uint16_t imm) {
-    return prog.values.nodes[id].op == Op::Const &&
-           prog.values.nodes[id].imm == imm;
-  };
-  auto is_zero = [&](ValueId id) { return is_const(id, 0); };
-  auto is_one = [&](ValueId id) { return is_const(id, 1); };
   auto clear_if_op = [&](ValueId& id, Op op) {
     if (id != kInvalidValue && prog.values.nodes[id].op == op) {
       id = kInvalidValue;
@@ -134,7 +128,7 @@ void SimplifyClosures(MtlxBsdfProgram& prog) {
       clear_if_op(c.microfacet.normal, Op::GeomNormalWorld);
       clear_if_op(c.microfacet.tangent, Op::GeomTangentWorld);
       if (c.microfacet.tf_thickness != kInvalidValue &&
-          is_zero(c.microfacet.tf_thickness)) {
+          IsConstZero(prog.values, c.microfacet.tf_thickness)) {
         c.microfacet.tf_thickness = c.microfacet.tf_ior = kInvalidValue;
       }
     } else if (c.op == ClosureOp::ChiangHair) {
@@ -144,14 +138,16 @@ void SimplifyClosures(MtlxBsdfProgram& prog) {
   }
 
   if (prog.opacity_root != kInvalidValue) {
-    if (is_zero(prog.opacity_root)) {
+    if (IsConstZero(prog.values, prog.opacity_root)) {
       prog.closures = {ClosureNode::MakeNull()};
       return;
     }
-    if (is_one(prog.opacity_root)) prog.opacity_root = kInvalidValue;
+    if (IsConstOne(prog.values, prog.opacity_root)) {
+      prog.opacity_root = kInvalidValue;
+    }
   }
 
-  ClosureAnalysis info = AnalyzeClosures(prog.closures, is_zero);
+  ClosureAnalysis info = AnalyzeClosures(prog.closures, prog.values);
   size_t n = prog.closures.size();
   std::vector<ClosureNode> simp;
   simp.reserve(n);
@@ -171,8 +167,8 @@ void SimplifyClosures(MtlxBsdfProgram& prog) {
 
   for (size_t i = 0; i < n; ++i) {
     ClosureNode c = prog.closures[i];
-    if (!is_combinator(c.op)) {
-      remap[i] = emit_node((is_leaf(c.op) && !info.has_scat[i])
+    if (!IsCombinator(c.op)) {
+      remap[i] = emit_node((IsLeaf(c.op) && !info.has_scat[i])
                                ? (info.is_opaque[i] && info.needs_tp[i]
                                       ? ClosureNode::MakeOpaqueBlocker()
                                       : ClosureNode::MakeNull())
@@ -199,15 +195,15 @@ void SimplifyClosures(MtlxBsdfProgram& prog) {
         folded = c0;
       }
     } else if (c.op == ClosureOp::Mix) {
-      if (is_zero(c.comb.weight))
+      if (IsConstZero(prog.values, c.comb.weight))
         folded = c1;
-      else if (is_one(c.comb.weight) || c0 == c1)
+      else if (IsConstOne(prog.values, c.comb.weight) || c0 == c1)
         folded = c0;
     } else {  // Multiply
-      if (is_one(c.comb.weight) || is_null(c0) ||
+      if (IsConstOne(prog.values, c.comb.weight) || is_null(c0) ||
           simp[c0].op == ClosureOp::OpaqueBlocker) {
         folded = c0;
-      } else if (is_zero(c.comb.weight)) {
+      } else if (IsConstZero(prog.values, c.comb.weight)) {
         if (!info.needs_tp[i]) {
           folded = emit_node(ClosureNode::MakeNull());
         } else if (info.is_opaque[old0]) {
@@ -234,7 +230,7 @@ void SimplifyClosures(MtlxBsdfProgram& prog) {
   std::vector<uint8_t> live(simp.size(), 0);
   live[root] = 1;
   for (int32_t i = root; i >= 0; --i) {
-    if (!live[i] || !is_combinator(simp[i].op)) continue;
+    if (!live[i] || !IsCombinator(simp[i].op)) continue;
     live[simp[i].comb.first] = 1;
     if (simp[i].comb.second >= 0) live[simp[i].comb.second] = 1;
   }
@@ -245,7 +241,7 @@ void SimplifyClosures(MtlxBsdfProgram& prog) {
     if (!live[i]) continue;
     ClosureNode c = simp[i];
     c.flags = kClosureNone;
-    if (is_combinator(c.op)) {
+    if (IsCombinator(c.op)) {
       c.comb.first = cremap[c.comb.first];
       if (c.comb.second >= 0) c.comb.second = cremap[c.comb.second];
     }
@@ -253,7 +249,7 @@ void SimplifyClosures(MtlxBsdfProgram& prog) {
     compact.push_back(c);
   }
 
-  ClosureAnalysis final_info = AnalyzeClosures(compact, is_zero);
+  ClosureAnalysis final_info = AnalyzeClosures(compact, prog.values);
   for (size_t i = 0; i < compact.size(); ++i) {
     if (final_info.needs_tp[i]) compact[i].flags |= kClosureNeedsTp;
   }
@@ -269,7 +265,7 @@ OptimizeResult PruneAndSchedule(MtlxValueProgram& prog, MtlxBsdfProgram* bsdf) {
   if (bsdf) {
     mark(bsdf->opacity_root);
     for (const ClosureNode& c : bsdf->closures) {
-      for_each_closure_value_id(c, mark);
+      ForEachClosureValueId(c, mark);
     }
   } else {
     mark(prog.result_root);
@@ -277,7 +273,7 @@ OptimizeResult PruneAndSchedule(MtlxValueProgram& prog, MtlxBsdfProgram* bsdf) {
   auto walk_back = [&](uint32_t begin, uint32_t end) {
     for (uint32_t i = end; i-- > begin;) {
       if (!live[i]) continue;
-      for (ValueId a : node_args(prog.nodes[i], prog.extra_args)) live[a] = 1;
+      for (ValueId a : NodeArgs(prog.nodes[i], prog.extra_args)) live[a] = 1;
       if (prog.nodes[i].op == Op::HeightToNormal) {
         live_region[prog.nodes[i].imm] = 1;
       }
@@ -297,7 +293,7 @@ OptimizeResult PruneAndSchedule(MtlxValueProgram& prog, MtlxBsdfProgram* bsdf) {
     in_opacity[bsdf->opacity_root] = 1;
     for (uint32_t i = prog.main_end; i-- > 0;) {
       if (!in_opacity[i]) continue;
-      for (ValueId a : node_args(prog.nodes[i], prog.extra_args)) {
+      for (ValueId a : NodeArgs(prog.nodes[i], prog.extra_args)) {
         if (varying[a]) in_opacity[a] = 1;
       }
     }
@@ -320,7 +316,7 @@ OptimizeResult PruneAndSchedule(MtlxValueProgram& prog, MtlxBsdfProgram* bsdf) {
     if (n.op == Op::Const) return b.Const(prog.consts[n.imm]);
     if (n.op == Op::Opaque) return b.OpaqueRef(n.imm);
     absl::InlinedVector<ValueId, 8> args;
-    for (ValueId a : node_args(n, prog.extra_args)) args.push_back(remap[a]);
+    for (ValueId a : NodeArgs(n, prog.extra_args)) args.push_back(remap[a]);
     uint16_t imm = n.op == Op::HeightToNormal ? region_remap[n.imm] : n.imm;
     return b.EmitRaw(n.op, args, imm, n.channels, n.flags);
   };
@@ -367,7 +363,7 @@ OptimizeResult PruneAndSchedule(MtlxValueProgram& prog, MtlxBsdfProgram* bsdf) {
       bsdf->opacity_root = remap[bsdf->opacity_root];
     }
     for (ClosureNode& c : bsdf->closures) {
-      for_each_closure_value_id(c, [&](ValueId& id) { id = remap[id]; });
+      ForEachClosureValueId(c, [&](ValueId& id) { id = remap[id]; });
     }
   }
 
@@ -417,7 +413,7 @@ OptimizeResult PruneAndSchedule(MtlxValueProgram& prog, MtlxBsdfProgram* bsdf) {
   auto assign_mats = [&](uint32_t begin, uint32_t end) {
     uint32_t count = 0;
     for (uint32_t i = begin; i < end; ++i) {
-      if (is_matrix_producer(out.nodes[i].op)) {
+      if (IsMatrixProducer(out.nodes[i].op)) {
         out.nodes[i].imm = static_cast<uint16_t>(count++);
       }
     }
@@ -435,20 +431,20 @@ OptimizeResult PruneAndSchedule(MtlxValueProgram& prog, MtlxBsdfProgram* bsdf) {
     if (id != kInvalidValue && id < out.uniform_end) escaped[id] = 1;
   };
   for (size_t i = out.uniform_end; i < out.nodes.size(); ++i) {
-    for (ValueId a : node_args(out.nodes[i], out.extra_args)) mark_esc(a);
+    for (ValueId a : NodeArgs(out.nodes[i], out.extra_args)) mark_esc(a);
   }
   mark_esc(out.result_root);
   if (bsdf) {
     mark_esc(bsdf->opacity_root);
     for (const ClosureNode& c : bsdf->closures) {
-      for_each_closure_value_id(c, mark_esc);
+      ForEachClosureValueId(c, mark_esc);
     }
   }
   out.uniform_offsets.assign(out.uniform_end, kNoUniformScalar);
   for (uint32_t u = 0; u < out.uniform_end; ++u) {
     Op op = out.nodes[u].op;
     if (!escaped[u] || op == Op::Const || op == Op::Opaque ||
-        is_matrix_producer(op)) {
+        IsMatrixProducer(op)) {
       continue;
     }
     out.uniform_offsets[u] = out.uniform_scalar_count;
@@ -507,7 +503,7 @@ void DumpBand(std::ostringstream& os, const MtlxValueProgram& prog,
       }
       os << "(";
       if (n.op == Op::Attr) os << "\"" << prog.attr_names[n.imm] << "\", ";
-      auto args = node_args(n, prog.extra_args);
+      auto args = NodeArgs(n, prog.extra_args);
       for (size_t j = 0; j < args.size(); ++j) {
         if (j > 0) os << ", ";
         os << "%" << args[j];
@@ -543,7 +539,7 @@ void VerifyValueProgram(const MtlxValueProgram& prog, bool scheduled) {
     const Region& r = prog.regions[k];
     Check(r.begin == cursor && r.begin < r.end && r.end <= prog.nodes.size() &&
               r.root >= r.begin && r.root < r.end &&
-              !is_matrix_producer(prog.nodes[r.root].op),
+              !IsMatrixProducer(prog.nodes[r.root].op),
           "invalid region bounds or root");
     std::fill(node_region.begin() + r.begin, node_region.begin() + r.end,
               static_cast<int>(k));
@@ -558,10 +554,10 @@ void VerifyValueProgram(const MtlxValueProgram& prog, bool scheduled) {
       Check(static_cast<size_t>(n.args[0]) + n.arity <= prog.extra_args.size(),
             "extra_args slice out of bounds");
     }
-    auto args = node_args(n, prog.extra_args);
+    auto args = NodeArgs(n, prog.extra_args);
     int reg = node_region[i];
     if (scheduled && i < prog.uniform_end) {
-      Check(!is_spatially_varying_op(n.op) && n.op != Op::SampleInput,
+      Check(!IsSpatiallyVaryingOp(n.op) && n.op != Op::SampleInput,
             "varying op in uniform band");
     }
     for (ValueId a : args) {
@@ -570,11 +566,11 @@ void VerifyValueProgram(const MtlxValueProgram& prog, bool scheduled) {
                                  (scheduled && a < prog.uniform_end));
       Check(order_ok, "operand violates topological order or region isolation");
       if (n.op != Op::MatRow) {
-        Check(!is_matrix_producer(prog.nodes[a].op),
+        Check(!IsMatrixProducer(prog.nodes[a].op),
               "non-MatRow operand is matrix producer");
       }
     }
-    if (int ew = elementwise_arity(n.op)) {
+    if (int ew = ElementwiseArity(n.op)) {
       Check(n.arity == ew, "elementwise arity mismatch");
     }
     switch (n.op) {
@@ -600,7 +596,7 @@ void VerifyValueProgram(const MtlxValueProgram& prog, bool scheduled) {
         break;
       case Op::MatRow: {
         const Node& p = prog.nodes[args[0]];
-        Check(n.arity == 1 && is_matrix_producer(p.op) && n.imm < p.channels &&
+        Check(n.arity == 1 && IsMatrixProducer(p.op) && n.imm < p.channels &&
                   n.channels == p.channels,
               "invalid MatRow");
         if (scheduled) {
@@ -620,7 +616,7 @@ void VerifyValueProgram(const MtlxValueProgram& prog, bool scheduled) {
   }
   if (prog.result_root != kInvalidValue) {
     Check(prog.result_root < prog.main_end &&
-              !is_matrix_producer(prog.nodes[prog.result_root].op),
+              !IsMatrixProducer(prog.nodes[prog.result_root].op),
           "invalid result_root");
   }
 }
@@ -632,17 +628,17 @@ void VerifyBsdfProgram(const MtlxBsdfProgram& prog, bool scheduled) {
   if (prog.opacity_root != kInvalidValue) {
     uint32_t lim = scheduled ? prog.values.opacity_end : prog.values.main_end;
     Check(prog.opacity_root < lim &&
-              !is_matrix_producer(prog.values.nodes[prog.opacity_root].op),
+              !IsMatrixProducer(prog.values.nodes[prog.opacity_root].op),
           "invalid opacity_root");
   }
   for (size_t i = 0; i < prog.closures.size(); ++i) {
     const ClosureNode& c = prog.closures[i];
-    for_each_closure_value_id(c, [&](ValueId id) {
+    ForEachClosureValueId(c, [&](ValueId id) {
       Check(id < prog.values.main_end &&
-                !is_matrix_producer(prog.values.nodes[id].op),
+                !IsMatrixProducer(prog.values.nodes[id].op),
             "closure ValueId out of bounds");
     });
-    if (is_combinator(c.op)) {
+    if (IsCombinator(c.op)) {
       Check(
           c.comb.first >= 0 && static_cast<size_t>(c.comb.first) < i &&
               (c.op == ClosureOp::Multiply ||
@@ -677,12 +673,12 @@ std::string DumpBsdfProgram(const MtlxBsdfProgram& prog) {
     const ClosureNode& c = prog.closures[i];
     os << "  #" << i << " = " << ClosureOpName(c.op) << "(";
     bool first = true;
-    if (is_combinator(c.op)) {
+    if (IsCombinator(c.op)) {
       os << "#" << c.comb.first;
       if (c.comb.second >= 0) os << ", #" << c.comb.second;
       first = false;
     }
-    for_each_closure_value_id(c, [&](ValueId id) {
+    ForEachClosureValueId(c, [&](ValueId id) {
       if (!first) os << ", ";
       os << "%" << id;
       first = false;

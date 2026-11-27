@@ -116,16 +116,10 @@ class IrBuilder {
   ValueId Opaque(double value) { return OpaqueRef(AddOpaqueValue(value)); }
   ValueId OpaqueRef(uint16_t idx) { return EmitRaw(Op::Opaque, {}, idx, 1, 0); }
 
-  bool IsZero(ValueId id) const {
-    return nodes_[id].op == Op::Const && nodes_[id].imm == 0;
-  }
-  bool IsOne(ValueId id) const {
-    return nodes_[id].op == Op::Const && nodes_[id].imm == 1;
-  }
+  bool IsZero(ValueId id) const { return IsConstZero(nodes_, id); }
+  bool IsOne(ValueId id) const { return IsConstOne(nodes_, id); }
   bool IsConstScalar(ValueId id, double* out = nullptr) const {
-    if (nodes_[id].op != Op::Const) return false;
-    if (out) *out = consts_[nodes_[id].imm];
-    return true;
+    return ConstScalar(nodes_, consts_, id, out);
   }
   bool IsVarying(ValueId id) const { return (meta_[id] & kMetaVarying) != 0; }
   bool IsClipped01(ValueId id) const {
@@ -152,15 +146,15 @@ class IrBuilder {
     return std::nullopt;
   }
 
-  uint8_t channels(ValueId id) const { return nodes_[id].channels; }
-  bool is_scalar(ValueId id) const { return nodes_[id].channels == 1; }
+  uint8_t Channels(ValueId id) const { return nodes_[id].channels; }
+  bool IsScalar(ValueId id) const { return nodes_[id].channels == 1; }
 
   // Emits a node directly with commutative canonicalization and GVN
   // deduplication (no algebraic rewrites or constant folding).
   ValueId EmitRaw(Op op, absl::Span<const ValueId> args, uint16_t imm,
                   uint8_t ch, uint8_t flags) {
     GvnKey key{op, ch, flags, imm, {args.begin(), args.end()}};
-    if ((is_commutative_op(op) && key.args.size() == 2 &&
+    if ((IsCommutativeOp(op) && key.args.size() == 2 &&
          key.args[0] > key.args[1]) ||
         (op == Op::Fma && key.args.size() == 3 && key.args[0] > key.args[1])) {
       std::swap(key.args[0], key.args[1]);
@@ -190,16 +184,16 @@ class IrBuilder {
                uint8_t explicit_ch = 0, uint8_t flags = 0) {
     switch (op) {
       case Op::Chan:
-        if (is_scalar(args[0])) return args[0];
+        if (IsScalar(args[0])) return args[0];
         break;
       case Op::Rgb:
-        if (is_scalar(args[0]) && args[0] == args[1] && args[1] == args[2]) {
+        if (IsScalar(args[0]) && args[0] == args[1] && args[1] == args[2]) {
           return args[0];
         }
         break;
       case Op::Vec2:
       case Op::Vec4:
-        if (is_scalar(args[0]) && args[0] == args[1]) return args[0];
+        if (IsScalar(args[0]) && args[0] == args[1]) return args[0];
         break;
       case Op::Neg:
         if (IsZero(args[0])) return Zero();
@@ -318,7 +312,7 @@ class IrBuilder {
     uint8_t ch = explicit_ch ? explicit_ch : DeduceChannels(op, args, imm);
 
     // Fold pure ops whose operands are all compile-time constants.
-    if (is_pure_op(op) && op != Op::Rgb && op != Op::Vec2 && op != Op::Vec4 &&
+    if (IsPureOp(op) && op != Op::Rgb && op != Op::Vec2 && op != Op::Vec4 &&
         args.size() <= 3) {
       Vector<double, 4> cargs[3], out(0.0);
       bool all_const = true;
@@ -330,7 +324,7 @@ class IrBuilder {
         }
       }
       Node tmp{op, ch, static_cast<uint8_t>(args.size()), flags, imm, {}};
-      if (all_const && detail::eval_pure_op<double>(tmp, cargs, out)) {
+      if (all_const && detail::EvalPureOp<double>(tmp, cargs, out)) {
         bool ok = true;
         for (uint8_t c = 0; c < ch; ++c) {
           ok &= std::abs(out[c]) <= std::numeric_limits<float>::max();
@@ -401,8 +395,8 @@ class IrBuilder {
   }
 
   uint8_t ComputeMeta(const Node& n) const {
-    auto args = node_args(n, extra_args_);
-    bool vary = is_spatially_varying_op(n.op) || n.op == Op::SampleInput;
+    auto args = NodeArgs(n, extra_args_);
+    bool vary = IsSpatiallyVaryingOp(n.op) || n.op == Op::SampleInput;
     for (ValueId a : args) vary |= IsVarying(a);
 
     bool clip = false;
@@ -451,7 +445,7 @@ class IrBuilder {
     uint8_t max_ch = 1;
     for (size_t i = 0; i < in.size(); ++i) {
       a[i] = in[i];
-      max_ch = std::max(max_ch, channels(a[i]));
+      max_ch = std::max(max_ch, Channels(a[i]));
     }
     if (out_ch != max_ch) return std::nullopt;
     switch (op) {
@@ -504,9 +498,9 @@ class IrBuilder {
       if (auto up = TryDecomposeAffine(
               dn.op, absl::MakeConstSpan(dn.args, dn.arity), dn.channels)) {
         auto ok = [ch](uint8_t c) { return c == 1 || c == ch; };
-        if (ok(channels(af.x)) && ok(channels(up->x)) &&
-            ok(channels(up->scale)) && ok(channels(up->bias)) &&
-            ok(channels(af.scale)) && ok(channels(af.bias))) {
+        if (ok(Channels(af.x)) && ok(Channels(up->x)) &&
+            ok(Channels(up->scale)) && ok(Channels(up->bias)) &&
+            ok(Channels(af.scale)) && ok(Channels(af.bias))) {
           af.x = up->x;
           af.bias = Fma(up->bias, af.scale, af.bias);
           af.scale = Mul(up->scale, af.scale);
@@ -533,7 +527,7 @@ class IrBuilder {
 
   uint8_t DeduceChannels(Op op, absl::Span<const ValueId> args,
                          uint16_t imm) const {
-    if (elementwise_arity(op) != 0) {
+    if (ElementwiseArity(op) != 0) {
       uint8_t ch = 1;
       for (ValueId a : args) ch = std::max(ch, nodes_[a].channels);
       return ch;
@@ -557,7 +551,7 @@ class IrBuilder {
       case Op::Noise:
       case Op::Worley:
       case Op::Fractal:
-        return noise_is_vec3(imm) ? 3 : 1;
+        return NoiseIsVec3(imm) ? 3 : 1;
       case Op::RgbToHsv:
       case Op::HsvToRgb:
       case Op::MatRow:

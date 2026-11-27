@@ -15,7 +15,6 @@
 #pragma once
 
 // Traversable sRGB-to-spectrum upsampler backed by a weak Float32 LUT cache.
-// Include only from `evaluator.cc` so the cache is never duplicated across TUs.
 
 #include <cstddef>
 #include <cstdint>
@@ -34,11 +33,10 @@
 #include <mitsuba/core/spectrum.h>
 #include <mitsuba/render/srgb.h>
 
-NAMESPACE_BEGIN(mitsuba)
-namespace mtlx::detail {
+namespace mitsuba::mtlx::detail {
 
 // Device-resident `data/srgb.coeff` lookup tables shared via a weak cache so
-// `SrgbUpsampler::traverse_cb()` can expose `data` and `scale` to `@dr.freeze`
+// `SrgbUpsampler::TraverseCb()` can expose `data` and `scale` to `@dr.freeze`
 // and `FrozenRender`.
 template <typename Float32>
 struct SrgbLut {
@@ -48,7 +46,7 @@ struct SrgbLut {
 };
 
 template <typename Float32>
-std::shared_ptr<SrgbLut<Float32>> get_srgb_lut() {
+std::shared_ptr<SrgbLut<Float32>> GetSrgbLut() {
   static absl::NoDestructor<absl::Mutex> mu;
   static absl::NoDestructor<std::weak_ptr<SrgbLut<Float32>>> cached;
   absl::MutexLock lock(*mu);
@@ -87,40 +85,40 @@ class SrgbUpsampler {
   using Wavelength = wavelength_t<Spectrum>;
   using UnpolarizedSpectrum = unpolarized_spectrum_t<Spectrum>;
 
-  void load() {
+  void Load() {
     if constexpr (is_spectral_v<Spectrum> && dr::is_jit_v<Float>) {
-      if (!m_lut) m_lut = get_srgb_lut<Float32>();
+      if (!lut_) lut_ = GetSrgbLut<Float32>();
     }
   }
 
-  static UnpolarizedSpectrum eval_coeffs(const dr::Array<Float, 3>& coeff,
-                                         const Float& scale,
-                                         const Wavelength& wavelengths,
-                                         bool unbounded) {
+  static UnpolarizedSpectrum EvalCoeffs(const dr::Array<Float, 3>& coeff,
+                                        const Float& scale,
+                                        const Wavelength& wavelengths,
+                                        bool unbounded) {
     UnpolarizedSpectrum spec =
         srgb_model_eval<UnpolarizedSpectrum>(coeff, wavelengths);
     return unbounded ? spec * scale : spec;
   }
 
   // Returns `(coeff, scale)` such that the upsampled spectrum at `wavelengths`
-  // is `eval_coeffs(coeff, scale, wavelengths, unbounded)`.
+  // is `EvalCoeffs(coeff, scale, wavelengths, unbounded)`.
   // `SRGBModel` upsamples colors in [0, 1], so an unbounded color `c` maps to
   // `2 * max(c) * S(c / (2 * max(c)))`, like `D65Spectrum::normalization` for
   // constant colors: the brightest channel sits at 0.5 inside the smooth
   // interior of the model, and the mapping remains homogeneous of degree 1 for
   // unbounded HDR emission and conductor IOR/extinction.
-  std::pair<dr::Array<Float, 3>, Float> fetch_coeffs(const Color3f& c,
-                                                     bool unbounded) const {
-    if (!unbounded) return {fetch(c), Float(1.0f)};
+  std::pair<dr::Array<Float, 3>, Float> FetchCoeffs(const Color3f& c,
+                                                    bool unbounded) const {
+    if (!unbounded) return {Fetch(c), Float(1.0f)};
     Color3f rgb = dr::maximum(c, 0.0f);
     Float z = dr::max(rgb) * 2.0f;
     auto active = z > 0.0f;
-    return {fetch(dr::select(active, rgb / dr::select(active, z, 1.0f),
+    return {Fetch(dr::select(active, rgb / dr::select(active, z, 1.0f),
                              Color3f(0.5f))),
             z};
   }
 
-  UnpolarizedSpectrum upsample(const Color3f& c, const Wavelength& wavelengths,
+  UnpolarizedSpectrum Upsample(const Color3f& c, const Wavelength& wavelengths,
                                bool unbounded) const {
     if constexpr (!is_spectral_v<Spectrum>) {
       (void)wavelengths;
@@ -131,17 +129,17 @@ class SrgbUpsampler {
         return c;
       }
     } else {
-      auto [coeff, scale] = fetch_coeffs(c, unbounded);
-      return eval_coeffs(coeff, scale, wavelengths, unbounded);
+      auto [coeff, scale] = FetchCoeffs(c, unbounded);
+      return EvalCoeffs(coeff, scale, wavelengths, unbounded);
     }
   }
 
-  void traverse_cb([[maybe_unused]] void* payload,
-                   [[maybe_unused]] const drjit::TraverseVisitor& cb) {
+  void TraverseCb([[maybe_unused]] void* payload,
+                  [[maybe_unused]] const drjit::TraverseVisitor& cb) {
     if constexpr (is_spectral_v<Spectrum> && dr::is_jit_v<Float>) {
-      if (m_lut) {
-        DR_TRAVERSE_MEMBER(m_lut->scale)
-        DR_TRAVERSE_MEMBER(m_lut->data)
+      if (lut_) {
+        DR_TRAVERSE_MEMBER(lut_->scale)
+        DR_TRAVERSE_MEMBER(lut_->data)
       }
     }
   }
@@ -150,8 +148,8 @@ class SrgbUpsampler {
   using Float32 = dr::float32_array_t<dr::detached_t<Float>>;
 
   // Mirrors `mitsuba::SRGBModel::fetch_jit()` (`mitsuba/src/render/srgb.cpp`),
-  // reading from the traversable `m_lut`.
-  dr::Array<Float, 3> fetch(const Color3f& color) const {
+  // reading from the traversable `lut_`.
+  dr::Array<Float, 3> Fetch(const Color3f& color) const {
     if constexpr (!dr::is_jit_v<Float>) {
       return SRGBModel<Float, Spectrum>::fetch(color);
     } else {
@@ -159,7 +157,7 @@ class SrgbUpsampler {
       using UInt32 = dr::uint32_array_t<Float>;
       using Mask = dr::mask_t<Float>;
 
-      uint32_t res = m_lut->res;
+      uint32_t res = lut_->res;
       float res_f = static_cast<float>(res);
       Color3f c = dr::clip(color, 0.0f, 1.0f);
 
@@ -177,7 +175,7 @@ class SrgbUpsampler {
       y *= scale;
 
       auto scale_at = [&](const UInt32& idx) {
-        return Float(dr::gather<Float32>(m_lut->scale, dr::detach<false>(idx)));
+        return Float(dr::gather<Float32>(lut_->scale, dr::detach<false>(idx)));
       };
       UInt32 zi = dr::binary_search<UInt32>(
                       1, res - 1,
@@ -193,7 +191,7 @@ class SrgbUpsampler {
              dz = res * res;
       auto fetch_coeff = [&](const UInt32& idx) {
         return Array3f(dr::gather<dr::Array<Float32, 3>>(
-            m_lut->data, dr::detach<false>(idx)));
+            lut_->data, dr::detach<false>(idx)));
       };
       auto lerp_x = [&](const UInt32& idx) {
         return dr::lerp(fetch_coeff(idx), fetch_coeff(idx + 1), wx);
@@ -216,8 +214,7 @@ class SrgbUpsampler {
     }
   }
 
-  std::shared_ptr<SrgbLut<Float32>> m_lut;
+  std::shared_ptr<SrgbLut<Float32>> lut_;
 };
 
-}  // namespace mtlx::detail
-NAMESPACE_END(mitsuba)
+}  // namespace mitsuba::mtlx::detail

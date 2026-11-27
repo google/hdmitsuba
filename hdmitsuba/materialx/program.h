@@ -51,15 +51,15 @@ inline constexpr int kMaxFractalOctaves = 16;
 inline constexpr int kFractalOctavesShift = 2;
 inline constexpr uint16_t kFractalDynamicOctaves = kMaxFractalOctaves + 1;
 
-constexpr uint16_t pack_noise_imm(bool is_3d, bool is_vec3,
-                                  uint16_t octaves = 0) {
+constexpr uint16_t PackNoiseImm(bool is_3d, bool is_vec3,
+                                uint16_t octaves = 0) {
   return static_cast<uint16_t>((is_3d ? kNoise3D : 0) |
                                (is_vec3 ? kNoiseVec3 : 0) |
                                (octaves << kFractalOctavesShift));
 }
-constexpr bool noise_is_3d(uint16_t imm) { return (imm & kNoise3D) != 0; }
-constexpr bool noise_is_vec3(uint16_t imm) { return (imm & kNoiseVec3) != 0; }
-constexpr uint16_t fractal_octaves(uint16_t imm) {
+constexpr bool NoiseIs3D(uint16_t imm) { return (imm & kNoise3D) != 0; }
+constexpr bool NoiseIsVec3(uint16_t imm) { return (imm & kNoiseVec3) != 0; }
+constexpr uint16_t FractalOctaves(uint16_t imm) {
   return static_cast<uint16_t>(imm >> kFractalOctavesShift);
 }
 
@@ -137,7 +137,7 @@ enum class Op : uint8_t {
   Blackbody,
   Vec4,
 
-  // Procedural noise ops (see `pack_noise_imm`).
+  // Procedural noise ops (see `PackNoiseImm`).
   CellNoise,
   Noise,
   Worley,
@@ -153,20 +153,18 @@ enum class Op : uint8_t {
   MatRow
 };
 
-constexpr int elementwise_arity(Op op) {
+constexpr int ElementwiseArity(Op op) {
   if (op >= Op::Neg && op <= Op::Fract) return 1;
   if (op >= Op::Add && op <= Op::Atan2) return 2;
   if (op >= Op::Select && op <= Op::Fma) return 3;
   return 0;
 }
-constexpr bool is_spatially_varying_op(Op op) {
+constexpr bool IsSpatiallyVaryingOp(Op op) {
   return op >= Op::SampleInputUV && op <= Op::HeightToNormal;
 }
-constexpr bool is_pure_op(Op op) { return op >= Op::Neg && op <= Op::Vec4; }
-constexpr bool is_commutative_op(Op op) {
-  return op >= Op::Add && op <= Op::Max;
-}
-constexpr bool is_matrix_producer(Op op) {
+constexpr bool IsPureOp(Op op) { return op >= Op::Neg && op <= Op::Vec4; }
+constexpr bool IsCommutativeOp(Op op) { return op >= Op::Add && op <= Op::Max; }
+constexpr bool IsMatrixProducer(Op op) {
   return op >= Op::MatTranspose && op <= Op::MatMul;
 }
 
@@ -188,10 +186,24 @@ struct Node {
 static_assert(sizeof(Node) == 12);
 static_assert(std::has_unique_object_representations_v<Node>);
 
-inline absl::Span<const ValueId> node_args(
+inline absl::Span<const ValueId> NodeArgs(
     const Node& n, absl::Span<const ValueId> extra_args) {
   return n.arity <= 3 ? absl::MakeConstSpan(n.args, n.arity)
                       : extra_args.subspan(n.args[0], n.arity);
+}
+
+inline bool IsConstZero(absl::Span<const Node> nodes, ValueId id) {
+  return nodes[id].op == Op::Const && nodes[id].imm == 0;
+}
+inline bool IsConstOne(absl::Span<const Node> nodes, ValueId id) {
+  return nodes[id].op == Op::Const && nodes[id].imm == 1;
+}
+inline bool ConstScalar(absl::Span<const Node> nodes,
+                        absl::Span<const double> consts, ValueId id,
+                        double* out = nullptr) {
+  if (nodes[id].op != Op::Const) return false;
+  if (out) *out = consts[nodes[id].imm];
+  return true;
 }
 
 // Self-contained SSA slice in `MtlxValueProgram::nodes[begin .. end)` evaluated
@@ -227,7 +239,7 @@ struct MtlxValueProgram {
   std::vector<std::string> attr_names;
 
   // For each `id < uniform_end`, the offset into
-  // `MtlxEvaluator::m_uniform_scalars` if `id` is a computed uniform read
+  // `MtlxEvaluator::uniform_scalars_` if `id` is a computed uniform read
   // outside `[0 .. uniform_end)`, or `kNoUniformScalar` otherwise (`Const`,
   // `Opaque`, or internal-only uniform).
   std::vector<uint32_t> uniform_offsets;
@@ -241,16 +253,16 @@ struct MtlxValueProgram {
   // Root expression for `MtlxExprTexture`, or `kInvalidValue` for BSDFs.
   ValueId result_root = kInvalidValue;
 
-  bool is_value_scalar(ValueId id) const { return nodes[id].channels == 1; }
-  bool result_scalar() const {
-    return result_root != kInvalidValue && is_value_scalar(result_root);
+  bool IsValueScalar(ValueId id) const { return nodes[id].channels == 1; }
+  bool ResultScalar() const {
+    return result_root != kInvalidValue && IsValueScalar(result_root);
   }
 
   // Appends a self-contained region node buffer (with 0-based local ValueIds)
   // as a contiguous `Region` slice after `main_end`.
-  void append_region(absl::Span<const Node> reg_nodes,
-                     absl::Span<const ValueId> reg_extra_args, ValueId reg_root,
-                     uint16_t has_texcoord) {
+  void AppendRegion(absl::Span<const Node> reg_nodes,
+                    absl::Span<const ValueId> reg_extra_args, ValueId reg_root,
+                    uint16_t has_texcoord) {
     uint32_t base = static_cast<uint32_t>(nodes.size());
     uint32_t extra_base = static_cast<uint32_t>(extra_args.size());
     if (base + reg_nodes.size() >= kMaxImm) {
@@ -280,7 +292,7 @@ struct MtlxValueProgram {
     regions.push_back(r);
   }
 
-  void traverse_state(void* payload, const drjit::TraverseVisitor& cb) const {
+  void TraverseState(void* payload, const drjit::TraverseVisitor& cb) const {
     if (!cb.state) return;
     auto put_span = [&](const auto& vec, const char* name) {
       size_t n = vec.size();
@@ -306,6 +318,17 @@ struct MtlxValueProgram {
     DR_TRAVERSE_STATE(result_root)
   }
 };
+
+inline bool IsConstZero(const MtlxValueProgram& prog, ValueId id) {
+  return IsConstZero(prog.nodes, id);
+}
+inline bool IsConstOne(const MtlxValueProgram& prog, ValueId id) {
+  return IsConstOne(prog.nodes, id);
+}
+inline bool ConstScalar(const MtlxValueProgram& prog, ValueId id,
+                        double* out = nullptr) {
+  return ConstScalar(prog.nodes, prog.consts, id, out);
+}
 
 // Microfacet `ClosureNode::Microfacet::mode` scatter mode values
 // (`kScatterModeMask`) and flags.
@@ -339,10 +362,10 @@ enum class ClosureOp : uint16_t {
   Multiply
 };
 
-constexpr bool is_leaf(ClosureOp op) {
+constexpr bool IsLeaf(ClosureOp op) {
   return op > ClosureOp::OpaqueBlocker && op < ClosureOp::Layer;
 }
-constexpr bool is_combinator(ClosureOp op) { return op >= ClosureOp::Layer; }
+constexpr bool IsCombinator(ClosureOp op) { return op >= ClosureOp::Layer; }
 
 // Tagged POD closure node stored in `MtlxBsdfProgram::closures`. Unless noted
 // as a literal or closure index, each field is a `ValueId` (`kInvalidValue` if
@@ -485,14 +508,14 @@ static_assert(std::has_unique_object_representations_v<ClosureNode>);
 
 // Returns true if a leaf BSDF closure transmits energy to an underlying `layer`
 // base (sheen or reflection-only dielectric / generalized Schlick).
-constexpr bool leaf_has_layer_throughput(const ClosureNode& c) {
+constexpr bool LeafHasLayerThroughput(const ClosureNode& c) {
   return c.op == ClosureOp::Sheen ||
          ((c.op == ClosureOp::Dielectric ||
            c.op == ClosureOp::GeneralizedSchlick) &&
           (c.microfacet.mode & kScatterModeMask) == kScatterR);
 }
 
-constexpr ValueId leaf_weight_id(const ClosureNode& c) {
+constexpr ValueId LeafWeightId(const ClosureNode& c) {
   if (c.op >= ClosureOp::OrenNayarDiffuse && c.op <= ClosureOp::Translucent) {
     return c.diffuse.weight;
   }
@@ -505,7 +528,7 @@ constexpr ValueId leaf_weight_id(const ClosureNode& c) {
 // Invokes `fn(id)` for every valid (`!= kInvalidValue`) `ValueId` referenced by
 // `c`.
 template <typename ClosureT, typename Fn>
-void for_each_closure_value_id(ClosureT& c, Fn&& fn) {
+void ForEachClosureValueId(ClosureT& c, Fn&& fn) {
   auto visit = [&](auto&... ids) {
     ((ids != kInvalidValue ? (void)fn(ids) : (void)0), ...);
   };

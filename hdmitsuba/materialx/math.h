@@ -27,16 +27,15 @@
 
 #include "hdmitsuba/materialx/program.h"
 
-NAMESPACE_BEGIN(mitsuba)
-namespace mtlx::detail {
+namespace mitsuba::mtlx::detail {
 
 template <typename ScalarFloat>
 inline constexpr ScalarFloat kMinLen2 =
     dr::Epsilon<ScalarFloat> * dr::Epsilon<ScalarFloat>;
 
 template <typename Vec>
-Vec safe_normalize(const Vec& v, const Vec& fallback = Vec(0.0f),
-                   dr::scalar_t<Vec> min_len2 = 0.0f) {
+Vec SafeNormalize(const Vec& v, const Vec& fallback = Vec(0.0f),
+                  dr::scalar_t<Vec> min_len2 = 0.0f) {
   auto len2 = dr::squared_norm(v);
   auto valid = len2 > min_len2;
   return dr::select(valid, v * dr::rsqrt(dr::select(valid, len2, 1.0f)),
@@ -44,20 +43,20 @@ Vec safe_normalize(const Vec& v, const Vec& fallback = Vec(0.0f),
 }
 
 template <typename Vec3>
-Vec3 orthogonalize_tangent(
+Vec3 OrthogonalizeTangent(
     const Vec3& n, const Vec3& t, const Vec3& fallback,
     dr::scalar_t<Vec3> min_len2 = kMinLen2<dr::scalar_t<Vec3>>) {
-  return safe_normalize(dr::fnmadd(n, dr::dot(n, t), t), fallback, min_len2);
+  return SafeNormalize(dr::fnmadd(n, dr::dot(n, t), t), fallback, min_len2);
 }
 
 template <typename SurfaceInteraction>
-auto geom_tangent_world(const SurfaceInteraction& si) {
+auto GeomTangentWorld(const SurfaceInteraction& si) {
   using Vec3 = std::decay_t<decltype(si.sh_frame.s)>;
-  return orthogonalize_tangent(Vec3(si.sh_frame.n), si.dp_du, si.sh_frame.s);
+  return OrthogonalizeTangent(Vec3(si.sh_frame.n), si.dp_du, si.sh_frame.s);
 }
 
 template <typename SurfaceInteraction, typename Vec3>
-Vec3 geom_bitangent_world(const SurfaceInteraction& si, const Vec3& t) {
+Vec3 GeomBitangentWorld(const SurfaceInteraction& si, const Vec3& t) {
   Vec3 b = dr::cross(si.sh_frame.n, t);
   // Mitsuba's V is flipped relative to MaterialX, so dp/dv_mtlx = -dp_dv.
   return dr::select(dr::dot(b, si.dp_dv) > 0.0f, -b, b);
@@ -65,19 +64,19 @@ Vec3 geom_bitangent_world(const SurfaceInteraction& si, const Vec3& t) {
 
 // Like OSL, rounds halfway cases away from zero.
 template <typename Float>
-Float mx_round(const Float& x) {
+Float MxRound(const Float& x) {
   Float t = dr::trunc(x);
   return dr::select(dr::abs(x - t) >= 0.5f, t + dr::copysign(1.0f, x), t);
 }
 
 template <typename Float>
-Float mx_safe_log(const Float& x) {
+Float MxSafeLog(const Float& x) {
   auto pos = x > 0.0f;
   return dr::select(pos, dr::log(dr::select(pos, x, 1.0f)), 0.0f);
 }
 
 template <typename T>
-T mx_safe_div(const T& a, const T& b) {
+T MxSafeDiv(const T& a, const T& b) {
   auto nz = b != 0.0f;
   return dr::select(nz, a / dr::select(nz, b, T(1.0f)), T(0.0f));
 }
@@ -85,7 +84,7 @@ T mx_safe_div(const T& a, const T& b) {
 // Like OSL's `safe_pow()`, raises negative bases to integer powers only, and
 // returns 0 for other negative bases.
 template <typename Float>
-Float mx_safe_pow(const Float& x, const Float& y) {
+Float MxSafePow(const Float& x, const Float& y) {
   Float mag = dr::pow(dr::select(x != 0.0f, dr::abs(x), 1.0f), y);
   Float neg =
       dr::select(dr::floor(y) == y,
@@ -96,14 +95,14 @@ Float mx_safe_pow(const Float& x, const Float& y) {
 }
 
 template <typename T>
-T mx_safe_atan2(const T& y, const T& x) {
+T MxSafeAtan2(const T& y, const T& x) {
   auto nz = (y != 0.0f) | (x != 0.0f);
   return dr::select(nz, dr::atan2(y, dr::select(nz, x, T(1.0f))), T(0.0f));
 }
 
 // Like division, the inverse of a singular matrix is zero.
 template <typename Float, size_t N>
-dr::Matrix<Float, N> mx_safe_inverse(const dr::Matrix<Float, N>& m) {
+dr::Matrix<Float, N> MxSafeInverse(const dr::Matrix<Float, N>& m) {
   using Matrix = dr::Matrix<Float, N>;
   auto valid = dr::det(m) != 0.0f;
   return dr::select(valid,
@@ -112,16 +111,16 @@ dr::Matrix<Float, N> mx_safe_inverse(const dr::Matrix<Float, N>& m) {
 }
 
 template <typename Float>
-Vector<Float, 2> mx_rotate2d(const Vector<Float, 2>& v,
-                             const Float& amount_deg) {
+Vector<Float, 2> MxRotate2D(const Vector<Float, 2>& v,
+                            const Float& amount_deg) {
   auto [s, c] = dr::sincos(dr::deg_to_rad(amount_deg));
   return Vector<Float, 2>(v.x() * c + v.y() * s, v.y() * c - v.x() * s);
 }
 
 template <typename Float>
-Vector<Float, 3> mx_rotate3d(const Vector<Float, 3>& v, const Float& amount_deg,
-                             const Vector<Float, 3>& axis_in) {
-  Vector<Float, 3> axis = safe_normalize(axis_in);
+Vector<Float, 3> MxRotate3D(const Vector<Float, 3>& v, const Float& amount_deg,
+                            const Vector<Float, 3>& axis_in) {
+  Vector<Float, 3> axis = SafeNormalize(axis_in);
   auto [s, c] = dr::sincos(-dr::deg_to_rad(amount_deg));
   return v * c + dr::cross(axis, v) * s + axis * dr::dot(axis, v) * (1.0f - c);
 }
@@ -129,39 +128,38 @@ Vector<Float, 3> mx_rotate3d(const Vector<Float, 3>& v, const Float& amount_deg,
 // Evaluates tangent-space normal mapping against an orthonormal `frame`
 // `(tangent, bitangent, normal)`.
 template <typename Float>
-Vector<Float, 3> mx_normal_map_frame(const Vector<Float, 3>& val,
-                                     const Vector<Float, 2>& scale,
-                                     const Frame<Float>& frame) {
+Vector<Float, 3> MxNormalMapFrame(const Vector<Float, 3>& val,
+                                  const Vector<Float, 2>& scale,
+                                  const Frame<Float>& frame) {
   using Vector3f = Vector<Float, 3>;
   Vector3f v =
       dr::select(dr::squared_norm(val) == 0.0f, Vector3f(0.0f, 0.0f, 1.0f),
                  dr::fmadd(val, 2.0f, -1.0f));
-  return safe_normalize(
+  return SafeNormalize(
       frame.to_world(Vector3f(v.x() * scale.x(), v.y() * scale.y(), v.z())),
       Vector3f(frame.n));
 }
 
 template <typename Float>
-Vector<Float, 3> mx_normal_map(const Vector<Float, 3>& val,
-                               const Vector<Float, 2>& scale,
-                               const Vector<Float, 3>& n,
-                               const Vector<Float, 3>& tangent,
-                               const Vector<Float, 3>& bitangent,
-                               const Vector<Float, 3>& fallback_n) {
+Vector<Float, 3> MxNormalMap(const Vector<Float, 3>& val,
+                             const Vector<Float, 2>& scale,
+                             const Vector<Float, 3>& n,
+                             const Vector<Float, 3>& tangent,
+                             const Vector<Float, 3>& bitangent,
+                             const Vector<Float, 3>& fallback_n) {
   using Vector3f = Vector<Float, 3>;
-  Vector3f N = safe_normalize(n, fallback_n);
-  Vector3f T = orthogonalize_tangent(N, tangent, coordinate_system(N).first,
-                                     dr::scalar_t<Float>(0.0f));
+  Vector3f N = SafeNormalize(n, fallback_n);
+  Vector3f T = OrthogonalizeTangent(N, tangent, coordinate_system(N).first,
+                                    dr::scalar_t<Float>(0.0f));
   Vector3f B = dr::cross(N, T);
   B = dr::select(dr::dot(bitangent, B) < 0.0f, -B, B);
-  return mx_normal_map_frame(val, scale,
-                             Frame<Float>(T, B, Normal<Float, 3>(N)));
+  return MxNormalMapFrame(val, scale, Frame<Float>(T, B, Normal<Float, 3>(N)));
 }
 
 // Port of MaterialX `mx_blackbody.glsl` (Apache-2.0, Contributors to the
 // MaterialX Project).
 template <typename Float>
-Color<Float, 3> mx_blackbody(const Float& temp_k) {
+Color<Float, 3> MxBlackbody(const Float& temp_k) {
   Float temp = dr::clip(temp_k, 800.0f, 25000.0f);
   Float t = 1000.0f / temp;
   Float xc =
@@ -181,8 +179,8 @@ Color<Float, 3> mx_blackbody(const Float& temp_k) {
 }
 
 template <typename Float>
-Vector<Float, 4> eval_elementwise(Op op, int channels,
-                                  const Vector<Float, 4>* a) {
+Vector<Float, 4> EvalElementwise(Op op, int channels,
+                                 const Vector<Float, 4>* a) {
   auto map = [&](auto fn) {
     if (channels == 1) return Vector<Float, 4>(fn(0));
     Vector<Float, 4> out(0.0f);
@@ -210,7 +208,7 @@ Vector<Float, 4> eval_elementwise(Op op, int channels,
     case Op::Exp:
       return unary([](const Float& x) { return dr::exp(x); });
     case Op::Round:
-      return unary([](const Float& x) { return mx_round(x); });
+      return unary([](const Float& x) { return MxRound(x); });
     case Op::Floor:
       return unary([](const Float& x) { return dr::floor(x); });
     case Op::Ceil:
@@ -218,7 +216,7 @@ Vector<Float, 4> eval_elementwise(Op op, int channels,
     case Op::Sqrt:
       return unary([](const Float& x) { return dr::safe_sqrt(x); });
     case Op::Log:
-      return unary([](const Float& x) { return mx_safe_log(x); });
+      return unary([](const Float& x) { return MxSafeLog(x); });
     case Op::Asin:
       return unary([](const Float& x) { return dr::safe_asin(x); });
     case Op::Acos:
@@ -233,7 +231,7 @@ Vector<Float, 4> eval_elementwise(Op op, int channels,
       return binary([](const Float& x, const Float& y) { return x * y; });
     case Op::Div:
       return binary(
-          [](const Float& x, const Float& y) { return mx_safe_div(x, y); });
+          [](const Float& x, const Float& y) { return MxSafeDiv(x, y); });
     case Op::Lt:
       return binary([](const Float& x, const Float& y) {
         return dr::select(x < y, Float(1.0f), Float(0.0f));
@@ -254,10 +252,10 @@ Vector<Float, 4> eval_elementwise(Op op, int channels,
           [](const Float& x, const Float& y) { return dr::maximum(x, y); });
     case Op::Pow:
       return binary(
-          [](const Float& x, const Float& y) { return mx_safe_pow(x, y); });
+          [](const Float& x, const Float& y) { return MxSafePow(x, y); });
     case Op::Atan2:
       return binary(
-          [](const Float& y, const Float& x) { return mx_safe_atan2(y, x); });
+          [](const Float& y, const Float& x) { return MxSafeAtan2(y, x); });
     case Op::Select:
       return ternary([](const Float& c, const Float& t, const Float& f) {
         return dr::select(c != 0.0f, t, f);
@@ -280,8 +278,8 @@ Vector<Float, 4> eval_elementwise(Op op, int channels,
 }
 
 template <typename Float>
-bool eval_pure_op(const Node& node, const Vector<Float, 4>* a,
-                  Vector<Float, 4>& out) {
+bool EvalPureOp(const Node& node, const Vector<Float, 4>* a,
+                Vector<Float, 4>& out) {
   using Val = Vector<Float, 4>;
   auto xy = [](const Val& v) -> Vector<Float, 2> { return dr::head<2>(v); };
   auto xyz = [](const Val& v) -> Vector<Float, 3> { return dr::head<3>(v); };
@@ -290,8 +288,8 @@ bool eval_pure_op(const Node& node, const Vector<Float, 4>* a,
     return Val(v.x(), v.y(), v.z(), w);
   };
 
-  if (elementwise_arity(node.op) != 0) {
-    out = eval_elementwise<Float>(node.op, node.channels, a);
+  if (ElementwiseArity(node.op) != 0) {
+    out = EvalElementwise<Float>(node.op, node.channels, a);
     return true;
   }
   uint16_t imm = node.imm;
@@ -317,15 +315,15 @@ bool eval_pure_op(const Node& node, const Vector<Float, 4>* a,
       out = val3(dr::cross(xyz(a[0]), xyz(a[1])));
       return true;
     case Op::Normalize:
-      out = imm == 2   ? val2(safe_normalize(xy(a[0])))
-            : imm == 4 ? safe_normalize(a[0])
-                       : val3(safe_normalize(xyz(a[0])));
+      out = imm == 2   ? val2(SafeNormalize(xy(a[0])))
+            : imm == 4 ? SafeNormalize(a[0])
+                       : val3(SafeNormalize(xyz(a[0])));
       return true;
     case Op::Rotate2D:
-      out = val2(mx_rotate2d(xy(a[0]), a[1].x()));
+      out = val2(MxRotate2D(xy(a[0]), a[1].x()));
       return true;
     case Op::Rotate3D:
-      out = val3(mx_rotate3d(xyz(a[0]), a[1].x(), xyz(a[2])));
+      out = val3(MxRotate3D(xyz(a[0]), a[1].x(), xyz(a[2])));
       return true;
     // The color conversions preserve the fourth (alpha) channel natively.
     case Op::RgbToHsv:
@@ -335,12 +333,11 @@ bool eval_pure_op(const Node& node, const Vector<Float, 4>* a,
       out = dr::hsv_to_rgb(a[0]);
       return true;
     case Op::Blackbody:
-      out = val3(mx_blackbody(a[0].x()));
+      out = val3(MxBlackbody(a[0].x()));
       return true;
     default:
       return false;
   }
 }
 
-}  // namespace mtlx::detail
-NAMESPACE_END(mitsuba)
+}  // namespace mitsuba::mtlx::detail

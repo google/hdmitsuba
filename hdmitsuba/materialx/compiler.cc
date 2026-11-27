@@ -211,7 +211,7 @@ class MtlxExprCompiler : private MtlxGraphResolver {
   void FinalizeExpr(ValueId root);
   bool ProgramUsesUv() const;
 
-  const std::vector<std::pair<std::string, int>>& attr_requests() const {
+  const std::vector<std::pair<std::string, int>>& AttrRequests() const {
     return attr_requests_;
   }
 
@@ -720,7 +720,7 @@ ValueId MtlxExprCompiler::MeshAttr(std::string_view name, int dim, ValueId def,
     it = attr_requests_.insert(attr_requests_.end(), std::move(req));
   }
   uint8_t read_ch = static_cast<uint8_t>(dim);
-  uint8_t ch = out_ch ? out_ch : std::max<uint8_t>(b_->channels(def), read_ch);
+  uint8_t ch = out_ch ? out_ch : std::max<uint8_t>(b_->Channels(def), read_ch);
   return b_->Emit(mtlx::Op::Attr, {def},
                   static_cast<uint16_t>(it - attr_requests_.begin()), ch,
                   read_ch);
@@ -1417,7 +1417,7 @@ ValueId MtlxExprCompiler::CompileGeomProp(
       ValueId e = CompileGeomIntrinsic(gp, gpd->getSpace(), type,
                                        !idx.empty() && idx != "0");
       if (ch == 1) return b_->Chan(e, 0);
-      if (ch == 2 && b_->channels(e) > 2) {
+      if (ch == 2 && b_->Channels(e) > 2) {
         return b_->Vec2(b_->Chan(e, 0), b_->Chan(e, 1));
       }
       return e;
@@ -1476,7 +1476,7 @@ std::optional<ValueId> MtlxExprCompiler::CompileMatrixValueNode(
                         b_->Mul(mat.rows[3], last))
               : b_->Add(res, b_->Mul(mat.rows[2], last));
     if (type == "vector2") return b_->Vec2(b_->Chan(res, 0), b_->Chan(res, 1));
-    if (type == "vector3" && b_->channels(res) == 4) {
+    if (type == "vector3" && b_->Channels(res) == 4) {
       return b_->Rgb(b_->Chan(res, 0), b_->Chan(res, 1), b_->Chan(res, 2));
     }
     return res;
@@ -1592,7 +1592,7 @@ std::optional<ValueId> MtlxExprCompiler::CompileColorPbrNode(
     bool has_coeffs = cr.kind != ResolvedInput::None &&
                       !(cr.kind == ResolvedInput::Value &&
                         cr.elem->getParent() == GetNodeInfo(node.node).nodedef);
-    if (!has_coeffs && b_->is_scalar(in_e)) return in_e;
+    if (!has_coeffs && b_->IsScalar(in_e)) return in_e;
     ValueId lum = b_->Emit(
         mtlx::Op::Dot,
         {in_e, has_coeffs ? CompileResolvedInput(cr, b_->Zero())
@@ -1620,7 +1620,7 @@ std::optional<ValueId> MtlxExprCompiler::CompileColorPbrNode(
   }
   if (cat == "roughness_dual") {
     ValueId r = in("roughness");
-    if (b_->is_scalar(r)) {
+    if (b_->IsScalar(r)) {
       return b_->Emit(
           mtlx::Op::Clip,
           {b_->Mul(r, r), b_->Const(mtlx::kMtlxFloatEps), b_->One()});
@@ -1745,7 +1745,7 @@ std::optional<ValueId> MtlxExprCompiler::CompileNoiseNode(
   auto in = [&](const std::string& name, ValueId def = kInvalidValue) {
     return CompileInputExpr(node, name, def);
   };
-  uint16_t imm = mtlx::pack_noise_imm(is_3d, type != "float");
+  uint16_t imm = mtlx::PackNoiseImm(is_3d, type != "float");
   ValueId coord = is_3d ? in("position", MeshAttr("__p_object", 3, PWorld()))
                         : in("texcoord", DefaultTexcoord());
   if (noise == "cellnoise") {
@@ -1769,19 +1769,19 @@ std::optional<ValueId> MtlxExprCompiler::CompileNoiseNode(
   }
   auto eval_one = [&](bool vec3, ValueId p, uint8_t ch = 0) {
     if (is_noise) {
-      return b_->Emit(mtlx::Op::Noise, {p}, mtlx::pack_noise_imm(is_3d, vec3),
+      return b_->Emit(mtlx::Op::Noise, {p}, mtlx::PackNoiseImm(is_3d, vec3),
                       ch);
     }
     if (oct) {
       uint16_t clamped =
           static_cast<uint16_t>(std::clamp(*oct, 0, mtlx::kMaxFractalOctaves));
       return b_->Emit(mtlx::Op::Fractal, {p, lac, dim},
-                      mtlx::pack_noise_imm(is_3d, vec3, clamped), ch);
+                      mtlx::PackNoiseImm(is_3d, vec3, clamped), ch);
     }
     ValueId args[] = {p, lac, dim, dyn_oct};
     return b_->Emit(
         mtlx::Op::Fractal, args,
-        mtlx::pack_noise_imm(is_3d, vec3, mtlx::kFractalDynamicOctaves), ch);
+        mtlx::PackNoiseImm(is_3d, vec3, mtlx::kFractalDynamicOctaves), ch);
   };
   auto offset_coord = [&]() {
     constexpr double kNoiseOffset[3] = {19.0, 73.0, 29.0};
@@ -1840,7 +1840,7 @@ ValueId MtlxExprCompiler::CompileNodeOutputExpr(
   }
   if (cat == "hsvadjust") {
     ValueId amt = CompileInputExpr(node, "amount", b_->ConstRgb(0.0, 1.0, 1.0));
-    if (b_->channels(amt) == 3) {
+    if (b_->Channels(amt) == 3) {
       if (auto v = b_->ConstValue(amt);
           v && (*v)[0] == 0.0 && (*v)[1] == 1.0 && (*v)[2] == 1.0) {
         return CompileInputExpr(node, "in");
@@ -2016,7 +2016,7 @@ ValueId MtlxExprCompiler::CompileOpacity(const ScopedNode& node) {
         [&] { return CompileOpacity(ResolveConnected(node, "fg")); },
         [&] { return CompileOpacity(ResolveConnected(node, "bg")); });
   }
-  if (!b_->is_scalar(res)) {
+  if (!b_->IsScalar(res)) {
     res = b_->Emit(mtlx::Op::Dot, {res, b_->Const(1.0 / 3.0)}, 3);
   }
   opacity_val_[key] = res;
@@ -2059,7 +2059,7 @@ int32_t MtlxExprCompiler::EmitClosure(mtlx::ClosureNode node) {
       opaque = IsClosureOpaque(node.comb.first);
       break;
     default:
-      opaque = !mtlx::leaf_has_layer_throughput(node);
+      opaque = !mtlx::LeafHasLayerThroughput(node);
       break;
   }
   closures_.push_back(node);
@@ -2365,8 +2365,8 @@ void MtlxExprCompiler::AppendPendingRegions() {
   val_prog_.main_end = static_cast<uint32_t>(val_prog_.nodes.size());
   val_prog_.regions.reserve(pending_regions_.size());
   for (const PendingRegion& reg : pending_regions_) {
-    val_prog_.append_region(reg.nodes, reg.extra_args, reg.root,
-                            reg.has_texcoord);
+    val_prog_.AppendRegion(reg.nodes, reg.extra_args, reg.root,
+                           reg.has_texcoord);
   }
   pending_regions_.clear();
 }
@@ -2443,8 +2443,8 @@ CompiledSurfaceShader CompileSurfaceShader(
                               warned);
     compiler.CompileBsdf(shader_node, output_name);
     out.bsdf = compiler.CreateBsdf(variant);
-    out.mesh_attributes.insert(compiler.attr_requests().begin(),
-                               compiler.attr_requests().end());
+    out.mesh_attributes.insert(compiler.AttrRequests().begin(),
+                               compiler.AttrRequests().end());
   }
   {
     MtlxExprCompiler compiler(shader_node->getDocument(), lookup_texture,
@@ -2453,8 +2453,8 @@ CompiledSurfaceShader CompileSurfaceShader(
     if (!compiler.IsZero(radiance)) {
       compiler.FinalizeExpr(radiance);
       out.radiance_texture = compiler.CreateExprTexture(variant);
-      out.mesh_attributes.insert(compiler.attr_requests().begin(),
-                                 compiler.attr_requests().end());
+      out.mesh_attributes.insert(compiler.AttrRequests().begin(),
+                                 compiler.AttrRequests().end());
     }
   }
   return out;
@@ -2489,8 +2489,8 @@ MaterialDisplacement CompileDisplacementShader(
   compiler.FinalizeExpr(disp.val);
   bool requires_uv = compiler.ProgramUsesUv();
   return {compiler.CreateExprTexture(variant), requires_uv, disp.is_vector,
-          MeshAttributeRequests(compiler.attr_requests().begin(),
-                                compiler.attr_requests().end())};
+          MeshAttributeRequests(compiler.AttrRequests().begin(),
+                                compiler.AttrRequests().end())};
 }
 
 void DiscoverDisplacementShaderTextures(

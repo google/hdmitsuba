@@ -16,7 +16,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -40,15 +39,13 @@
 
 #include "hdmitsuba/materialx/math.h"
 #include "hdmitsuba/materialx/noise.h"
-#include "hdmitsuba/materialx/srgb_lut.h"
 
-NAMESPACE_BEGIN(mitsuba)
-namespace mtlx {
+namespace mitsuba::mtlx {
 namespace {
 
 template <size_t N, typename Float>
-void eval_matrix_op(const Node& node, const Vector<Float, 4>* a,
-                    Vector<Float, 4>& out, Vector<Float, 4>* mat_rows) {
+void EvalMatrixOp(const Node& node, const Vector<Float, 4>* a,
+                  Vector<Float, 4>& out, Vector<Float, 4>* mat_rows) {
   using Matrix = dr::Matrix<Float, N>;
   using Row = dr::Array<Float, N>;
   auto read_mat = [&](size_t off) {
@@ -66,7 +63,7 @@ void eval_matrix_op(const Node& node, const Vector<Float, 4>* a,
       return;
     }
     result = node.op == Op::MatTranspose ? dr::transpose(m)
-                                         : detail::mx_safe_inverse(m);
+                                         : detail::MxSafeInverse(m);
   }
   Vector<Float, 4>* dst = mat_rows + static_cast<size_t>(node.imm) * 4;
   for (size_t i = 0; i < N; ++i) {
@@ -77,23 +74,23 @@ void eval_matrix_op(const Node& node, const Vector<Float, 4>* a,
 }
 
 template <int Dim, typename Out, typename Float>
-Vector<Float, 4> eval_noise_op(const Node& node, const Vector<Float, 4>* a) {
+Vector<Float, 4> EvalNoiseOp(const Node& node, const Vector<Float, 4>* a) {
   Out res;
   if (node.op == Op::CellNoise) {
-    res = detail::mx_cell_noise<Dim, Out, Float>(dr::head<Dim>(a[0]));
+    res = detail::MxCellNoise<Dim, Out, Float>(dr::head<Dim>(a[0]));
   } else if (node.op == Op::Noise) {
-    res = detail::mx_perlin_noise<Dim, Out, Float>(dr::head<Dim>(a[0]));
+    res = detail::MxPerlinNoise<Dim, Out, Float>(dr::head<Dim>(a[0]));
   } else if (node.op == Op::Worley) {
-    res = detail::mx_worley_noise<Dim, Out, Float>(
-        dr::head<Dim>(a[0]), a[1].x(), dr::round(a[2].x()) == 1.0f);
+    res = detail::MxWorleyNoise<Dim, Out, Float>(dr::head<Dim>(a[0]), a[1].x(),
+                                                 dr::round(a[2].x()) == 1.0f);
   } else {
-    uint16_t oct = fractal_octaves(node.imm);
+    uint16_t oct = FractalOctaves(node.imm);
     if (oct == kFractalDynamicOctaves) {
-      res = detail::mx_fractal_noise<Dim, Out, Float>(
+      res = detail::MxFractalNoise<Dim, Out, Float>(
           dr::head<Dim>(a[0]), a[3].x(), a[1].x(), a[2].x(),
           kMaxFractalOctaves);
     } else {
-      res = detail::mx_fractal_noise<Dim, Out, Float>(
+      res = detail::MxFractalNoise<Dim, Out, Float>(
           dr::head<Dim>(a[0]), int(oct), a[1].x(), a[2].x());
     }
   }
@@ -105,7 +102,7 @@ Vector<Float, 4> eval_noise_op(const Node& node, const Vector<Float, 4>* a) {
 }
 
 template <typename Color3f>
-Color3f clamp_color(const Color3f& c, bool unbounded) {
+Color3f ClampColor(const Color3f& c, bool unbounded) {
   return unbounded ? dr::maximum(c, 0.0f) : dr::clip(c, 0.0f, 1.0f);
 }
 
@@ -145,19 +142,19 @@ class MtlxExprTexture final : public Texture<Float, Spectrum> {
   MI_IMPORT_TYPES(Texture)
 
   explicit MtlxExprTexture(const Properties& props) : Texture(props) {
-    m_eval.compile(props);
+    eval_.Compile(props);
     if constexpr (is_spectral_v<Spectrum>) {
-      if (m_eval.program().result_root != kInvalidValue) {
-        m_eval.add_spectrum(m_eval.program().result_root, /*unbounded=*/true);
+      if (eval_.Program().result_root != kInvalidValue) {
+        eval_.AddSpectrum(eval_.Program().result_root, /*unbounded=*/true);
       }
     }
-    m_eval.finalize_uniforms();
+    eval_.FinalizeUniforms();
   }
 
-  void traverse(TraversalCallback* cb) override { m_eval.traverse(cb); }
+  void traverse(TraversalCallback* cb) override { eval_.Traverse(cb); }
 
   void parameters_changed(const std::vector<std::string>& = {}) override {
-    m_eval.parameters_changed();
+    eval_.ParametersChanged();
   }
 
   UnpolarizedSpectrum eval(const SurfaceInteraction3f& si,
@@ -168,10 +165,10 @@ class MtlxExprTexture final : public Texture<Float, Spectrum> {
       return eval_3(si, active);
     } else {
       MI_MASKED_FUNCTION(ProfilerPhase::TextureEvaluate, active);
-      if (m_eval.program().result_root == kInvalidValue) return 0.0f;
+      if (eval_.Program().result_root == kInvalidValue) return 0.0f;
       typename MtlxEvaluator<Float, Spectrum>::EvalState state;
-      m_eval.eval_surface(si, active, state);
-      return m_eval.eval_spectrum(0, si.wavelengths, state);
+      eval_.EvalSurface(si, active, state);
+      return eval_.EvalSpectrum(0, si.wavelengths, state);
     }
   }
 
@@ -198,19 +195,19 @@ class MtlxExprTexture final : public Texture<Float, Spectrum> {
   }
 
   Float eval_1(const SurfaceInteraction3f& si, Mask active) const override {
-    return m_eval.eval_1(si, active);
+    return eval_.Eval1(si, active);
   }
 
   Color3f eval_3(const SurfaceInteraction3f& si, Mask active) const override {
-    return m_eval.eval_3(si, active);
+    return eval_.Eval3(si, active);
   }
 
   bool is_spatially_varying() const override {
-    return m_eval.is_spatially_varying();
+    return eval_.IsSpatiallyVarying();
   }
 
   std::string to_string() const override {
-    return "MtlxExprTexture[\n" + m_eval.to_string() + "]";
+    return "MtlxExprTexture[\n" + eval_.ToString() + "]";
   }
 
   MI_DECLARE_CLASS(MtlxExprTexture)
@@ -221,77 +218,70 @@ class MtlxExprTexture final : public Texture<Float, Spectrum> {
       return;
     }
     Texture::traverse_cb(payload, cb);
-    m_eval.traverse_cb(payload, cb);
+    eval_.TraverseCb(payload, cb);
   }
 
  private:
-  MtlxEvaluator<Float, Spectrum> m_eval;
+  MtlxEvaluator<Float, Spectrum> eval_;
 };
 
 }  // namespace
 
 template <typename Float, typename Spectrum>
-MtlxEvaluator<Float, Spectrum>::MtlxEvaluator()
-    : m_srgb(std::make_unique<detail::SrgbUpsampler<Float, Spectrum>>()) {}
-
-template <typename Float, typename Spectrum>
-MtlxEvaluator<Float, Spectrum>::~MtlxEvaluator() = default;
-
-template <typename Float, typename Spectrum>
-void MtlxEvaluator<Float, Spectrum>::compile(const Properties& props) {
-  compile(props, props.get_any<MtlxValueProgram>("program"));
+void MtlxEvaluator<Float, Spectrum>::Compile(const Properties& props) {
+  Compile(props, props.get_any<MtlxValueProgram>("program"));
 }
 
 template <typename Float, typename Spectrum>
-void MtlxEvaluator<Float, Spectrum>::compile(const Properties& props,
+void MtlxEvaluator<Float, Spectrum>::Compile(const Properties& props,
                                              MtlxValueProgram prog) {
-  m_inputs.clear();
+  inputs_.clear();
   for (size_t i = 0;; ++i) {
     std::string name = "in" + std::to_string(i);
     if (!props.has_property(name)) break;
-    m_inputs.push_back(props.get_texture<Texture>(name));
+    inputs_.push_back(props.get_texture<Texture>(name));
   }
 
-  m_prog = std::move(prog);
-  m_spec_slots.clear();
-  m_uniform_specs.clear();
-  m_opaques.clear();
-  m_opaques.reserve(m_prog.opaques.size());
-  for (double v : m_prog.opaques) {
-    m_opaques.push_back(dr::opaque<Float>(static_cast<ScalarFloat>(v)));
+  prog_ = std::move(prog);
+  spec_slots_.clear();
+  uniform_specs_.clear();
+  opaques_.clear();
+  opaques_.reserve(prog_.opaques.size());
+  for (double v : prog_.opaques) {
+    opaques_.push_back(dr::opaque<Float>(static_cast<ScalarFloat>(v)));
   }
 }
 
 template <typename Float, typename Spectrum>
-int MtlxEvaluator<Float, Spectrum>::add_spectrum(ValueId id, bool unbounded) {
-  for (size_t i = 0; i < m_spec_slots.size(); ++i) {
-    if (m_spec_slots[i].value == id && m_spec_slots[i].unbounded == unbounded) {
+int MtlxEvaluator<Float, Spectrum>::AddSpectrum(ValueId id, bool unbounded) {
+  for (size_t i = 0; i < spec_slots_.size(); ++i) {
+    if (spec_slots_[i].value == id && spec_slots_[i].unbounded == unbounded) {
       return static_cast<int>(i);
     }
   }
   int uniform_spec_idx = -1;
   if constexpr (is_spectral_v<Spectrum>) {
-    if (!m_prog.is_value_scalar(id)) {
-      m_srgb->load();
-      if (id < m_prog.uniform_end) {
-        uniform_spec_idx = static_cast<int>(m_uniform_specs.size());
-        m_uniform_specs.emplace_back();
+    if (!prog_.IsValueScalar(id)) {
+      srgb_.Load();
+      if (id < prog_.uniform_end) {
+        uniform_spec_idx = static_cast<int>(uniform_specs_.size());
+        uniform_specs_.emplace_back();
       }
     }
   }
-  m_spec_slots.push_back({id, unbounded, uniform_spec_idx});
-  return static_cast<int>(m_spec_slots.size() - 1);
+  spec_slots_.push_back({id, unbounded, uniform_spec_idx});
+  return static_cast<int>(spec_slots_.size() - 1);
 }
 
 template <typename Float, typename Spectrum>
-void MtlxEvaluator<Float, Spectrum>::finalize_uniforms() {
-  update_uniform_state();
+void MtlxEvaluator<Float, Spectrum>::FinalizeUniforms() {
+  UpdateUniformState();
 }
 
 template <typename Float, typename Spectrum>
-bool MtlxEvaluator<Float, Spectrum>::has_opaque_grad() const {
+bool MtlxEvaluator<Float, Spectrum>::HasOpaqueGrad() const {
   if constexpr (dr::is_diff_v<Float>) {
-    for (const Float& p : m_opaques) {
+    for (const Float& p : opaques_) {
       if (dr::grad_enabled(p)) return true;
     }
   }
@@ -299,57 +289,57 @@ bool MtlxEvaluator<Float, Spectrum>::has_opaque_grad() const {
 }
 
 template <typename Float, typename Spectrum>
-void MtlxEvaluator<Float, Spectrum>::update_uniform_state() {
+void MtlxEvaluator<Float, Spectrum>::UpdateUniformState() {
   // Precompute finite-difference UV steps per `HeightToNormal` region.
-  m_region_eps.resize(m_prog.regions.size());
-  for (size_t r_idx = 0; r_idx < m_prog.regions.size(); ++r_idx) {
-    const Region& r = m_prog.regions[r_idx];
+  region_eps_.resize(prog_.regions.size());
+  for (size_t r_idx = 0; r_idx < prog_.regions.size(); ++r_idx) {
+    const Region& r = prog_.regions[r_idx];
     ScalarVector2i max_res(1);
     for (uint32_t i = r.begin; i < r.end; ++i) {
-      const Node& n = m_prog.nodes[i];
+      const Node& n = prog_.nodes[i];
       if (n.op == Op::SampleInput || n.op == Op::SampleInputUV) {
-        max_res = dr::maximum(max_res, m_inputs[n.imm]->resolution());
+        max_res = dr::maximum(max_res, inputs_[n.imm]->resolution());
       }
     }
     // Use an exact multiple of 1/256 texel (`0.125 / res`) when sampling
     // bitmaps so CUDA's 8-bit fixed-point `tex2D` sub-texel interpolation
     // introduces zero quantization error in central differences.
-    m_region_eps[r_idx] =
+    region_eps_[r_idx] =
         dr::select(max_res > 1,
                    dr::maximum(ScalarFloat(0.125f) / ScalarPoint2f(max_res),
                                ScalarFloat(1e-5f)),
                    ScalarPoint2f(1e-4f));
   }
 
-  m_uniform_scalars.clear();
-  if (m_prog.uniform_scalar_count == 0 && m_uniform_specs.empty()) return;
+  uniform_scalars_.clear();
+  if (prog_.uniform_scalar_count == 0 && uniform_specs_.empty()) return;
 
   absl::InlinedVector<Val, 32> uvals;
-  eval_uniform_nodes(uvals);
+  EvalUniformNodes(uvals);
 
   bool scheduled = false;
-  if (m_prog.uniform_scalar_count > 0) {
-    m_uniform_scalars.reserve(m_prog.uniform_scalar_count);
-    for (uint32_t u = 0; u < m_prog.uniform_end; ++u) {
-      if (m_prog.uniform_offsets[u] == kNoUniformScalar) continue;
-      uint8_t ch = m_prog.nodes[u].channels;
+  if (prog_.uniform_scalar_count > 0) {
+    uniform_scalars_.reserve(prog_.uniform_scalar_count);
+    for (uint32_t u = 0; u < prog_.uniform_end; ++u) {
+      if (prog_.uniform_offsets[u] == kNoUniformScalar) continue;
+      uint8_t ch = prog_.nodes[u].channels;
       for (uint8_t c = 0; c < ch; ++c) {
-        m_uniform_scalars.push_back(dr::detach(uvals[u][c]));
+        uniform_scalars_.push_back(dr::detach(uvals[u][c]));
       }
     }
     if constexpr (dr::is_jit_v<Float>) {
-      for (Float& s : m_uniform_scalars) {
+      for (Float& s : uniform_scalars_) {
         scheduled |= dr::detail::schedule_force(s);
       }
     }
   }
   if constexpr (is_spectral_v<Spectrum>) {
-    for (const SpecSlot& slot : m_spec_slots) {
+    for (const SpecSlot& slot : spec_slots_) {
       if (slot.uniform_spec_idx < 0) continue;
       Color3f c =
-          clamp_color(Color3f(dr::head<3>(uvals[slot.value])), slot.unbounded);
-      auto [coeff, scale] = m_srgb->fetch_coeffs(c, slot.unbounded);
-      UniformSpec& dst = m_uniform_specs[slot.uniform_spec_idx];
+          ClampColor(Color3f(dr::head<3>(uvals[slot.value])), slot.unbounded);
+      auto [coeff, scale] = srgb_.FetchCoeffs(c, slot.unbounded);
+      UniformSpec& dst = uniform_specs_[slot.uniform_spec_idx];
       dst.coeff = dr::detach(coeff);
       dst.scale = dr::detach(scale);
       if constexpr (dr::is_jit_v<Float>) {
@@ -365,73 +355,73 @@ void MtlxEvaluator<Float, Spectrum>::update_uniform_state() {
 
 template <typename Float, typename Spectrum>
 typename MtlxEvaluator<Float, Spectrum>::Val
-MtlxEvaluator<Float, Spectrum>::load_uniform(ValueId id) const {
-  const Node& n = m_prog.nodes[id];
+MtlxEvaluator<Float, Spectrum>::LoadUniform(ValueId id) const {
+  const Node& n = prog_.nodes[id];
   if (n.op == Op::Const) {
-    return Val(static_cast<ScalarFloat>(m_prog.consts[n.imm]));
+    return Val(static_cast<ScalarFloat>(prog_.consts[n.imm]));
   }
-  if (n.op == Op::Opaque) return Val(m_opaques[n.imm]);
-  uint32_t off = m_prog.uniform_offsets[id];
-  if (n.channels == 1) return Val(m_uniform_scalars[off]);
+  if (n.op == Op::Opaque) return Val(opaques_[n.imm]);
+  uint32_t off = prog_.uniform_offsets[id];
+  if (n.channels == 1) return Val(uniform_scalars_[off]);
   Val out(0.0f);
-  for (uint8_t c = 0; c < n.channels; ++c) out[c] = m_uniform_scalars[off + c];
+  for (uint8_t c = 0; c < n.channels; ++c) out[c] = uniform_scalars_[off + c];
   return out;
 }
 
 template <typename Float, typename Spectrum>
-void MtlxEvaluator<Float, Spectrum>::eval_uniform_nodes(
+void MtlxEvaluator<Float, Spectrum>::EvalUniformNodes(
     absl::InlinedVector<Val, 32>& uvals) const {
-  uvals.resize(m_prog.uniform_end);
-  absl::InlinedVector<Val, 4> mats(m_prog.uniform_mat_count * 4);
+  uvals.resize(prog_.uniform_end);
+  absl::InlinedVector<Val, 4> mats(prog_.uniform_mat_count * 4);
   absl::InlinedVector<std::optional<CachedAttr>, 4> attr_cache;
   std::optional<SurfaceInteraction3f> si_uv;
   SurfaceInteraction3f si = dr::zeros<SurfaceInteraction3f>();
-  eval_range(0, m_prog.uniform_end, 0, uvals.data(), mats.data(), uvals.data(),
-             si, Mask(true), attr_cache, si_uv);
+  EvalRange(0, prog_.uniform_end, 0, uvals.data(), mats.data(), uvals.data(),
+            si, Mask(true), attr_cache, si_uv);
 }
 
 template <typename Float, typename Spectrum>
-void MtlxEvaluator<Float, Spectrum>::eval_until(uint32_t end,
-                                                const SurfaceInteraction3f& si,
-                                                Mask active,
-                                                EvalState& state) const {
+void MtlxEvaluator<Float, Spectrum>::EvalUntil(uint32_t end,
+                                               const SurfaceInteraction3f& si,
+                                               Mask active,
+                                               EvalState& state) const {
   if (!state.uniform_ready) {
     state.uniform_ready = true;
-    if (m_prog.uniform_scalar_count > 0 && has_opaque_grad()) {
-      eval_uniform_nodes(state.uniform_vals);
+    if (prog_.uniform_scalar_count > 0 && HasOpaqueGrad()) {
+      EvalUniformNodes(state.uniform_vals);
     }
   }
-  uint32_t start = std::max(state.evaluated_end, m_prog.uniform_end);
+  uint32_t start = std::max(state.evaluated_end, prog_.uniform_end);
   if (start >= end) return;
 
-  state.varying_vals.resize(end - m_prog.uniform_end);
-  if (m_prog.main_mat_count > 0 && state.mat_rows.empty()) {
-    state.mat_rows.resize(m_prog.main_mat_count * 4);
+  state.varying_vals.resize(end - prog_.uniform_end);
+  if (prog_.main_mat_count > 0 && state.mat_rows.empty()) {
+    state.mat_rows.resize(prog_.main_mat_count * 4);
   }
   const Val* uptr =
       state.uniform_vals.empty() ? nullptr : state.uniform_vals.data();
-  eval_range(start, end, m_prog.uniform_end, state.varying_vals.data(),
-             state.mat_rows.data(), uptr, si, active, state.attr_cache,
-             state.si_uv);
+  EvalRange(start, end, prog_.uniform_end, state.varying_vals.data(),
+            state.mat_rows.data(), uptr, si, active, state.attr_cache,
+            state.si_uv);
   state.evaluated_end = end;
 }
 
 template <typename Float, typename Spectrum>
-void MtlxEvaluator<Float, Spectrum>::traverse(TraversalCallback* cb) {
-  for (size_t i = 0; i < m_inputs.size(); ++i) {
-    cb->put("in" + std::to_string(i), m_inputs[i], ParamFlags::Differentiable);
+void MtlxEvaluator<Float, Spectrum>::Traverse(TraversalCallback* cb) {
+  for (size_t i = 0; i < inputs_.size(); ++i) {
+    cb->put("in" + std::to_string(i), inputs_[i], ParamFlags::Differentiable);
   }
-  for (size_t i = 0; i < m_opaques.size(); ++i) {
-    cb->put("param" + std::to_string(i), m_opaques[i],
+  for (size_t i = 0; i < opaques_.size(); ++i) {
+    cb->put("param" + std::to_string(i), opaques_[i],
             ParamFlags::Differentiable);
   }
 }
 
 template <typename Float, typename Spectrum>
-void MtlxEvaluator<Float, Spectrum>::parameters_changed() {
+void MtlxEvaluator<Float, Spectrum>::ParametersChanged() {
   if constexpr (dr::is_jit_v<Float>) {
     bool scheduled = false;
-    for (Float& p : m_opaques) {
+    for (Float& p : opaques_) {
       if (unlikely(p.size() != 1)) {
         Throw("MtlxEvaluator: parameter must have size 1 (got %zu)!", p.size());
       }
@@ -439,26 +429,26 @@ void MtlxEvaluator<Float, Spectrum>::parameters_changed() {
     }
     if (scheduled) dr::eval();
   }
-  update_uniform_state();
+  UpdateUniformState();
 }
 
 template <typename Float, typename Spectrum>
-std::string MtlxEvaluator<Float, Spectrum>::to_string() const {
+std::string MtlxEvaluator<Float, Spectrum>::ToString() const {
   std::ostringstream oss;
-  oss << "  code_size = " << m_prog.nodes.size() << ",\n";
-  for (size_t i = 0; i < m_inputs.size(); ++i) {
-    oss << "  in" << i << " = " << string::indent(m_inputs[i]) << ",\n";
+  oss << "  code_size = " << prog_.nodes.size() << ",\n";
+  for (size_t i = 0; i < inputs_.size(); ++i) {
+    oss << "  in" << i << " = " << string::indent(inputs_[i]) << ",\n";
   }
   return oss.str();
 }
 
 template <typename Float, typename Spectrum>
-bool MtlxEvaluator<Float, Spectrum>::is_spatially_varying() const {
-  for (size_t i = m_prog.uniform_end; i < m_prog.nodes.size(); ++i) {
-    const Node& n = m_prog.nodes[i];
+bool MtlxEvaluator<Float, Spectrum>::IsSpatiallyVarying() const {
+  for (size_t i = prog_.uniform_end; i < prog_.nodes.size(); ++i) {
+    const Node& n = prog_.nodes[i];
     if (n.op == Op::SampleInput) {
-      if (m_inputs[n.imm]->is_spatially_varying()) return true;
-    } else if (is_spatially_varying_op(n.op)) {
+      if (inputs_[n.imm]->is_spatially_varying()) return true;
+    } else if (IsSpatiallyVaryingOp(n.op)) {
       return true;
     }
   }
@@ -467,51 +457,52 @@ bool MtlxEvaluator<Float, Spectrum>::is_spatially_varying() const {
 
 template <typename Float, typename Spectrum>
 typename MtlxEvaluator<Float, Spectrum>::Val
-MtlxEvaluator<Float, Spectrum>::read_val(ValueId id,
-                                         const EvalState& state) const {
-  if (id < m_prog.uniform_end) {
-    return state.uniform_vals.empty() ? load_uniform(id)
+MtlxEvaluator<Float, Spectrum>::ReadVal(ValueId id,
+                                        const EvalState& state) const {
+  if (id < prog_.uniform_end) {
+    return state.uniform_vals.empty() ? LoadUniform(id)
                                       : state.uniform_vals[id];
   }
-  return state.varying_vals[id - m_prog.uniform_end];
+  return state.varying_vals[id - prog_.uniform_end];
 }
 
 template <typename Float, typename Spectrum>
 typename MtlxEvaluator<Float, Spectrum>::Val
-MtlxEvaluator<Float, Spectrum>::eval_opacity(ValueId opacity_root,
-                                             const SurfaceInteraction3f& si,
-                                             Mask active,
-                                             EvalState& state) const {
-  eval_until(m_prog.opacity_end, si, active, state);
-  return read_val(opacity_root, state);
+MtlxEvaluator<Float, Spectrum>::EvalOpacity(ValueId opacity_root,
+                                            const SurfaceInteraction3f& si,
+                                            Mask active,
+                                            EvalState& state) const {
+  EvalUntil(prog_.opacity_end, si, active, state);
+  return ReadVal(opacity_root, state);
 }
 
 template <typename Float, typename Spectrum>
-void MtlxEvaluator<Float, Spectrum>::eval_surface(
-    const SurfaceInteraction3f& si, Mask active, EvalState& state) const {
-  eval_until(m_prog.main_end, si, active, state);
+void MtlxEvaluator<Float, Spectrum>::EvalSurface(const SurfaceInteraction3f& si,
+                                                 Mask active,
+                                                 EvalState& state) const {
+  EvalUntil(prog_.main_end, si, active, state);
 }
 
 template <typename Float, typename Spectrum>
 typename MtlxEvaluator<Float, Spectrum>::Val
-MtlxEvaluator<Float, Spectrum>::eval_expr(const SurfaceInteraction3f& si,
-                                          Mask active) const {
-  if (m_prog.result_root == kInvalidValue) return Val(0.0f);
+MtlxEvaluator<Float, Spectrum>::EvalExpr(const SurfaceInteraction3f& si,
+                                         Mask active) const {
+  if (prog_.result_root == kInvalidValue) return Val(0.0f);
   EvalState state;
-  eval_until(m_prog.main_end, si, active, state);
-  return read_val(m_prog.result_root, state);
+  EvalUntil(prog_.main_end, si, active, state);
+  return ReadVal(prog_.result_root, state);
 }
 
 template <typename Float, typename Spectrum>
-void MtlxEvaluator<Float, Spectrum>::eval_range(
+void MtlxEvaluator<Float, Spectrum>::EvalRange(
     uint32_t begin, uint32_t end, uint32_t base_offset, Val* out_vals,
     Val* mat_rows, const Val* uniform_vals, const SurfaceInteraction3f& si,
     Mask active, absl::InlinedVector<std::optional<CachedAttr>, 4>& attr_cache,
     std::optional<SurfaceInteraction3f>& si_uv) const {
-  uint32_t uniform_end = m_prog.uniform_end;
+  uint32_t uniform_end = prog_.uniform_end;
   auto get = [&](ValueId a) -> Val {
     if (a < uniform_end) {
-      return uniform_vals ? uniform_vals[a] : load_uniform(a);
+      return uniform_vals ? uniform_vals[a] : LoadUniform(a);
     }
     return out_vals[a - base_offset];
   };
@@ -521,24 +512,24 @@ void MtlxEvaluator<Float, Spectrum>::eval_range(
   };
   auto eval_input = [&](uint16_t k, bool mono,
                         const SurfaceInteraction3f& si_q) -> Val {
-    return mono ? Val(m_inputs[k]->eval_1(si_q, active))
-                : val3(m_inputs[k]->eval_3(si_q, active));
+    return mono ? Val(inputs_[k]->eval_1(si_q, active))
+                : val3(inputs_[k]->eval_3(si_q, active));
   };
 
   Val a[8];
   for (uint32_t i = begin; i < end; ++i) {
-    const Node& n = m_prog.nodes[i];
+    const Node& n = prog_.nodes[i];
     if (n.op == Op::MatRow) {
-      uint16_t mat_slot = m_prog.nodes[n.args[0]].imm;
+      uint16_t mat_slot = prog_.nodes[n.args[0]].imm;
       out_vals[i - base_offset] =
           mat_rows[static_cast<size_t>(mat_slot) * 4 + n.imm];
       continue;
     }
-    auto arg_ids = node_args(n, m_prog.extra_args);
+    auto arg_ids = NodeArgs(n, prog_.extra_args);
     for (size_t j = 0; j < arg_ids.size(); ++j) a[j] = get(arg_ids[j]);
 
     Val out(0.0f);
-    if (detail::eval_pure_op<Float>(n, a, out)) {
+    if (detail::EvalPureOp<Float>(n, a, out)) {
       out_vals[i - base_offset] = out;
       continue;
     }
@@ -546,10 +537,10 @@ void MtlxEvaluator<Float, Spectrum>::eval_range(
     uint16_t imm = n.imm;
     switch (n.op) {
       case Op::Const:
-        out = Val(static_cast<ScalarFloat>(m_prog.consts[imm]));
+        out = Val(static_cast<ScalarFloat>(prog_.consts[imm]));
         break;
       case Op::Opaque:
-        out = Val(m_opaques[imm]);
+        out = Val(opaques_[imm]);
         break;
       case Op::SampleInput:
         out = eval_input(imm, n.flags == 1, si);
@@ -564,10 +555,10 @@ void MtlxEvaluator<Float, Spectrum>::eval_range(
         if constexpr (!dr::is_jit_v<Float>) {
           if (!active || !si.shape) break;
         }
-        if (attr_cache.empty()) attr_cache.resize(m_prog.attr_names.size());
+        if (attr_cache.empty()) attr_cache.resize(prog_.attr_names.size());
         std::optional<CachedAttr>& cached = attr_cache[imm];
         if (!cached) {
-          const std::string& attr = m_prog.attr_names[imm];
+          const std::string& attr = prog_.attr_names[imm];
           Mask has = si.shape->has_attribute(attr, active) & active;
           Val val =
               dr::none_or<false>(has)
@@ -595,11 +586,11 @@ void MtlxEvaluator<Float, Spectrum>::eval_range(
         out = val3(si.sh_frame.n);
         break;
       case Op::GeomTangentWorld:
-        out = val3(detail::geom_tangent_world(si));
+        out = val3(detail::GeomTangentWorld(si));
         break;
       case Op::GeomBitangentWorld:
-        out = val3(
-            detail::geom_bitangent_world(si, detail::geom_tangent_world(si)));
+        out =
+            val3(detail::GeomBitangentWorld(si, detail::GeomTangentWorld(si)));
         break;
       case Op::GeomIncidentDir:
         out = val3(-si.to_world(si.wi));
@@ -607,21 +598,21 @@ void MtlxEvaluator<Float, Spectrum>::eval_range(
 
       case Op::NormalMap:
         if (imm == kNormalMapDefaultFrame) {
-          Vector3f t = detail::geom_tangent_world(si);
-          out = val3(detail::mx_normal_map_frame(
+          Vector3f t = detail::GeomTangentWorld(si);
+          out = val3(detail::MxNormalMapFrame(
               xyz(a[0]), Vector2f(dr::head<2>(a[1])),
-              Frame3f(t, detail::geom_bitangent_world(si, t), si.sh_frame.n)));
+              Frame3f(t, detail::GeomBitangentWorld(si, t), si.sh_frame.n)));
         } else {
-          out = val3(detail::mx_normal_map(
-              xyz(a[0]), Vector2f(dr::head<2>(a[1])), xyz(a[2]), xyz(a[3]),
-              xyz(a[4]), Vector3f(si.sh_frame.n)));
+          out = val3(detail::MxNormalMap(xyz(a[0]), Vector2f(dr::head<2>(a[1])),
+                                         xyz(a[2]), xyz(a[3]), xyz(a[4]),
+                                         Vector3f(si.sh_frame.n)));
         }
         break;
 
       case Op::HeightToNormal: {
         Float scale = a[0].x();
-        const Region& r = m_prog.regions[imm];
-        ScalarPoint2f eps = m_region_eps[imm];
+        const Region& r = prog_.regions[imm];
+        ScalarPoint2f eps = region_eps_[imm];
         // Matches MaterialX 1.39 `mx_heighttonormal_vector3` (`1 / 16` Sobel
         // scale factor and cross-product Jacobian over `(u_mtlx, v_mtlx)`).
         ScalarFloat inv_2eps_u = 0.5f / eps.x();
@@ -648,17 +639,16 @@ void MtlxEvaluator<Float, Spectrum>::eval_range(
               s.p += du * si_in.dp_du + dv * si_in.dp_dv;
               absl::InlinedVector<Val, 32> reg_uvals;
               const Val* uptr = nullptr;
-              if (ad_uniform && m_prog.uniform_end > 0) {
-                eval_uniform_nodes(reg_uvals);
+              if (ad_uniform && prog_.uniform_end > 0) {
+                EvalUniformNodes(reg_uvals);
                 uptr = reg_uvals.data();
               }
               absl::InlinedVector<Val, 64> reg_vals(r.end - r.begin);
               absl::InlinedVector<Val, 4> reg_mats(r.mat_count * 4);
               absl::InlinedVector<std::optional<CachedAttr>, 4> reg_attrs;
               std::optional<SurfaceInteraction3f> reg_si_uv;
-              eval_range(r.begin, r.end, r.begin, reg_vals.data(),
-                         reg_mats.data(), uptr, s, active, reg_attrs,
-                         reg_si_uv);
+              EvalRange(r.begin, r.end, r.begin, reg_vals.data(),
+                        reg_mats.data(), uptr, s, active, reg_attrs, reg_si_uv);
               Val v = reg_vals[r.root - r.begin];
               Vector3f val = r.has_texcoord ? Vector3f(v.x(), v.y(), v.z())
                                             : Vector3f(v.x(), 0.0f, 0.0f);
@@ -674,7 +664,7 @@ void MtlxEvaluator<Float, Spectrum>::eval_range(
           Vector3f tangent(d_u.y() * inv_2eps_u, d_u.z() * inv_2eps_u, dh_du);
           Vector3f bitangent(d_v.y() * inv_2eps_v, d_v.z() * inv_2eps_v, dh_dv);
           norm = dr::cross(tangent, bitangent);
-          norm = detail::safe_normalize(
+          norm = detail::SafeNormalize(
               dr::select(norm.z() < 0.0f, -norm, norm),
               Vector3f(0.0f, 0.0f, 1.0f),
               static_cast<ScalarFloat>(kMtlxFloatEps * kMtlxFloatEps));
@@ -689,13 +679,13 @@ void MtlxEvaluator<Float, Spectrum>::eval_range(
       case Op::Noise:
       case Op::Worley:
       case Op::Fractal: {
-        bool is_3d = noise_is_3d(imm);
-        if (noise_is_vec3(imm)) {
-          out = is_3d ? eval_noise_op<3, Vector3f>(n, a)
-                      : eval_noise_op<2, Vector3f>(n, a);
+        bool is_3d = NoiseIs3D(imm);
+        if (NoiseIsVec3(imm)) {
+          out = is_3d ? EvalNoiseOp<3, Vector3f>(n, a)
+                      : EvalNoiseOp<2, Vector3f>(n, a);
         } else {
-          out = is_3d ? eval_noise_op<3, Float>(n, a)
-                      : eval_noise_op<2, Float>(n, a);
+          out =
+              is_3d ? EvalNoiseOp<3, Float>(n, a) : EvalNoiseOp<2, Float>(n, a);
         }
         break;
       }
@@ -707,9 +697,9 @@ void MtlxEvaluator<Float, Spectrum>::eval_range(
         uint8_t dim =
             n.op == Op::MatDet ? static_cast<uint8_t>(n.arity) : n.channels;
         if (dim == 3) {
-          eval_matrix_op<3>(n, a, out, mat_rows);
+          EvalMatrixOp<3>(n, a, out, mat_rows);
         } else {
-          eval_matrix_op<4>(n, a, out, mat_rows);
+          EvalMatrixOp<4>(n, a, out, mat_rows);
         }
         break;
       }
@@ -722,54 +712,54 @@ void MtlxEvaluator<Float, Spectrum>::eval_range(
 }
 
 template <typename Float, typename Spectrum>
-Float MtlxEvaluator<Float, Spectrum>::eval_1(const SurfaceInteraction3f& si,
-                                             Mask active) const {
-  Color3f c = eval_3(si, active);
-  return m_prog.result_scalar() ? c.x() : luminance(c);
+Float MtlxEvaluator<Float, Spectrum>::Eval1(const SurfaceInteraction3f& si,
+                                            Mask active) const {
+  Color3f c = Eval3(si, active);
+  return prog_.ResultScalar() ? c.x() : luminance(c);
 }
 
 template <typename Float, typename Spectrum>
 typename MtlxEvaluator<Float, Spectrum>::Color3f
-MtlxEvaluator<Float, Spectrum>::eval_3(const SurfaceInteraction3f& si,
-                                       Mask active) const {
+MtlxEvaluator<Float, Spectrum>::Eval3(const SurfaceInteraction3f& si,
+                                      Mask active) const {
   MI_MASKED_FUNCTION(ProfilerPhase::TextureEvaluate, active);
-  Val v = eval_expr(si, active);
+  Val v = EvalExpr(si, active);
   return Color3f(v.x(), v.y(), v.z());
 }
 
 template <typename Float, typename Spectrum>
 typename MtlxEvaluator<Float, Spectrum>::UnpolarizedSpectrum
-MtlxEvaluator<Float, Spectrum>::eval_spectrum(size_t slot_idx,
-                                              const Wavelength& wavelengths,
-                                              const EvalState& state) const {
-  const SpecSlot& slot = m_spec_slots[slot_idx];
+MtlxEvaluator<Float, Spectrum>::EvalSpectrum(size_t slot_idx,
+                                             const Wavelength& wavelengths,
+                                             const EvalState& state) const {
+  const SpecSlot& slot = spec_slots_[slot_idx];
   if constexpr (is_spectral_v<Spectrum>) {
-    if (slot.uniform_spec_idx >= 0 && !has_opaque_grad()) {
-      const UniformSpec& u = m_uniform_specs[slot.uniform_spec_idx];
-      return detail::SrgbUpsampler<Float, Spectrum>::eval_coeffs(
+    if (slot.uniform_spec_idx >= 0 && !HasOpaqueGrad()) {
+      const UniformSpec& u = uniform_specs_[slot.uniform_spec_idx];
+      return detail::SrgbUpsampler<Float, Spectrum>::EvalCoeffs(
           u.coeff, u.scale, wavelengths, slot.unbounded);
     }
   }
-  Val v = read_val(slot.value, state);
-  if (m_prog.is_value_scalar(slot.value)) {
+  Val v = ReadVal(slot.value, state);
+  if (prog_.IsValueScalar(slot.value)) {
     return UnpolarizedSpectrum(slot.unbounded ? dr::maximum(v.x(), 0.0f)
                                               : dr::clip(v.x(), 0.0f, 1.0f));
   }
-  return m_srgb->upsample(clamp_color(Color3f(dr::head<3>(v)), slot.unbounded),
-                          wavelengths, slot.unbounded);
+  return srgb_.Upsample(ClampColor(Color3f(dr::head<3>(v)), slot.unbounded),
+                        wavelengths, slot.unbounded);
 }
 
 template <typename Float, typename Spectrum>
-void MtlxEvaluator<Float, Spectrum>::traverse_cb(
+void MtlxEvaluator<Float, Spectrum>::TraverseCb(
     void* payload, const drjit::TraverseVisitor& cb) {
-  DR_TRAVERSE_MEMBER(m_inputs)
-  DR_TRAVERSE_MEMBER(m_opaques)
-  DR_TRAVERSE_MEMBER(m_uniform_scalars)
+  DR_TRAVERSE_MEMBER(inputs_)
+  DR_TRAVERSE_MEMBER(opaques_)
+  DR_TRAVERSE_MEMBER(uniform_scalars_)
   if constexpr (is_spectral_v<Spectrum>) {
-    DR_TRAVERSE_MEMBER(m_uniform_specs)
+    DR_TRAVERSE_MEMBER(uniform_specs_)
   }
-  m_srgb->traverse_cb(payload, cb);
-  m_prog.traverse_state(payload, cb);
+  srgb_.TraverseCb(payload, cb);
+  prog_.TraverseState(payload, cb);
 }
 
 MI_INSTANTIATE_CLASS(MtlxEvaluator)
@@ -785,5 +775,4 @@ void RegisterMaterialXExprTexture() {
   (void)registered;
 }
 
-}  // namespace mtlx
-NAMESPACE_END(mitsuba)
+}  // namespace mitsuba::mtlx

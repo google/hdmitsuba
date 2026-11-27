@@ -170,7 +170,7 @@ TEST(MaterialXOptimizerTest, IrBuilderAffineCollapseDivMixAndUniformHoist) {
   OptimizeValueProgram(p);
   EXPECT_EQ(p.main_end - p.uniform_end, 3u);
   EXPECT_EQ(p.nodes[p.result_root].op, Op::Fma);
-  auto args = node_args(p.nodes[p.result_root], p.extra_args);
+  auto args = NodeArgs(p.nodes[p.result_root], p.extra_args);
   EXPECT_NE(args[0] < p.uniform_end, args[1] < p.uniform_end);
   EXPECT_LT(args[2], p.uniform_end);
 }
@@ -225,7 +225,7 @@ TEST(MaterialXOptimizerTest, PruneAndScheduleHoistsSharedRegionUniforms) {
   ValueId r_root = rb.Mul(rb.Chan(rb.Emit(Op::GeomUV, {}, 0, 2), 0),
                           rb.Add(rb.OpaqueRef(0), rb.Const(1.0)));
   ASSERT_TRUE(rb.IsVarying(r_root));
-  p.append_region(rnodes, rextra, r_root, 0);
+  p.AppendRegion(rnodes, rextra, r_root, 0);
 
   OptimizeValueProgram(p);
   ASSERT_EQ(p.regions.size(), 1u);
@@ -391,7 +391,7 @@ TEST(MaterialXOptimizerTest, DumpProgramFormatsBandsRegionsAndClosures) {
   std::vector<ValueId> rextra;
   IrBuilder rb(rnodes, rextra, p.values.consts, p.values.opaques);
   ValueId r_root = rb.Chan(rb.Emit(Op::GeomUV, {}, 0, 2), 0);
-  p.values.append_region(rnodes, rextra, r_root, 0);
+  p.values.AppendRegion(rnodes, rextra, r_root, 0);
 
   OptimizeBsdfProgram(p);
   std::string dump = DumpBsdfProgram(p);
