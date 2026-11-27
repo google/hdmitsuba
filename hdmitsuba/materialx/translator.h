@@ -31,14 +31,16 @@
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-// Opaque prepared MaterialX shading network shared between texture discovery
-// and material translation within a single Hydra commit.
+// Opaque variant-independent lowered MaterialX shading network shared between
+// texture preloading (`PrepareMaterialXNetwork`) and variant instantiation
+// (`TranslateMaterialXNetwork`).
 struct PreparedMaterialX;
 
-// Builds a Hydra MaterialX shading network and invokes `callback` with the
-// `TextureKey` of every bitmap texture it consumes for parallel preloading.
-// Returns nullptr if `network` has no valid MaterialX surface or displacement
-// shader.
+// Builds and lowers a Hydra MaterialX shading network once into
+// variant-independent symbolic SSA programs, invoking `callback` with the
+// `TextureKey` of every live bitmap texture it consumes for parallel
+// preloading. Returns nullptr if `network` has no valid MaterialX surface or
+// displacement shader.
 std::shared_ptr<const PreparedMaterialX> PrepareMaterialXNetwork(
     const SdfPath& id, const HdMaterialNetwork2& network,
     const std::function<void(const TextureKey&)>& callback);
@@ -46,7 +48,9 @@ std::shared_ptr<const PreparedMaterialX> PrepareMaterialXNetwork(
 bool HasMaterialXSurface(const PreparedMaterialX& prepared);
 bool HasMaterialXDisplacement(const PreparedMaterialX& prepared);
 
-// Translates a prepared MaterialX network for a specific Mitsuba variant.
+// Resolves symbolic texture samples against `lookup_texture` and instantiates
+// the Mitsuba BSDF, optional emitter, and optional displacement texture for
+// `variant`.
 TranslatedMaterial TranslateMaterialXNetwork(
     const SdfPath& id, const PreparedMaterialX& prepared,
     const std::function<const CachedTexture*(const TextureKey&)>&

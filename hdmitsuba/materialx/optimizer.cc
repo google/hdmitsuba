@@ -257,34 +257,9 @@ void SimplifyClosures(MtlxBsdfProgram& prog) {
 }
 
 OptimizeResult PruneAndSchedule(MtlxValueProgram& prog, MtlxBsdfProgram* bsdf) {
-  std::vector<uint8_t> live(prog.nodes.size(), 0);
-  std::vector<uint8_t> live_region(prog.regions.size(), 0);
-  auto mark = [&](ValueId id) {
-    if (id != kInvalidValue) live[id] = 1;
-  };
-  if (bsdf) {
-    mark(bsdf->opacity_root);
-    for (const ClosureNode& c : bsdf->closures) {
-      ForEachClosureValueId(c, mark);
-    }
-  } else {
-    mark(prog.result_root);
-  }
-  auto walk_back = [&](uint32_t begin, uint32_t end) {
-    for (uint32_t i = end; i-- > begin;) {
-      if (!live[i]) continue;
-      for (ValueId a : NodeArgs(prog.nodes[i], prog.extra_args)) live[a] = 1;
-      if (prog.nodes[i].op == Op::HeightToNormal) {
-        live_region[prog.nodes[i].imm] = 1;
-      }
-    }
-  };
-  walk_back(0, prog.main_end);
-  for (size_t k = prog.regions.size(); k-- > 0;) {
-    if (!live_region[k]) continue;
-    live[prog.regions[k].root] = 1;
-    walk_back(prog.regions[k].begin, prog.regions[k].end);
-  }
+  LiveMask live_mask = ComputeLiveMask(prog, bsdf);
+  const std::vector<uint8_t>& live = live_mask.node;
+  const std::vector<uint8_t>& live_region = live_mask.region;
 
   std::vector<uint8_t> varying = ComputeVarying(prog);
   std::vector<uint8_t> in_opacity(prog.main_end, 0);
@@ -520,6 +495,41 @@ void DumpBand(std::ostringstream& os, const MtlxValueProgram& prog,
 }
 
 }  // namespace
+
+LiveMask ComputeLiveMask(const MtlxValueProgram& prog,
+                         const MtlxBsdfProgram* bsdf) {
+  LiveMask live{std::vector<uint8_t>(prog.nodes.size(), 0),
+                std::vector<uint8_t>(prog.regions.size(), 0)};
+  auto mark = [&](ValueId id) {
+    if (id != kInvalidValue) live.node[id] = 1;
+  };
+  if (bsdf) {
+    mark(bsdf->opacity_root);
+    for (const ClosureNode& c : bsdf->closures) {
+      ForEachClosureValueId(c, mark);
+    }
+  } else {
+    mark(prog.result_root);
+  }
+  auto walk_back = [&](uint32_t begin, uint32_t end) {
+    for (uint32_t i = end; i-- > begin;) {
+      if (!live.node[i]) continue;
+      for (ValueId a : NodeArgs(prog.nodes[i], prog.extra_args)) {
+        live.node[a] = 1;
+      }
+      if (prog.nodes[i].op == Op::HeightToNormal) {
+        live.region[prog.nodes[i].imm] = 1;
+      }
+    }
+  };
+  walk_back(0, prog.main_end);
+  for (size_t k = prog.regions.size(); k-- > 0;) {
+    if (!live.region[k]) continue;
+    live.node[prog.regions[k].root] = 1;
+    walk_back(prog.regions[k].begin, prog.regions[k].end);
+  }
+  return live;
+}
 
 void VerifyValueProgram(const MtlxValueProgram& prog, bool scheduled) {
   Check(

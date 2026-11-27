@@ -29,6 +29,7 @@ add_library(hdMitsuba SHARED
   materialx/bsdf.cc
   materialx/compiler.cc
   materialx/evaluator.cc
+  materialx/expr_lower.cc
   materialx/optimizer.cc
   materialx/translator.cc
   mesh.cc

@@ -1263,9 +1263,11 @@ def test_mi_traverse_emitter_param_update() -> None:
   assert c4_em is not None
   si = mtlx.make_test_si(wi=(0.0, 0.0, 1.0))
   params = mi.traverse(c4_em)
+  # Narrowing `color4 -> color3` drops the unused alpha opaque (`param3`).
+  assert 'radiance.param3' not in params
   np.testing.assert_allclose(
-      [float(params[f'radiance.param{i}'][0]) for i in range(4)],
-      [0.2, 0.4, 0.6, 0.8],
+      [float(params[f'radiance.param{i}'][0]) for i in range(3)],
+      [0.2, 0.4, 0.6],
   )
   params['radiance.param0'] = mi.Float(0.8)
   params['radiance.param2'] = mi.Float(0.1)

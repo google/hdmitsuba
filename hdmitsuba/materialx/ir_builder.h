@@ -185,13 +185,48 @@ class IrBuilder {
     switch (op) {
       case Op::Chan:
         if (IsScalar(args[0])) return args[0];
-        break;
-      case Op::Rgb:
-        if (IsScalar(args[0]) && args[0] == args[1] && args[1] == args[2]) {
-          return args[0];
+        if (nodes_[args[0]].op == Op::Vec2 && imm < 2) {
+          return Chan(nodes_[args[0]].args[imm], 0);
+        }
+        if (nodes_[args[0]].op == Op::Rgb && imm < 3) {
+          return Chan(nodes_[args[0]].args[imm], 0);
+        }
+        if (nodes_[args[0]].op == Op::Vec4) {
+          return imm == 3 ? Chan(nodes_[args[0]].args[1], 0)
+                          : Chan(nodes_[args[0]].args[0], imm);
         }
         break;
+      case Op::Dot:
+        for (int i = 0; i < 2; ++i) {
+          if (IsScalar(args[i])) {
+            if (auto cv = ConstValue(args[1 - i])) {
+              double sum = cv->x() + cv->y() + (imm >= 3 ? cv->z() : 0.0) +
+                           (imm == 4 ? cv->w() : 0.0);
+              if (std::abs(sum - 1.0) <= 1e-12) return args[i];
+            }
+          }
+        }
+        break;
+      case Op::Rgb:
       case Op::Vec2:
+        if (IsScalar(args[0]) &&
+            std::all_of(args.begin() + 1, args.end(),
+                        [&](ValueId a) { return a == args[0]; })) {
+          return args[0];
+        }
+        if (nodes_[args[0]].op == Op::Chan && nodes_[args[0]].imm == 0) {
+          ValueId src = nodes_[args[0]].args[0];
+          if (Channels(src) == args.size()) {
+            bool identity = true;
+            for (size_t i = 1; i < args.size(); ++i) {
+              identity &= nodes_[args[i]].op == Op::Chan &&
+                          nodes_[args[i]].imm == i &&
+                          nodes_[args[i]].args[0] == src;
+            }
+            if (identity) return src;
+          }
+        }
+        break;
       case Op::Vec4:
         if (IsScalar(args[0]) && args[0] == args[1]) return args[0];
         break;

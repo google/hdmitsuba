@@ -117,63 +117,9 @@ void PrepareLibraryDocument(const mx::DocumentPtr& doc) {
   }
 }
 
-struct MaterialXStdLibraries {
-  mx::ConstDocumentPtr doc;
-  absl::flat_hash_set<const mx::GraphElement*> image_graphs;
-};
-
-// Returns true if `g` or any `NodeGraph` it transitively invokes contains an
-// `image` node, short-circuiting graphs owned by `std_libs->doc` via
-// `std_libs->image_graphs`.
-bool GraphHasImageNode(const mx::ConstGraphElementPtr& g,
-                       const MaterialXStdLibraries* std_libs,
-                       absl::flat_hash_set<const mx::GraphElement*>& visited) {
-  if (!g) return false;
-  if (std_libs && g->getDocument() == std_libs->doc) {
-    return std_libs->image_graphs.contains(g.get());
-  }
-  if (!visited.insert(g.get()).second) return false;
-  std::vector<mx::NodePtr> nodes = g->getNodes();
-  for (const mx::NodePtr& node : nodes) {
-    if (node->getCategory() == "image") return true;
-  }
-  auto visit_port = [&](const mx::PortElementPtr& port) {
-    if (!port->hasNodeGraphString() &&
-        (port->hasNodeName() || port->hasInterfaceName() ||
-         !port->hasOutputString())) {
-      return false;
-    }
-    mx::OutputPtr out = port->getConnectedOutput();
-    return out && GraphHasImageNode(out->getParent()->asA<mx::GraphElement>(),
-                                    std_libs, visited);
-  };
-  for (const mx::InputPtr& in : g->getInputs()) {
-    if (visit_port(in)) return true;
-    if (in->hasNodeName() && g->getParent() &&
-        GraphHasImageNode(g->getParent()->asA<mx::GraphElement>(), std_libs,
-                          visited)) {
-      return true;
-    }
-  }
-  for (const mx::OutputPtr& out : g->getOutputs()) {
-    if (visit_port(out)) return true;
-  }
-  for (const mx::NodePtr& node : nodes) {
-    for (const mx::InputPtr& in : node->getInputs()) {
-      if (visit_port(in)) return true;
-    }
-    if (mx::InterfaceElementPtr impl = node->getImplementation()) {
-      if (GraphHasImageNode(impl->asA<mx::NodeGraph>(), std_libs, visited)) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
 // Returns the immutable MaterialX standard libraries (initialized once).
-const MaterialXStdLibraries& GetMaterialXStdLibraries() {
-  static const absl::NoDestructor<MaterialXStdLibraries> std_libs([] {
+const mx::ConstDocumentPtr& GetMaterialXStdLibraries() {
+  static const absl::NoDestructor<mx::ConstDocumentPtr> std_libs([] {
     mx::FileSearchPath search_path;
     for (const char* env :
          {"PXR_MTLX_PLUGIN_SEARCH_PATHS", "PXR_MTLX_STDLIB_SEARCH_PATHS"}) {
@@ -191,15 +137,7 @@ const MaterialXStdLibraries& GetMaterialXStdLibraries() {
     mx::DocumentPtr doc = mx::createDocument();
     mx::loadLibraries({}, search_path, doc);
     PrepareLibraryDocument(doc);
-    absl::flat_hash_set<const mx::GraphElement*> image_graphs;
-    for (const mx::NodeGraphPtr& ng : doc->getNodeGraphs()) {
-      absl::flat_hash_set<const mx::GraphElement*> visited;
-      if (GraphHasImageNode(ng, nullptr, visited)) {
-        image_graphs.insert(ng.get());
-      }
-    }
-    return MaterialXStdLibraries{mx::ConstDocumentPtr(std::move(doc)),
-                                 std::move(image_graphs)};
+    return mx::ConstDocumentPtr(std::move(doc));
   }());
   return *std_libs;
 }
@@ -237,13 +175,31 @@ bool IsMaterialXTerminal(const HdMaterialNetwork2& network,
   return it != network.nodes.end() && IsMaterialXNode(it->second);
 }
 
-std::optional<std::string> ConvertToMtlxString(const VtValue& val) {
-  if (val.IsHolding<bool>()) return val.UncheckedGet<bool>() ? "true" : "false";
-  if (val.IsHolding<int>()) return absl::StrCat(val.UncheckedGet<int>());
-  if (val.IsHolding<SdfAssetPath>()) return ResolvePathFromValue(val);
-  if (val.IsHolding<std::string>()) return val.UncheckedGet<std::string>();
-  if (val.IsHolding<TfToken>()) return val.UncheckedGet<TfToken>().GetString();
+// Resolves a Hydra parameter's MaterialX type and formats its `VtValue` string
+// in a single type dispatch. Returns `{mtlx_type, value_string}`, or
+// `std::nullopt` if `val` holds an unsupported type.
+std::optional<std::pair<std::string, std::string>> FormatMtlxParam(
+    const mx::NodeDef* nd, const HdMaterialNode2& hd_node,
+    const std::string& name, const VtValue& val,
+    std::string_view forced_type = {}) {
+  std::string explicit_type(forced_type);
+  if (explicit_type.empty() && nd) {
+    if (mx::InputPtr p = nd->getActiveInput(name)) explicit_type = p->getType();
+  }
+  std::string_view usd_type;
+  if (explicit_type.empty()) {
+    if (auto it =
+            hd_node.parameters.find(TfToken(absl::StrCat("typeName:", name)));
+        it != hd_node.parameters.end() && it->second.IsHolding<TfToken>()) {
+      usd_type = it->second.UncheckedGet<TfToken>().GetString();
+    }
+  }
 
+  auto make = [&](std::string_view inferred_type, std::string val_str) {
+    return std::make_pair(explicit_type.empty() ? std::string(inferred_type)
+                                                : std::move(explicit_type),
+                          std::move(val_str));
+  };
   auto format_span = [](const auto* p, int n) {
     std::string out;
     for (int i = 0; i < n; ++i) {
@@ -252,36 +208,56 @@ std::optional<std::string> ConvertToMtlxString(const VtValue& val) {
     }
     return out;
   };
+  auto try_vec = [&](auto tag, int n, std::string_view inferred_type)
+      -> std::optional<std::pair<std::string, std::string>> {
+    using T = decltype(tag);
+    if (!val.IsHolding<T>()) return std::nullopt;
+    return make(inferred_type, format_span(val.UncheckedGet<T>().data(), n));
+  };
+
+  if (val.IsHolding<bool>()) {
+    return make("boolean", val.UncheckedGet<bool>() ? "true" : "false");
+  }
+  if (val.IsHolding<int>()) {
+    int v = val.UncheckedGet<int>();
+    return make("integer", explicit_type == "boolean" ? (v ? "true" : "false")
+                                                      : absl::StrCat(v));
+  }
+  if (val.IsHolding<SdfAssetPath>()) {
+    return make("filename", ResolvePathFromValue(val));
+  }
+  if (val.IsHolding<std::string>()) {
+    return make(usd_type == "asset" ? "filename" : "string",
+                val.UncheckedGet<std::string>());
+  }
+  if (val.IsHolding<TfToken>()) {
+    return make(usd_type == "asset" ? "filename" : "string",
+                val.UncheckedGet<TfToken>().GetString());
+  }
   if (val.IsHolding<float>()) {
-    return absl::StrFormat("%.9g", val.UncheckedGet<float>());
+    return make("float", absl::StrFormat("%.9g", val.UncheckedGet<float>()));
   }
   if (val.IsHolding<double>()) {
-    return absl::StrFormat("%.9g", val.UncheckedGet<double>());
+    return make("float", absl::StrFormat("%.9g", val.UncheckedGet<double>()));
   }
-  if (val.IsHolding<GfVec2f>()) {
-    return format_span(val.UncheckedGet<GfVec2f>().data(), 2);
-  }
-  if (val.IsHolding<GfVec2d>()) {
-    return format_span(val.UncheckedGet<GfVec2d>().data(), 2);
-  }
-  if (val.IsHolding<GfVec3f>()) {
-    return format_span(val.UncheckedGet<GfVec3f>().data(), 3);
-  }
-  if (val.IsHolding<GfVec3d>()) {
-    return format_span(val.UncheckedGet<GfVec3d>().data(), 3);
-  }
-  if (val.IsHolding<GfVec4f>()) {
-    return format_span(val.UncheckedGet<GfVec4f>().data(), 4);
-  }
-  if (val.IsHolding<GfVec4d>()) {
-    return format_span(val.UncheckedGet<GfVec4d>().data(), 4);
-  }
-  if (val.IsHolding<GfMatrix3d>()) {
-    return format_span(val.UncheckedGet<GfMatrix3d>().data(), 9);
-  }
-  if (val.IsHolding<GfMatrix4d>()) {
-    return format_span(val.UncheckedGet<GfMatrix4d>().data(), 16);
-  }
+  if (auto r = try_vec(GfVec2f{}, 2, "vector2")) return r;
+  if (auto r = try_vec(GfVec2d{}, 2, "vector2")) return r;
+  std::string_view v3_type =
+      (usd_type == "float3" || usd_type == "double3" ||
+       usd_type == "vector3f" || usd_type == "vector3d" ||
+       usd_type == "normal3f" || usd_type == "normal3d" ||
+       usd_type == "point3f" || usd_type == "point3d")
+          ? "vector3"
+          : "color3";
+  if (auto r = try_vec(GfVec3f{}, 3, v3_type)) return r;
+  if (auto r = try_vec(GfVec3d{}, 3, v3_type)) return r;
+  std::string_view v4_type =
+      (usd_type == "float4" || usd_type == "double4") ? "vector4" : "color4";
+  if (auto r = try_vec(GfVec4f{}, 4, v4_type)) return r;
+  if (auto r = try_vec(GfVec4d{}, 4, v4_type)) return r;
+  if (auto r = try_vec(GfMatrix3d{}, 9, "matrix33")) return r;
+  if (auto r = try_vec(GfMatrix4d{}, 16, "matrix44")) return r;
+
   TF_WARN("Unsupported MaterialX parameter type '%s'",
           val.GetTypeName().c_str());
   return std::nullopt;
@@ -334,41 +310,6 @@ mx::NodeDefPtr ResolveNodeDef(const TfToken& hd_node_type,
   return nullptr;
 }
 
-std::string InferMtlxParamType(const mx::NodeDef* nd,
-                               const HdMaterialNode2& hd_node,
-                               const std::string& name, const VtValue& val) {
-  if (nd) {
-    if (mx::InputPtr p = nd->getActiveInput(name)) return p->getType();
-  }
-
-  std::string_view usd_type;
-  if (auto it =
-          hd_node.parameters.find(TfToken(absl::StrCat("typeName:", name)));
-      it != hd_node.parameters.end() && it->second.IsHolding<TfToken>()) {
-    usd_type = it->second.UncheckedGet<TfToken>().GetString();
-  }
-  if (val.IsHolding<bool>()) return "boolean";
-  if (val.IsHolding<int>()) return "integer";
-  if (val.IsHolding<float>() || val.IsHolding<double>()) return "float";
-  if (val.IsHolding<GfVec2f>() || val.IsHolding<GfVec2d>()) return "vector2";
-  if (val.IsHolding<GfVec3f>() || val.IsHolding<GfVec3d>()) {
-    return (usd_type == "float3" || usd_type == "double3" ||
-            usd_type == "vector3f" || usd_type == "vector3d" ||
-            usd_type == "normal3f" || usd_type == "normal3d" ||
-            usd_type == "point3f" || usd_type == "point3d")
-               ? "vector3"
-               : "color3";
-  }
-  if (val.IsHolding<GfVec4f>() || val.IsHolding<GfVec4d>()) {
-    return (usd_type == "float4" || usd_type == "double4") ? "vector4"
-                                                           : "color4";
-  }
-  if (val.IsHolding<GfMatrix3d>()) return "matrix33";
-  if (val.IsHolding<GfMatrix4d>()) return "matrix44";
-  if (val.IsHolding<SdfAssetPath>() || usd_type == "asset") return "filename";
-  return "string";
-}
-
 const std::string* GetMtlxVersion(const HdMaterialNetwork2& net2) {
   auto it = net2.config.find(TfToken("mtlx:version"));
   return (it != net2.config.end() && it->second.IsHolding<std::string>())
@@ -376,140 +317,104 @@ const std::string* GetMtlxVersion(const HdMaterialNetwork2& net2) {
              : nullptr;
 }
 
-// Populates a standalone `mx::Document` with the subgraphs rooted at the
-// MaterialX terminal connections.
-class DocumentBuilder {
- public:
-  using BuiltNode = std::pair<mx::NodePtr, mx::NodeDefPtr>;
+using BuiltNode = std::pair<mx::NodePtr, mx::NodeDefPtr>;
 
-  struct Result {
-    mx::DocumentPtr doc;
-    std::vector<mx::ConstDocumentPtr> custom_libs;
-  };
+struct DocBuildCtx {
+  const HdMaterialNetwork2& net2;
+  const mx::ConstDocumentPtr& std_libs;
+  mx::DocumentPtr doc;
+  std::vector<mx::ConstDocumentPtr> custom_libs = {};
+  absl::flat_hash_map<SdfPath, BuiltNode, SdfPath::Hash> built = {};
+  absl::flat_hash_set<SdfPath, SdfPath::Hash> visiting = {};
+};
 
-  DocumentBuilder(const HdMaterialNetwork2& net2,
-                  const mx::ConstDocumentPtr& std_libs,
-                  const std::string* version)
-      : net2_(net2), std_libs_(std_libs), doc_(mx::createDocument()) {
-    doc_->setVersionString(version ? *version : "1.38");
+template <typename AddPortFn>
+bool ConnectPort(AddPortFn&& add_port, const BuiltNode& up,
+                 const TfToken& output_name) {
+  const auto& [up_node, up_nd] = up;
+  if (!up_node) return false;
+  if (up_node->isMultiOutputType()) {
+    mx::OutputPtr out_port =
+        up_nd ? up_nd->getActiveOutput(output_name.GetString()) : nullptr;
+    if (!out_port) return false;
+    mx::PortElementPtr port = add_port(out_port->getType());
+    port->setConnectedNode(up_node);
+    port->setOutputString(out_port->getName());
+  } else {
+    add_port(up_node->getType())->setConnectedNode(up_node);
   }
+  return true;
+}
 
-  Result Build(const HdMaterialConnection2* surface_conn,
-               const HdMaterialConnection2* disp_conn) {
-    auto add_terminal = [&](const char* out_name,
-                            const HdMaterialConnection2* conn) {
-      return conn &&
-             ConnectPort(
-                 [&](const std::string& type) {
-                   return doc_->addOutput(out_name, type);
-                 },
-                 BuildNode(conn->upstreamNode), conn->upstreamOutputName);
-    };
-    bool ok = add_terminal("out_surface", surface_conn);
-    ok |= add_terminal("out_displacement", disp_conn);
-    if (!ok) return {};
-    return {std::move(doc_), std::move(custom_libs_)};
+BuiltNode BuildDocumentNode(DocBuildCtx& ctx, const SdfPath& path) {
+  if (ctx.visiting.contains(path)) {
+    TF_WARN("Cycle detected in MaterialX network at '%s'; breaking cycle.",
+            path.GetText());
+    return {};
   }
+  if (auto it = ctx.built.find(path); it != ctx.built.end()) return it->second;
+  auto node_it = ctx.net2.nodes.find(path);
+  if (node_it == ctx.net2.nodes.end()) return {};
+  const HdMaterialNode2& hd_node = node_it->second;
 
- private:
-  template <typename AddPortFn>
-  static bool ConnectPort(AddPortFn&& add_port, const BuiltNode& up,
-                          const TfToken& output_name) {
-    const auto& [up_node, up_nd] = up;
-    if (!up_node) return false;
-    if (up_node->isMultiOutputType()) {
-      mx::OutputPtr out_port =
-          up_nd ? up_nd->getActiveOutput(output_name.GetString()) : nullptr;
-      if (!out_port) return false;
-      mx::PortElementPtr port = add_port(out_port->getType());
-      port->setConnectedNode(up_node);
-      port->setOutputString(out_port->getName());
-    } else {
-      add_port(up_node->getType())->setConnectedNode(up_node);
-    }
-    return true;
-  }
-
-  BuiltNode BuildNode(const SdfPath& path) {
-    if (visiting_.contains(path)) {
-      TF_WARN("Cycle detected in MaterialX network at '%s'; breaking cycle.",
-              path.GetText());
+  std::string mx_name = absl::StrCat("n_", ctx.built.size());
+  mx::NodePtr mx_node;
+  mx::NodeDefPtr nd;
+  auto swizzle = ParseSwizzleNodeDef(hd_node.nodeTypeId.GetString());
+  if (swizzle) {
+    mx_node =
+        ctx.doc->addNode("swizzle", mx_name, std::string(swizzle->second));
+  } else {
+    nd = ResolveNodeDef(hd_node.nodeTypeId, ctx.std_libs, ctx.custom_libs);
+    if (!nd) {
+      TF_WARN("No MaterialX NodeDef '%s' for node '%s'; ignoring the node.",
+              hd_node.nodeTypeId.GetText(), path.GetText());
+      ctx.built.emplace(path, BuiltNode{});
       return {};
     }
-    if (auto it = built_.find(path); it != built_.end()) return it->second;
-    auto node_it = net2_.nodes.find(path);
-    if (node_it == net2_.nodes.end()) return {};
-    const HdMaterialNode2& hd_node = node_it->second;
+    mx_node = ctx.doc->addNodeInstance(nd, mx_name);
+  }
+  ctx.built.emplace(path, BuiltNode{mx_node, nd});
 
-    std::string mx_name = absl::StrCat("n_", built_.size());
-    mx::NodePtr mx_node;
-    mx::NodeDefPtr nd;
-    auto swizzle = ParseSwizzleNodeDef(hd_node.nodeTypeId.GetString());
-    if (swizzle) {
-      mx_node = doc_->addNode("swizzle", mx_name, std::string(swizzle->second));
-    } else {
-      nd = ResolveNodeDef(hd_node.nodeTypeId, std_libs_, custom_libs_);
-      if (!nd) {
-        TF_WARN("No MaterialX NodeDef '%s' for node '%s'; ignoring the node.",
-                hd_node.nodeTypeId.GetText(), path.GetText());
-        built_.emplace(path, BuiltNode{});
-        return {};
-      }
-      mx_node = doc_->addNodeInstance(nd, mx_name);
+  ctx.visiting.insert(path);
+  for (const auto& [in_tok, conns] : hd_node.inputConnections) {
+    if (conns.empty()) continue;
+    const HdMaterialConnection2& c = conns[0];
+    const std::string& in_name = in_tok.GetString();
+    ConnectPort(
+        [&](const std::string& type) {
+          return mx_node->addInput(in_name, type);
+        },
+        BuildDocumentNode(ctx, c.upstreamNode), c.upstreamOutputName);
+  }
+  ctx.visiting.erase(path);
+
+  for (const auto& [param_tok, val] : hd_node.parameters) {
+    const std::string& p_name = param_tok.GetString();
+    if (mx_node->getInput(p_name) || absl::StartsWith(p_name, "colorSpace:") ||
+        absl::StartsWith(p_name, "typeName:")) {
+      continue;
     }
-    built_.emplace(path, BuiltNode{mx_node, nd});
-
-    visiting_.insert(path);
-    for (const auto& [in_tok, conns] : hd_node.inputConnections) {
-      if (conns.empty()) continue;
-      const HdMaterialConnection2& c = conns[0];
-      const std::string& in_name = in_tok.GetString();
-      ConnectPort(
-          [&](const std::string& type) {
-            return mx_node->addInput(in_name, type);
-          },
-          BuildNode(c.upstreamNode), c.upstreamOutputName);
+    std::string_view forced_type = (swizzle && p_name == "in") ? swizzle->first
+                                   : (swizzle && p_name == "channels")
+                                       ? std::string_view("string")
+                                       : std::string_view();
+    auto formatted =
+        FormatMtlxParam(nd.get(), hd_node, p_name, val, forced_type);
+    if (!formatted) continue;
+    mx::InputPtr mx_in =
+        mx_node->setInputValue(p_name, formatted->second, formatted->first);
+    if (auto cs_it = hd_node.parameters.find(
+            TfToken(absl::StrCat("colorSpace:", p_name)));
+        cs_it != hd_node.parameters.end() &&
+        cs_it->second.IsHolding<TfToken>()) {
+      const TfToken& cs = cs_it->second.UncheckedGet<TfToken>();
+      if (!cs.IsEmpty()) mx_in->setColorSpace(cs.GetString());
     }
-    visiting_.erase(path);
-
-    for (const auto& [param_tok, val] : hd_node.parameters) {
-      const std::string& p_name = param_tok.GetString();
-      if (mx_node->getInput(p_name) ||
-          absl::StartsWith(p_name, "colorSpace:") ||
-          absl::StartsWith(p_name, "typeName:")) {
-        continue;
-      }
-      std::string in_type =
-          (swizzle && p_name == "in") ? std::string(swizzle->first)
-          : (swizzle && p_name == "channels")
-              ? std::string("string")
-              : InferMtlxParamType(nd.get(), hd_node, p_name, val);
-      std::optional<std::string> val_str =
-          (in_type == "boolean" && val.IsHolding<int>())
-              ? std::optional<std::string>(val.UncheckedGet<int>() ? "true"
-                                                                   : "false")
-              : ConvertToMtlxString(val);
-      if (!val_str) continue;
-      mx::InputPtr mx_in = mx_node->setInputValue(p_name, *val_str, in_type);
-      if (auto cs_it = hd_node.parameters.find(
-              TfToken(absl::StrCat("colorSpace:", p_name)));
-          cs_it != hd_node.parameters.end() &&
-          cs_it->second.IsHolding<TfToken>()) {
-        const TfToken& cs = cs_it->second.UncheckedGet<TfToken>();
-        if (!cs.IsEmpty()) mx_in->setColorSpace(cs.GetString());
-      }
-    }
-
-    return {mx_node, nd};
   }
 
-  const HdMaterialNetwork2& net2_;
-  const mx::ConstDocumentPtr& std_libs_;
-  mx::DocumentPtr doc_;
-  std::vector<mx::ConstDocumentPtr> custom_libs_;
-  absl::flat_hash_map<SdfPath, BuiltNode, SdfPath::Hash> built_;
-  absl::flat_hash_set<SdfPath, SdfPath::Hash> visiting_;
-};
+  return {mx_node, nd};
+}
 
 // Upgrades `doc` while preserving constant `which >= 5` on 10-input 1.39
 // `switch` nodes (`in6`..`in10` authored) when `mtlx:version` was not set.
@@ -534,6 +439,44 @@ void UpgradeMaterialXDocument(const mx::DocumentPtr& doc,
   }
 }
 
+// Populates a standalone, upgraded `mx::Document` with the MaterialX subgraphs
+// rooted at `surface_conn` and `disp_conn`, attached to `std_libs`.
+mx::DocumentPtr BuildMaterialXDocument(
+    const HdMaterialNetwork2& network, const mx::ConstDocumentPtr& std_libs,
+    const HdMaterialConnection2* surface_conn,
+    const HdMaterialConnection2* disp_conn) {
+  const std::string* version = GetMtlxVersion(network);
+  DocBuildCtx ctx{network, std_libs, mx::createDocument()};
+  ctx.doc->setVersionString(version ? *version : "1.38");
+  auto add_terminal = [&](const char* out_name,
+                          const HdMaterialConnection2* conn) {
+    return conn && ConnectPort(
+                       [&](const std::string& type) {
+                         return ctx.doc->addOutput(out_name, type);
+                       },
+                       BuildDocumentNode(ctx, conn->upstreamNode),
+                       conn->upstreamOutputName);
+  };
+  bool ok = add_terminal("out_surface", surface_conn);
+  ok |= add_terminal("out_displacement", disp_conn);
+  if (!ok) return nullptr;
+
+  // Upgrade the small standalone user graph BEFORE attaching `std_libs`.
+  UpgradeMaterialXDocument(ctx.doc, version != nullptr);
+
+  if (ctx.custom_libs.empty()) {
+    ctx.doc->setDataLibrary(std_libs);
+  } else {
+    mx::DocumentPtr overlay = mx::createDocument();
+    overlay->setDataLibrary(std_libs);
+    for (const mx::ConstDocumentPtr& lib : ctx.custom_libs) {
+      overlay->importLibrary(lib);
+    }
+    ctx.doc->setDataLibrary(overlay);
+  }
+  return std::move(ctx.doc);
+}
+
 template <typename Float, typename Spectrum>
 TranslatedMaterial TranslateWithTextureCache(
     const SdfPath& id, const PreparedMaterialX& prepared,
@@ -547,22 +490,6 @@ TranslatedMaterial TranslateWithTextureCache(
 
 }  // namespace
 
-struct PreparedMaterialX {
-  mx::DocumentPtr doc;
-  mx::NodePtr surface_node;
-  std::string surface_output;
-  mx::NodePtr displacement_node;
-  std::string displacement_output;
-};
-
-bool HasMaterialXSurface(const PreparedMaterialX& prepared) {
-  return prepared.surface_node != nullptr;
-}
-
-bool HasMaterialXDisplacement(const PreparedMaterialX& prepared) {
-  return prepared.displacement_node != nullptr;
-}
-
 std::shared_ptr<const PreparedMaterialX> PrepareMaterialXNetwork(
     const SdfPath& id, const HdMaterialNetwork2& network,
     const std::function<void(const TextureKey&)>& callback) {
@@ -574,54 +501,12 @@ std::shared_ptr<const PreparedMaterialX> PrepareMaterialXNetwork(
   if (!IsMaterialXTerminal(network, disp_conn)) disp_conn = nullptr;
   if (!surface_conn && !disp_conn) return nullptr;
   try {
-    const MaterialXStdLibraries& std_libs = GetMaterialXStdLibraries();
-    const std::string* version = GetMtlxVersion(network);
-    auto [doc, custom_libs] = DocumentBuilder(network, std_libs.doc, version)
-                                  .Build(surface_conn, disp_conn);
+    mx::DocumentPtr doc = BuildMaterialXDocument(
+        network, GetMaterialXStdLibraries(), surface_conn, disp_conn);
     if (!doc) return nullptr;
-
-    // Upgrade the small standalone user graph BEFORE attaching `std_libs`.
-    UpgradeMaterialXDocument(doc, version != nullptr);
-
-    if (custom_libs.empty()) {
-      doc->setDataLibrary(std_libs.doc);
-    } else {
-      mx::DocumentPtr overlay = mx::createDocument();
-      overlay->setDataLibrary(std_libs.doc);
-      for (const mx::ConstDocumentPtr& lib : custom_libs) {
-        overlay->importLibrary(lib);
-      }
-      doc->setDataLibrary(overlay);
-    }
-    mx::OutputPtr surf_out = doc->getOutput("out_surface");
-    mx::NodePtr surface_node =
-        surf_out ? surf_out->getConnectedNode() : nullptr;
-    std::string surface_output = surf_out ? surf_out->getOutputString() : "";
-    mx::OutputPtr disp_out = doc->getOutput("out_displacement");
-    mx::NodePtr displacement_node =
-        disp_out ? disp_out->getConnectedNode() : nullptr;
-    std::string displacement_output =
-        disp_out ? disp_out->getOutputString() : "";
-    if (surface_node && disp_rank < surf_rank &&
-        surf_out->getType() == mx::MATERIAL_TYPE_STRING &&
-        HasDisplacementShader(surface_node, surface_output)) {
-      displacement_node = surface_node;
-      displacement_output = surface_output;
-    }
-    if (!surface_node && !displacement_node) return nullptr;
-    absl::flat_hash_set<const mx::GraphElement*> visited;
-    if (GraphHasImageNode(doc, &std_libs, visited)) {
-      if (surface_node) {
-        DiscoverSurfaceShaderTextures(surface_node, surface_output, callback);
-      }
-      if (displacement_node) {
-        DiscoverDisplacementShaderTextures(displacement_node,
-                                           displacement_output, callback);
-      }
-    }
-    return std::make_shared<PreparedMaterialX>(PreparedMaterialX{
-        std::move(doc), std::move(surface_node), std::move(surface_output),
-        std::move(displacement_node), std::move(displacement_output)});
+    return LowerMaterialXShaders(doc->getOutput("out_surface"),
+                                 doc->getOutput("out_displacement"),
+                                 disp_rank < surf_rank, callback);
   } catch (const std::exception& e) {
     TF_WARN("Failed to translate MaterialX network '%s': %s", id.GetText(),
             e.what());
@@ -636,32 +521,26 @@ TranslatedMaterial TranslateMaterialXNetwork(
     std::string_view variant) {
   TranslatedMaterial res;
   try {
-    if (prepared.surface_node) {
-      CompiledSurfaceShader compiled =
-          CompileSurfaceShader(prepared.surface_node, prepared.surface_output,
-                               variant, lookup_texture);
-      res.mesh_attributes = std::move(compiled.mesh_attributes);
-      if (compiled.radiance_texture) {
-        mitsuba::ref<mitsuba::Object> radiance = compiled.radiance_texture;
-        if (absl::StrContains(variant, "spectral")) {
-          // Linear sRGB colors are relative to the D65 white point. As for
-          // Mitsuba's own RGB emitter colors, multiply the upsampled color by
-          // the D65 spectrum.
-          mitsuba::Properties d65_props("d65");
-          d65_props.set("nested", radiance);
-          radiance = CreateExpandedObject(d65_props, variant,
-                                          mitsuba::ObjectType::Texture);
-        }
-        mitsuba::Properties emitter_props("area");
-        emitter_props.set("radiance", radiance);
-        res.shape_emitter_props = std::move(emitter_props);
+    CompiledMaterialXResult compiled =
+        InstantiateMaterialXShaders(prepared, variant, lookup_texture);
+    res.bsdf = std::move(compiled.bsdf);
+    res.mesh_attributes = std::move(compiled.mesh_attributes);
+    res.displacement = std::move(compiled.displacement);
+    if (compiled.radiance_texture) {
+      mitsuba::ref<mitsuba::Object> radiance =
+          std::move(compiled.radiance_texture);
+      if (absl::StrContains(variant, "spectral")) {
+        // Linear sRGB colors are relative to the D65 white point. As for
+        // Mitsuba's own RGB emitter colors, multiply the upsampled color by
+        // the D65 spectrum.
+        mitsuba::Properties d65_props("d65");
+        d65_props.set("nested", radiance);
+        radiance = CreateExpandedObject(d65_props, variant,
+                                        mitsuba::ObjectType::Texture);
       }
-      res.bsdf = std::move(compiled.bsdf);
-    }
-    if (prepared.displacement_node) {
-      res.displacement = CompileDisplacementShader(prepared.displacement_node,
-                                                   prepared.displacement_output,
-                                                   variant, lookup_texture);
+      mitsuba::Properties emitter_props("area");
+      emitter_props.set("radiance", radiance);
+      res.shape_emitter_props = std::move(emitter_props);
     }
   } catch (const std::exception& e) {
     TF_WARN("Failed to translate MaterialX network '%s': %s", id.GetText(),
@@ -696,8 +575,7 @@ std::optional<std::pair<TranslatedMaterial, bool>> TranslateUsdMaterialX(
       MI_INVOKE_VARIANT(variant, TranslateWithTextureCache, prim.GetPath(),
                         *prepared, keys, variant);
   if (trans.bsdf) trans.bsdf->set_id(prim.GetPath().GetAsString());
-  return std::make_pair(std::move(trans),
-                        prepared->displacement_node != nullptr);
+  return std::make_pair(std::move(trans), HasMaterialXDisplacement(*prepared));
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE
