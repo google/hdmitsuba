@@ -647,7 +647,7 @@ class SceneModel final : public SceneManager {
     }
 
     if (film_changed) {
-      sensor->parameters_changed();
+      sensor->parameters_changed({"film"});
       reset_progressive_ = true;
     }
 
@@ -1012,12 +1012,23 @@ class SceneModel final : public SceneManager {
     return pending_specs;
   }
 
+  struct CommitStatus {
+    bool rebuild = false;
+    bool updated = false;
+
+    CommitStatus& operator|=(const CommitStatus& other) {
+      rebuild |= other.rebuild;
+      updated |= other.updated;
+      return *this;
+    }
+  };
+
   template <typename MapType, typename ValueType, typename WorkFn,
             typename MergeFn>
-  bool ParallelCommit(MapType& specs_map, WorkFn&& work_fn,
-                      MergeFn&& merge_fn) {
+  CommitStatus ParallelCommit(MapType& specs_map, WorkFn&& work_fn,
+                              MergeFn&& merge_fn) {
     auto pending_specs = GetPendingSpecs(specs_map);
-    if (pending_specs.empty()) return false;
+    if (pending_specs.empty()) return {};
 
     std::vector<ValueType> results(pending_specs.size());
     JitParallelFor<Float>(pending_specs.size(), [&](size_t i) {
@@ -1031,7 +1042,7 @@ class SceneModel final : public SceneManager {
       }
       pending_specs[i]->MarkClean();
     }
-    return rebuild;
+    return {rebuild, /*updated=*/true};
   }
 
   void CommitMaterials() {
@@ -1134,7 +1145,8 @@ class SceneModel final : public SceneManager {
               }
               sensors_[spec->id] = res;
               return true;
-            });
+            })
+            .rebuild;
     if (shape_sensors_dirty_) {
       RebuildShapeSensorMap();
       shape_sensors_dirty_ = false;
@@ -1540,10 +1552,10 @@ class SceneModel final : public SceneManager {
     return resolved;
   }
 
-  bool CommitMeshes() {
+  CommitStatus CommitMeshes() {
     // 1. Get pending specs.
     auto pending_specs = GetPendingSpecs(mesh_specs_);
-    if (pending_specs.empty()) return false;
+    if (pending_specs.empty()) return {};
 
     // 2. Prepare work on the main thread (resolve motion-wrapped specs and
     // displacement textures lock-free).
@@ -1594,10 +1606,10 @@ class SceneModel final : public SceneManager {
       }
       pending_specs[i]->MarkClean();
     }
-    return rebuild;
+    return {rebuild, /*updated=*/true};
   }
 
-  bool CommitCurves() {
+  CommitStatus CommitCurves() {
     return ParallelCommit<decltype(curve_specs_), mitsuba::ref<Shape>>(
         curve_specs_,
         [&](CurveSpec* spec, mitsuba::ref<Shape>& res) {
@@ -1638,7 +1650,7 @@ class SceneModel final : public SceneManager {
     return spec.plugin_type;
   }
 
-  bool CommitParticleFields() {
+  CommitStatus CommitParticleFields() {
     const std::string leaf_integrator =
         ResolveLeafIntegratorType(integrator_spec_);
     if (!particle_field_specs_.empty() &&
@@ -1680,7 +1692,7 @@ class SceneModel final : public SceneManager {
         });
   }
 
-  bool CommitLights() {
+  CommitStatus CommitLights() {
     return ParallelCommit<decltype(light_specs_),
                           typename PrimTranslator::TranslatedLight>(
         light_specs_,
@@ -1729,15 +1741,17 @@ class SceneModel final : public SceneManager {
     }
     NewJitScope<Float>();
 
-    bool rebuild_scene = scene_dirty_;
     CommitMaterials();
+    bool rebuild_scene = scene_dirty_;
     rebuild_scene |= CommitCameras();
-    rebuild_scene |= CommitMeshes();
-    rebuild_scene |= CommitCurves();
-    rebuild_scene |= CommitParticleFields();
-    rebuild_scene |= CommitLights();
+    CommitStatus scene_objects;
+    scene_objects |= CommitMeshes();
+    scene_objects |= CommitCurves();
+    scene_objects |= CommitParticleFields();
+    scene_objects |= CommitLights();
 
     const bool materials_changed = !material_dirty_flags_.empty();
+    rebuild_scene |= scene_objects.rebuild;
     if (!rebuild_scene && materials_changed &&
         NeedsRebuildForFilteredTextures()) {
       rebuild_scene = true;
@@ -1758,7 +1772,7 @@ class SceneModel final : public SceneManager {
       scene_ = nullptr;
       scene_dirty_ = true;
       excluded_rprims_dirty_ = true;
-    } else if (scene_) {
+    } else if (scene_ && (materials_changed || scene_objects.updated)) {
       scene_->parameters_changed();
     }
 

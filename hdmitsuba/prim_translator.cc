@@ -1215,29 +1215,53 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateSensorInPlace(
   auto* sensor = dynamic_cast<mitsuba::Sensor<Float, Spectrum>*>(sensor_obj);
   if (!sensor) return;
 
-  TraversalCallback cb;
+  if (spec.transform_dirty && !spec.transform.IsAnimated()) {
+    // Update the camera transform directly from the host scalar matrix,
+    // avoiding `Endpoint::parameters_changed()`'s device->host readback and
+    // redundant `update_camera_transforms()` work.
+    // `UsdToMitsubaSensorTransform` already strips scale from `spec.transform`.
+    sensor->set_world_transform_scalar(spec.transform.First());
+  }
+
+  const bool animated_transform_dirty =
+      spec.transform_dirty && spec.transform.IsAnimated();
+  if (!animated_transform_dirty && !spec.params_dirty) {
+    return;
+  }
+
+  TraversalCallback cb("", nullptr,
+                       /*recurse_objects=*/animated_transform_dirty);
   sensor->traverse(&cb);
 
-  if (spec.dirty_bits & HdCamera::DirtyBits::DirtyTransform) {
+  std::vector<std::string> changed_keys;
+  if (animated_transform_dirty) {
     SetTransformParameter(cb, spec.transform);
+    changed_keys.emplace_back("to_world");
   }
-  if (spec.dirty_bits & HdCamera::DirtyBits::DirtyParams) {
+  if (spec.params_dirty) {
     cb.set<ScalarFloat>("near_clip", spec.near_clip);
     cb.set<ScalarFloat>("far_clip", spec.far_clip);
+    changed_keys.emplace_back("near_clip");
+    changed_keys.emplace_back("far_clip");
     if (spec.sensor_type == "perspective" || spec.sensor_type.empty()) {
       cb.set<Float>("x_fov", dr::opaque<Float>(spec.fov));
       cb.set<Float>("principal_point_offset_x",
                     dr::opaque<Float>(spec.horizontal_aperture_offset));
       cb.set<Float>("principal_point_offset_y",
                     dr::opaque<Float>(spec.vertical_aperture_offset));
+      changed_keys.emplace_back("x_fov");
+      changed_keys.emplace_back("principal_point_offset_x");
+      changed_keys.emplace_back("principal_point_offset_y");
       if (spec.aperture_radius > 0.0f && spec.focus_distance > 0.0f) {
         cb.set<Float>("aperture_radius",
                       dr::opaque<Float>(spec.aperture_radius));
         cb.set<Float>("focus_distance", dr::opaque<Float>(spec.focus_distance));
+        changed_keys.emplace_back("aperture_radius");
+        changed_keys.emplace_back("focus_distance");
       }
     }
   }
-  sensor->parameters_changed();
+  sensor->parameters_changed(changed_keys);
 }
 
 namespace {
