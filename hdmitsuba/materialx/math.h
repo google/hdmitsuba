@@ -16,10 +16,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <tuple>
 #include <type_traits>
+#include <utility>
 
 #include <drjit/color.h>
-#include <drjit/matrix.h>
+#include <drjit/while_loop.h>
 #include <mitsuba/core/frame.h>
 #include <mitsuba/core/math.h>
 #include <mitsuba/core/spectrum.h>
@@ -28,6 +30,39 @@
 #include "hdmitsuba/materialx/program.h"
 
 namespace mitsuba::mtlx::detail {
+
+template <typename Tuple, size_t... Is>
+auto TupleTake(Tuple&& t, std::index_sequence<Is...>) {
+  return std::make_tuple(std::get<Is>(std::forward<Tuple>(t))...);
+}
+
+// Runs `dr::while_loop` over `state` while passing `invariants` as trailing
+// arguments to `body(state..., invariants...)`. Includes `invariants` in the
+// loop state only when `dr::grad_enabled` is true (required for symbolic AD);
+// otherwise captures them by value to avoid Dr.Jit's invariant-elimination
+// re-recording retries without duplicating `body`.
+template <typename StateTuple, typename InvTuple, typename Cond, typename Body>
+StateTuple WhileLoopWithInvariants(StateTuple state, InvTuple invariants,
+                                   Cond&& cond, Body&& body, const char* label,
+                                   long long max_iters) {
+  bool inv_grad = std::apply(
+      [](const auto&... xs) { return (dr::grad_enabled(xs) || ...); },
+      invariants);
+  if (inv_grad) {
+    auto res = dr::while_loop(
+        std::tuple_cat(std::move(state), std::move(invariants)),
+        std::forward<Cond>(cond), std::forward<Body>(body), label, max_iters);
+    return TupleTake(std::move(res),
+                     std::make_index_sequence<std::tuple_size_v<StateTuple>>());
+  }
+  return dr::while_loop(
+      std::move(state), std::forward<Cond>(cond),
+      [body = std::forward<Body>(body),
+       inv = std::move(invariants)](auto&... s) mutable {
+        std::apply([&](const auto&... iv) { body(s..., iv...); }, inv);
+      },
+      label, max_iters);
+}
 
 template <typename ScalarFloat>
 inline constexpr ScalarFloat kMinLen2 =
@@ -98,16 +133,6 @@ template <typename T>
 T MxSafeAtan2(const T& y, const T& x) {
   auto nz = (y != 0.0f) | (x != 0.0f);
   return dr::select(nz, dr::atan2(y, dr::select(nz, x, T(1.0f))), T(0.0f));
-}
-
-// Like division, the inverse of a singular matrix is zero.
-template <typename Float, size_t N>
-dr::Matrix<Float, N> MxSafeInverse(const dr::Matrix<Float, N>& m) {
-  using Matrix = dr::Matrix<Float, N>;
-  auto valid = dr::det(m) != 0.0f;
-  return dr::select(valid,
-                    dr::inverse(dr::select(valid, m, dr::identity<Matrix>())),
-                    dr::zeros<Matrix>());
 }
 
 template <typename Float>
