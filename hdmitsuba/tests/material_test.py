@@ -52,6 +52,7 @@ def _set_mitsuba_variant():
         'materialx',
         'materialx_bump',
         'materialx_displacement',
+        'materialx_furnace',
         'materialx_lobes',
     ],
 )
