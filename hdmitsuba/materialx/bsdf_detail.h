@@ -345,20 +345,6 @@ Float SafeDielectricIor(const Float& ior_raw, bool solid_trans) {
       ior);
 }
 
-// Wraps `mitsuba::fresnel`, handling two-sided dielectrics (`thin_walled` or
-// reflection-only) and clamping `F` to exact `1` under total internal
-// reflection (`cos_theta_t == 0`), where `dr::rcp` in `mitsuba::fresnel` can
-// round `F` just below `1` (e.g. `0.99999988f` on AVX/CUDA).
-template <typename Float>
-std::tuple<Float, Float, Float, Float> ExactFresnel(const Float& cos_theta_i,
-                                                    const Float& eta,
-                                                    bool two_sided) {
-  auto [f, cos_theta_t, eta_it, eta_ti] =
-      fresnel(two_sided ? dr::abs(cos_theta_i) : cos_theta_i, eta);
-  return {dr::select((cos_theta_t == 0.0f) && (eta_it < 1.0f), Float(1.0f), f),
-          cos_theta_t, eta_it, eta_ti};
-}
-
 // Clamps conductor `ior` away from zero to avoid `0 / 0` in
 // `fresnel_conductor` at normal incidence when `ior == extinction == 0`.
 template <typename Float, typename Spectrum>
@@ -464,6 +450,23 @@ bool MicrofacetNeedIorFresnel(const MicrofacetParams<Float, Spectrum>& m) {
   return (m.kind == MicrofacetKind::Dielectric &&
           (!m.thin_walled || !m.trans_only)) ||
          (m.kind == MicrofacetKind::GeneralizedSchlick && !m.two_sided);
+}
+
+// Wraps `mitsuba::fresnel`, handling two-sided dielectrics (`thin_walled` or
+// reflection-only), multi-bounce slab reflectance `2F / (1 + F)` for
+// thin-walled transmissive `Dielectric(RT)`, and clamping `F` to exact `1`
+// under TIR (`cos_theta_t == 0`), where `dr::rcp` can round `F` just below `1`.
+template <typename Float, typename Spectrum>
+std::tuple<Float, Float, Float, Float> ExactFresnel(
+    const MicrofacetParams<Float, Spectrum>& m, const Float& cos_theta_i) {
+  auto [f, cos_theta_t, eta_it, eta_ti] =
+      fresnel(m.two_sided ? dr::abs(cos_theta_i) : cos_theta_i, m.ior);
+  f = dr::select((cos_theta_t == 0.0f) && (eta_it < 1.0f), Float(1.0f), f);
+  if (m.kind == MicrofacetKind::Dielectric && m.thin_walled && !m.refl_only &&
+      !m.trans_only) {
+    f *= 2.0f / (1.0f + f);
+  }
+  return {f, cos_theta_t, eta_it, eta_ti};
 }
 
 // Maps a (possibly anisotropic) GGX lobe and incident direction `wi_l` to an
@@ -581,13 +584,12 @@ unpolarized_spectrum_t<Spectrum> MicrofacetReflAlbedo(
     f90 = m.has_thinfilm ? dr::select(tf_active, UnpolSpec(1.0f), m.spec2)
                          : m.spec2;
   } else {
-    auto [f_d, cos_t, eta_it, eta_ti] = ExactFresnel(cos_i, m.ior, m.two_sided);
+    auto [f_d, cos_t, eta_it, eta_ti] = ExactFresnel(m, cos_i);
     f_nv = MicrofacetFresnel(m, cos_i, f_d, cos_t);
-    f0 = dr::select(
-        eta_it < 1.0f, f_nv,
-        MicrofacetThinfilmFresnel(
-            m, UnpolSpec(dr::square((m.ior - 1.0f) / (m.ior + 1.0f))),
-            Float(1.0f)));
+    f0 = dr::select(eta_it < 1.0f, f_nv,
+                    MicrofacetThinfilmFresnel(
+                        m, UnpolSpec(std::get<0>(ExactFresnel(m, Float(1.0f)))),
+                        Float(1.0f)));
     index_matched = m.ior == 1.0f;
     if (m.has_thinfilm) index_matched = index_matched && !tf_active;
   }
@@ -620,8 +622,7 @@ LobeSample<Float> MicrofacetSample(const MicrofacetParams<Float, Spectrum>& m,
     Float cos_ih = dr::dot(wi_l, h);
     Float fres(0.0f), cos_theta_t(0.0f), eta_it(1.0f), eta_ti(1.0f);
     if (MicrofacetNeedIorFresnel(m)) {
-      std::tie(fres, cos_theta_t, eta_it, eta_ti) =
-          ExactFresnel(cos_ih, m.ior, m.two_sided);
+      std::tie(fres, cos_theta_t, eta_it, eta_ti) = ExactFresnel(m, cos_ih);
     }
     trans_ok = m.thin_walled ? Mask(true) : (fres < 1.0f);
     if (m.refl_on) {
@@ -685,7 +686,7 @@ std::pair<unpolarized_spectrum_t<Spectrum>, Float> MicrofacetEvalPdf(
   Float f_d(0.0f), cos_theta_t(0.0f);
   if (MicrofacetNeedIorFresnel(m)) {
     std::tie(f_d, cos_theta_t, std::ignore, std::ignore) =
-        ExactFresnel(cos_ih, m.ior, m.two_sided);
+        ExactFresnel(m, cos_ih);
   }
   UnpolSpec f_c = m.trans_only ? UnpolSpec(0.0f)
                                : MicrofacetFresnel(m, cos_ih, f_d, cos_theta_t);
@@ -757,8 +758,7 @@ MicrofacetEvalFeatures(const MicrofacetParams<Float, Spectrum>& m,
   Float cos_i = Frame<Float>::cos_theta(wi_l);
   Float f_d(0.0f), cos_t(0.0f), eta_ti(1.0f);
   if (MicrofacetNeedIorFresnel(m)) {
-    std::tie(f_d, cos_t, std::ignore, eta_ti) =
-        ExactFresnel(cos_i, m.ior, m.two_sided);
+    std::tie(f_d, cos_t, std::ignore, eta_ti) = ExactFresnel(m, cos_i);
   }
   if (!m.trans_only) {
     UnpolSpec f_c = MicrofacetFresnel(m, cos_i, f_d, cos_t);
