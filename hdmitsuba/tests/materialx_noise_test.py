@@ -226,7 +226,7 @@ def test_worley_ad() -> None:
       'ND_ifgreater_integer',
       {'value1': px, 'value2': 0.0, 'in1': 1, 'in2': 0},
   )
-  ems = [
+  em_static, em_dyn = (
       mtlx.compile_mtlx_material(
           'ND_surface_unlit',
           stage=stage,
@@ -236,8 +236,9 @@ def test_worley_ad() -> None:
           ),
       )[1]
       for style in (0, dyn_style)
-  ]
-  assert ems[0] is not None and ems[1] is not None
+  )
+  assert em_static is not None and em_dyn is not None
+  ems = (em_static, em_dyn)
 
   eps = 1e-4
   si = dr.zeros(mi.SurfaceInteraction3f, 4)
