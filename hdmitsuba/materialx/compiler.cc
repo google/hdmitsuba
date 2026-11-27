@@ -110,7 +110,7 @@ ValueId LowerEdf(LowerCtx& ctx, const ScopedNode& node,
       TF_DEBUG(HDMITSUBA_MATERIAL)
           .Msg("Approximating MaterialX '%s' as uniform_edf.\n", cat.c_str());
     }
-    res = in("color", b.One());
+    res = b.Emit(mtlx::Op::Max, {in("color", b.One()), b.Zero()});
   } else if (cat == "generalized_schlick_edf") {
     ValueId base =
         LowerEdf(ctx, ResolveConnected(ctx.resolver, node, "base"), cache);
@@ -127,7 +127,7 @@ ValueId LowerEdf(LowerCtx& ctx, const ScopedNode& node,
                   b.Div(b.Const(2.0),
                         b.Mul(b.Add(exp, b.One()), b.Add(exp, b.Const(2.0)))));
       }
-      res = b.Mul(base, w);
+      res = b.Mul(base, b.Emit(mtlx::Op::Max, {w, b.Zero()}));
     }
   } else if (cat == "add") {
     res = b.Add(
@@ -136,10 +136,12 @@ ValueId LowerEdf(LowerCtx& ctx, const ScopedNode& node,
   } else if (cat == "multiply") {
     ValueId base =
         LowerEdf(ctx, ResolveConnected(ctx.resolver, node, "in1"), cache);
-    if (!b.IsZero(base)) res = b.Mul(base, in("in2", b.One()));
+    if (!b.IsZero(base)) {
+      res = b.Mul(base, b.Emit(mtlx::Op::Max, {in("in2", b.One()), b.Zero()}));
+    }
   } else if (cat == "mix") {
     res = LowerMixVal(
-        ctx, in("mix"),
+        ctx, Clip01(ctx, in("mix")),
         [&] {
           return LowerEdf(ctx, ResolveConnected(ctx.resolver, node, "fg"),
                           cache);

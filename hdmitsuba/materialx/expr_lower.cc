@@ -298,6 +298,7 @@ TfToken ResolveSourceColorSpace(LowerCtx& ctx, std::string_view color_space) {
           {"rec709_display", TfToken("g24_rec709_scene")},
           {"srgb", GfColorSpaceNames->SRGBRec709},
           {"srgb_texture", GfColorSpaceNames->SRGBRec709},
+          {"srgb_tx", GfColorSpaceNames->SRGBRec709},
           {"lin_adobergb", GfColorSpaceNames->LinearAdobeRGB},
           {"adobergb", GfColorSpaceNames->G22AdobeRGB},
           {"srgb_displayp3", GfColorSpaceNames->SRGBP3D65},

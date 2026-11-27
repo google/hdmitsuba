@@ -1068,6 +1068,12 @@ def test_edf_and_emissive_surface_shaders(
               'mix': 0.25,
           },
       ),
+      # Negative OpenPBR emission clamps to zero.
+      (
+          'ND_open_pbr_surface_surfaceshader',
+          (0.0, 0.0, 0.0),
+          {'emission_luminance': -0.5, 'emission_color': (1.0, 0.5, 0.25)},
+      ),
   ]:
     _, emitter = mtlx.compile_mtlx_material(shader_id, stage=stage, **kw)
     assert emitter is not None
@@ -1089,6 +1095,39 @@ def test_edf_and_emissive_surface_shaders(
   assert measured_emitter is not None
   np.testing.assert_allclose(
       measured_emitter.eval(si), mi.Color3f(0.3, 0.6, 0.9), atol=1e-5
+  )
+
+  # Negative EDF colors/scales clamp to zero and mix weights clip to [0, 1].
+  si_b, px, _, _ = _make_position_batch(
+      stage, [-0.5, 1.5], [0.0, 0.0], [0.0, 0.0]
+  )
+  u_edf = (
+      'ND_uniform_edf',
+      {'color': ('ND_combine3_color3', {'in1': px, 'in2': 0.5, 'in3': 1.0})},
+  )
+  schlick_edf = (
+      'ND_generalized_schlick_edf',
+      {
+          'base': ('ND_multiply_edfC', {'in1': u_edf, 'in2': (2.0, -1.0, 1.0)}),
+          'color0': (1.0, 1.0, -1.0),
+          'color90': (1.0, 1.0, -1.0),
+      },
+  )
+  _, dyn_em = mtlx.compile_mtlx_material(
+      'ND_surface',
+      stage=stage,
+      edf=(
+          'ND_mix_edf',
+          {
+              'fg': schlick_edf,
+              'bg': ('ND_uniform_edf', {'color': (1.0, 1.0, 1.0)}),
+              'mix': 2.0,
+          },
+      ),
+  )
+  assert dyn_em is not None
+  np.testing.assert_allclose(
+      dyn_em.eval(si_b), mi.Color3f([0.0, 3.0], 0.0, 0.0), atol=1e-5
   )
 
 

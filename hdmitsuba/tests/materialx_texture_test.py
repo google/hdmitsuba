@@ -318,6 +318,7 @@ def test_image_and_value_colorspaces(tmp_path: pathlib.Path) -> None:
       (gray_path, None, (gray,) * 3),
       (gray_path, 'raw', (gray,) * 3),
       (gray_path, 'srgb_texture', (((gray + 0.055) / 1.055) ** 2.4,) * 3),
+      (gray_path, 'srgb_tx', (((gray + 0.055) / 1.055) ** 2.4,) * 3),
       (gray_path, 'g22_rec709', (gray**2.2,) * 3),
       (aces_path, 'acescg', (0.68875, 0.21902, 0.07105)),
       (aces_path, 'srgb_texture', ((aces + 0.055) / 1.055) ** 2.4),
